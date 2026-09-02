@@ -1,5 +1,5 @@
 {
-  "provider": "glm",
+  "provider": "DeepSeek",
   "url": "https://opencode.ai/zen/go/v1",
-  "model": "glm-5.3-flash"
+  "model": "deepseek-v4-flash"
 }
