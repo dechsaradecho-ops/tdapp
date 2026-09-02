@@ -6,6 +6,7 @@ pause trading, (optionally) close positions, and notify the user immediately.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from app.engine.risk_engine import PortfolioSnapshot, RiskEngine
 from app.integrations.line_client import build_risk_alert
@@ -13,6 +14,24 @@ from app.services.database import Database
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
+
+
+def _realized_pnl_since(closed_trades: list[dict], since: datetime) -> float:
+    """Sum closed-trade PnL whose closed_at is within the window."""
+    total = 0.0
+    for t in closed_trades:
+        raw = t.get("closed_at")
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt >= since:
+            total += float(t.get("pnl") or 0)
+    return total
 
 
 def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
@@ -35,12 +54,13 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
             if t.get("status") == "open" and t.get("stop_loss") and t.get("entry_price"):
                 open_risk += abs(float(t["entry_price"]) - float(t["stop_loss"])) * float(t.get("volume") or 1)
 
+        now = datetime.now(timezone.utc)
         snap = PortfolioSnapshot(
             starting_capital=float(p["capital"]),
             peak_equity=max(float(p["capital"]), equity + realized_month),
             current_equity=equity + realized_month,
-            realized_pnl_today=realized_month * 0.2,   # demo split; wire real aggregates in prod
-            realized_pnl_week=realized_month * 0.5,
+            realized_pnl_today=_realized_pnl_since(closed, now - timedelta(days=1)),
+            realized_pnl_week=_realized_pnl_since(closed, now - timedelta(days=7)),
             realized_pnl_month=realized_month,
             open_risk=open_risk,
         )

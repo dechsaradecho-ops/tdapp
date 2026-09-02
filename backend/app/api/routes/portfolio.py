@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from app.engine.portfolio_engine import PortfolioEngine
-from app.engine.strategy_engine import StrategyEngine
+from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.models.schemas import AssetOpportunity, PortfolioInput, PortfolioRecommendation
 
 router = APIRouter()
@@ -27,6 +27,20 @@ async def recommend(payload: PortfolioInput, request: Request) -> PortfolioRecom
         )
         for r in rows
     ] if rows else []
+
+    if not opportunities:
+        # No worker rows → live quotes (demo only as last resort)
+        from app.integrations import quotes
+        try:
+            snaps = await quotes.fetch_all_snapshots(
+                ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD", "AUDUSD"])
+            for asset, snap in snaps.items():
+                ind = IndicatorSnapshot(**{**snap, "source": "live"})
+                opp = StrategyEngine().opportunity_score(ind)
+                opportunities.append(AssetOpportunity(
+                    asset=asset, score=opp.score, band=opp.band, reasons=[]))
+        except Exception:
+            pass
 
     if not opportunities:
         from app.api.routes.market import DEMO

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
+from app.integrations import quotes
 from app.models.schemas import FinalDecision, SignalProposal
 from app.services.notification_service import NotificationService
 
@@ -36,6 +37,19 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 reason=[r.get("explanation", "")],
                 recommendation=FinalDecision.trade,
             ))
+        return proposals
+
+    # No stored signals → analyze live quotes right now (demo only as last resort)
+    try:
+        snaps = await quotes.fetch_all_snapshots(list(DEMO.keys()))
+    except Exception:
+        snaps = {}
+    for asset, snap in snaps.items():
+        ind = IndicatorSnapshot(**{**snap, "source": "live"})
+        opp = engine.opportunity_score(ind)
+        proposals.append(engine.build_proposal(
+            ind, opp, 0.5, ind.ema_fast > ind.ema_slow))
+    if proposals:
         return proposals
 
     for asset, ind in DEMO.items():

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from app.integrations.line_client import (
     build_daily_market_summary,
@@ -31,7 +32,8 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
             if lu.get("notification_enabled"):
                 ok = await notifier.line.push(lu["line_user_id"], n["message"])
         db.update("notifications", n["id"], {
-            "status": "sent" if ok else "failed", "sent_at": "now()",
+            "status": "sent" if ok else "failed",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
         })
         sent += 1 if ok else 0
     return sent
@@ -41,8 +43,9 @@ async def send_daily_summaries(db: Database, notifier: NotificationService) -> N
     """Daily Portfolio + Market summaries (scheduled)."""
     portfolios = db.select("portfolios", limit=100)
     for p in portfolios:
-        equity = float(p["capital"]) * 1.012  # demo; wire real equity in prod
-        pnl = equity - float(p["capital"])
+        trades = db.select("trades", filters={"user_id": p["user_id"]}, limit=100)
+        pnl = sum(float(t.get("pnl") or 0) for t in trades if t.get("status") == "closed")
+        equity = float(p["capital"]) + pnl
         msg = build_daily_portfolio_summary(
             capital=float(p["capital"]), equity=equity, pnl=pnl,
             goal_pct=float(p["target_return"]), achievement_pct=40.0,

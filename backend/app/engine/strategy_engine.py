@@ -53,6 +53,19 @@ BANDS = ((81.0, 100.0, OpportunityBand.very_high), (61.0, 81.0, OpportunityBand.
          (31.0, 61.0, OpportunityBand.medium), (0.0, 31.0, OpportunityBand.low))
 
 
+def regime_of(ind: IndicatorSnapshot) -> str:
+    """Classify the market regime from an indicator snapshot (worker + API share this)."""
+    if ind.high_impact_event:
+        return "news_driven_market"
+    if ind.adx < 20:
+        return "sideway"
+    if ind.atr_pct > 2.5:
+        return "high_volatility"
+    if ind.ema_fast > ind.ema_slow:
+        return "bull_trend" if ind.adx < 35 else "strong_bull_trend"
+    return "bear_trend" if ind.adx < 35 else "strong_bear_trend"
+
+
 class StrategyEngine:
     """Deterministic scoring core + explainability. AI layer wraps this for narrative."""
 
