@@ -55,6 +55,7 @@ def _journal_from_rows(rows: list[dict]) -> list[JournalEntry]:
         opportunity_score=float(r.get("opportunity_score") or 0),
         ai_explanation=r.get("ai_explanation", ""),
         closed_at=r.get("closed_at"),
+        created_at=r.get("created_at"),
     ) for r in rows]
 
 
@@ -167,8 +168,9 @@ async def get_kill_switch(request: Request) -> KillSwitchStatus:
     losses = [e for e in entries if (e.pnl or 0) < 0]
     # Demo baseline capital for percentage math (portfolio wiring comes with auth)
     capital = 10_000.0
+    today = datetime.now(timezone.utc).date().isoformat()
     daily = sum(e.pnl or 0 for e in entries
-                if e.closed_at and str(e.closed_at)[:10] == datetime.now(timezone.utc).date().isoformat())
+                if str(e.created_at or e.closed_at or "")[:10] == today)
     monthly = total_pnl
     weekly = sum(e.pnl or 0 for e in entries[-20:])
 
@@ -229,7 +231,7 @@ async def journal_analysis(request: Request, days: int = 30) -> JournalAnalysis:
     if days > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
         entries = [e for e in entries
-                   if e.created_at and str(e.created_at)[:10] >= cutoff]
+                   if str(e.created_at or e.closed_at or "")[:10] >= cutoff]
     return analyze_journal(entries, period_days=days)
 
 
