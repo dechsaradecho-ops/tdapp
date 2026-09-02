@@ -119,3 +119,45 @@ async def counts(request: Request) -> dict:
             out[f"{table}_latest"] = latest
     out["verdict"] = "ok"
     return out
+
+
+@router.post("/scan-now")
+async def scan_now(request: Request) -> dict:
+    """Trigger one market-scanner cycle immediately (no 5-min wait).
+
+    Answers 'when does it actually insert?' — runs the same scan_once the
+    scheduler runs, but inline, and reports per-step outcomes plus any raw
+    error the scanner's silent-failure path would normally swallow.
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    from app.workers.market_scanner import scan_once
+
+    try:
+        results = await scan_once(db)
+        out["scanned"] = len(results)
+        out["assets"] = [
+            {"asset": r["asset"], "score": r["opportunity"]["score"],
+             "source": r["snapshot"].get("source")}
+            for r in results
+        ]
+    except Exception as exc:  # surface anything the worker swallowed
+        out["verdict"] = "fail"
+        out["error"] = f"{exc.__class__.__name__}: {exc}"
+        return out
+
+    rows = db.select("market_analysis", order="created_at", desc=True, limit=100)
+    out["market_analysis_rows"] = len(rows)
+    out["market_analysis_latest"] = rows[0].get("created_at") if rows else None
+    signals = db.select("signals", order="created_at", desc=True, limit=100)
+    out["signals_rows"] = len(signals)
+    out["verdict"] = "ok" if rows else "fail"
+    if not rows:
+        out["hint"] = ("scan ran but market_analysis is still empty — the "
+                       "insert failed; run /api/system/db-check for the raw error")
+    return out
