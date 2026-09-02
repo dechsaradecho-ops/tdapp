@@ -68,6 +68,7 @@ class PaperBroker(Broker):
 
     def __init__(self) -> None:
         self._positions: dict[str, Position] = {}
+        self.closed_trades: list[dict] = []  # journal for paper-trading analytics
         self._seq = 0
         self._prices: dict[str, float] = {
             "EURUSD": 1.08500, "GBPUSD": 1.26500, "USDJPY": 149.500,
@@ -90,10 +91,16 @@ class PaperBroker(Broker):
 
     async def close_position(self, ticket: str) -> OrderResult:
         pos = self._positions.pop(ticket, None)
-        return (
-            OrderResult(ok=True, message=f"closed {ticket} pnl={self._approx_pnl(pos):.2f}")
-            if pos else OrderResult(ok=False, message=f"unknown ticket {ticket}")
-        )
+        if pos is None:
+            return OrderResult(ok=False, message=f"unknown ticket {ticket}")
+        pos.current_price = pos.current_price or pos.entry_price
+        pnl = self._approx_pnl(pos)
+        self.closed_trades.append({
+            "ticket": ticket, "asset": pos.asset, "direction": pos.direction,
+            "volume": pos.volume, "entry_price": pos.entry_price,
+            "exit_price": pos.current_price, "pnl": round(pnl, 2),
+        })
+        return OrderResult(ok=True, message=f"closed {ticket} pnl={pnl:.2f}")
 
     async def positions(self, user_id: str) -> list[Position]:
         return [p for p in self._positions.values() if p.user_id == user_id]

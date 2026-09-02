@@ -859,11 +859,18 @@ def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTra
     """Summarize the PaperBroker state as live-readiness.
 
     Score: win rate (40%) + discipline (closed trades present, 30%) + PnL (30%).
+    Accepts the real PaperBroker (_positions + closed_trades dicts) or any object
+    exposing a `.trades` list with `.pnl` attributes (tests / alt brokers).
     """
-    closed = [t for t in broker.trades if t.pnl is not None]
-    wins = [t for t in closed if t.pnl > 0]
+    if hasattr(broker, "closed_trades"):
+        closed = [float(t.get("pnl") or 0) for t in broker.closed_trades]
+        open_count = len(getattr(broker, "_positions", {}) or {})
+    else:
+        closed = [float(t.pnl) for t in broker.trades if t.pnl is not None]
+        open_count = len([t for t in broker.trades if t.pnl is None])
+    wins = [p for p in closed if p > 0]
     win_rate = len(wins) / len(closed) if closed else 0.0
-    pnl = sum(t.pnl for t in closed)
+    pnl = sum(closed)
     pnl_score = max(0.0, min(1.0, 0.5 + pnl / max(virtual_capital, 1) * 5))
     coaching = ("ยังไม่มีสถิติเพียงพอ — เทรดกระดาษอย่างน้อย 10 ไม้เพื่อให้ AI ประเมินได้"
                 if len(closed) < 10 else
@@ -871,7 +878,7 @@ def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTra
     readiness = round(win_rate * 40 + (min(len(closed), 10) / 10) * 30 + pnl_score * 30, 1)
     return PaperTradingStatus(
         enabled=True, virtual_capital=virtual_capital, virtual_pnl=round(pnl, 2),
-        open_virtual_orders=len([t for t in broker.trades if t.pnl is None]),
+        open_virtual_orders=open_count,
         ai_coaching=coaching, live_readiness_score=readiness)
 
 
