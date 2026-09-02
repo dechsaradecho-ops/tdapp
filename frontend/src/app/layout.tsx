@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import ChatWidget from "@/components/ChatWidget";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,11 +19,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/market" className="hover:text-accent">Market</a>
             <a href="/signals" className="hover:text-accent">Signals</a>
             <a href="/risk" className="hover:text-accent">Risk</a>
-            <a href="/chat" className="hover:text-accent">AI Chat</a>
             <a href="/settings" className="hover:text-accent">Settings</a>
           </nav>
         </header>
         <main className="p-6 max-w-7xl mx-auto">{children}</main>
+        <ChatWidget />
       </body>
     </html>
   );
