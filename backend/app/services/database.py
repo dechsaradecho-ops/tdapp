@@ -17,11 +17,19 @@ class Database:
     def __init__(self) -> None:
         s = get_settings()
         self._client = None
-        if s.supabase_url and s.effective_service_key:
+        self.init_error: Optional[str] = None
+        if not s.supabase_url and not s.effective_service_key:
+            self.init_error = "env missing: SUPABASE_URL and SUPABASE_SECRET_KEY are both unset"
+        elif not s.supabase_url:
+            self.init_error = "env missing: SUPABASE_URL is unset"
+        elif not s.effective_service_key:
+            self.init_error = "env missing: SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_KEY) is unset"
+        else:
             try:
                 from supabase import create_client
                 self._client = create_client(s.supabase_url, s.effective_service_key)
             except Exception as exc:  # pragma: no cover
+                self.init_error = f"create_client failed: {exc}"
                 log.warning("Supabase init failed (%s) — running without DB", exc)
 
     @property

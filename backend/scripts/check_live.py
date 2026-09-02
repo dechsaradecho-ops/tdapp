@@ -92,7 +92,8 @@ async def main() -> int:
                 "web-only deployments)")
         out(f"  db={health.get('db')}  ai={health.get('ai')}")
         if health.get("db") != "ok":
-            out("✘ db != ok — workers cannot persist at all (env/RLS/table)")
+            out(f"  detail: {health.get('db_detail')}")
+            out("✘ db != ok — workers cannot persist at all")
             exit_code = max(exit_code, 2)
 
         # ---- 2. /api/market/summary ------------------------------------

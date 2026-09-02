@@ -53,6 +53,8 @@ class FakeDatabase:
     def available(self) -> bool:
         return True
 
+    init_error: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Market scanner

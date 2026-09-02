@@ -114,5 +114,6 @@ async def health() -> dict:
                     else ("enabled" if get_settings().enable_workers else "disabled")),
         "jobs": [j.id for j in scheduler.get_jobs()] if scheduler is not None else [],
         "db": "ok" if db.available else "unavailable",
+        "db_detail": (db.init_error or "connected"),
         "ai": provider.name,
     }
