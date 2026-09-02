@@ -1,5 +1,5 @@
 {
-  "provider": "deepseek",
+  "provider": "DeepSeek V4 Flash",
   "url": "https://opencode.ai/zen/go/v1",
   "model": "deepseek-v4-flash"
 }
