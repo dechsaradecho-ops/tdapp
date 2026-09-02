@@ -45,16 +45,24 @@ def _config_path() -> Path:
 
 @lru_cache
 def get_ai_config() -> AIConfig:
-    """Merge ai.config.json (provider/url) with env var AI_API_KEY (secret)."""
+    """Merge ai.config.json (provider/url) with env var AI_API_KEY (secret).
+
+    If provider/url file is missing, infer the provider from the key's shape:
+    - DeepSeek keys start with "sk-"
+    - GLM keys look like "id.secret"
+    """
     path = _config_path()
-    provider, url = "deepseek", ""
+    provider, url = "", ""
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            provider = str(data.get("provider", "deepseek")).lower()
+            provider = str(data.get("provider", "")).lower()
             url = str(data.get("url", ""))
         except (json.JSONDecodeError, OSError):
             pass
     # Secret key ALWAYS from env var (supports .env locally via pydantic-settings)
     api_key = get_settings().ai_api_key
+    if provider not in DEFAULT_BASE_URLS:
+        # Auto-detect from key shape; default deepseek when unknown
+        provider = "glm" if (api_key and "." in api_key and not api_key.startswith("sk-")) else "deepseek"
     return AIConfig(provider=provider, api_key=api_key, url=url)

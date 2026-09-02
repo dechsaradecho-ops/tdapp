@@ -43,18 +43,25 @@ class DeepSeekProvider(AIProvider):
         self.model = "deepseek-chat"
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-                    "temperature": temperature,
-                },
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                        "temperature": temperature,
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            return (
+                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
+                "ตรวจสอบว่า AI_API_KEY ตรงกับ provider ใน ai.config.json หรือไม่ "
+                "(key ของ DeepSeek ขึ้นต้น sk- / key ของ GLM เป็นรูปแบบ id.secret)"
             )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
 
 
 class GLMProvider(AIProvider):
@@ -67,18 +74,25 @@ class GLMProvider(AIProvider):
         self.model = "glm-4-flash"
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-                    "temperature": temperature,
-                },
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                        "temperature": temperature,
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            return (
+                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
+                "ตรวจสอบว่า AI_API_KEY ตรงกับ provider ใน ai.config.json หรือไม่ "
+                "(key ของ DeepSeek ขึ้นต้น sk- / key ของ GLM เป็นรูปแบบ id.secret)"
             )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
 
 
 class StubProvider(AIProvider):
