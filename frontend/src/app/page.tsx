@@ -24,7 +24,6 @@ export default function DashboardPage() {
         <Stat label="Current Equity" value={fmtMoney(equity)} positive={pnl >= 0} />
         <Stat label="Current PnL" value={fmtMoney(pnl)} positive={pnl >= 0} />
         <Stat label="Monthly Goal" value="3%" />
-        <Stat label="Monthly Goal" value="3%" />
       </section>
 
       <GoalForm />
