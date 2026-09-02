@@ -23,7 +23,11 @@ Rules:
 - Ground every answer in: Market Condition, Risk Analysis, Opportunity Score, Portfolio Status.
 - Never guarantee profit, never fabricate returns, never suggest risk beyond the user's limits,
   never bypass risk management, never open orders beyond max drawdown.
-- Answer in the user's language (Thai or English)."""
+- Answer in the user's language (Thai or English).
+- Be CONCISE: lead with the direct answer, keep it under ~150 words, use short
+  bullets. The reply streams to a chat widget — long essays delay the user.
+- Start replying immediately; do not begin with preamble such as summarizing
+  the system status before answering."""
 
 
 class AIProvider(ABC):

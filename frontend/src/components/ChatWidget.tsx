@@ -21,11 +21,20 @@ export default function ChatWidget() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [thinkSecs, setThinkSecs] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (open) endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading, open]);
+
+  // live "thinking" counter so the UI keeps moving while the model
+  // prepares its first token (can take 10-60s on complex questions)
+  useEffect(() => {
+    if (!loading) { setThinkSecs(0); return; }
+    const t = setInterval(() => setThinkSecs((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [loading]);
 
   const send = async (text: string) => {
     if (!text.trim() || loading) return;
@@ -46,14 +55,25 @@ export default function ChatWidget() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let acc = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        acc += decoder.decode(value, { stream: true });
-        setMessages([...next, { role: "assistant", content: acc }]);
-      }
-      if (!acc.trim()) {
-        setMessages([...next, { role: "assistant", content: "(no reply)" }]);
+      // reveal text gradually even when network chunks arrive in bursts —
+      // gives a continuous typing feel instead of one big dump
+      let shown = 0;
+      const typer = setInterval(() => {
+        if (shown < acc.length) {
+          shown = Math.min(acc.length, shown + 6);
+          setMessages([...next, { role: "assistant", content: acc.slice(0, shown) }]);
+        }
+      }, 16);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          acc += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        // flush remaining text then stop the typer
+        clearInterval(typer);
+        setMessages([...next, { role: "assistant", content: acc || "(no reply)" }]);
       }
     } catch (e) {
       setMessages([...next, { role: "assistant", content: `⚠️ เชื่อมต่อ AI ไม่ได้: ${e}` }]);
@@ -90,7 +110,9 @@ export default function ChatWidget() {
               </div>
             ))}
             {loading && !messages[messages.length - 1]?.content && (
-              <p className="text-slate-500 text-xs">💭 AI กำลังคิด...</p>
+              <p className="text-slate-500 text-xs animate-pulse">
+                💭 AI กำลังคิด... ({thinkSecs}s)
+              </p>
             )}
             <div ref={endRef} />
           </div>
