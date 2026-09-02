@@ -34,13 +34,27 @@ export default function ChatWidget() {
     setInput("");
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const res = await fetch(`${API_BASE}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: next }),
       });
-      const data = await res.json();
-      setMessages([...next, { role: "assistant", content: data.reply ?? "(no reply)" }]);
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+      // stream the reply: append chunks as they arrive (AI "typing" effect)
+      setMessages([...next, { role: "assistant", content: "" }]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let acc = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        setMessages([...next, { role: "assistant", content: acc }]);
+      }
+      if (!acc.trim()) {
+        setMessages([...next, { role: "assistant", content: "(no reply)" }]);
+      }
     } catch (e) {
       setMessages([...next, { role: "assistant", content: `⚠️ เชื่อมต่อ AI ไม่ได้: ${e}` }]);
     } finally {
@@ -75,7 +89,9 @@ export default function ChatWidget() {
                 </div>
               </div>
             ))}
-            {loading && <p className="text-slate-500 text-xs">AI กำลังคิด...</p>}
+            {loading && !messages[messages.length - 1]?.content && (
+              <p className="text-slate-500 text-xs">💭 AI กำลังคิด...</p>
+            )}
             <div ref={endRef} />
           </div>
 

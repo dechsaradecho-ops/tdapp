@@ -6,8 +6,9 @@ prompt enforces the safety contract.
 """
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -28,9 +29,58 @@ Rules:
 class AIProvider(ABC):
     name = "base"
 
+    # set by subclasses in __init__ (used by the shared streaming impl)
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+
     @abstractmethod
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
         """Return the assistant's reply text."""
+
+    async def chat_stream(self, messages: list[dict[str, str]],
+                          temperature: float = 0.3) -> AsyncIterator[str]:
+        """Yield reply chunks as they arrive (OpenAI-compatible SSE streaming).
+
+        Lets the UI show the answer progressively instead of a frozen
+        "AI กำลังคิด..." for the full generation time.
+        On upstream failure yields a single chunk with the same error text
+        that `chat` returns, so the UI contract stays identical.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+                        "temperature": temperature,
+                        "max_tokens": 1024,
+                        "stream": True,
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(data)["choices"][0].get("delta", {})
+                        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                            continue
+                        piece = delta.get("content")
+                        if piece:
+                            yield piece
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            yield (
+                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
+                "ตรวจสอบว่า AI_API_KEY ตรงกับ provider ใน ai.config.json หรือไม่ "
+                "(key ของ DeepSeek ขึ้นต้น sk- / key ของ GLM เป็นรูปแบบ id.secret)"
+            )
 
 
 class DeepSeekProvider(AIProvider):
@@ -44,7 +94,8 @@ class DeepSeekProvider(AIProvider):
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            # read=120: long Thai answers from flash models can exceed 60s
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}"},
@@ -52,6 +103,7 @@ class DeepSeekProvider(AIProvider):
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
                         "temperature": temperature,
+                        "max_tokens": 1024,
                     },
                 )
                 resp.raise_for_status()
@@ -75,7 +127,8 @@ class GLMProvider(AIProvider):
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            # read=120: long Thai answers from flash models can exceed 60s
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}"},
@@ -83,6 +136,7 @@ class GLMProvider(AIProvider):
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
                         "temperature": temperature,
+                        "max_tokens": 1024,
                     },
                 )
                 resp.raise_for_status()
@@ -108,12 +162,17 @@ class StubProvider(AIProvider):
             "ยังทำงานปกติโดยไม่ต้องพึ่ง AI ภายนอก."
         )
 
+    async def chat_stream(self, messages: list[dict[str, str]],
+                          temperature: float = 0.3) -> AsyncIterator[str]:
+        yield await self.chat(messages, temperature)
+
 
 def get_ai_provider() -> AIProvider:
     c = get_ai_config()
     if not c.is_configured:
         return StubProvider()
-    if c.provider == "glm":
+    if c.provider in ("glm", "qwen"):
+        # qwen via OpenAI-compatible gateways (e.g. opencode zen) — same wire format
         return GLMProvider()
     return DeepSeekProvider()
 

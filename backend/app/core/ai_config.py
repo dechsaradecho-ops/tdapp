@@ -20,11 +20,13 @@ from app.core.config import get_settings
 DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com",
     "glm": "https://open.bigmodel.cn/api/paas/v4",
+    "qwen": "https://opencode.ai/zen/go/v1",
 }
 
 DEFAULT_MODELS = {
     "deepseek": "deepseek-chat",
     "glm": "glm-5.3-flash",
+    "qwen": "qwen3.8-flash",
 }
 
 
