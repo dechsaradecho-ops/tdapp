@@ -11,6 +11,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+      # รัน background workers ในตัว web service นี้ (อย่าเปิดซ้ำที่ service อื่น)
+      - key: ENABLE_WORKERS
+        value: "1"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SECRET_KEY

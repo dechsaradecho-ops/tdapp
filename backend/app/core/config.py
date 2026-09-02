@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
+    # Background workers — set ENABLE_WORKERS=1 on exactly ONE service
+    # (e.g. the tdapp-api web service) to run the APScheduler in-process.
+    enable_workers: bool = False
+
     # AI — secret key via env var AI_API_KEY (ป้องกันรั่วไหล)
     # provider + url อยู่ในไฟล์ ai.config.json (ไม่ใช่ความลับ)
     ai_api_key: str = ""
@@ -41,6 +45,10 @@ class Settings(BaseSettings):
     # LINE
     line_channel_access_token: str = ""
     line_channel_secret: str = ""
+
+    # Supabase table names for worker pipelines (worker #2 output, AI daily report log)
+    news_analysis_table: str = "news_analysis"
+    ai_daily_report_table: str = "ai_daily_report"
 
     # Risk defaults (percent)
     default_risk_per_trade: float = 0.5

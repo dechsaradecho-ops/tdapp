@@ -9,6 +9,7 @@ import asyncio
 import logging
 import random
 
+from app.core.config import get_settings
 from app.integrations.ai_provider import get_ai_provider
 from app.services.database import Database
 
@@ -39,10 +40,24 @@ async def analyze_once(db: Database) -> dict:
 
     sentiment = round(random.uniform(-0.6, 0.6), 2)
     log.info("News[%s] sentiment=%s", event, sentiment)
-    return {
+    result = {
         "event": event,
         "sentiment": sentiment,
         "affected_assets": AFFECTED[event],
         "analysis": narrative,
         "confidence": round(random.uniform(55, 85), 1),
     }
+
+    # Persist so the market scanner can ground its news-sentiment input.
+    # Insert failure (e.g. table not created yet) is logged, not raised.
+    inserted = db.insert(get_settings().news_analysis_table, {
+        "event": event,
+        "sentiment": sentiment,
+        "affected_assets": AFFECTED[event],
+        "analysis": narrative,
+        "confidence": result["confidence"],
+    })
+    if inserted is None:
+        log.info("news_analysis row not persisted (table missing or DB unavailable)")
+
+    return result

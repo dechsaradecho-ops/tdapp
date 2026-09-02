@@ -44,6 +44,8 @@ class IndicatorSnapshot:
     news_sentiment: float = 0.0    # -1 .. +1
     high_impact_event: bool = False
 
+    source: str = "demo"           # "live" (quote feed) / "demo" (random-walk fallback)
+
     reasons: list[str] = field(default_factory=list)
 
 

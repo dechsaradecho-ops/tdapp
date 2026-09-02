@@ -1,8 +1,11 @@
 """FastAPI application entrypoint."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -10,8 +13,57 @@ from app.api.routes import ai, chat, goal, market, portfolio, risk, signals, web
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.services.database import Database
+from app.services.notification_service import NotificationService
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
+from app.workers import market_scanner, news_analysis, notification_worker, portfolio_monitor
+
+log = logging.getLogger(__name__)
+
+
+async def _safe_job(coro) -> None:
+    """Run a scheduled coroutine, logging failures instead of crashing the app."""
+    try:
+        await coro
+    except Exception:
+        log.exception("Worker job failed")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging()
+    app.state.db = Database()
+    app.state.line = LineClient()
+    app.state.broker = PaperBroker()
+    await app.state.broker.connect()
+
+    # Background workers run inside this single web service when
+    # ENABLE_WORKERS=1 (set on tdapp-api only — never on more than one
+    # instance, or jobs will run duplicated).
+    scheduler: AsyncIOScheduler | None = None
+    if get_settings().enable_workers:
+        scheduler = AsyncIOScheduler()
+        db = app.state.db
+        notifier = NotificationService(db, app.state.line)
+        scheduler.add_job(lambda: asyncio.create_task(_safe_job(market_scanner.scan_once(db))),
+                          "interval", minutes=5, id="market_scanner", max_instances=1)
+        scheduler.add_job(lambda: asyncio.create_task(_safe_job(news_analysis.analyze_once(db))),
+                          "interval", minutes=15, id="news_analysis", max_instances=1)
+        scheduler.add_job(lambda: asyncio.create_task(_safe_job(asyncio.to_thread(
+            portfolio_monitor.monitor_once, db, app.state.broker, notifier))),
+            "interval", minutes=1, id="portfolio_monitor", max_instances=1)
+        scheduler.add_job(lambda: asyncio.create_task(_safe_job(
+            notification_worker.dispatch_pending(db, notifier))),
+            "interval", minutes=1, id="notifications", max_instances=1)
+        scheduler.start()
+        log.info("In-app workers ENABLED: scanner(5m) news(15m) monitor(1m) notify(1m)")
+    else:
+        log.info("In-app workers disabled (ENABLE_WORKERS not set)")
+
+    yield
+
+    if scheduler is not None:
+        scheduler.shutdown(wait=False)
 
 
 @asynccontextmanager
@@ -57,4 +109,9 @@ app.include_router(webhook.router, prefix="/api/line", tags=["line"])
 
 @app.get("/health", tags=["system"])
 async def health() -> dict:
-    return {"status": "ok", "platform": "AI Wealth & Trading Advisor", "deployment": "render"}
+    return {
+        "status": "ok",
+        "platform": "AI Wealth & Trading Advisor",
+        "deployment": "render",
+        "workers": "enabled" if get_settings().enable_workers else "disabled",
+    }
