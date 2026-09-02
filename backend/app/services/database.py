@@ -48,6 +48,21 @@ class Database:
             log.error("insert %s failed: %s", table, exc)
             return None
 
+    def insert_raw(self, table: str,
+                   row: dict[str, Any]) -> tuple[Optional[dict], Optional[str]]:
+        """Insert that returns the RAW error string instead of swallowing it.
+
+        Used by the /api/system/db-check probe to surface RLS/policy/schema
+        errors that `insert` normally reduces to a log line.
+        """
+        if not self._client:
+            return None, "client unavailable"
+        try:
+            resp = self._client.table(table).insert(row).execute()
+            return (resp.data[0] if resp.data else None), None
+        except Exception as exc:
+            return None, str(exc)
+
     def select(self, table: str, filters: Optional[dict] = None,
                order: str = "created_at", desc: bool = True, limit: int = 50) -> list[dict]:
         if not self._client:

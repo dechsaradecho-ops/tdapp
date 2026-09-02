@@ -67,8 +67,35 @@ async def db_check(request: Request) -> dict:
     # -- 3. DELETE cleanup -----------------------------------------------
     deleted = db.delete(PROBE_TABLE, {"token": token})
     result["delete"] = "ok" if deleted else "FAIL"
-    result["verdict"] = "pass" if (ins and rows and deleted) else "partial"
     result["token"] = token
+    ok_probe = ins and rows and deleted
+
+    # -- 4. WORKER-TABLE PROBE (scanner-shaped INSERT into market_analysis)
+    # db_probe has no RLS → proves connectivity but NOT the RLS policies that
+    # gate the worker tables. This inserts a row exactly like the market
+    # scanner would and reports the RAW PostgREST error when it fails.
+    worker_row = {
+        "asset": "PROBE",
+        "regime": "sideway",           # valid market_regime enum value
+        "sentiment": "neutral",
+        "confidence": 50.00,
+        "explanation": "db-check probe row — safe to delete",
+    }
+    data, raw_err = db.insert_raw("market_analysis", worker_row)
+    result["worker_insert"] = "ok" if data else "FAIL"
+    result["worker_table"] = "market_analysis"
+    if not data:
+        result["worker_insert_error"] = raw_err
+        result["worker_insert_hint"] = (
+            "scanner-shaped INSERT into market_analysis failed. If the error "
+            "mentions row-level security / policy, run "
+            "database/004_rls_insert_policies.sql in the Supabase SQL Editor."
+        )
+    else:
+        # cleanup the probe row immediately
+        db.delete("market_analysis", {"asset": "PROBE"})
+
+    result["verdict"] = "pass" if (ok_probe and data) else "partial"
     return result
 
 

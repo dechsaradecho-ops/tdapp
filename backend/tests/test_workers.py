@@ -49,6 +49,20 @@ class FakeDatabase:
                 return True
         return False
 
+    def insert_raw(self, table: str, row: dict) -> tuple[dict | None, str | None]:
+        """Same contract as Database.insert_raw (raw error, no swallow)."""
+        if table in self.fail_tables:
+            return None, "fake: new row violates row-level security policy"
+        self.insert(table, row)
+        return row, None
+
+    def delete(self, table: str, filters: dict) -> bool:
+        rows = self.rows.get(table, [])
+        kept = [r for r in rows
+                if not all(r.get(c) == v for c, v in filters.items())]
+        self.rows[table] = kept
+        return len(kept) < len(rows)
+
     @property
     def available(self) -> bool:
         return True

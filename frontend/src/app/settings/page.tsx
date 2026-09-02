@@ -123,6 +123,22 @@ export default function SettingsPage() {
               <StepBadge label="Select" status={dbCheck.select} />
               <StepBadge label="Delete" status={dbCheck.delete} />
             </div>
+            {dbCheck.worker_table && (
+              <div className="pt-1">
+                <p className="text-xs text-slate-500 mb-1">
+                  INSERT แบบเดียวกับ scanner → {dbCheck.worker_table}:
+                </p>
+                <StepBadge label="Worker insert" status={dbCheck.worker_insert} />
+                {dbCheck.worker_insert_error && (
+                  <p className="text-loss text-xs mt-1 break-all">
+                    error: {dbCheck.worker_insert_error}
+                  </p>
+                )}
+                {dbCheck.worker_insert_hint && (
+                  <p className="text-amber-400 text-xs mt-1">{dbCheck.worker_insert_hint}</p>
+                )}
+              </div>
+            )}
             {dbCheck.error && <p className="text-loss">error: {dbCheck.error}</p>}
             {dbCheck.insert_hint && <p className="text-amber-400">{dbCheck.insert_hint}</p>}
             {dbCheck.select_hint && <p className="text-amber-400">{dbCheck.select_hint}</p>}

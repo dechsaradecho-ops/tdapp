@@ -35,6 +35,10 @@ export interface DbCheckResult {
   insert?: "ok" | "FAIL";
   select?: "ok" | "FAIL";
   delete?: "ok" | "FAIL";
+  worker_table?: string;
+  worker_insert?: "ok" | "FAIL";
+  worker_insert_error?: string;
+  worker_insert_hint?: string;
   error?: string;
   insert_hint?: string;
   select_hint?: string;
