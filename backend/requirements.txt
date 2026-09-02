@@ -1,7 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-pydantic==2.9.2
-pydantic-settings==2.5.2
+# ยืดหยุ่นเวอร์ชัน: pydantic-core ต้องมี prebuilt wheel ตามเวอร์ชัน Python ที่ Render ใช้
+pydantic>=2.9.2,<3
+pydantic-settings>=2.5.2,<3
 python-dotenv==1.0.1
 httpx==0.27.2
 redis==5.0.8
