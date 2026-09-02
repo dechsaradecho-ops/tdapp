@@ -70,9 +70,10 @@ services:
       - key: NEXT_PUBLIC_API_BASE_URL
         sync: false
 
-  # Redis cache
-  - type: redis
-    name: tdapp-redis
-    plan: starter
-    maxmemoryPolicy: allkeys-lru
-    ipAllowList: []
+  # Redis cache (ยังไม่ถูกใช้ในโค้ด — ปิดไว้ก่อนเพื่อไม่เสียค่าใช้จ่าย)
+  # เปิดเมื่อไหร่: พอมีการใช้ cache/queue จริง แล้วตั้ง REDIS_URL ผ่าน Secret File หรือ env var
+  # - type: redis
+  #   name: tdapp-redis
+  #   plan: starter
+  #   maxmemoryPolicy: allkeys-lru
+  #   ipAllowList: []
