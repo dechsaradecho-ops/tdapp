@@ -73,7 +73,7 @@ async def main() -> int:
     base = args.base.rstrip("/")
 
     exit_code = 0
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(base_url=base) as client:
         # ---- 1. /health -------------------------------------------------
         out(f"== {base}/health")
         health = await get_json(client, "/health")
