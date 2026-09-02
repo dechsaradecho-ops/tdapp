@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import ai, chat, goal, market, portfolio, risk, signals, system, webhook
+from app.api.routes import ai, chat, goal, market, portfolio, risk, signals, system, trading, webhook
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.integrations.ai_provider import get_ai_provider
@@ -99,6 +99,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
 app.include_router(webhook.router, prefix="/api/line", tags=["line"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
 
 
 @app.get("/ping", tags=["system"])

@@ -27,7 +27,13 @@ Rules:
 - Be CONCISE: lead with the direct answer, keep it under ~150 words, use short
   bullets. The reply streams to a chat widget — long essays delay the user.
 - Start replying immediately; do not begin with preamble such as summarizing
-  the system status before answering."""
+  the system status before answering.
+- When the user asks for a FULL analysis (e.g. "วิเคราะห์เต็ม", "extended analysis",
+  "สรุปทั้งหมด"), structure the reply in these 11 sections in order:
+  NEWS & CALENDAR / SESSION ANALYSIS / CORRELATION ANALYSIS / ORDER STRATEGY /
+  EXECUTION PLAN / RISK OFFICER REVIEW / JOURNAL INSIGHT / BACKTEST RESULT /
+  PAPER TRADING STATUS / KILL SWITCH STATUS / FINAL DECISION — one short line
+  per section, ending with a clear FINAL DECISION (TRADE or WAIT + reason)."""
 
 
 class AIProvider(ABC):

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 import random
+from datetime import datetime, timezone
 
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
+from app.models.schemas import FrequencyEngine, RiskProfile
 from app.services.database import Database
 
 log = logging.getLogger(__name__)
@@ -45,7 +47,20 @@ async def scan_once(db: Database) -> list[dict]:
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})
 
         # Strong setups produce a signal (SEMI-AUTO approval flow)
+        # Signal quality filter: confidence < 70 => NO TRADE (spec)
         if opp.score >= 70:
+            # Frequency guard — count today's emitted signals before adding another
+            today = datetime.now(timezone.utc).date().isoformat()
+            todays = db.select("signals", limit=200)
+            today_count = len([r for r in todays if str(r.get("created_at", ""))[:10] == today])
+            freq = FrequencyEngine(RiskProfile.moderate).evaluate(
+                confidence=opp.score, trades_today=today_count,
+                regime=regime_of(ind), volatility_index=ind.volatility_index)
+            if not freq.allowed:
+                log.info("Signal for %s throttled by frequency engine: %s", asset, freq.reason)
+                results[-1]["frequency_blocked"] = freq.reason
+                continue
+
             bullish = ind.ema_fast > ind.ema_slow
             proposal = engine.build_proposal(ind, opp, risk_per_trade_pct=0.5, regime_bullish=bullish)
             db.insert("signals", {

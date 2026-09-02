@@ -106,4 +106,123 @@ export interface SignalProposal {
   recommendation: FinalDecision;
 }
 
+// ---------- Extended Trading System ----------
+export interface FrequencyDecision {
+  allowed: boolean;
+  reason: string;
+  trades_today: number;
+  trades_this_week: number;
+  open_positions: number;
+  limits: {
+    max_trades_daily: number;
+    max_trades_weekly: number;
+    max_open_positions: number;
+    risk_per_trade_pct: number;
+  } | null;
+}
+
+export interface EntryLeg {
+  order_type: "market" | "buy_limit" | "sell_limit" | "buy_stop" | "sell_stop";
+  price: number;
+  lot: number;
+  risk_pct: number;
+  note: string;
+}
+
+export interface OrderPlan {
+  asset: string;
+  direction: "BUY" | "SELL";
+  entries: EntryLeg[];
+  total_lots: number;
+  total_risk_pct: number;
+  average_entry: number;
+  stop_loss: number;
+  take_profit: number;
+  rationale: string[];
+}
+
+export interface CorrelationResponse {
+  assets: string[];
+  portfolio_correlation: number;
+  exposure: { currency: string; exposure_pct: number; direction_net: string }[];
+}
+
+export interface NewsRisk {
+  status: "SAFE" | "CAUTION" | "DANGER";
+  reason: string;
+  minutes_to_next: number | null;
+}
+
+export interface SessionStatus {
+  active_sessions: string[];
+  overlapping: boolean;
+  volatility_hint: "low" | "medium" | "high";
+  current_utc_time: string;
+}
+
+export interface KillSwitch {
+  engaged: boolean;
+  triggers: string[];
+  checked: string[];
+  message: string;
+}
+
+export interface JournalAnalysis {
+  period_days: number;
+  total_trades: number;
+  win_rate_pct: number;
+  profit_factor: number;
+  average_rr: number;
+}
+
+export interface PaperTrading {
+  enabled: boolean;
+  virtual_capital: number;
+  virtual_pnl: number;
+  open_virtual_orders: number;
+  ai_coaching: string;
+  live_readiness_score: number;
+}
+
+export interface BacktestConfig {
+  asset: string;
+  indicator: "EMA" | "RSI" | "MACD" | "ADX" | "ATR" | "SuperTrend" | "PriceAction";
+  days: number;
+  initial_capital: number;
+  risk_per_trade_pct: number;
+}
+
+export interface BacktestResult {
+  config: BacktestConfig;
+  total_trades: number;
+  win_rate_pct: number;
+  profit_factor: number;
+  sharpe_ratio: number;
+  max_drawdown_pct: number;
+  final_equity: number;
+  note: string;
+}
+
+export interface WalkForwardResult {
+  segments: number;
+  in_sample_win_rates: number[];
+  out_sample_win_rates: number[];
+  reliability_score: number;
+  note?: string;
+}
+
+export interface ExtendedAnalysis {
+  news_calendar: string;
+  session_analysis: string;
+  correlation_analysis: string;
+  order_strategy: string;
+  execution_plan: string;
+  risk_officer_review: string;
+  journal_insight: string;
+  backtest_result: string;
+  paper_trading_status: string;
+  kill_switch_status: string;
+  final_decision: string;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";

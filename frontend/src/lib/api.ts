@@ -1,12 +1,24 @@
 import {
   API_BASE,
+  BacktestConfig,
+  BacktestResult,
+  CorrelationResponse,
   DbCheckResult,
   DbCounts,
+  ExtendedAnalysis,
+  FrequencyDecision,
   GoalAssessment,
+  JournalAnalysis,
+  KillSwitch,
   MarketSummary,
+  NewsRisk,
+  OrderPlan,
+  PaperTrading,
   PortfolioRecommendation,
   RiskStatus,
+  SessionStatus,
   SignalProposal,
+  WalkForwardResult,
 } from "./types";
 
 async function get<T>(path: string): Promise<T> {
@@ -65,4 +77,40 @@ export const api = {
 
   // GET /api/system/counts — worker table row counts
   dbCounts: () => get<DbCounts>("/api/system/counts"),
+
+  // ---------- Extended Trading System ----------
+  tradingFrequency: () => get<FrequencyDecision>("/api/trading/frequency"),
+
+  tradingOrderPlan: (input: {
+    asset: string;
+    direction: string;
+    entry: number;
+    stop_loss: number;
+    take_profit: number;
+    atr_pct?: number;
+    regime?: string;
+    equity?: number;
+    risk_per_trade_pct?: number;
+  }) => post<OrderPlan>("/api/trading/order-plan", input),
+
+  tradingCorrelation: () => get<CorrelationResponse>("/api/trading/correlation"),
+
+  tradingCalendar: () => get<NewsRisk>("/api/trading/calendar"),
+
+  tradingSession: () => get<SessionStatus>("/api/trading/session"),
+
+  tradingKillSwitch: () => get<KillSwitch>("/api/trading/kill-switch"),
+
+  tradingJournal: (days = 30) =>
+    get<JournalAnalysis>(`/api/trading/journal?days=${days}`),
+
+  tradingBacktest: (config: BacktestConfig) =>
+    post<BacktestResult>("/api/trading/backtest", config),
+
+  tradingWalkForward: (config: BacktestConfig) =>
+    post<WalkForwardResult>("/api/trading/walk-forward", config),
+
+  tradingPaper: () => get<PaperTrading>("/api/trading/paper-trading"),
+
+  extendedAnalysis: () => get<ExtendedAnalysis>("/api/trading/extended-analysis"),
 };
