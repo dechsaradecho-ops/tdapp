@@ -3,23 +3,25 @@
 import { useEffect, useState } from "react";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
+import { usePortfolio } from "@/lib/portfolio";
 import { RiskStatus } from "@/lib/types";
 
 export default function RiskPage() {
+  const { capital, equity, pnl } = usePortfolio();
   const [risk, setRisk] = useState<RiskStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.checkRisk({
-      starting_capital: 100000,
-      peak_equity: 102000,
-      current_equity: 101200,
-      realized_pnl_today: -120,
-      realized_pnl_week: 300,
-      realized_pnl_month: 1200,
-      open_risk: 500,
+      starting_capital: capital,
+      peak_equity: capital * 1.02,
+      current_equity: equity,
+      realized_pnl_today: Math.min(pnl, 0),
+      realized_pnl_week: pnl,
+      realized_pnl_month: pnl,
+      open_risk: capital * 0.005,
     }).then(setRisk).catch((e) => setError(String(e)));
-  }, []);
+  }, [capital, equity, pnl]);
 
   return (
     <div className="max-w-xl space-y-4">

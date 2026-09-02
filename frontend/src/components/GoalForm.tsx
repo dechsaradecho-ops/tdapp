@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtMoney, probabilityLabel } from "@/lib/format";
+import { usePortfolio } from "@/lib/portfolio";
 import { GoalAssessment } from "@/lib/types";
 
 const SCENARIO_LABELS: Record<string, string> = {
@@ -12,7 +13,7 @@ const SCENARIO_LABELS: Record<string, string> = {
 };
 
 export default function GoalForm() {
-  const [capital, setCapital] = useState(100000);
+  const { capital, setCapital } = usePortfolio();
   const [target, setTarget] = useState(3);
   const [profile, setProfile] = useState("moderate");
   const [maxDd, setMaxDd] = useState(10);

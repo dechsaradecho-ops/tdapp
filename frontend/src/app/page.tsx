@@ -6,10 +6,12 @@ import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
 import { api } from "@/lib/api";
 import { fmtMoney } from "@/lib/format";
+import { usePortfolio } from "@/lib/portfolio";
 import { MarketSummary } from "@/lib/types";
 
 export default function DashboardPage() {
   const [summary, setSummary] = useState<MarketSummary | null>(null);
+  const { capital, equity, pnl } = usePortfolio();
 
   useEffect(() => {
     api.marketSummary().then(setSummary).catch(() => setSummary(null));
@@ -18,9 +20,10 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Stat label="Capital" value={fmtMoney(100000)} />
-        <Stat label="Current Equity" value={fmtMoney(101200)} positive />
-        <Stat label="Current PnL" value={fmtMoney(1200)} positive />
+        <Stat label="Capital" value={fmtMoney(capital)} />
+        <Stat label="Current Equity" value={fmtMoney(equity)} positive={pnl >= 0} />
+        <Stat label="Current PnL" value={fmtMoney(pnl)} positive={pnl >= 0} />
+        <Stat label="Monthly Goal" value="3%" />
         <Stat label="Monthly Goal" value="3%" />
       </section>
 

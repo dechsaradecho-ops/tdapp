@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
+import { usePortfolio } from "@/lib/portfolio";
 import { PortfolioRecommendation } from "@/lib/types";
 
 export default function SettingsPage() {
-  const [capital, setCapital] = useState(100000);
+  const { capital, setCapital } = usePortfolio();
   const [target, setTarget] = useState(3);
   const [profile, setProfile] = useState("moderate");
   const [maxDd, setMaxDd] = useState(10);
