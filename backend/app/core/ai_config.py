@@ -1,9 +1,10 @@
-"""AI provider configuration — provider/url from ai.config.json, key from env var.
+"""AI provider configuration — non-secret settings in ai.config.json, key in env var.
 
-- File: backend/ai.config.json (non-secret):
+- File: backend/ai.config.json (NON-SECRET — safe to commit, no key inside):
     {
-        "provider": "deepseek",   // "deepseek" | "glm"
-        "url": ""                 // optional — defaults per provider if empty
+        "provider": "glm",                       // "deepseek" | "glm"
+        "url": "https://opencode.ai/zen/go/v1",  // optional — defaults per provider
+        "model": "glm-5.3-flash"                 // optional — defaults per provider
     }
 - Secret key: env var AI_API_KEY (never stored in files to prevent leaks).
 """
@@ -21,14 +22,20 @@ DEFAULT_BASE_URLS = {
     "glm": "https://open.bigmodel.cn/api/paas/v4",
 }
 
+DEFAULT_MODELS = {
+    "deepseek": "deepseek-chat",
+    "glm": "glm-5.3-flash",
+}
+
 
 class AIConfig:
-    """Merged AI config: JSON (provider/url) + env var (api_key)."""
+    """Merged AI config: JSON (provider/url/model) + env var (api_key)."""
 
-    def __init__(self, provider: str = "deepseek", api_key: str = "", url: str = "") -> None:
+    def __init__(self, provider: str = "deepseek", api_key: str = "", url: str = "", model: str = "") -> None:
         self.provider = provider
         self.api_key = api_key
         self.base_url = (url or DEFAULT_BASE_URLS.get(provider, DEFAULT_BASE_URLS["deepseek"])).rstrip("/")
+        self.model = model or DEFAULT_MODELS.get(provider, DEFAULT_MODELS["deepseek"])
 
     @property
     def is_configured(self) -> bool:
@@ -45,24 +52,23 @@ def _config_path() -> Path:
 
 @lru_cache
 def get_ai_config() -> AIConfig:
-    """Merge ai.config.json (provider/url) with env var AI_API_KEY (secret).
+    """Merge ai.config.json (provider/url/model) with env var AI_API_KEY (secret).
 
-    If provider/url file is missing, infer the provider from the key's shape:
-    - DeepSeek keys start with "sk-"
-    - GLM keys look like "id.secret"
+    If the file is missing or incomplete, infer the provider from the key's shape:
+    DeepSeek keys start with "sk-", anything else is treated as GLM.
     """
     path = _config_path()
-    provider, url = "", ""
+    provider, url, model = "", "", ""
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             provider = str(data.get("provider", "")).lower()
             url = str(data.get("url", ""))
+            model = str(data.get("model", ""))
         except (json.JSONDecodeError, OSError):
             pass
     # Secret key ALWAYS from env var (supports .env locally via pydantic-settings)
     api_key = get_settings().ai_api_key
     if provider not in DEFAULT_BASE_URLS:
-        # Auto-detect from key shape; default deepseek when unknown
-        provider = "glm" if (api_key and "." in api_key and not api_key.startswith("sk-")) else "deepseek"
-    return AIConfig(provider=provider, api_key=api_key, url=url)
+        provider = "deepseek" if api_key.startswith("sk-") else "glm"
+    return AIConfig(provider=provider, api_key=api_key, url=url, model=model)
