@@ -5,8 +5,7 @@ Format:
 {
     "provider": "deepseek",            // "deepseek" | "glm"
     "api_key": "sk-...",               // secret key of the chosen provider
-    "deepseek_base_url": "https://api.deepseek.com",
-    "glm_base_url": "https://open.bigmodel.cn/api/paas/v4"
+    "url": ""                          // optional — defaults per provider if empty
 }
 """
 from __future__ import annotations
@@ -16,24 +15,19 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+DEFAULT_BASE_URLS = {
+    "deepseek": "https://api.deepseek.com",
+    "glm": "https://open.bigmodel.cn/api/paas/v4",
+}
 
 
 class AIConfig:
     """Snapshot of ai.config.json."""
 
-    def __init__(
-        self,
-        provider: str = "deepseek",
-        api_key: str = "",
-        deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL,
-        glm_base_url: str = DEFAULT_GLM_BASE_URL,
-    ) -> None:
+    def __init__(self, provider: str = "deepseek", api_key: str = "", url: str = "") -> None:
         self.provider = provider
         self.api_key = api_key
-        self.deepseek_base_url = deepseek_base_url
-        self.glm_base_url = glm_base_url
+        self.base_url = (url or DEFAULT_BASE_URLS.get(provider, DEFAULT_BASE_URLS["deepseek"])).rstrip("/")
 
     @property
     def is_configured(self) -> bool:
@@ -61,6 +55,5 @@ def get_ai_config() -> AIConfig:
     return AIConfig(
         provider=str(data.get("provider", "deepseek")).lower(),
         api_key=str(data.get("api_key", "")),
-        deepseek_base_url=str(data.get("deepseek_base_url", DEFAULT_DEEPSEEK_BASE_URL)),
-        glm_base_url=str(data.get("glm_base_url", DEFAULT_GLM_BASE_URL)),
+        url=str(data.get("url", "")),
     )

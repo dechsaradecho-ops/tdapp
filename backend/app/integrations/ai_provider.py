@@ -39,7 +39,7 @@ class DeepSeekProvider(AIProvider):
     def __init__(self) -> None:
         c = get_ai_config()
         self.api_key = c.api_key
-        self.base_url = c.deepseek_base_url.rstrip("/")
+        self.base_url = c.base_url
         self.model = "deepseek-chat"
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
@@ -63,7 +63,7 @@ class GLMProvider(AIProvider):
     def __init__(self) -> None:
         c = get_ai_config()
         self.api_key = c.api_key
-        self.base_url = c.glm_base_url.rstrip("/")
+        self.base_url = c.base_url
         self.model = "glm-4-flash"
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
