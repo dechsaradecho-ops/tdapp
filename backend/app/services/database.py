@@ -17,10 +17,10 @@ class Database:
     def __init__(self) -> None:
         s = get_settings()
         self._client = None
-        if s.supabase_url and s.supabase_service_key:
+        if s.supabase_url and s.effective_service_key:
             try:
                 from supabase import create_client
-                self._client = create_client(s.supabase_url, s.supabase_service_key)
+                self._client = create_client(s.supabase_url, s.effective_service_key)
             except Exception as exc:  # pragma: no cover
                 log.warning("Supabase init failed (%s) — running without DB", exc)
 

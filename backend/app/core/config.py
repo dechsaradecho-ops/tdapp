@@ -12,10 +12,24 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     frontend_origin: str = "http://localhost:3000"
 
-    # Supabase
+    # Supabase — new naming (publishable/secret, see Supabase dashboard)
     supabase_url: str = ""
+    supabase_publishable_key: str = ""   # SUPABASE_PUBLISHABLE_KEY (replaces anon)
+    supabase_secret_key: str = ""        # SUPABASE_SECRET_KEY (replaces service_role)
+    supabase_jwks_url: str = ""          # SUPABASE_JWKS_URL (for JWT verification)
+    # Legacy naming — still accepted for backward compatibility
     supabase_service_key: str = ""
     supabase_anon_key: str = ""
+
+    @property
+    def effective_service_key(self) -> str:
+        """Backend/server key: SECRET_KEY preferred, falls back to legacy service_role."""
+        return self.supabase_secret_key or self.supabase_service_key
+
+    @property
+    def effective_anon_key(self) -> str:
+        """Public key: PUBLISHABLE_KEY preferred, falls back to legacy anon."""
+        return self.supabase_publishable_key or self.supabase_anon_key
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
