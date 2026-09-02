@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: FastAPI (backend)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--reload", "--port", "8000"],
+      "cwd": "${workspaceFolder}/backend",
+      "jinja": true
+    },
+    {
+      "name": "Python: Workers (run_all)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "app.workers.run_all",
+      "cwd": "${workspaceFolder}/backend"
+    },
+    {
+      "name": "Next.js: dev (frontend)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/frontend"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full Stack (API + Web)",
+      "configurations": ["Python: FastAPI (backend)", "Next.js: dev (frontend)"]
+    }
+  ]
+}

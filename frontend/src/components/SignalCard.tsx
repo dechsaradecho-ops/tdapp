@@ -1,0 +1,84 @@
+"use client";
+
+import { useState } from "react";
+import { API_BASE, SignalProposal } from "@/lib/types";
+import { fmtNum } from "@/lib/format";
+
+const DECISION_STYLE: Record<string, string> = {
+  "TRADE": "bg-profit/20 text-profit border-profit",
+  "WAIT": "bg-amber-500/20 text-amber-400 border-amber-500",
+  "REDUCE RISK": "bg-loss/20 text-loss border-loss",
+  "INCREASE CASH": "bg-slate-500/20 text-slate-300 border-slate-500",
+};
+
+export default function SignalCard({ signal }: { signal: SignalProposal }) {
+  const [approving, setApproving] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+
+  const decide = async (approve: boolean) => {
+    setApproving(true);
+    try {
+      // DEMO signal ids are local; a real signal_id comes from the DB row.
+      const res = await fetch(`${API_BASE}/api/signals/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ signal_id: signal.asset, approve }),
+      });
+      setDone(await res.text());
+    } catch (e) {
+      setDone(String(e));
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-lg">{signal.asset}</span>
+          <span className={`px-2 py-0.5 rounded text-xs font-bold ${signal.direction === "BUY" ? "bg-profit text-surface" : "bg-loss text-white"}`}>
+            {signal.direction}
+          </span>
+        </div>
+        <span className={`text-xs px-2 py-1 rounded border ${DECISION_STYLE[signal.recommendation] ?? ""}`}>
+          {signal.recommendation}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-sm mb-2">
+        <Field label="Confidence" value={`${signal.confidence}%`} />
+        <Field label="Risk / Trade" value={`${signal.risk_per_trade_pct}%`} />
+        <Field label="Entry" value={fmtNum(signal.entry, 5)} />
+        <Field label="RR" value={`1 : ${signal.expected_rr}`} />
+        <Field label="Stop Loss" value={fmtNum(signal.stop_loss, 5)} />
+        <Field label="Take Profit" value={fmtNum(signal.take_profit, 5)} />
+      </div>
+      <details className="text-sm">
+        <summary className="cursor-pointer text-accent">Reason ({signal.reason.length})</summary>
+        <ol className="list-decimal list-inside mt-2 space-y-1 text-slate-300">
+          {signal.reason.map((r, i) => <li key={i}>{r}</li>)}
+        </ol>
+      </details>
+      <div className="mt-3 flex gap-2">
+        <button disabled={approving} onClick={() => decide(true)}
+          className="flex-1 bg-profit text-surface font-semibold rounded py-1.5 text-sm hover:brightness-110 disabled:opacity-50">
+          Approve
+        </button>
+        <button disabled={approving} onClick={() => decide(false)}
+          className="flex-1 border border-loss text-loss rounded py-1.5 text-sm hover:bg-loss/10 disabled:opacity-50">
+          Reject
+        </button>
+      </div>
+      {done && <p className="text-xs text-slate-500 mt-2 break-all">{done}</p>}
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-surface rounded p-2 border border-slate-800">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="font-semibold">{value}</p>
+    </div>
+  );
+}

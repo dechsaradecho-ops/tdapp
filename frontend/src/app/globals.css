@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-surface text-slate-200;
+}
+
+.panel {
+  @apply bg-panel rounded-xl border border-slate-800 p-4;
+}
+
+.panel-title {
+  @apply text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3;
+}

@@ -1,0 +1,23 @@
+export const fmtMoney = (v: number, currency = "THB") =>
+  new Intl.NumberFormat("th-TH", { style: "currency", currency, maximumFractionDigits: 2 }).format(v);
+
+export const fmtPct = (v: number, digits = 1) => `${v >= 0 ? "" : ""}${v.toFixed(digits)}%`;
+
+export const fmtNum = (v: number, digits = 2) =>
+  new Intl.NumberFormat("en-US", { maximumFractionDigits: digits }).format(v);
+
+export function scoreColor(score: number): string {
+  if (score >= 81) return "text-emerald-400";
+  if (score >= 61) return "text-accent";
+  if (score >= 31) return "text-amber-400";
+  return "text-slate-500";
+}
+
+export function probabilityLabel(p: string): string {
+  switch (p) {
+    case "high_probability": return "High Probability";
+    case "moderate_probability": return "Moderate Probability";
+    case "low_probability": return "Low Probability";
+    default: return p;
+  }
+}
