@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import ai, chat, goal, market, portfolio, risk, signals, webhook
+from app.api.routes import ai, chat, goal, market, portfolio, risk, signals, system, webhook
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.integrations.ai_provider import get_ai_provider
@@ -98,6 +98,18 @@ app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
 app.include_router(webhook.router, prefix="/api/line", tags=["line"])
+app.include_router(system.router, prefix="/api/system", tags=["system"])
+
+
+@app.get("/ping", tags=["system"])
+async def ping() -> dict:
+    """Ultra-light keepalive for external cron/uptime pingers.
+
+    Deliberately touches nothing (no DB client, no AI provider, no scheduler
+    inspection) so it stays fast even on a cold or degraded instance.
+    Point a cron-job at this every ~10 min to prevent Render spin-down.
+    """
+    return {"pong": True}
 
 
 @app.get("/health", tags=["system"])

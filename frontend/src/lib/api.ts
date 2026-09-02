@@ -1,5 +1,7 @@
 import {
   API_BASE,
+  DbCheckResult,
+  DbCounts,
   GoalAssessment,
   MarketSummary,
   PortfolioRecommendation,
@@ -57,4 +59,10 @@ export const api = {
 
   // GET /api/signals/latest
   latestSignals: () => get<SignalProposal[]>("/api/signals/latest"),
+
+  // GET /api/system/db-check — live insert/select/delete probe
+  dbCheck: () => get<DbCheckResult>("/api/system/db-check"),
+
+  // GET /api/system/counts — worker table row counts
+  dbCounts: () => get<DbCounts>("/api/system/counts"),
 };

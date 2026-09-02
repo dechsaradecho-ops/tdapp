@@ -28,6 +28,33 @@ export interface AssetOpportunity {
   reasons: string[];
 }
 
+export interface DbCheckResult {
+  table?: string;
+  client: "ok" | "unavailable";
+  verdict: "pass" | "fail" | "partial";
+  insert?: "ok" | "FAIL";
+  select?: "ok" | "FAIL";
+  delete?: "ok" | "FAIL";
+  error?: string;
+  insert_hint?: string;
+  select_hint?: string;
+  token?: string;
+}
+
+export interface DbCounts {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  market_analysis?: number;
+  signals?: number;
+  news_analysis?: number;
+  trades?: number;
+  market_analysis_latest?: string;
+  signals_latest?: string;
+  news_analysis_latest?: string;
+  trades_latest?: string;
+}
+
 export interface MarketSummary {
   regime: string;
   confidence: number;

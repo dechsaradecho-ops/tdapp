@@ -72,6 +72,20 @@ class Database:
             log.error("update %s/%s failed: %s", table, row_id, exc)
             return False
 
+    def delete(self, table: str, filters: dict[str, Any]) -> bool:
+        """Delete rows matching simple equality filters (probe cleanup)."""
+        if not self._client:
+            return False
+        try:
+            q = self._client.table(table).delete()
+            for col, val in filters.items():
+                q = q.eq(col, val)
+            q.execute()
+            return True
+        except Exception as exc:
+            log.error("delete %s %s failed: %s", table, filters, exc)
+            return False
+
 
 def queue_notification(db: Database, user_id: str, ntype: str, message: str,
                        channel: str = "line") -> None:
