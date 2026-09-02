@@ -1,0 +1,6 @@
+{
+  "provider": "deepseek",
+  "api_key": "PUT_YOUR_KEY_HERE",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "glm_base_url": "https://open.bigmodel.cn/api/paas/v4"
+}

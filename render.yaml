@@ -17,14 +17,12 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
-      - key: AI_PROVIDER
-        value: deepseek
-      - key: AI_API_KEY
-        sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
+    # AI config (provider + key) อยู่ใน Secret File: ai.config.json
+    # (Dashboard → tdapp-api → Environment → Secret File → path: ai.config.json)
 
   # Background workers (scanner, news, monitor, notifier)
   - type: worker
@@ -43,12 +41,9 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
-      - key: AI_PROVIDER
-        value: deepseek
-      - key: AI_API_KEY
-        sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
+    # AI config (provider + key) อยู่ใน Secret File: ai.config.json
 
   # Next.js frontend
   - type: web

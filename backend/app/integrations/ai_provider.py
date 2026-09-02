@@ -1,4 +1,4 @@
-"""AI provider abstraction — DeepSeek or GLM, selected by AI_PROVIDER env.
+"""AI provider abstraction — DeepSeek or GLM, selected by ai.config.json.
 
 All AI responsibilities (market/news/sentiment analysis, feasibility, explanations,
 chat) route through this client. The AI must never guarantee profit; the system
@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app.core.config import get_settings
+from app.core.ai_config import get_ai_config
 
 SYSTEM_PROMPT = """You are a professional AI Wealth & Trading Advisor for Forex, Gold (XAUUSD),
 Crypto, Indices and CFDs. Your goal is to help users assess the FEASIBILITY of return targets
@@ -37,9 +37,9 @@ class DeepSeekProvider(AIProvider):
     name = "deepseek"
 
     def __init__(self) -> None:
-        s = get_settings()
-        self.api_key = s.ai_api_key
-        self.base_url = s.deepseek_base_url.rstrip("/")
+        c = get_ai_config()
+        self.api_key = c.api_key
+        self.base_url = c.deepseek_base_url.rstrip("/")
         self.model = "deepseek-chat"
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
@@ -61,9 +61,9 @@ class GLMProvider(AIProvider):
     name = "glm"
 
     def __init__(self) -> None:
-        s = get_settings()
-        self.api_key = s.ai_api_key
-        self.base_url = s.glm_base_url.rstrip("/")
+        c = get_ai_config()
+        self.api_key = c.api_key
+        self.base_url = c.glm_base_url.rstrip("/")
         self.model = "glm-4-flash"
 
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
@@ -96,10 +96,10 @@ class StubProvider(AIProvider):
 
 
 def get_ai_provider() -> AIProvider:
-    s = get_settings()
-    if s.ai_api_key == "":
+    c = get_ai_config()
+    if not c.is_configured:
         return StubProvider()
-    if s.ai_provider == "glm":
+    if c.provider == "glm":
         return GLMProvider()
     return DeepSeekProvider()
 

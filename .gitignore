@@ -18,6 +18,10 @@ venv/
 .env
 .env.local
 
+# AI provider config (contains secret key)
+backend/ai.config.json
+ai.config.json
+
 # IDE / OS
 .vscode/*
 !.vscode/launch.json
