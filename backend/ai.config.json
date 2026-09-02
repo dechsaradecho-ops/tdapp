@@ -1,5 +1,5 @@
 {
   "provider": "qwen3.8-flash",
-  "url": "https://opencode.ai/zen/go/v1/chat/completions",
+  "url": "https://opencode.ai/zen/go/v1",
   "model": "qwen3.8-flash"
 }
