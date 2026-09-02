@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import random
 
-from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
+from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
 from app.services.database import Database
 
@@ -36,7 +36,7 @@ async def scan_once(db: Database) -> list[dict]:
         opp = engine.opportunity_score(ind)
         row = {
             "asset": asset,
-            "regime": _regime_of(ind),
+            "regime": regime_of(ind),
             "sentiment": "bullish" if ind.ema_fast > ind.ema_slow else "bearish",
             "confidence": opp.score,
             "explanation": " | ".join(opp.reasons[:3]),
@@ -106,15 +106,3 @@ def _random_walk_snapshot(asset: str, news_sentiment: float = 0.0) -> IndicatorS
         news_sentiment=news_sentiment,
         high_impact_event=random.random() < 0.1,
     )
-
-
-def _regime_of(ind: IndicatorSnapshot) -> str:
-    if ind.high_impact_event:
-        return "news_driven_market"
-    if ind.adx < 20:
-        return "sideway"
-    if ind.atr_pct > 2.5:
-        return "high_volatility"
-    if ind.ema_fast > ind.ema_slow:
-        return "bull_trend" if ind.adx < 35 else "strong_bull_trend"
-    return "bear_trend" if ind.adx < 35 else "strong_bear_trend"

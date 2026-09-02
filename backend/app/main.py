@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import ai, chat, goal, market, portfolio, risk, signals, webhook
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.integrations.ai_provider import get_ai_provider
 from app.services.database import Database
 from app.services.notification_service import NotificationService
 from app.integrations.line_client import LineClient
@@ -56,24 +57,16 @@ async def lifespan(app: FastAPI):
             notification_worker.dispatch_pending(db, notifier))),
             "interval", minutes=1, id="notifications", max_instances=1)
         scheduler.start()
+        app.state.scheduler = scheduler
         log.info("In-app workers ENABLED: scanner(5m) news(15m) monitor(1m) notify(1m)")
     else:
+        app.state.scheduler = None
         log.info("In-app workers disabled (ENABLE_WORKERS not set)")
 
     yield
 
-    if scheduler is not None:
-        scheduler.shutdown(wait=False)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    setup_logging()
-    app.state.db = Database()
-    app.state.line = LineClient()
-    app.state.broker = PaperBroker()
-    await app.state.broker.connect()
-    yield
+    if app.state.scheduler is not None:
+        app.state.scheduler.shutdown(wait=False)
 
 
 settings = get_settings()
@@ -109,9 +102,17 @@ app.include_router(webhook.router, prefix="/api/line", tags=["line"])
 
 @app.get("/health", tags=["system"])
 async def health() -> dict:
+    """Liveness + integration diagnostics (used by scripts/check_live.py)."""
+    db: Database = app.state.db
+    provider = get_ai_provider()
+    scheduler = getattr(app.state, "scheduler", None)
     return {
         "status": "ok",
         "platform": "AI Wealth & Trading Advisor",
         "deployment": "render",
-        "workers": "enabled" if get_settings().enable_workers else "disabled",
+        "workers": ("running" if scheduler is not None
+                    else ("enabled" if get_settings().enable_workers else "disabled")),
+        "jobs": [j.id for j in scheduler.get_jobs()] if scheduler is not None else [],
+        "db": "ok" if db.available else "unavailable",
+        "ai": provider.name,
     }
