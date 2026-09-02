@@ -19,9 +19,7 @@ services:
         sync: false
       - key: AI_PROVIDER
         value: deepseek
-      - key: DEEPSEEK_API_KEY
-        sync: false
-      - key: GLM_API_KEY
+      - key: AI_API_KEY
         sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
@@ -47,7 +45,7 @@ services:
         sync: false
       - key: AI_PROVIDER
         value: deepseek
-      - key: DEEPSEEK_API_KEY
+      - key: AI_API_KEY
         sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false

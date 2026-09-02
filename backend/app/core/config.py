@@ -34,11 +34,10 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # AI provider: deepseek | glm
+    # AI provider: deepseek | glm (ใช้ key เดียวกัน AI_API_KEY)
     ai_provider: str = "deepseek"
-    deepseek_api_key: str = ""
+    ai_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    glm_api_key: str = ""
     glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
 
     # LINE

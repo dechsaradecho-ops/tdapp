@@ -38,7 +38,7 @@ class DeepSeekProvider(AIProvider):
 
     def __init__(self) -> None:
         s = get_settings()
-        self.api_key = s.deepseek_api_key
+        self.api_key = s.ai_api_key
         self.base_url = s.deepseek_base_url.rstrip("/")
         self.model = "deepseek-chat"
 
@@ -62,7 +62,7 @@ class GLMProvider(AIProvider):
 
     def __init__(self) -> None:
         s = get_settings()
-        self.api_key = s.glm_api_key
+        self.api_key = s.ai_api_key
         self.base_url = s.glm_base_url.rstrip("/")
         self.model = "glm-4-flash"
 
@@ -89,7 +89,7 @@ class StubProvider(AIProvider):
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
         last = messages[-1]["content"] if messages else ""
         return (
-            "[STUB AI] ยังไม่ได้ตั้งค่า AI provider (DEEPSEEK_API_KEY / GLM_API_KEY). "
+            "[STUB AI] ยังไม่ได้ตั้งค่า AI_API_KEY. "
             f"คำถามล่าสุด: “{last[:120]}”. ระบบวิเคราะห์เชิงกล (Goal/Risk/Opportunity engines) "
             "ยังทำงานปกติโดยไม่ต้องพึ่ง AI ภายนอก."
         )
@@ -97,11 +97,11 @@ class StubProvider(AIProvider):
 
 def get_ai_provider() -> AIProvider:
     s = get_settings()
-    if s.ai_provider == "glm" and s.glm_api_key:
+    if s.ai_api_key == "":
+        return StubProvider()
+    if s.ai_provider == "glm":
         return GLMProvider()
-    if s.ai_provider == "deepseek" and s.deepseek_api_key:
-        return DeepSeekProvider()
-    return StubProvider()
+    return DeepSeekProvider()
 
 
 def build_context_block(context: dict[str, Any]) -> str:
