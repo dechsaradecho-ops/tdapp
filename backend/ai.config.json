@@ -1,5 +1,5 @@
 {
   "provider": "DeepSeek",
-  "url": "https://opencode.ai/zen/go/v1",
+  "url": "https://opencode.ai/zen/go/v1/chat/completions",
   "model": "deepseek-v4-flash"
 }
