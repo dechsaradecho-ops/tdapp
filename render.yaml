@@ -17,12 +17,14 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
+      - key: AI_API_KEY
+        sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
-    # AI config (provider + key) อยู่ใน Secret File: ai.config.json
-    # (Dashboard → tdapp-api → Environment → Secret File → path: ai.config.json)
+    # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret, ใส่ใน repo ได้)
+    # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment
 
   # Background workers (scanner, news, monitor, notifier)
   - type: worker
@@ -41,9 +43,12 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
+      - key: AI_API_KEY
+        sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
-    # AI config (provider + key) อยู่ใน Secret File: ai.config.json
+    # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret)
+    # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment
 
   # Next.js frontend
   - type: web

@@ -1,12 +1,11 @@
-"""AI provider configuration loaded from ai.config.json (not env vars).
+"""AI provider configuration — provider/url from ai.config.json, key from env var.
 
-File location: backend/ai.config.json (gitignored — contains the secret key).
-Format:
-{
-    "provider": "deepseek",            // "deepseek" | "glm"
-    "api_key": "sk-...",               // secret key of the chosen provider
-    "url": ""                          // optional — defaults per provider if empty
-}
+- File: backend/ai.config.json (non-secret):
+    {
+        "provider": "deepseek",   // "deepseek" | "glm"
+        "url": ""                 // optional — defaults per provider if empty
+    }
+- Secret key: env var AI_API_KEY (never stored in files to prevent leaks).
 """
 from __future__ import annotations
 
@@ -15,6 +14,8 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from app.core.config import get_settings
+
 DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com",
     "glm": "https://open.bigmodel.cn/api/paas/v4",
@@ -22,7 +23,7 @@ DEFAULT_BASE_URLS = {
 
 
 class AIConfig:
-    """Snapshot of ai.config.json."""
+    """Merged AI config: JSON (provider/url) + env var (api_key)."""
 
     def __init__(self, provider: str = "deepseek", api_key: str = "", url: str = "") -> None:
         self.provider = provider
@@ -44,16 +45,16 @@ def _config_path() -> Path:
 
 @lru_cache
 def get_ai_config() -> AIConfig:
-    """Load and cache ai.config.json. Missing file → unconfigured (stub provider)."""
+    """Merge ai.config.json (provider/url) with env var AI_API_KEY (secret)."""
     path = _config_path()
-    if not path.is_file():
-        return AIConfig()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return AIConfig()
-    return AIConfig(
-        provider=str(data.get("provider", "deepseek")).lower(),
-        api_key=str(data.get("api_key", "")),
-        url=str(data.get("url", "")),
-    )
+    provider, url = "deepseek", ""
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            provider = str(data.get("provider", "deepseek")).lower()
+            url = str(data.get("url", ""))
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Secret key ALWAYS from env var (supports .env locally via pydantic-settings)
+    api_key = get_settings().ai_api_key
+    return AIConfig(provider=provider, api_key=api_key, url=url)

@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # AI provider config ย้ายไปอยู่ที่ไฟล์ ai.config.json (ดู app.core.ai_config)
+    # AI — secret key via env var AI_API_KEY (ป้องกันรั่วไหล)
+    # provider + url อยู่ในไฟล์ ai.config.json (ไม่ใช่ความลับ)
+    ai_api_key: str = ""
 
     # LINE
     line_channel_access_token: str = ""
