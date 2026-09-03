@@ -944,6 +944,63 @@ class PauseStatus(BaseModel):
     paused_at: Optional[datetime] = None
 
 
+# ---------- Auto-Trader: monitor dashboard ----------
+class MonitorOpenPosition(BaseModel):
+    """One open paper position with a live mark and unrealized PnL."""
+    id: str
+    ticket: str = ""
+    asset: str
+    direction: str
+    volume: float
+    entry_price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    current_price: float
+    unrealized_pnl: float
+    source: str = "auto"
+    created_at: Optional[datetime] = None
+
+
+class MonitorTrade(BaseModel):
+    """One execution-journal row (open, closed or rejected)."""
+    id: str
+    asset: str
+    direction: str
+    volume: float
+    entry_price: float
+    exit_price: Optional[float] = None
+    pnl: Optional[float] = None
+    status: str
+    source: str = "auto"
+    ticket: Optional[str] = None
+    close_reason: Optional[str] = None
+    closed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class MonitorStats(BaseModel):
+    trades_today: int = 0
+    trades_week: int = 0
+    open_positions: int = 0
+    closed_count: int = 0
+    win_rate: float = 0.0          # % of closed trades that won
+    pnl_today: float = 0.0
+    pnl_week: float = 0.0
+    pnl_total: float = 0.0
+
+
+class MonitorSnapshot(BaseModel):
+    """Everything the /monitor dashboard needs in one response."""
+    pause: PauseStatus
+    order_mode: str = "auto"
+    capital: float = 0.0
+    kill: KillSwitchStatus
+    stats: MonitorStats
+    open_positions: list[MonitorOpenPosition] = Field(default_factory=list)
+    recent: list[MonitorTrade] = Field(default_factory=list)
+    generated_at: Optional[datetime] = None
+
+
 # ---------- Extended Output Format ----------
 class ExtendedAnalysis(BaseModel):
     """The 11-section extended output format (spec)."""
