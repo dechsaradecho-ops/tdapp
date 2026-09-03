@@ -28,7 +28,8 @@ create table if not exists paper_trades (
 );
 create index if not exists idx_paper_trades_user on paper_trades(user_id, created_at desc);
 create index if not exists idx_paper_trades_open on paper_trades(status) where status = 'open';
-create index if not exists idx_paper_trades_date on paper_trades(date(created_at));
+-- date(timestamptz) is NOT immutable (depends on session TimeZone), pin UTC first
+create index if not exists idx_paper_trades_date on paper_trades(date(created_at at time zone 'utc'));
 
 -- ---------- 2. trading_pause: real kill-switch state ----------
 -- Single row (id=1). Execution path MUST read this before firing orders.
