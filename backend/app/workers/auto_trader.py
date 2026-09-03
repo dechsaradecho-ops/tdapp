@@ -40,7 +40,12 @@ async def trade_once(db, broker, notifier) -> dict:
                     dt = dt.replace(tzinfo=timezone.utc)
                 age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60
                 if age_min > 30:
-                    db.update("signals", sig["id"], {"approval": "expired"})
+                    # 'expired' needs the 009 migration (enum value). If it
+                    # fails (un-migrated DB), fall back to 'rejected' so the
+                    # row still leaves the pending queue either way.
+                    if not db.update("signals", sig["id"],
+                                     {"approval": "expired"}):
+                        db.update("signals", sig["id"], {"approval": "rejected"})
                     expired += 1
                     continue
             except ValueError:

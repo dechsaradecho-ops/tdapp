@@ -312,7 +312,10 @@ class TestAutoTrader:
              "approval": "pending", "created_at": old}]})
         out = await auto_trader.trade_once(db, broker, notifier)
         assert out["fired"] == 0
+        assert out["expired"] == 1
         assert broker.orders == []
+        # stale rows leave the pending queue — marked expired (009 migration)
+        assert db.rows["signals"][0]["approval"] == "expired"
 
 
 # ---------------------------------------------------------------------------
