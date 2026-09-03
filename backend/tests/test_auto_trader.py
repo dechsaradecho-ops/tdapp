@@ -352,6 +352,7 @@ class GuardBroker(FakeBroker):
         super().__init__()
         self._positions = {p.ticket: p for p in positions}  # the book
         self._pos = self._positions  # same dict (alias)
+        self._seq = 0
         self.closed: list[str] = []
 
     async def all_positions(self):
@@ -478,10 +479,47 @@ class TestPositionGuard:
              "entry_price": None, "status": "open"},            # bad numeric
         ]})
         broker = GuardBroker([])
-        broker._pos = {}
-        broker._positions = {}
         restored = await position_guard.rehydrate_book(db, broker)
         assert restored <= 1  # only the valid row (or none on parse error)
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_reissues_duplicate_tickets(self, notifier, _fake_live_marks):
+        """Regression (prod 2026-09-03): the broker's order sequence restarts
+        at 1 on every deploy, so a NEW trade re-issued a ticket identical to a
+        pre-restart row still open in the DB (old GBPUSD PAPER-000001 vs new
+        AUDUSD PAPER-000001) — marks and closes then hit the wrong row.
+        rehydrate must re-ticket the second row and advance _seq."""
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "row-aud", "ticket": "PAPER-000001", "user_id": "demo",
+             "asset": "AUDUSD", "direction": "BUY", "volume": 0.01,
+             "entry_price": 0.71933, "stop_loss": 0.71566,
+             "take_profit": 0.72667, "status": "open", "source": "auto"},
+            {"id": "row-gbp", "ticket": "PAPER-000001", "user_id": "demo",
+             "asset": "GBPUSD", "direction": "BUY", "volume": 0.01,
+             "entry_price": 1.26797, "stop_loss": 1.24553,
+             "take_profit": 1.31286, "status": "open", "source": "auto"},
+        ]})
+        broker = GuardBroker([])
+        restored = await position_guard.rehydrate_book(db, broker)
+        assert restored == 2
+        # GBPUSD row got a fresh unique ticket in both book and DB
+        gbp_row = next(r for r in db.rows["paper_trades"] if r["id"] == "row-gbp")
+        assert gbp_row["ticket"] == "PAPER-000002"
+        assert "PAPER-000002" in broker._positions
+        assert broker._positions["PAPER-000002"].asset == "GBPUSD"
+        # order sequence moved past restored tickets → no future collisions
+        assert broker._seq == 2
+
+        # and the re-issued position is enforced: live price past TP → closes,
+        # and close_trade_rows updates the re-issued GBPUSD row only
+        _fake_live_marks["GBPUSD"] = 1.3536
+        _fake_live_marks["AUDUSD"] = 0.72  # between SL and TP → stays open
+        out = await position_guard.guard_once(db, broker, notifier)
+        assert out["closed"] == 1
+        assert broker.closed == ["PAPER-000002"]
+        assert gbp_row["status"] == "closed" and gbp_row["close_reason"] == "tp"
+        aud_row = next(r for r in db.rows["paper_trades"] if r["id"] == "row-aud")
+        assert aud_row["status"] == "open"
 
 
 # ---------------------------------------------------------------------------

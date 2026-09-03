@@ -129,11 +129,35 @@ async def rehydrate_book(db, broker) -> int:
     if book is None:
         log.warning("rehydrate: broker exposes no in-memory book; skipped")
         return 0
+    seq = int(getattr(broker, "_seq", 0) or 0)
     restored = 0
+    # Tickets already live in the broker book BEFORE rehydrate (e.g. an order
+    # placed earlier in this process) are authoritative — matching DB rows are
+    # skipped. Duplicates WITHIN the DB rows themselves are re-ticketed.
+    preexisting = set(book)
+    seen = set(preexisting)
     for row in rows or []:
         ticket = str(row.get("ticket") or "")
-        if not ticket or ticket in book:
+        if not ticket or ticket in preexisting:
             continue
+        if ticket in seen:
+            # Duplicate ticket: the broker's order sequence restarts at 1 on
+            # every deploy, so a NEW trade can re-issue a ticket identical to
+            # a pre-restart row still "open" in the DB (observed: GBPUSD
+            # PAPER-000001 from 11:18 vs a new AUDUSD PAPER-000001). Re-issue
+            # the rehydrated row a fresh ticket and rewrite the DB row so
+            # marks/closes map 1:1 again.
+            seq += 1
+            new_ticket = f"PAPER-{seq:06d}"
+            try:
+                db.update("paper_trades", str(row.get("id") or ""),
+                          {"ticket": new_ticket})
+            except Exception as exc:
+                log.warning("rehydrate: cannot re-ticket %s: %s", ticket, exc)
+                continue
+            log.warning("rehydrate: duplicate ticket %s — row %s re-issued as %s",
+                        ticket, row.get("id"), new_ticket)
+            ticket = new_ticket
         try:
             book[ticket] = Position(
                 ticket=ticket,
@@ -146,9 +170,20 @@ async def rehydrate_book(db, broker) -> int:
                 take_profit=float(row["take_profit"]) if row.get("take_profit") is not None else None,
                 current_price=float(row.get("entry_price") or 0),
             )
+            seen.add(ticket)
             restored += 1
+            # Walk the order sequence past every restored ticket so future
+            # place_order() calls can never collide with restored ones.
+            if ticket.startswith("PAPER-"):
+                try:
+                    seq = max(seq, int(ticket.split("-", 1)[1]))
+                except (IndexError, ValueError):
+                    pass
         except Exception as exc:
             log.warning("rehydrate: skip %s: %s", ticket or "?", exc)
+    if hasattr(broker, "_seq"):
+        broker._seq = max(getattr(broker, "_seq", 0), seq)
     if restored:
-        log.info("rehydrate: restored %d open position(s) into the broker book", restored)
+        log.info("rehydrate: restored %d open position(s) into the broker book "
+                 "(order sequence at %d)", restored, seq)
     return restored
