@@ -37,18 +37,30 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     (async () => {
       const st = await loadStatus();
       if (st?.pin_set && getToken()) {
-        try {
-          // Cheap authenticated probe with a hard timeout so a slow/hanging
-          // API can never leave the gate stuck on the "checking" screen.
-          await Promise.race([
-            api.dbCounts(),
-            new Promise<never>((_, rej) =>
-              setTimeout(() => rej(new Error("probe timeout")), 15000)),
-          ]);
-          setChecking(false);       // token still valid → straight in
-          return;
-        } catch {
-          clearToken();             // dead token / timeout → show PIN pad
+        // Cheap authenticated probe with a hard timeout so a slow/hanging
+        // API can never leave the gate stuck on the "checking" screen.
+        // A cold Render instance can take 30s+ to answer, so retry a few
+        // times. Only a definitive 401 clears the token — a timeout keeps
+        // it (the session is still alive server-side) and retries instead,
+        // otherwise slow starts turn into an enter-PIN → checking → PIN
+        // pad loop.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await Promise.race([
+              api.dbCounts(),
+              new Promise<never>((_, rej) =>
+                setTimeout(() => rej(new Error("probe timeout")), 20000)),
+            ]);
+            setChecking(false);   // token still valid → straight in
+            return;
+          } catch (e) {
+            const m = e instanceof Error ? e.message : String(e);
+            if (m.includes("ต้องเข้าสู่ระบบ")) {
+              clearToken();       // token definitively dead → show PIN pad
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 3000)); // back off, retry
+          }
         }
       }
       setChecking(false);
