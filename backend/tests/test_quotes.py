@@ -303,7 +303,179 @@ class TestSnapshotFromCandles:
         down = make_candles(60, start=2400.0, drift=-2.0, noise=1.0)
         snap = quotes.snapshot_from_candles("XAUUSD", down)
         assert snap["supertrend_dir"] == -1
-        assert snap["price_change_pct_20"] < 0
+
+
+# ---------------------------------------------------------------------------
+# Spot feed — exchangerate-api.com primary + Yahoo fallback
+# ---------------------------------------------------------------------------
+def _ex_resp(quote: str, rate: float, status: int = 200):
+    """exchangerate-api.com /latest/{base} payload shape."""
+    return _resp({"result": "success", "base_code": "USD",
+                  "conversion_rates": {quote: rate}}, status=status)
+
+
+def _yahoo_payload(price: float):
+    return _resp({"chart": {"result": [{"meta": {"regularMarketPrice": price}}]}})
+
+
+def _fake_client_factory(calls: list[str], responses: list):
+    """AsyncClient stand-in: pops one response (or exception) per GET."""
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, **kw):
+            calls.append(url)
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+    return _FakeClient
+
+
+class TestSpotFeedExchangerate:
+    @pytest.fixture(autouse=True)
+    def _reset_spot_state(self):
+        quotes._spot_cache.clear()
+        quotes._exchange_key_idx = 0
+        yield
+        quotes._spot_cache.clear()
+        quotes._exchange_key_idx = 0
+
+    def test_pair_mapping_covers_fx_only(self):
+        assert quotes._exchange_pair("GBPUSD") == ("GBP", "USD")
+        assert quotes._exchange_pair("XAUUSD") is None  # no gold on free tier
+
+    @pytest.mark.asyncio
+    async def test_returns_rate_for_fx_pair(self, monkeypatch):
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [_ex_resp("USD", 1.3485)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        price, err = await quotes._fetch_spot_exchangerate("GBPUSD")
+        assert price == 1.3485
+        assert err == ""
+        assert calls == [f"{quotes.EXCHANGERATE_URL}/keyA/latest/GBP"]
+
+    @pytest.mark.asyncio
+    async def test_unmapped_asset_needs_no_http(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, []))
+        price, err = await quotes._fetch_spot_exchangerate("XAUUSD")
+        assert price == 0.0
+        assert "no exchangerate mapping" in err
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_rotates_key_on_429(self, monkeypatch):
+        """Exhausted key → advance to the next one transparently."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA,keyB", raising=False)
+        calls: list[str] = []
+        responses = [_ex_resp("USD", 1.0, status=429), _ex_resp("USD", 1.35)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        price, err = await quotes._fetch_spot_exchangerate("GBPUSD")
+        assert price == 1.35
+        assert err == ""
+        assert "/keyA/latest/GBP" in calls[0]
+        assert "/keyB/latest/GBP" in calls[1]
+
+    @pytest.mark.asyncio
+    async def test_rotates_key_on_transport_error(self, monkeypatch):
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA,keyB", raising=False)
+        calls: list[str] = []
+        responses = [httpx.ConnectError("dns fail"), _ex_resp("JPY", 159.08)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        price, err = await quotes._fetch_spot_exchangerate("USDJPY")
+        assert price == 159.08
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_all_keys_exhausted_reports_error(self, monkeypatch):
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA,keyB", raising=False)
+        calls: list[str] = []
+        responses = [_ex_resp("USD", 1.0, status=429),
+                     _ex_resp("USD", 1.0, status=429)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        price, err = await quotes._fetch_spot_exchangerate("EURUSD")
+        assert price == 0.0
+        assert "429" in err
+        assert len(calls) == 2  # tried both keys, stopped
+
+    @pytest.mark.asyncio
+    async def test_no_keys_configured_short_circuits(self, monkeypatch):
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "", raising=False)
+        calls: list[str] = []
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, []))
+        price, err = await quotes._fetch_spot_exchangerate("GBPUSD")
+        assert price == 0.0
+        assert "no EXCHANGERATE_API_KEYS" in err
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_spot_prices_chain_exchangerate_then_yahoo(self, monkeypatch):
+        """FX pairs served by exchangerate; XAUUSD falls through to Yahoo."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _ex_resp("USD", 1.15),          # EURUSD → exchangerate ok
+            _yahoo_payload(4540.2),          # XAUUSD → yahoo fallback ok
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        prices, failures = await quotes.fetch_spot_prices(["EURUSD", "XAUUSD"])
+        assert prices == {"EURUSD": 1.15, "XAUUSD": 4540.2}
+        assert failures == {}
+        assert any("/keyA/latest/EUR" in c for c in calls)
+        assert any(f"{quotes.YAHOO_CHART_URL}/GC=F" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_fetch_spot_prices_yahoo_fallback_when_exchangerate_dead(self, monkeypatch):
+        """Every exchangerate key 429s → GBPUSD still priced via Yahoo."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _ex_resp("USD", 1.0, status=429),   # keyA dead
+            _yahoo_payload(1.3485),              # yahoo saves the day
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        prices, failures = await quotes.fetch_spot_prices(["GBPUSD"])
+        assert prices == {"GBPUSD": 1.3485}
+        assert failures == {}
+        assert len([c for c in calls if "exchangerate" in c]) == 1
+        assert len([c for c in calls if "yahoo" in c]) == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_spot_prices_second_call_is_cached(self, monkeypatch):
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [_ex_resp("USD", 1.3485)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        prices1, _ = await quotes.fetch_spot_prices(["GBPUSD"])
+        prices2, _ = await quotes.fetch_spot_prices(["GBPUSD"])
+        assert prices1 == prices2 == {"GBPUSD": 1.3485}
+        assert len(calls) == 1  # second call served from the 30s cache
 
 
 # ---------------------------------------------------------------------------

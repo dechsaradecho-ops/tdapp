@@ -6,15 +6,29 @@ import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { MonitorSnapshot } from "@/lib/types";
 
-// 10s UI polling — cheap for a single user; the backend caches spot quotes
-// for 30s so the free quote feeds aren't hammered.
-const REFRESH_MS = 10_000;
+// ความถี่รีเฟรชเลือกได้จาก UI (จำค่าใน localStorage) — backend cache spot
+// quotes 30s ดังนั้นยิงถี่กว่า 10s ก็ไม่เพิ่มโหลด feed
+const REFRESH_OPTIONS = [
+  { label: "ปิด", value: 0 },
+  { label: "10 วิ", value: 10 },
+  { label: "30 วิ", value: 30 },
+  { label: "1 นาที", value: 60 },
+  { label: "5 นาที", value: 300 },
+];
+
+const LS_KEY = "tdapp_monitor_autorefresh";
 
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string>("");
+  // อ่านค่าตั้งต้นจาก localStorage (จำค่าที่เลือกไว้) — init function กัน SSR mismatch
+  const [intervalSec, setIntervalSec] = useState<number>(() => {
+    if (typeof window === "undefined") return 10;
+    const saved = Number(window.localStorage.getItem(LS_KEY));
+    return REFRESH_OPTIONS.some((o) => o.value === saved) ? saved : 10;
+  });
 
   const load = useCallback(async () => {
     try {
@@ -29,9 +43,15 @@ export default function MonitorPage() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, REFRESH_MS);
+    if (intervalSec <= 0) return; // ปิดรีเฟรชอัตโนมัติ
+    const t = setInterval(load, intervalSec * 1000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, intervalSec]);
+
+  const changeInterval = (v: number) => {
+    setIntervalSec(v);
+    if (typeof window !== "undefined") window.localStorage.setItem(LS_KEY, String(v));
+  };
 
   const togglePause = async () => {
     setBusy(true);
@@ -122,6 +142,18 @@ export default function MonitorPage() {
           <h2 className="panel-title">ไม้ที่เปิดค้าง (Paper)</h2>
           <div className="flex items-center gap-3">
             {updatedAt && <span className="text-xs text-slate-500">อัปเดต {updatedAt}</span>}
+            <select
+              value={intervalSec}
+              onChange={(e) => changeInterval(Number(e.target.value))}
+              className="bg-surface border border-slate-700 rounded px-2 py-1.5 text-xs"
+              aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
+            >
+              {REFRESH_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  รีเฟรช: {o.label}
+                </option>
+              ))}
+            </select>
             <button onClick={togglePause} disabled={busy || !snap}
               className={snap?.pause.paused
                 ? "bg-profit text-surface font-semibold rounded px-3 py-1.5 text-sm disabled:opacity-50"

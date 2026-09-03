@@ -42,7 +42,7 @@ async def _feed_status_for(assets: list[str]) -> QuoteFeedStatus | None:
     from datetime import datetime, timezone
     return QuoteFeedStatus(
         state="ok" if not failures else "error",
-        source="yahoo-spot",
+        source="exchangerate+yahoo",
         fetched_at=datetime.now(timezone.utc),
         failed_assets=sorted(failures),
         message="; ".join(failures[a] for a in sorted(failures))[:300],

@@ -1007,7 +1007,7 @@ class QuoteFeedStatus(BaseModel):
     to broker/entry prices; failed_assets + message tell the user what broke.
     """
     state: str = "ok"                      # "ok" | "error"
-    source: str = ""                       # "yahoo-spot" | "frankfurter" | "twelvedata"
+    source: str = ""                       # "exchangerate+yahoo" | "frankfurter" | "twelvedata"
     fetched_at: Optional[datetime] = None  # when marks were last fetched
     failed_assets: list[str] = Field(default_factory=list)
     message: str = ""

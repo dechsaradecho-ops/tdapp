@@ -50,12 +50,11 @@ FRANKFURTER_URL = "https://api.frankfurter.dev/v1"  # .app domain 301-redirects 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 GOLD_SYMBOL = "XAU/USD"
 
-# --- Spot feed (Yahoo chart API) — for live marks on the monitor page -----
+# --- Spot feed (exchangerate-api.com first, Yahoo chart API fallback) -----
 # Frankfurter only publishes ONE close per business day (ECB), so intraday
-# positions opened at today's close look "pinned" until tomorrow. Yahoo's
-# chart API serves real intraday FX spots and gold via the COMEX future
-# (GC=F tracks spot within a couple of dollars). Free, no key, so it doesn't
-# burn Twelve Data credits.
+# positions opened at today's close look "pinned" until tomorrow.
+# Priority: v6.exchangerate-api.com (6 rotating keys) → Yahoo chart API
+# (real intraday FX spots + gold via the COMEX future GC=F).
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -66,8 +65,69 @@ YAHOO_SYMBOLS: dict[str, str] = {
     "AUDUSD": "AUDUSD=X",
     "XAUUSD": "GC=F",  # COMEX gold future ≈ spot (no XAUUSD symbol on Yahoo)
 }
-SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps Yahoo load tiny
+SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps feeds tiny
 _spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
+
+# exchangerate-api.com state — keys rotate when one exhausts its quota (429)
+EXCHANGERATE_URL = "https://v6.exchangerate-api.com/v6"
+_exchange_key_idx = 0
+
+
+def _exchange_pair(asset: str) -> tuple[str, str] | None:
+    """asset → (base, quote) for exchangerate-api; None for unsupported (XAUUSD)."""
+    pair = {"EURUSD": ("EUR", "USD"), "GBPUSD": ("GBP", "USD"),
+            "USDJPY": ("USD", "JPY"), "AUDUSD": ("AUD", "USD")}
+    return pair.get(asset)
+
+
+async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
+    """Spot price via exchangerate-api.com, rotating through all keys.
+
+    /latest/{base} returns conversion rates for every quote currency, so one
+    request per key covers all four FX pairs. Returns (price, "") on success
+    or (0.0, reason) when every key fails.
+    """
+    global _exchange_key_idx
+    pair = _exchange_pair(asset)
+    if pair is None:
+        return 0.0, f"{asset}: no exchangerate mapping"
+
+    base, quote = pair
+    keys = get_settings().exchangerate_key_list
+    if not keys:
+        return 0.0, "no EXCHANGERATE_API_KEYS configured"
+
+    last_err = "no keys tried"
+    for _ in range(len(keys)):
+        key = keys[_exchange_key_idx % len(keys)]
+        _exchange_key_idx += 1
+        try:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                resp = await client.get(f"{EXCHANGERATE_URL}/{key}/latest/{base}",
+                                        timeout=10.0)
+                if resp.status_code == 429 or resp.status_code >= 400:
+                    last_err = f"exchangerate key #{_exchange_key_idx % len(keys)}: HTTP {resp.status_code}"
+                    continue  # rotate to the next key
+                payload = resp.json()
+                rate = ((payload.get("conversion_rates") or {}).get(quote))
+                if not rate:
+                    last_err = f"{asset}: no {quote} rate in exchangerate payload"
+                    continue
+                return float(rate), ""
+        except (httpx.HTTPError, ValueError) as exc:
+            last_err = f"exchangerate request failed ({exc})"
+            continue
+    return 0.0, f"{asset}: {last_err}"
+
+
+async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[str, str]]:
+    """Intraday spot prices: exchangerate-api.com first, Yahoo fallback, cached ~30s.
+
+    Returns (prices, failures) where failures maps asset → human-readable
+    reason (timeout/HTTP/missing data). Prices that fail are simply absent
+    from the dict — callers show a feed-status banner instead of guessing.
+    Per-asset failures are isolated: one dead symbol never blocks the rest.
+    """
 
 
 class QuotesUnavailable(Exception):
@@ -349,7 +409,7 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
     if todo:
         headers = {"User-Agent": YAHOO_UA}
 
-        async def _one(asset: str) -> tuple[str, float | None, str]:
+        async def _yahoo_one(asset: str) -> tuple[str, float | None, str]:
             sym = YAHOO_SYMBOLS.get(asset)
             if not sym:
                 return asset, None, f"no spot symbol mapping for {asset}"
@@ -370,6 +430,17 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                 return asset, None, f"{asset}: spot feed timeout"
             except (httpx.HTTPError, ValueError, IndexError, KeyError) as exc:
                 return asset, None, f"{asset}: spot feed error ({exc})"
+
+        async def _one(asset: str) -> tuple[str, float | None, str]:
+            # 1) exchangerate-api.com first (6 rotating keys — FX pairs only)
+            price, err = await _fetch_spot_exchangerate(asset)
+            if price:
+                return asset, price, ""
+            # 2) Yahoo chart API fallback (also the only XAUUSD source)
+            asset_y, y_price, y_err = await _yahoo_one(asset)
+            if y_price:
+                return asset, y_price, ""
+            return asset, None, f"{err}; {y_err}"
 
         results = await asyncio.gather(*[_one(a) for a in todo])
         now = time.monotonic()

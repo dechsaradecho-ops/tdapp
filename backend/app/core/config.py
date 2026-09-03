@@ -61,6 +61,19 @@ class Settings(BaseSettings):
     # FX pairs use Frankfurter (ECB) — free, no key needed.
     twelvedata_api_key: str = ""
 
+    # Spot feed (intraday FX for the monitor / position guard):
+    # exchangerate-api.com keys are tried first (rotation when one 429s),
+    # then Yahoo chart API as the fallback. Comma-separated.
+    exchangerate_api_keys: str = (
+        "0aacb73092285cee6abd420a,bd9a7944ef813fcee4d706ea,"
+        "f0b1eac751318f74206add11,a35ed72a0ff5022944a2fda9,"
+        "2be7d0052285a8ca73112389,0adf11d7fa57282e25e98c48"
+    )
+
+    @property
+    def exchangerate_key_list(self) -> list[str]:
+        return [k.strip() for k in self.exchangerate_api_keys.split(",") if k.strip()]
+
     # Supabase table names for worker pipelines (worker #2 output, AI daily report log)
     news_analysis_table: str = "news_analysis"
     ai_daily_report_table: str = "ai_daily_report"

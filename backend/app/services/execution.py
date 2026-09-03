@@ -532,7 +532,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         now_utc = datetime.now(timezone.utc)
         feed_status = QuoteFeedStatus(
             state="ok" if not failures else "error",
-            source="yahoo-spot",
+            source="exchangerate+yahoo",
             fetched_at=now_utc,
             failed_assets=sorted(failures),
             message="; ".join(failures[a] for a in sorted(failures))[:300],
