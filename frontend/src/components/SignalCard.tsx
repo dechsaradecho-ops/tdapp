@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { API_BASE, SignalProposal } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
+import LimitLevels from "@/components/LimitLevels";
 
 const DECISION_STYLE: Record<string, string> = {
   "TRADE": "bg-profit/20 text-profit border-profit",
@@ -53,6 +54,7 @@ export default function SignalCard({ signal }: { signal: SignalProposal }) {
         <Field label="Stop Loss" value={fmtNum(signal.stop_loss, 5)} />
         <Field label="Take Profit" value={fmtNum(signal.take_profit, 5)} />
       </div>
+      <LimitLevels signal={signal} />
       <details className="text-sm">
         <summary className="cursor-pointer text-accent">Reason ({signal.reason.length})</summary>
         <ol className="list-decimal list-inside mt-2 space-y-1 text-slate-300">

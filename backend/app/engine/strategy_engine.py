@@ -12,6 +12,7 @@ from typing import Optional
 from app.models.schemas import (
     AssetOpportunity,
     FinalDecision,
+    LimitLevel,
     OpportunityBand,
     RiskProfile,
     SignalProposal,
@@ -174,7 +175,43 @@ class StrategyEngine:
             risk_per_trade_pct=risk_per_trade_pct,
             reason=reasons[:6],
             recommendation=decision,
+            limit_levels=self.limit_ladder(
+                direction, ind.price, sl_distance,
+                rr_target=rr_target, atr_multiple_sl=atr_multiple_sl),
         )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def limit_ladder(
+        direction: str,
+        entry: float,
+        sl_distance: float,
+        rr_target: float = 2.0,
+        atr_multiple_sl: float = 1.5,
+    ) -> list[LimitLevel]:
+        """Laddered limit entries (แนวรับหลายระดับ) spaced by fractions of the SL distance.
+
+        BUY  → limits below market (buy the dip):  -0.25 / -0.50 / -0.75 × sl_distance
+        SELL → mirrored above market:              +0.25 / +0.50 / +0.75 × sl_distance
+        Risk split 40/35/25; each rung keeps the same SL distance and RR target.
+        (sl_distance already includes the ATR multiple — same as the main SL.)
+        """
+        sign = 1 if direction == "BUY" else -1
+        steps = (0.25, 0.50, 0.75)
+        weights = (40.0, 35.0, 25.0)
+        levels: list[LimitLevel] = []
+        for step, weight in zip(steps, weights):
+            price = entry - sign * sl_distance * step
+            level_sl = price - sign * sl_distance
+            level_tp = price + sign * sl_distance * rr_target
+            levels.append(LimitLevel(
+                price=round(price, 5),
+                risk_pct=weight,
+                sl=round(level_sl, 5),
+                tp=round(level_tp, 5),
+                rr=rr_target,
+            ))
+        return levels
 
     # ------------------------------------------------------------------
     @staticmethod

@@ -93,6 +93,14 @@ export interface RiskStatus {
   message: string;
 }
 
+export interface LimitLevel {
+  price: number;
+  risk_pct: number;
+  sl: number;
+  tp: number;
+  rr: number;
+}
+
 export interface SignalProposal {
   asset: string;
   direction: "BUY" | "SELL";
@@ -104,6 +112,7 @@ export interface SignalProposal {
   risk_per_trade_pct: number;
   reason: string[];
   recommendation: FinalDecision;
+  limit_levels: LimitLevel[];
 }
 
 // ---------- Extended Trading System ----------

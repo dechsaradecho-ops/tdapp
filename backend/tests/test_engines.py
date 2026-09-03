@@ -212,6 +212,38 @@ class TestBuildProposal:
         assert c_with < c_without
 
 
+class TestLimitLadder:
+    def setup_method(self):
+        self.engine = StrategyEngine()
+
+    def test_proposal_includes_three_limit_levels(self):
+        ind = make_ind()
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True)
+        assert len(p.limit_levels) == 3
+        assert sum(lv.risk_pct for lv in p.limit_levels) == 100.0
+
+    def test_buy_limits_below_entry_with_sl_tp(self):
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True, atr_multiple_sl=1.5, rr_target=2.0)
+        sl_distance = 36.0  # 2400 * 1% * 1.5
+        for lv, step, weight in zip(p.limit_levels, (0.25, 0.50, 0.75), (40.0, 35.0, 25.0)):
+            assert lv.price == round(2400.0 - sl_distance * step, 5)
+            assert lv.risk_pct == weight
+            assert lv.sl < lv.price < lv.tp            # long: per-level SL below, TP above
+            assert abs((lv.tp - lv.price) - (lv.price - lv.sl) * 2.0) < 0.05  # RR 1:2
+
+    def test_sell_limits_above_entry_mirrored(self):
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, False, atr_multiple_sl=1.5, rr_target=2.0)
+        sl_distance = 36.0
+        for lv, step in zip(p.limit_levels, (0.25, 0.50, 0.75)):
+            assert lv.price == round(2400.0 + sl_distance * step, 5)
+            assert lv.tp < lv.price < lv.sl            # short: mirrored
+
+
 # ---------------------------------------------------------------------------
 # Risk Engine
 # ---------------------------------------------------------------------------

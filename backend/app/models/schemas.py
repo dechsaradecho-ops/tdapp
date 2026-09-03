@@ -109,6 +109,20 @@ class MarketSummary(BaseModel):
 
 
 # ---------- Signals / Trades ----------
+class LimitLevel(BaseModel):
+    """One limit-order rung in a laddered entry (แนวรับ 1 ระดับ).
+
+    price    — limit price of this rung
+    risk_pct — share of the total trade risk placed at this rung (sums to 100)
+    sl / tp  — per-level stop-loss / take-profit (keeps the RR target)
+    """
+    price: float
+    risk_pct: float
+    sl: float
+    tp: float
+    rr: float
+
+
 class SignalProposal(BaseModel):
     asset: str
     direction: Literal["BUY", "SELL"]
@@ -120,6 +134,8 @@ class SignalProposal(BaseModel):
     risk_per_trade_pct: float
     reason: list[str]
     recommendation: FinalDecision
+    # laddered entries (แนวรับหลายระดับ) — empty for legacy rows without it
+    limit_levels: list[LimitLevel] = []
 
 
 class TradeRecord(BaseModel):

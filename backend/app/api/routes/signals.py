@@ -29,13 +29,21 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     rows = db.select("signals", limit=5)
     if rows:
         for r in rows:
+            entry = float(r["entry"] or 0)
+            stop_loss = float(r["stop_loss"] or 0)
+            sl_distance = abs(entry - stop_loss)
+            ladder = (
+                StrategyEngine.limit_ladder(r["direction"].upper(), entry, sl_distance)
+                if entry > 0 and sl_distance > 0 else []
+            )
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
-                confidence=float(r["confidence"]), entry=float(r["entry"] or 0),
-                stop_loss=float(r["stop_loss"] or 0), take_profit=float(r["take_profit"] or 0),
+                confidence=float(r["confidence"]), entry=entry,
+                stop_loss=stop_loss, take_profit=float(r["take_profit"] or 0),
                 expected_rr=float(r["expected_rr"] or 2.0), risk_per_trade_pct=0.5,
                 reason=[r.get("explanation", "")],
                 recommendation=FinalDecision.trade,
+                limit_levels=ladder,
             ))
         return proposals
 
