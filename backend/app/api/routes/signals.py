@@ -135,8 +135,10 @@ async def approve_signal(payload: ApprovalRequest, request: Request):
         db.update("signals", payload.signal_id, {"approval": "rejected"})
         return {"status": "blocked", "executed": False,
                 "rejects": report.rejects, "checks": report.checks}
-    # Approval stamp — shown on the signals page (010 migration).
-    db.update("signals", payload.signal_id,
-              {"approval": "approved", "approved_at": now_iso()})
+    # Approval stamp — shown on the signals page (010 migration). The stamp
+    # is a separate update on purpose: until 010 is applied the second call
+    # is a no-op instead of failing the whole approval write.
+    db.update("signals", payload.signal_id, {"approval": "approved"})
+    db.update("signals", payload.signal_id, {"approved_at": now_iso()})
     return {"status": "executed", "executed": True,
             "volume": report.size_lots, "checks": report.checks}

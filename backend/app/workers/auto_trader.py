@@ -47,8 +47,9 @@ async def trade_once(db, broker, notifier) -> dict:
             signal_id=sig.get("id"), source="auto",
         )
         if report.allowed:
-            db.update("signals", sig["id"],
-                      {"approval": "approved", "approved_at": now_iso()})
+            db.update("signals", sig["id"], {"approval": "approved"})
+            # Separate call — tolerates a DB without the 010 approved_at column.
+            db.update("signals", sig["id"], {"approved_at": now_iso()})
             fired += 1
         else:
             blocked += 1
