@@ -48,6 +48,8 @@ export default function PerformancePage() {
   const [btAsset, setBtAsset] = useState<string>("EURUSD");
   const [btIndicator, setBtIndicator] = useState<(typeof INDICATORS)[number]>("EMA");
   const [btDays, setBtDays] = useState(120);
+  const [btCapital, setBtCapital] = useState(10_000);
+  const [btRiskPct, setBtRiskPct] = useState(1.0);
   const [bt, setBt] = useState<BacktestResult | null>(null);
   const [wf, setWf] = useState<WalkForwardResult | null>(null);
   const [btLoading, setBtLoading] = useState(false);
@@ -71,12 +73,25 @@ export default function PerformancePage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  // seed backtest defaults from saved settings (capital = single source of truth)
+  useEffect(() => {
+    api.getSettings()
+      .then((s) => {
+        setBtAsset(s.backtest_asset);
+        setBtIndicator(s.backtest_indicator as (typeof INDICATORS)[number]);
+        setBtDays(s.backtest_days);
+        setBtCapital(s.capital);
+        setBtRiskPct(s.risk_per_trade_pct);
+      })
+      .catch(() => { /* backend unreachable — keep component defaults */ });
+  }, []);
+
   const runBacktest = async () => {
     setBtLoading(true);
     setBt(null); setWf(null);
     const config: BacktestConfig = {
       asset: btAsset, indicator: btIndicator, days: btDays,
-      initial_capital: 10000, risk_per_trade_pct: 1.0,
+      initial_capital: btCapital, risk_per_trade_pct: btRiskPct,
     };
     try {
       const [b, w] = await Promise.all([

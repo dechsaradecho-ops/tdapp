@@ -52,7 +52,7 @@ export default function GoalForm() {
         <h2 className="panel-title">Goal Engine — ประเมินความเป็นไปได้ของเป้าหมาย</h2>
         <div className="space-y-3">
           <label className="block text-sm">
-            Capital (THB)
+            Capital (USD)
             <input type="number" value={capital} min={1}
               onChange={(e) => setCapital(Number(e.target.value))}
               className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2" />

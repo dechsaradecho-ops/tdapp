@@ -10,7 +10,8 @@ from app.engine.goal_engine import GoalEngine
 from app.engine.risk_engine import PortfolioSnapshot, RiskEngine
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
-from app.models.schemas import GoalInput, RiskProfile
+from app.api.routes.settings import get_app_settings
+from app.models.schemas import GoalInput
 from app.api.routes.market import DEMO as market_demo
 
 router = APIRouter()
@@ -105,15 +106,17 @@ async def _build_context(db) -> str:
         f"{a} {score:.0f}" for a, (score, _) in
         sorted(per_asset.items(), key=lambda kv: -kv[1][0]))
 
-    # ---- Goal/risk context defaults (user-specific values wired to auth later) ----
+    # ---- Goal/risk context — capital/profile from saved settings (single source) ----
+    s = get_app_settings(db)
+    cap = s.capital or 100_000.0
     goal = GoalEngine().assess(GoalInput(
-        capital=100_000, target_return_pct=3.0,
-        max_drawdown_pct=10.0, risk_profile=RiskProfile.moderate,
+        capital=cap, target_return_pct=3.0,
+        max_drawdown_pct=s.max_drawdown_pct, risk_profile=s.risk_profile,
     ))
     risk = RiskEngine().check(PortfolioSnapshot(
-        starting_capital=100_000, peak_equity=102_000, current_equity=101_200,
-        realized_pnl_today=-120, realized_pnl_week=300, realized_pnl_month=1200,
-        open_risk=500,
+        starting_capital=cap, peak_equity=cap * 1.02, current_equity=cap * 1.012,
+        realized_pnl_today=-cap * 0.0012, realized_pnl_week=cap * 0.003,
+        realized_pnl_month=cap * 0.012, open_risk=cap * 0.005,
     ))
 
     return build_context_block({

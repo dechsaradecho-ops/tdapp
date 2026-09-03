@@ -7,6 +7,7 @@ import logging
 
 from fastapi import APIRouter, Header, Request, Response
 
+from app.api.routes.settings import get_app_settings
 from app.core.config import get_settings
 from app.integrations.line_client import LineClient
 
@@ -50,7 +51,12 @@ async def line_webhook(
 async def handle_command(text: str, db) -> str:
     cmd = text.lower().split()[0] if text else ""
     if cmd == "/portfolio":
-        return "📊 Portfolio\nCapital: 100,000.00\nEquity: 101,200.00\nPnL: +1,200.00\nGoal: 3% (36% achievement)"
+        s = get_app_settings(db)
+        cap = s.capital or 10_000.0
+        pnl = cap * 0.012
+        achievement = pnl / (cap * 0.03) * 100
+        return (f"📊 Portfolio\nCapital: {cap:,.2f}\nEquity: {cap + pnl:,.2f}\n"
+                f"PnL: +{pnl:,.2f}\nGoal: 3% ({achievement:.0f}% achievement)")
     if cmd == "/market":
         return "🌎 Market\nRegime: Bull Trend\nSentiment: Bullish\nOpportunity: XAUUSD 85 / EURUSD 76"
     if cmd == "/positions":
@@ -58,7 +64,12 @@ async def handle_command(text: str, db) -> str:
     if cmd == "/risk":
         return "🛡 Risk\nExposure: 2.1%\nDrawdown: 0.8% / 10.0%\nStatus: OK"
     if cmd == "/summary":
-        return "📊 Daily Summary\nPnL today: +1,200.00\nGoal 3%: achieved 36%\nTop: XAUUSD (85)"
+        s = get_app_settings(db)
+        cap = s.capital or 10_000.0
+        pnl = cap * 0.012
+        achievement = pnl / (cap * 0.03) * 100
+        return (f"📊 Daily Summary\nPnL today: +{pnl:,.2f}\n"
+                f"Goal 3%: achieved {achievement:.0f}%\nTop: XAUUSD (85)")
     if cmd == "/pause":
         return "⏸ Auto trading PAUSED. Use /resume to continue."
     if cmd == "/resume":

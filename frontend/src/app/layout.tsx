@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import CapitalSync from "@/components/CapitalSync";
 import ChatWidget from "@/components/ChatWidget";
 import "./globals.css";
 
@@ -24,6 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </nav>
         </header>
         <main className="p-6 max-w-7xl mx-auto">{children}</main>
+        <CapitalSync />
         <ChatWidget />
       </body>
     </html>

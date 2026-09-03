@@ -64,6 +64,7 @@ export default function SettingsPage() {
     try {
       const res = await api.saveSettings(cfg);
       setCfg(res.settings);
+      setCapital(res.settings.capital); // global store follows saved settings
       setSaveMsg(res.ok ? "✅ บันทึกลง Supabase แล้ว" : `❌ ${res.message}`);
     } catch (e) {
       setSaveMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
@@ -122,7 +123,8 @@ export default function SettingsPage() {
       <div className="panel">
         <h2 className="panel-title">Portfolio Settings</h2>
         <div className="space-y-3">
-          <NumField label="Capital (THB)" value={capital} onChange={setCapital} />
+          <NumField label="Capital (USD) — ใช้ทั้งระบบ" value={capital}
+            onChange={(v) => { setCapital(v); set("capital", v); }} />
           <NumField label="Target Return (%/month)" value={target} onChange={setTarget} step={0.5} />
           <NumField label="Max Drawdown (%)" value={maxDd} onChange={setMaxDd} step={0.5} />
           <label className="block text-sm">
