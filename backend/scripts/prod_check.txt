@@ -1,0 +1,5 @@
+login: OK
+market sources: {}
+XAUUSD: MISSING from market/summary
+signals: 1
+  GBPUSD  entry=1.26797 dir=BUY conf=75.0

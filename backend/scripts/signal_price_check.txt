@@ -1,0 +1,6 @@
+signals: 5
+XAUUSD  entry=4466.81669 live=4466.81669 diff=+0.00000 (+0.00%) created=? src=?
+EURUSD  entry=1.1615 live=1.16150 diff=+0.00000 (+0.00%) created=? src=?
+USDJPY  entry=156.01 live=156.01000 diff=+0.00000 (+0.00%) created=? src=?
+GBPUSD  entry=1.3497 live=1.34970 diff=+0.00000 (+0.00%) created=? src=?
+AUDUSD  entry=0.71933 live=0.71933 diff=+0.00000 (+0.00%) created=? src=?

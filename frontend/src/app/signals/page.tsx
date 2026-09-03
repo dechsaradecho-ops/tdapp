@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import SignalCard from "@/components/SignalCard";
 import { api } from "@/lib/api";
-import { SignalProposal } from "@/lib/types";
+import { AppSettings, SignalProposal } from "@/lib/types";
 
 const REFRESH_OPTIONS = [
   { label: "ปิด", value: 0 },
@@ -18,6 +18,7 @@ const LS_KEY = "tdapp_signals_autorefresh";
 
 export default function SignalsPage() {
   const [signals, setSignals] = useState<SignalProposal[]>([]);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -34,8 +35,13 @@ export default function SignalsPage() {
     inFlight.current = true;
     setLoading(true);
     try {
-      const data = await api.latestSignals();
+      // settings อาจล้มเหลวได้ (auth/expiry) — หน้ายังแสดง signals ได้ปกติ
+      const [data, st] = await Promise.all([
+        api.latestSignals(),
+        api.getSettings().catch(() => null),
+      ]);
       setSignals(data);
+      if (st) setSettings(st);
       setError(null);
       setLastUpdated(new Date());
     } catch (e) {
@@ -67,10 +73,22 @@ export default function SignalsPage() {
     }
   };
 
+  // หัวข้อ + ป้ายตามโหมดจริงจาก settings — หน้าเคยเขียนตายตัวว่า SEMI-AUTO
+  // ทั้งที่ order_mode=auto (auto trader ยิงเองใน ~1 นาที)
+  const mode = settings?.order_mode ?? "semi_auto";
+  const isAuto = mode === "auto";
+  const heading = isAuto
+    ? "🤖 AUTO — ระบบยิงออเดอร์เองเมื่อสัญญาณผ่านทุก gate"
+    : mode === "manual"
+      ? "✋ MANUAL — ทุกไม้ต้องกดอนุมัติเองก่อนยิง"
+      : "SEMI-AUTO — ข้อเสนอการเทรด (รอการอนุมัติ)";
+  const pending = signals.filter((s) => s.approval !== "approved");
+  const approved = signals.filter((s) => s.approval === "approved");
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="panel-title">SEMI-AUTO — ข้อเสนอการเทรด (รอการอนุมัติ)</h2>
+        <h2 className="panel-title">{heading}</h2>
 
         <div className="flex items-center gap-2 text-sm">
           {lastUpdated && (
@@ -108,28 +126,30 @@ export default function SignalsPage() {
       {!signals.length && !error && !loading && (
         <p className="text-slate-500 text-sm">ยังไม่มีสัญญาณ — รอ Market Scanner</p>
       )}
-      {/* รออนุมัติ — action queue ด้านบน */}
-      {signals.some((s) => s.approval !== "approved") && (
+      {/* รอดำเนินการ — action queue ด้านบน (auto = ระบบยิงเอง, semi/manual = รอกด) */}
+      {pending.length > 0 && (
         <>
           <h3 className="text-sm font-semibold text-slate-300">
-            รอการอนุมัติ ({signals.filter((s) => s.approval !== "approved").length})
+            {isAuto
+              ? `🤖 ระบบกำลังดำเนินการ (${pending.length}) — auto trader จะยิงออเดอร์ภายใน ~1 นาที`
+              : `รอการอนุมัติ (${pending.length})`}
           </h3>
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {signals.filter((s) => s.approval !== "approved").map((s) => (
-              <SignalCard key={`${s.asset}-${s.approval ?? "pending"}`} signal={s} />
+            {pending.map((s) => (
+              <SignalCard key={`${s.asset}-${s.approval ?? "pending"}`} signal={s} orderMode={mode} />
             ))}
           </div>
         </>
       )}
-      {/* อนุมัติแล้ว — แสดงด้านล่างพร้อมสแตมป์เวลาที่อนุมัติ */}
-      {signals.some((s) => s.approval === "approved") && (
+      {/* อนุมัติ/ยิงแล้ว — แสดงด้านล่างพร้อมสแตมป์เวลา */}
+      {approved.length > 0 && (
         <>
           <h3 className="text-sm font-semibold text-profit">
-            อนุมัติแล้ว ({signals.filter((s) => s.approval === "approved").length})
+            {isAuto ? `🤖 ยิงออเดอร์แล้ว (${approved.length})` : `อนุมัติแล้ว (${approved.length})`}
           </h3>
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {signals.filter((s) => s.approval === "approved").map((s) => (
-              <SignalCard key={`${s.asset}-${s.approved_at ?? "approved"}`} signal={s} />
+            {approved.map((s) => (
+              <SignalCard key={`${s.asset}-${s.approved_at ?? "approved"}`} signal={s} orderMode={mode} />
             ))}
           </div>
         </>

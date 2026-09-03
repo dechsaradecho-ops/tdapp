@@ -1,0 +1,6 @@
+DEPLOY_LIVE
+HTTP 200
+EURUSD entry=1.1615 current=1.1629 uPnL=1.4
+AUDUSD entry=0.71933 current=0.7203 uPnL=0.97
+GBPUSD entry=1.26797 current=1.3536 uPnL=85.63
+feed_status: state=ok failed=[] msg=
