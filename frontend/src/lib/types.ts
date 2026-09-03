@@ -328,4 +328,22 @@ export interface MonitorSnapshot {
   generated_at: string | null;
 }
 
+// ---------- Auth: 6-digit PIN gate ----------
+export interface PinStatus {
+  pin_set: boolean;
+  locked: boolean;
+  locked_until: string | null;
+  failed_attempts: number;
+  max_failed: number;
+  lock_minutes: number;
+}
+
+export interface PinLoginResponse {
+  ok: boolean;
+  token: string | null;
+  message: string;
+  remaining_attempts: number | null;
+  locked_until: string | null;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";

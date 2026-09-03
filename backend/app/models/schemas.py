@@ -1001,6 +1001,33 @@ class MonitorSnapshot(BaseModel):
     generated_at: Optional[datetime] = None
 
 
+# ---------- Auth: 6-digit PIN gate ----------
+class PinStatus(BaseModel):
+    """Public auth state — lets the frontend pick setup vs login."""
+    pin_set: bool = False
+    locked: bool = False
+    locked_until: Optional[datetime] = None
+    failed_attempts: int = 0
+    max_failed: int = 5
+    lock_minutes: int = 15
+
+
+class PinLoginRequest(BaseModel):
+    pin: str
+
+
+class PinSetRequest(BaseModel):
+    pin: str
+
+
+class PinLoginResponse(BaseModel):
+    ok: bool = False
+    token: Optional[str] = None
+    message: str = ""
+    remaining_attempts: Optional[int] = None
+    locked_until: Optional[datetime] = None
+
+
 # ---------- Extended Output Format ----------
 class ExtendedAnalysis(BaseModel):
     """The 11-section extended output format (spec)."""

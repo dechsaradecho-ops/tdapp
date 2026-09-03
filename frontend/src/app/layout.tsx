@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import AuthGate from "@/components/AuthGate";
 import CapitalSync from "@/components/CapitalSync";
 import ChatWidget from "@/components/ChatWidget";
 import "./globals.css";
@@ -25,7 +26,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/settings" className="hover:text-accent">Settings</a>
           </nav>
         </header>
-        <main className="p-6 max-w-7xl mx-auto">{children}</main>
+        <main className="p-6 max-w-7xl mx-auto">
+          <AuthGate>{children}</AuthGate>
+        </main>
         <CapitalSync />
         <ChatWidget />
       </body>

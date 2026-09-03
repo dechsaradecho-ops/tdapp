@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from app.api.routes import (ai, chat, goal, market, portfolio, risk, settings as settings_routes, signals,
+from app.api.routes import (ai, auth, chat, goal, market, portfolio, risk, settings as settings_routes, signals,
                             system, trading, webhook)
 from app.core.config import get_settings
 from app.core.logging import setup_logging
@@ -109,6 +110,37 @@ app.include_router(webhook.router, prefix="/api/line", tags=["line"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+
+
+# ---------------------------------------------------------------------------
+# PIN gate — every /api/* request needs a valid session token, except the
+# whitelist below. The token comes from POST /api/auth/login (6-digit PIN).
+# Fail-CLOSED: if the check errors out, the request is rejected.
+# ---------------------------------------------------------------------------
+_PIN_EXEMPT_PATHS = {
+    "/ping", "/health",
+    "/api/auth/status", "/api/auth/login", "/api/auth/set-pin",
+}
+
+
+@app.middleware("http")
+async def pin_gate(request, call_next):
+    from app.services import pin_auth
+    path = request.url.path
+    if request.method == "OPTIONS":
+        return await call_next(request)   # CORS preflight has no auth header
+    if path in _PIN_EXEMPT_PATHS or not path.startswith("/api/"):
+        return await call_next(request)
+    # Gate is enforced only once a PIN exists (bootstrap stays open until
+    # the owner sets their PIN from the dashboard).
+    if not pin_auth.gate_active(request.app.state.db):
+        return await call_next(request)
+    header = request.headers.get("authorization") or ""
+    token = header[7:] if header.startswith("Bearer ") else ""
+    if not pin_auth.session_valid(token):
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    return await call_next(request)
 
 
 @app.get("/ping", tags=["system"])

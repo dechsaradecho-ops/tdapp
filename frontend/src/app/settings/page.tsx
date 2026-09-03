@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
+import PinManager from "@/components/PinManager";
 import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
@@ -142,6 +143,7 @@ export default function SettingsPage() {
       <div className="panel">
         <h2 className="panel-title">Portfolio Settings</h2>
         <div className="space-y-3">
+          <PinManager />
           <NumField label="Capital (USD) — ใช้ทั้งระบบ" value={capital}
             onChange={(v) => { setCapital(v); set("capital", v); }} />
           <NumField label="Target Return (%/month)" value={target} onChange={setTarget} step={0.5} />

@@ -17,6 +17,8 @@ import {
   OrderPlan,
   PaperTrading,
   PauseStatus,
+  PinLoginResponse,
+  PinStatus,
   PortfolioRecommendation,
   RiskStatus,
   SessionStatus,
@@ -24,30 +26,47 @@ import {
   SignalProposal,
   WalkForwardResult,
 } from "./types";
+import { getToken, notifyAuthExpired } from "./auth";
+
+function headers(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  const token = getToken();
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+}
+
+/** Shared 401 handling: clear the dead token + tell the UI to re-lock. */
+function handle401(res: Response, path: string): never {
+  if (res.status === 401) {
+    notifyAuthExpired();
+    throw new Error(`ต้องเข้าสู่ระบบ (${path})`);
+  }
+  throw new Error(`${path} → ${res.status}`);
+}
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
+  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", headers: headers() });
+  if (!res.ok) handle401(res, path);
   return res.json();
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  if (!res.ok) handle401(res, path);
   return res.json();
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`PUT ${path} → ${res.status}`);
+  if (!res.ok) handle401(res, path);
   return res.json();
 }
 
@@ -143,4 +162,12 @@ export const api = {
 
   // ---------- Monitor dashboard ----------
   monitor: () => get<MonitorSnapshot>("/api/trading/monitor"),
+
+  // ---------- Auth: 6-digit PIN gate ----------
+  authStatus: () => get<PinStatus>("/api/auth/status"),
+  authLogin: (pin: string) =>
+    post<PinLoginResponse>("/api/auth/login", { pin }),
+  authSetPin: (pin: string) =>
+    post<PinLoginResponse>("/api/auth/set-pin", { pin }),
+  authLogout: () => post<{ ok: boolean }>("/api/auth/logout", {}),
 };

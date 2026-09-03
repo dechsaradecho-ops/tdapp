@@ -1,0 +1,87 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { clearToken } from "@/lib/auth";
+import { PinStatus } from "@/lib/types";
+
+/** Settings panel: first-time PIN setup + change PIN (requires session). */
+export default function PinManager() {
+  const [status, setStatus] = useState<PinStatus | null>(null);
+  const [pin, setPin] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [msg, setMsg] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => api.authStatus().then(setStatus).catch(() => setStatus(null));
+  useEffect(() => { load(); }, []);
+
+  const submit = async () => {
+    setMsg(""); setOk(null);
+    if (pin.length !== 6 || !/^\d{6}$/.test(pin)) {
+      setOk(false); setMsg("PIN ต้องเป็นตัวเลข 6 หลัก"); return;
+    }
+    if (pin !== confirm) {
+      setOk(false); setMsg("PIN ทั้งสองช่องไม่ตรงกัน"); return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.authSetPin(pin);
+      setOk(r.ok);
+      setMsg(r.message || (r.ok ? "บันทึกแล้ว" : "ตั้ง PIN ไม่สำเร็จ"));
+      if (r.ok) {
+        setPin(""); setConfirm("");
+        // set-pin returns a fresh token — keep the session alive with it.
+        await load();
+      }
+    } catch (e) {
+      setOk(false);
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    try { await api.authLogout(); } catch { /* already dead */ }
+    clearToken();
+    window.location.href = "/";
+  };
+
+  return (
+    <div className="border border-slate-800 rounded p-3 space-y-2">
+      <p className="text-sm font-semibold">🔐 รหัส PIN (ใช้ปลดล็อกหน้าเว็บ)</p>
+      {status?.pin_set ? (
+        <p className="text-xs text-profit">ตั้ง PIN ไว้แล้ว — ทุกครั้งที่เปิดเว็บจะขอ PIN ก่อน (ผิด {status.max_failed} ครั้งติด → ล็อก {status.lock_minutes} นาที)</p>
+      ) : (
+        <p className="text-xs text-amber-400">ยังไม่ได้ตั้ง PIN — หน้าเว็บเปิดให้ใช้โดยไม่ต้องยืนยัน แนะนำให้ตั้งเพื่อความปลอดภัย</p>
+      )}
+      <div className="flex gap-2">
+        <input
+          type="password" inputMode="numeric" maxLength={6} value={pin}
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+          placeholder="PIN ใหม่ 6 หลัก" disabled={busy}
+          className="w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
+        />
+        <input
+          type="password" inputMode="numeric" maxLength={6} value={confirm}
+          onChange={(e) => setConfirm(e.target.value.replace(/\D/g, "").slice(0, 6))}
+          placeholder="ยืนยัน PIN" disabled={busy}
+          className="w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
+        />
+        <button onClick={submit} disabled={busy}
+          className="bg-accent text-surface font-semibold rounded px-4 py-2 text-sm disabled:opacity-50">
+          {busy ? "..." : status?.pin_set ? "เปลี่ยน PIN" : "ตั้ง PIN"}
+        </button>
+        {status?.pin_set && (
+          <button onClick={logout} disabled={busy}
+            className="border border-slate-700 rounded px-3 py-2 text-sm text-slate-400 hover:text-loss">
+            ออกจากระบบ
+          </button>
+        )}
+      </div>
+      {msg && <p className={`text-xs ${ok ? "text-profit" : "text-loss"}`}>{msg}</p>}
+    </div>
+  );
+}
