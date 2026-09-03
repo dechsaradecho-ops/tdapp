@@ -436,7 +436,7 @@ def _parse_dt(raw: Any) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
+async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     """Aggregate paper_trades + live broker marks + pause/kill state.
 
     All reads are fail-safe: a broken broker or missing rows degrade the
@@ -455,49 +455,81 @@ def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     closed_rows = [r for r in rows
                    if r.get("status") == "closed" and r.get("pnl") is not None]
 
-    # ---- live marks from the broker (fail-safe) --------------------------
+    # ---- live marks ------------------------------------------------------
+    # 1) broker-native marks for open tickets (fail-safe)
     marks: dict[str, float] = {}
     try:
-        positions = broker.all_positions() if hasattr(broker, "all_positions") else []
-        if inspect.iscoroutine(positions):
-            positions = {}
+        if hasattr(broker, "all_positions"):
+            positions = broker.all_positions()
+            if inspect.iscoroutine(positions):
+                positions = await positions
+            else:
+                positions = list(positions)
+        else:
+            positions = []
         for pos in positions:
             price = getattr(pos, "current_price", None)
-            if not price:
+            if not price and hasattr(broker, "mark_price"):
                 try:
                     price = broker.mark_price(pos.ticket)
                     if inspect.iscoroutine(price):
-                        price = None
+                        price = await price
                 except Exception:
                     price = None
             if price:
                 marks[str(pos.ticket)] = float(price)
+                marks.setdefault("asset:" + str(getattr(pos, "asset", "")).upper(),
+                                 float(price))
     except Exception as exc:
         log.warning("monitor: broker marks unavailable: %s", exc)
 
-    def mark_for(ticket: str, entry: float) -> float:
+    # 2) live feed marks per asset (PaperBroker's internal book is a random
+    # walk, NOT the market — the old code fell back to entry price which
+    # pinned current_price == entry and showed PnL 0.00 forever).
+    if open_rows:
+        try:
+            from app.integrations import quotes as quotes_mod
+            assets = sorted({str(r["asset"]).upper() for r in open_rows
+                             if r.get("asset")})
+            snaps = await quotes_mod.fetch_all_snapshots(assets)
+            for asset, snap in snaps.items():
+                price = float(snap.get("price") or 0)
+                if price > 0:
+                    marks["asset:" + asset] = price
+        except Exception as exc:
+            log.warning("monitor: live quotes unavailable: %s", exc)
+
+    def mark_for(row: dict) -> float:
+        """Resolve the best mark: broker ticket mark → live feed → entry."""
+        ticket = str(row.get("ticket") or "")
+        asset = "asset:" + str(row.get("asset") or "").upper()
         if ticket in marks:
             return marks[ticket]
-        return entry  # unknown mark → show flat PnL rather than guess
+        if asset in marks:
+            return marks[asset]
+        return float(row.get("entry_price") or 0)  # unknown → flat PnL, no guess
 
-    open_positions = [MonitorOpenPosition(
-        id=str(r.get("id")), ticket=str(r.get("ticket") or ""),
-        asset=r["asset"], direction=str(r["direction"]).upper(),
-        volume=float(r.get("volume") or 0),
-        entry_price=float(r.get("entry_price") or 0),
-        stop_loss=float(r["stop_loss"]) if r.get("stop_loss") is not None else None,
-        take_profit=float(r["take_profit"]) if r.get("take_profit") is not None else None,
-        current_price=mark_for(str(r.get("ticket") or ""), float(r.get("entry_price") or 0)),
-        unrealized_pnl=round(
-            PaperBrokerPnl.compute(SimpleNamespace(
-                direction=str(r["direction"]).upper(),
-                current_price=mark_for(str(r.get("ticket") or ""),
-                                       float(r.get("entry_price") or 0)),
-                entry_price=float(r.get("entry_price") or 0),
-                volume=float(r.get("volume") or 0))), 2),
-        source=r.get("source", "auto"),
-        created_at=_parse_dt(r.get("created_at")),
-    ) for r in open_rows]
+    open_positions = []
+    for r in open_rows:
+        mark = mark_for(r)
+        entry = float(r.get("entry_price") or 0)
+        unrealized = round(PaperBrokerPnl.compute(SimpleNamespace(
+            direction=str(r["direction"]).upper(),
+            current_price=mark,
+            entry_price=entry,
+            volume=float(r.get("volume") or 0))), 2)
+        open_positions.append(MonitorOpenPosition(
+            id=str(r.get("id")), ticket=str(r.get("ticket") or ""),
+            asset=r["asset"], direction=str(r["direction"]).upper(),
+            volume=float(r.get("volume") or 0),
+            entry_price=entry,
+            stop_loss=float(r["stop_loss"]) if r.get("stop_loss") is not None else None,
+            take_profit=float(r["take_profit"]) if r.get("take_profit") is not None else None,
+            current_price=mark,
+            unrealized_pnl=unrealized,
+            source=r.get("source", "auto"),
+            created_at=_parse_dt(r.get("created_at")),
+        ))
 
     recent = [MonitorTrade(
         id=str(r.get("id")), asset=r["asset"],

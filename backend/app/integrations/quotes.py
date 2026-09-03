@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -308,12 +309,34 @@ async def fetch_snapshot(asset: str, client: httpx.AsyncClient,
     return snapshot_from_candles(asset, candles, news_sentiment, high_impact_event)
 
 
-async def fetch_all_snapshots(assets: list[str], concurrency: int = 5) -> dict[str, dict]:
-    """Fetch snapshots for all assets concurrently.
+_QUOTE_TTL = 60.0  # seconds — protects Twelve Data's 800 credits/day
+# from 10s dashboard polling (8,640 req/day → 1,440/day cached).
+_quote_cache: dict[str, tuple[float, dict]] = {}
 
+
+async def fetch_all_snapshots(assets: list[str], concurrency: int = 5,
+                              ttl: float | None = None) -> dict[str, dict]:
+    """Fetch snapshots for all assets concurrently (in-memory cached).
+
+    Cache TTL defaults to 60s: FX comes from Frankfurter (free) and gold
+    from Twelve Data (800 credits/day on the free tier) — uncached polling
+    every 10s from a single monitor page would burn the daily quota in ~2h.
     Returns {asset: snapshot_dict} for successes; failures are logged and
     simply missing from the result (caller can decide fallback).
     """
+    now = time.monotonic()
+    effective_ttl = _QUOTE_TTL if ttl is None else ttl
+    out: dict[str, dict] = {}
+    missing: list[str] = []
+    for a in assets:
+        hit = _quote_cache.get(a)
+        if hit is not None and now - hit[0] < effective_ttl:
+            out[a] = hit[1]
+        else:
+            missing.append(a)
+    if not missing:
+        return out
+
     sem = asyncio.Semaphore(concurrency)
 
     async def _one(asset: str) -> tuple[str, dict | None]:
@@ -328,5 +351,10 @@ async def fetch_all_snapshots(assets: list[str], concurrency: int = 5) -> dict[s
                     log.exception("Unexpected quote error for %s", asset)
                     return asset, None
 
-    pairs = await asyncio.gather(*[_one(a) for a in assets])
-    return {a: s for a, s in pairs if s is not None}
+    pairs = await asyncio.gather(*[_one(a) for a in missing])
+    fetched = {a: s for a, s in pairs if s is not None}
+    now = time.monotonic()
+    for a, s in fetched.items():
+        _quote_cache[a] = (now, s)
+    out.update(fetched)
+    return out

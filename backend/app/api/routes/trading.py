@@ -265,7 +265,10 @@ async def monitor(request: Request) -> MonitorSnapshot:
     open positions with live marks + unrealized PnL, recent executions, stats."""
     db = request.app.state.db
     s = _settings(request)
-    return execution.monitor_snapshot(db, request.app.state.broker, s)
+    # monitor_snapshot is async: it awaits live quote marks per asset —
+    # the old sync version silently dropped the broker coroutine and pinned
+    # current_price to the entry price (PnL stuck at 0.00).
+    return await execution.monitor_snapshot(db, request.app.state.broker, s)
 
 
 # ----------------------------------------------------------------- journal

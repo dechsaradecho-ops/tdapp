@@ -5,7 +5,9 @@ import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { MonitorSnapshot } from "@/lib/types";
 
-const REFRESH_MS = 15_000;
+// 10s UI polling — cheap for a single user; the backend caches live quotes
+// for 60s so Twelve Data's free-tier gold quota isn't burned.
+const REFRESH_MS = 10_000;
 
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
