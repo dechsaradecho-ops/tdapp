@@ -101,6 +101,16 @@ export interface LimitLevel {
   rr: number;
 }
 
+// Health of the live-price source — backend reports failures explicitly so
+// the UI can warn "ราคาอาจไม่อัปเดต" instead of silently showing stale marks.
+export interface QuoteFeedStatus {
+  state: "ok" | "error";
+  source: string;
+  fetched_at: string | null;
+  failed_assets: string[];
+  message: string;
+}
+
 export interface SignalProposal {
   asset: string;
   direction: "BUY" | "SELL";
@@ -118,6 +128,7 @@ export interface SignalProposal {
   approval?: string | null;
   approved_at?: string | null;
   created_at?: string | null;
+  feed_status?: QuoteFeedStatus | null;
 }
 
 // ---------- Extended Trading System ----------
@@ -331,6 +342,7 @@ export interface MonitorSnapshot {
   open_positions: MonitorOpenPosition[];
   recent: MonitorTrade[];
   generated_at: string | null;
+  feed_status?: QuoteFeedStatus | null;
 }
 
 // ---------- Auth: 6-digit PIN gate ----------

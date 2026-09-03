@@ -496,18 +496,47 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # 2) live feed marks per asset (PaperBroker's internal book is a random
     # walk, NOT the market — the old code fell back to entry price which
     # pinned current_price == entry and showed PnL 0.00 forever).
+    # Primary source is the intraday spot feed (Yahoo): Frankfurter publishes
+    # only ONE close per business day, so intraday FX positions opened at
+    # today's close would look "pinned" until tomorrow. Failures are NOT
+    # silent: they land in feed_status so the UI can warn the user.
+    feed_status: Optional["QuoteFeedStatus"] = None
     if open_rows:
+        from app.models.schemas import QuoteFeedStatus
+        from app.integrations import quotes as quotes_mod
+        assets = sorted({str(r["asset"]).upper() for r in open_rows
+                         if r.get("asset")})
         try:
-            from app.integrations import quotes as quotes_mod
-            assets = sorted({str(r["asset"]).upper() for r in open_rows
-                             if r.get("asset")})
-            snaps = await quotes_mod.fetch_all_snapshots(assets)
-            for asset, snap in snaps.items():
-                price = float(snap.get("price") or 0)
+            prices, failures = await quotes_mod.fetch_spot_prices(assets)
+            for asset, price in prices.items():
                 if price > 0:
                     marks["asset:" + asset] = price
-        except Exception as exc:
-            log.warning("monitor: live quotes unavailable: %s", exc)
+        except Exception as exc:  # whole-feed failure (shouldn't happen —
+            # fetch_spot_prices isolates per-asset errors, but stay safe)
+            prices, failures = {}, {a: str(exc) for a in assets}
+            log.warning("monitor: spot feed unavailable: %s", exc)
+
+        # Daily-close snapshots still top up assets the spot feed missed
+        # (better than entry price, and works when Yahoo is down).
+        if failures or not prices:
+            try:
+                snaps = await quotes_mod.fetch_all_snapshots(
+                    [a for a in assets if a not in prices])
+                for asset, snap in snaps.items():
+                    price = float(snap.get("price") or 0)
+                    if price > 0:
+                        marks["asset:" + asset] = price
+            except Exception as exc:
+                log.warning("monitor: daily-close fallback failed: %s", exc)
+
+        now_utc = datetime.now(timezone.utc)
+        feed_status = QuoteFeedStatus(
+            state="ok" if not failures else "error",
+            source="yahoo-spot",
+            fetched_at=now_utc,
+            failed_assets=sorted(failures),
+            message="; ".join(failures[a] for a in sorted(failures))[:300],
+        )
 
     def mark_for(row: dict) -> float:
         """Resolve the best mark: broker ticket mark → live feed → entry."""
@@ -596,4 +625,5 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         pause=get_pause(db), order_mode=s.order_mode, capital=s.capital,
         kill=kill, stats=stats, open_positions=open_positions, recent=recent,
         generated_at=now,
+        feed_status=feed_status,
     )

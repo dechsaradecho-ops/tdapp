@@ -50,6 +50,25 @@ FRANKFURTER_URL = "https://api.frankfurter.dev/v1"  # .app domain 301-redirects 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 GOLD_SYMBOL = "XAU/USD"
 
+# --- Spot feed (Yahoo chart API) — for live marks on the monitor page -----
+# Frankfurter only publishes ONE close per business day (ECB), so intraday
+# positions opened at today's close look "pinned" until tomorrow. Yahoo's
+# chart API serves real intraday FX spots and gold via the COMEX future
+# (GC=F tracks spot within a couple of dollars). Free, no key, so it doesn't
+# burn Twelve Data credits.
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+YAHOO_SYMBOLS: dict[str, str] = {
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X",
+    "XAUUSD": "GC=F",  # COMEX gold future ≈ spot (no XAUUSD symbol on Yahoo)
+}
+SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps Yahoo load tiny
+_spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
+
 
 class QuotesUnavailable(Exception):
     """Raised when the live data feed fails — caller decides on fallback."""
@@ -307,6 +326,61 @@ async def fetch_snapshot(asset: str, client: httpx.AsyncClient,
     """Convenience: candles → indicator dict. Raises QuotesUnavailable."""
     candles = await fetch_candles(asset, client)
     return snapshot_from_candles(asset, candles, news_sentiment, high_impact_event)
+
+
+async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[str, str]]:
+    """Intraday spot prices via Yahoo chart API, cached ~30s.
+
+    Returns (prices, failures) where failures maps asset → human-readable
+    reason (timeout/HTTP/missing data). Prices that fail are simply absent
+    from the dict — callers show a feed-status banner instead of guessing.
+    Per-asset failures are isolated: one dead symbol never blocks the rest.
+    """
+    now = time.monotonic()
+    out: dict[str, float] = {}
+    failures: dict[str, str] = {}
+    todo: list[str] = []
+    for a in assets:
+        hit = _spot_cache.get(a)
+        if hit is not None and now - hit[0] < SPOT_TTL:
+            out[a] = hit[1]
+        else:
+            todo.append(a)
+    if todo:
+        headers = {"User-Agent": YAHOO_UA}
+
+        async def _one(asset: str) -> tuple[str, float | None, str]:
+            sym = YAHOO_SYMBOLS.get(asset)
+            if not sym:
+                return asset, None, f"no spot symbol mapping for {asset}"
+            try:
+                async with httpx.AsyncClient(follow_redirects=True) as client:
+                    resp = await client.get(
+                        f"{YAHOO_CHART_URL}/{sym}",
+                        params={"interval": "1m", "range": "1d"},
+                        headers=headers, timeout=10.0)
+                    resp.raise_for_status()
+                    meta = ((resp.json().get("chart") or {}).get("result")
+                            or [{}])[0].get("meta", {})
+                    price = meta.get("regularMarketPrice")
+                    if not price:
+                        return asset, None, f"{asset}: no regularMarketPrice"
+                    return asset, float(price), ""
+            except httpx.TimeoutException:
+                return asset, None, f"{asset}: spot feed timeout"
+            except (httpx.HTTPError, ValueError, IndexError, KeyError) as exc:
+                return asset, None, f"{asset}: spot feed error ({exc})"
+
+        results = await asyncio.gather(*[_one(a) for a in todo])
+        now = time.monotonic()
+        for asset, price, err in results:
+            if price is not None:
+                _spot_cache[asset] = (now, price)
+                out[asset] = price
+            else:
+                failures[asset] = err
+                log.warning("spot feed: %s", err)
+    return out, failures
 
 
 _QUOTE_TTL = 60.0  # seconds — protects Twelve Data's 800 credits/day

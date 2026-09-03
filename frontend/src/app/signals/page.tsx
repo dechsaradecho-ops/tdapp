@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import FeedStatusBanner from "@/components/FeedStatusBanner";
 import SignalCard from "@/components/SignalCard";
 import { api } from "@/lib/api";
 import { SignalProposal } from "@/lib/types";
@@ -102,6 +103,8 @@ export default function SignalsPage() {
       </div>
 
       {error && <p className="text-loss text-sm">{error}</p>}
+      {/* สถานะฟีดราคา — ทุกการ์ดแชร์ probe เดียวกันต่อ request */}
+      <FeedStatusBanner feed={signals[0]?.feed_status} />
       {!signals.length && !error && !loading && (
         <p className="text-slate-500 text-sm">ยังไม่มีสัญญาณ — รอ Market Scanner</p>
       )}

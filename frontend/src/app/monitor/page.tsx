@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import FeedStatusBanner from "@/components/FeedStatusBanner";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { MonitorSnapshot } from "@/lib/types";
 
-// 10s UI polling — cheap for a single user; the backend caches live quotes
-// for 60s so Twelve Data's free-tier gold quota isn't burned.
+// 10s UI polling — cheap for a single user; the backend caches spot quotes
+// for 30s so the free quote feeds aren't hammered.
 const REFRESH_MS = 10_000;
 
 export default function MonitorPage() {
@@ -46,6 +47,7 @@ export default function MonitorPage() {
 
   return (
     <div className="space-y-4">
+      <FeedStatusBanner feed={snap?.feed_status} />
       {/* ---------- Status strip ---------- */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <div className={`panel ${snap?.pause.paused ? "border-loss" : ""}`}>

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.integrations import quotes
-from app.models.schemas import FinalDecision, SignalProposal
+from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal)
 from app.services import execution
 from app.services.execution import (
     SIGNAL_TTL_MIN,
@@ -23,6 +23,30 @@ router = APIRouter()
 class ApprovalRequest(BaseModel):
     signal_id: str
     approve: bool
+
+
+async def _feed_status_for(assets: list[str]) -> QuoteFeedStatus | None:
+    """Probe the intraday spot feed for the signal assets — never raises.
+
+    Failures (timeout/HTTP/missing data) surface on the signals page so the
+    user can see WHY an entry price may be stale instead of trusting a
+    silently-fallen-back number.
+    """
+    if not assets:
+        return None
+    try:
+        _prices, failures = await quotes.fetch_spot_prices(assets)
+    except Exception as exc:  # fetch_spot_prices isolates per-asset errors;
+        # this guard is for anything unexpected above it
+        failures = {a: str(exc) for a in assets}
+    from datetime import datetime, timezone
+    return QuoteFeedStatus(
+        state="ok" if not failures else "error",
+        source="yahoo-spot",
+        fetched_at=datetime.now(timezone.utc),
+        failed_assets=sorted(failures),
+        message="; ".join(failures[a] for a in sorted(failures))[:300],
+    )
 
 
 @router.get("/latest", response_model=list[SignalProposal])
@@ -45,6 +69,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     # as pending.
     rows = [r for r in rows
             if (r.get("approval") or "pending") in ("pending", "approved")]
+    # Feed health probe (shared by every card below) — non-fatal.
+    feed = await _feed_status_for(
+        sorted({str(r.get("asset") or "").upper() for r in rows}))
     # Pending signals past the TTL were already expired by the pass above;
     # approved rows always stay visible — the user explicitly asked to see
     # them at the bottom with an approval-time stamp (GBPUSD 1.26797 bug).
@@ -74,6 +101,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 approval=r.get("approval") or "pending",
                 approved_at=r.get("approved_at"),
                 created_at=r.get("created_at"),
+                feed_status=feed,
             ))
         return proposals
 
@@ -82,18 +110,24 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         snaps = await quotes.fetch_all_snapshots(list(DEMO.keys()))
     except Exception:
         snaps = {}
+    live_feed = await _feed_status_for(sorted(snaps.keys()))
     for asset, snap in snaps.items():
         ind = IndicatorSnapshot(**{**snap, "source": "live"})
         opp = engine.opportunity_score(ind)
         proposals.append(engine.build_proposal(
             ind, opp, 0.5, ind.ema_fast > ind.ema_slow))
     if proposals:
+        for p in proposals:
+            p.feed_status = live_feed
         return proposals
 
+    demo_feed = await _feed_status_for(list(DEMO.keys()))
     for asset, ind in DEMO.items():
         opp = engine.opportunity_score(ind)
         bullish = ind.ema_fast > ind.ema_slow
         proposals.append(engine.build_proposal(ind, opp, 0.5, bullish))
+    for p in proposals:
+        p.feed_status = demo_feed
     return proposals
 
 

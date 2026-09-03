@@ -142,6 +142,9 @@ class SignalProposal(BaseModel):
     approval: Optional[str] = None
     approved_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    # Live-price feed health for the page banner (set once per request, on
+    # every card of the response — cards share the same fetch).
+    feed_status: Optional[QuoteFeedStatus] = None
 
 
 class TradeRecord(BaseModel):
@@ -995,6 +998,21 @@ class MonitorStats(BaseModel):
     pnl_total: float = 0.0
 
 
+# ---------- Live quote feed health (surfaced on monitor + signals pages) ----------
+class QuoteFeedStatus(BaseModel):
+    """Health of the live-price source, so users see WHY a mark may be stale.
+
+    state="ok"    — feed responded, prices fresh
+    state="error" — feed call failed (network/timeout/HTTP) → marks fell back
+    to broker/entry prices; failed_assets + message tell the user what broke.
+    """
+    state: str = "ok"                      # "ok" | "error"
+    source: str = ""                       # "yahoo-spot" | "frankfurter" | "twelvedata"
+    fetched_at: Optional[datetime] = None  # when marks were last fetched
+    failed_assets: list[str] = Field(default_factory=list)
+    message: str = ""
+
+
 class MonitorSnapshot(BaseModel):
     """Everything the /monitor dashboard needs in one response."""
     pause: PauseStatus
@@ -1004,6 +1022,11 @@ class MonitorSnapshot(BaseModel):
     stats: MonitorStats
     open_positions: list[MonitorOpenPosition] = Field(default_factory=list)
     recent: list[MonitorTrade] = Field(default_factory=list)
+    generated_at: Optional[datetime] = None
+    # Live-price feed health — rendered as a banner when the feed fails.
+    feed_status: Optional[QuoteFeedStatus] = None
+    # Live-price feed health, surfaced to the user on the monitor page.
+    feed_status: Optional[QuoteFeedStatus] = None
     generated_at: Optional[datetime] = None
 
 
