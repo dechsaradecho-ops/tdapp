@@ -24,6 +24,7 @@ from app.models.schemas import (
     KillSwitchEngine,
     KillSwitchStatus,
     MarketSessionStatus,
+    MonitorSnapshot,
     NewsRiskStatus,
     OrderPlan,
     OrderStrategyEngine,
@@ -255,6 +256,16 @@ class PauseRequest(BaseModel):
 async def set_pause(payload: PauseRequest, request: Request) -> PauseStatus:
     """Engage/clear the manual kill switch — blocks BOTH auto and approved orders."""
     return execution.set_pause(request.app.state.db, payload.paused, payload.reason)
+
+
+# ----------------------------------------------------------------- monitor
+@router.get("/monitor", response_model=MonitorSnapshot)
+async def monitor(request: Request) -> MonitorSnapshot:
+    """One snapshot for the /monitor dashboard: pause state, kill switch,
+    open positions with live marks + unrealized PnL, recent executions, stats."""
+    db = request.app.state.db
+    s = _settings(request)
+    return execution.monitor_snapshot(db, request.app.state.broker, s)
 
 
 # ----------------------------------------------------------------- journal

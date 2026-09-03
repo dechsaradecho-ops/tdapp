@@ -12,8 +12,10 @@ refused, not waved through.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from app.api.routes.settings import get_app_settings
@@ -26,6 +28,7 @@ from app.models.schemas import (
     GateReport,
     KillSwitchEngine,
     KillSwitchStatus,
+    MonitorSnapshot,
     NewsRiskStatus,
     PauseStatus,
     RiskOfficer,
@@ -363,3 +366,137 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         except Exception as exc:
             log.error("trade_opened notify failed: %s", exc)
     return report
+
+
+# ---------------------------------------------------------------------------
+# Monitor dashboard — one snapshot for the /monitor page
+# ---------------------------------------------------------------------------
+def _parse_dt(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
+    """Aggregate paper_trades + live broker marks + pause/kill state.
+
+    All reads are fail-safe: a broken broker or missing rows degrade the
+    dashboard, never raise.
+    """
+    from app.models.schemas import (
+        MonitorOpenPosition, MonitorSnapshot, MonitorStats, MonitorTrade,
+    )
+
+    # ---- journal rows ----------------------------------------------------
+    try:
+        rows = db.select("paper_trades", limit=500)
+    except Exception:
+        rows = []
+    open_rows = [r for r in rows if r.get("status") == "open"]
+    closed_rows = [r for r in rows
+                   if r.get("status") == "closed" and r.get("pnl") is not None]
+
+    # ---- live marks from the broker (fail-safe) --------------------------
+    marks: dict[str, float] = {}
+    try:
+        positions = broker.all_positions() if hasattr(broker, "all_positions") else []
+        if inspect.iscoroutine(positions):
+            positions = {}
+        for pos in positions:
+            price = getattr(pos, "current_price", None)
+            if not price:
+                try:
+                    price = broker.mark_price(pos.ticket)
+                    if inspect.iscoroutine(price):
+                        price = None
+                except Exception:
+                    price = None
+            if price:
+                marks[str(pos.ticket)] = float(price)
+    except Exception as exc:
+        log.warning("monitor: broker marks unavailable: %s", exc)
+
+    def mark_for(ticket: str, entry: float) -> float:
+        if ticket in marks:
+            return marks[ticket]
+        return entry  # unknown mark → show flat PnL rather than guess
+
+    open_positions = [MonitorOpenPosition(
+        id=str(r.get("id")), ticket=str(r.get("ticket") or ""),
+        asset=r["asset"], direction=str(r["direction"]).upper(),
+        volume=float(r.get("volume") or 0),
+        entry_price=float(r.get("entry_price") or 0),
+        stop_loss=float(r["stop_loss"]) if r.get("stop_loss") is not None else None,
+        take_profit=float(r["take_profit"]) if r.get("take_profit") is not None else None,
+        current_price=mark_for(str(r.get("ticket") or ""), float(r.get("entry_price") or 0)),
+        unrealized_pnl=round(
+            PaperBrokerPnl.compute(SimpleNamespace(
+                direction=str(r["direction"]).upper(),
+                current_price=mark_for(str(r.get("ticket") or ""),
+                                       float(r.get("entry_price") or 0)),
+                entry_price=float(r.get("entry_price") or 0),
+                volume=float(r.get("volume") or 0))), 2),
+        source=r.get("source", "auto"),
+        created_at=_parse_dt(r.get("created_at")),
+    ) for r in open_rows]
+
+    recent = [MonitorTrade(
+        id=str(r.get("id")), asset=r["asset"],
+        direction=str(r["direction"]).upper(),
+        volume=float(r.get("volume") or 0),
+        entry_price=float(r.get("entry_price") or 0),
+        exit_price=float(r["exit_price"]) if r.get("exit_price") is not None else None,
+        pnl=float(r["pnl"]) if r.get("pnl") is not None else None,
+        status=r.get("status", "open"), source=r.get("source", "auto"),
+        ticket=r.get("ticket"), close_reason=r.get("close_reason"),
+        closed_at=_parse_dt(r.get("closed_at")),
+        created_at=_parse_dt(r.get("created_at")),
+    ) for r in sorted(
+        rows, key=lambda r: str(r.get("created_at") or ""), reverse=True)[:50]]
+
+    # ---- stats -----------------------------------------------------------
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    week_ago = now - timedelta(days=7)
+
+    def created(r: dict) -> Optional[datetime]:
+        return _parse_dt(r.get("created_at"))
+
+    today_rows = [r for r in rows if (created(r) and created(r).date().isoformat() == today)]
+    week_rows = [r for r in rows if (created(r) and created(r) >= week_ago)
+                 and r.get("status") != "rejected"]
+    wins = [r for r in closed_rows if float(r.get("pnl") or 0) > 0]
+    stats = MonitorStats(
+        trades_today=len(today_rows),
+        trades_week=len(week_rows),
+        open_positions=len(open_rows),
+        closed_count=len(closed_rows),
+        win_rate=round(len(wins) / len(closed_rows) * 100, 1) if closed_rows else 0.0,
+        pnl_today=round(sum(float(r.get("pnl") or 0) for r in today_rows), 2),
+        pnl_week=round(sum(float(r.get("pnl") or 0) for r in week_rows), 2),
+        pnl_total=round(sum(float(r.get("pnl") or 0) for r in closed_rows), 2),
+    )
+
+    # ---- kill switch (same math the gate uses) ---------------------------
+    daily, weekly, monthly = _loss_pcts(db, s.capital)
+    kill = KillSwitchEngine(
+        daily_loss_limit=s.kill_daily_loss_pct,
+        weekly_loss_limit=s.kill_weekly_loss_pct,
+        monthly_loss_limit=s.kill_monthly_loss_pct,
+        drawdown_limit=s.max_drawdown_pct,
+    ).evaluate(
+        daily_loss_pct=daily, weekly_loss_pct=weekly, monthly_loss_pct=monthly,
+        drawdown_pct=0.0,
+        broker_connected=True, market_data_ok=True,
+        ai_provider_ok=True, execution_ok=True,
+    )
+
+    return MonitorSnapshot(
+        pause=get_pause(db), order_mode=s.order_mode, capital=s.capital,
+        kill=kill, stats=stats, open_positions=open_positions, recent=recent,
+        generated_at=now,
+    )

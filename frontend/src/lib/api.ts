@@ -12,6 +12,7 @@ import {
   JournalAnalysis,
   KillSwitch,
   MarketSummary,
+  MonitorSnapshot,
   NewsRisk,
   OrderPlan,
   PaperTrading,
@@ -139,4 +140,7 @@ export const api = {
   getTradingPause: () => get<PauseStatus>("/api/trading/pause"),
   setTradingPause: (paused: boolean, reason = "") =>
     post<PauseStatus>("/api/trading/pause", { paused, reason }),
+
+  // ---------- Monitor dashboard ----------
+  monitor: () => get<MonitorSnapshot>("/api/trading/monitor"),
 };

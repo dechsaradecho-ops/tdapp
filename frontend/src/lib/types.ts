@@ -273,4 +273,59 @@ export interface PauseStatus {
   paused_at: string | null;
 }
 
+/** One open paper position with a live mark and unrealized PnL. */
+export interface MonitorOpenPosition {
+  id: string;
+  ticket: string;
+  asset: string;
+  direction: string;
+  volume: number;
+  entry_price: number;
+  stop_loss: number | null;
+  take_profit: number | null;
+  current_price: number;
+  unrealized_pnl: number;
+  source: string;
+  created_at: string | null;
+}
+
+/** One execution-journal row (open, closed or rejected). */
+export interface MonitorTrade {
+  id: string;
+  asset: string;
+  direction: string;
+  volume: number;
+  entry_price: number;
+  exit_price: number | null;
+  pnl: number | null;
+  status: string;
+  source: string;
+  ticket: string | null;
+  close_reason: string | null;
+  closed_at: string | null;
+  created_at: string | null;
+}
+
+export interface MonitorStats {
+  trades_today: number;
+  trades_week: number;
+  open_positions: number;
+  closed_count: number;
+  win_rate: number;
+  pnl_today: number;
+  pnl_week: number;
+  pnl_total: number;
+}
+
+export interface MonitorSnapshot {
+  pause: PauseStatus;
+  order_mode: string;
+  capital: number;
+  kill: KillSwitch;
+  stats: MonitorStats;
+  open_positions: MonitorOpenPosition[];
+  recent: MonitorTrade[];
+  generated_at: string | null;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
