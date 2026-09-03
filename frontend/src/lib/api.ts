@@ -1,5 +1,6 @@
 import {
   API_BASE,
+  AppSettings,
   BacktestConfig,
   BacktestResult,
   CorrelationResponse,
@@ -17,6 +18,7 @@ import {
   PortfolioRecommendation,
   RiskStatus,
   SessionStatus,
+  SettingsSaveResult,
   SignalProposal,
   WalkForwardResult,
 } from "./types";
@@ -34,6 +36,16 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`PUT ${path} → ${res.status}`);
   return res.json();
 }
 
@@ -113,4 +125,12 @@ export const api = {
   tradingPaper: () => get<PaperTrading>("/api/trading/paper-trading"),
 
   extendedAnalysis: () => get<ExtendedAnalysis>("/api/trading/extended-analysis"),
+
+  // ---------- Settings ----------
+  getSettings: () => get<AppSettings>("/api/settings"),
+
+  saveSettings: (data: Partial<AppSettings>) =>
+    put<SettingsSaveResult>("/api/settings", data),
+
+  resetSettings: () => post<SettingsSaveResult>("/api/settings/reset", {}),
 };

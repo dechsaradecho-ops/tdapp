@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 
 from app.models.schemas import (
+    AppSettings,
     BacktestConfig,
     BacktestResult,
     CorrelationEngine,
@@ -31,6 +32,7 @@ from app.models.schemas import (
     RiskOfficerReview,
     RiskProfile,
     SessionEngine,
+    TradeLimits,
     WalkForwardResult,
     analyze_journal,
     paper_trading_status,
@@ -41,6 +43,12 @@ from app.models.schemas import (
 router = APIRouter()
 
 JOURNAL_TABLE = "trading_journal"
+
+
+def _settings(request: Request) -> AppSettings:
+    """Load user settings from DB (defaults fallback when row missing)."""
+    from app.api.routes.settings import get_app_settings
+    return get_app_settings(request.app.state.db)
 
 
 def _journal_from_rows(rows: list[dict]) -> list[JournalEntry]:
@@ -62,9 +70,11 @@ def _journal_from_rows(rows: list[dict]) -> list[JournalEntry]:
 # ---------------------------------------------------------------- frequency
 @router.get("/frequency", response_model=FrequencyDecision)
 async def get_frequency(request: Request,
-                        profile: RiskProfile = RiskProfile.moderate) -> FrequencyDecision:
+                        profile: RiskProfile | None = None) -> FrequencyDecision:
     """Evaluate whether a new trade is allowed under the frequency limits."""
     db = request.app.state.db
+    s = _settings(request)
+    eff_profile = profile or s.risk_profile
     today = datetime.now(timezone.utc).date().isoformat()
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
 
@@ -72,8 +82,18 @@ async def get_frequency(request: Request,
     week_trades = db.select(JOURNAL_TABLE, limit=200)
     week_count = len([r for r in week_trades if str(r.get("trade_date", "")) >= week_ago[:10]])
 
-    return FrequencyEngine(profile).evaluate(
-        confidence=70.0,
+    return FrequencyEngine(
+        eff_profile,
+        limits_override=TradeLimits(
+            max_trades_daily=s.max_trades_daily,
+            max_trades_weekly=s.max_trades_weekly,
+            max_open_positions=s.max_open_positions,
+            risk_per_trade_pct=s.risk_per_trade_pct,
+        ),
+        min_confidence=s.min_confidence,
+        drawdown_throttle_pct=s.drawdown_throttle_pct,
+    ).evaluate(
+        confidence=s.min_confidence,
         trades_today=len(today_trades),
         trades_this_week=week_count,
     )
@@ -147,7 +167,8 @@ async def get_calendar(request: Request) -> NewsRiskStatus:
         events.append(EconomicEvent(
             event=r["event"], currency=r.get("currency", "USD"),
             time_utc=t, impact=r.get("impact", "high")))
-    return EconomicCalendarEngine().news_risk(events, now)
+    s = _settings(request)
+    return EconomicCalendarEngine(block_minutes=s.news_block_minutes).news_risk(events, now)
 
 
 # ----------------------------------------------------------------- session
@@ -163,18 +184,24 @@ async def get_kill_switch(request: Request) -> KillSwitchStatus:
     db = request.app.state.db
     broker = request.app.state.broker
     entries = _journal_from_rows(db.select(JOURNAL_TABLE, limit=200))
+    s = _settings(request)
 
     total_pnl = sum(e.pnl or 0 for e in entries)
     losses = [e for e in entries if (e.pnl or 0) < 0]
-    # Demo baseline capital for percentage math (portfolio wiring comes with auth)
-    capital = 10_000.0
+    # Settings capital replaces the old demo baseline
+    capital = s.capital or 10_000.0
     today = datetime.now(timezone.utc).date().isoformat()
     daily = sum(e.pnl or 0 for e in entries
                 if str(e.created_at or e.closed_at or "")[:10] == today)
     monthly = total_pnl
     weekly = sum(e.pnl or 0 for e in entries[-20:])
 
-    return KillSwitchEngine().evaluate(
+    return KillSwitchEngine(
+        daily_loss_limit=s.kill_daily_loss_pct,
+        weekly_loss_limit=s.kill_weekly_loss_pct,
+        monthly_loss_limit=s.kill_monthly_loss_pct,
+        drawdown_limit=s.max_drawdown_pct,
+    ).evaluate(
         daily_loss_pct=max(0.0, -daily / capital * 100),
         weekly_loss_pct=max(0.0, -weekly / capital * 100),
         monthly_loss_pct=max(0.0, -monthly / capital * 100),
@@ -200,11 +227,13 @@ async def review(payload: RiskOfficerRequest, request: Request) -> RiskOfficerRe
     freq = await get_frequency(request, payload.profile)
     news = await get_calendar(request)
     ks = await get_kill_switch(request)
+    s = _settings(request)
     return RiskOfficer().review_trade(
         confidence=payload.confidence,
         opportunity_score=payload.opportunity_score,
         frequency=freq, news_risk=news, kill_switch=ks,
         correlation_score=payload.correlation_score,
+        correlation_cap=s.correlation_cap,
     )
 
 
@@ -288,7 +317,8 @@ async def walk_forward_route(config: BacktestConfig) -> WalkForwardResult:
 async def paper_trading(request: Request) -> PaperTradingStatus:
     """Virtual capital status + AI coaching + live readiness score."""
     broker = request.app.state.broker
-    return paper_trading_status(broker)
+    s = _settings(request)
+    return paper_trading_status(broker, virtual_capital=s.paper_virtual_capital)
 
 
 # -------------------------------------------------- extended analysis (11 sections)
@@ -300,6 +330,7 @@ async def extended_analysis(request: Request) -> dict:
 
     db = request.app.state.db
     engine = StrategyEngine()
+    s = _settings(request)
 
     ctx = await _build_context(db)
 
@@ -320,12 +351,14 @@ async def extended_analysis(request: Request) -> dict:
     officer = RiskOfficer().review_trade(
         confidence=confidence, opportunity_score=confidence,
         frequency=freq, news_risk=news, kill_switch=ks,
-        correlation_score=corr["portfolio_correlation"])
+        correlation_score=corr["portfolio_correlation"],
+        correlation_cap=s.correlation_cap)
 
     plan = OrderStrategyEngine().build_plan(
         asset=asset, direction="BUY", entry=1.0, stop_loss=0.99,
         take_profit=1.02, regime=regime, atr_pct=0.8,
-        equity=10_000.0, risk_per_trade_pct=freq.limits.risk_per_trade_pct if freq.limits else 1.0)
+        equity=s.default_equity,
+        risk_per_trade_pct=freq.limits.risk_per_trade_pct if freq.limits else 1.0)
 
     return {
         "news_calendar": f"{news.status}: {news.reason}",
@@ -361,6 +394,6 @@ def _final_decision(officer: RiskOfficerReview, news: NewsRiskStatus,
         return "WAIT — Risk Officer ไม่อนุมัติ"
     if news.status == "DANGER":
         return "WAIT — ข่าว impact สูงใกล้ตัว"
-    if confidence >= 70:
+    if confidence >= s.min_confidence:
         return "TRADE — ผ่านทุกด่าน อนุมัติเข้าไม้ตามแผน"
     return "WAIT — Confidence ต่ำกว่าเกณฑ์"

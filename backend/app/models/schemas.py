@@ -222,11 +222,17 @@ class FrequencyDecision(BaseModel):
 class FrequencyEngine:
     """Guards against overtrading — evaluates every order against profile limits."""
 
-    def __init__(self, profile: RiskProfile = RiskProfile.moderate) -> None:
+    def __init__(self, profile: RiskProfile = RiskProfile.moderate,
+                 limits_override: Optional[TradeLimits] = None,
+                 min_confidence: float = 70.0,
+                 drawdown_throttle_pct: float = 5.0) -> None:
         self.profile = profile
+        self._override = limits_override
+        self.min_confidence = min_confidence
+        self.drawdown_throttle_pct = drawdown_throttle_pct
 
     def limits(self) -> TradeLimits:
-        return TradeLimits(**TRADE_LIMITS_TABLE[self.profile])
+        return self._override or TradeLimits(**TRADE_LIMITS_TABLE[self.profile])
 
     def evaluate(
         self,
@@ -242,8 +248,9 @@ class FrequencyEngine:
         reason = ""
 
         # --- Signal quality filter (spec: <70 / <60 => NO TRADE) ---
-        if confidence < 70:
-            reason = f"Signal quality filter: confidence {confidence:.0f} < 70 → NO TRADE"
+        if confidence < self.min_confidence:
+            reason = (f"Signal quality filter: confidence {confidence:.0f} < "
+                      f"{self.min_confidence:.0f} → NO TRADE")
         # --- Hard limits ---
         elif trades_today >= limits.max_trades_daily:
             reason = f"Daily limit reached ({trades_today}/{limits.max_trades_daily})"
@@ -256,7 +263,7 @@ class FrequencyEngine:
             reason = (f"Regime '{regime}' + volatility {volatility_index:.0f} → "
                       f"throttled (limit {max(1, limits.max_trades_daily // 2)})")
         # --- Drawdown-based throttling ---
-        elif current_drawdown_pct > 5:
+        elif current_drawdown_pct > self.drawdown_throttle_pct:
             reason = f"Drawdown {current_drawdown_pct:.1f}% → frequency throttled"
 
         return FrequencyDecision(
@@ -506,6 +513,9 @@ class EconomicCalendarEngine:
     """
     HIGH_IMPACT_BLOCK_MIN = 30.0
 
+    def __init__(self, block_minutes: float = 30.0) -> None:
+        self.block_minutes = block_minutes
+
     def news_risk(
         self,
         events: list[EconomicEvent],
@@ -520,12 +530,14 @@ class EconomicCalendarEngine:
         upcoming.sort(key=lambda e: e.time_utc)  # type: ignore[arg-type, return-value]
         nxt = upcoming[0]
         minutes = (nxt.time_utc - now).total_seconds() / 60.0  # type: ignore[operator]
-        if minutes < self.HIGH_IMPACT_BLOCK_MIN:
+        block_min = self.block_minutes
+        if minutes < block_min:
             return NewsRiskStatus(
                 status="DANGER",
-                reason=f"{nxt.event} อีก {minutes:.0f} นาที → ห้ามเปิดออเดอร์ใหม่ (<30 นาที)",
+                reason=f"{nxt.event} อีก {minutes:.0f} นาที → ห้ามเปิดออเดอร์ใหม่ "
+                       f"(<{block_min:g} นาที)",
                 next_high_impact=nxt, minutes_to_next=round(minutes, 1))
-        if minutes < self.HIGH_IMPACT_BLOCK_MIN * 4:
+        if minutes < block_min * 4:
             return NewsRiskStatus(
                 status="CAUTION",
                 reason=f"{nxt.event} อีก {minutes:.0f} นาที → เตรียมรับความผันผวน",
@@ -586,6 +598,15 @@ class KillSwitchStatus(BaseModel):
 class KillSwitchEngine:
     """Hard stop — any single trigger halts all trading immediately."""
 
+    def __init__(self, daily_loss_limit: float = 2.0,
+                 weekly_loss_limit: float = 5.0,
+                 monthly_loss_limit: float = 8.0,
+                 drawdown_limit: float = 10.0) -> None:
+        self.daily_loss_limit = daily_loss_limit
+        self.weekly_loss_limit = weekly_loss_limit
+        self.monthly_loss_limit = monthly_loss_limit
+        self.drawdown_limit = drawdown_limit
+
     def evaluate(
         self,
         daily_loss_pct: float = 0.0,
@@ -598,14 +619,14 @@ class KillSwitchEngine:
         execution_ok: bool = True,
     ) -> KillSwitchStatus:
         triggers: list[str] = []
-        if daily_loss_pct > 2.0:
-            triggers.append(f"Daily loss {daily_loss_pct:.2f}% > 2%")
-        if weekly_loss_pct > 5.0:
-            triggers.append(f"Weekly loss {weekly_loss_pct:.2f}% > 5%")
-        if monthly_loss_pct > 8.0:
-            triggers.append(f"Monthly loss {monthly_loss_pct:.2f}% > 8%")
-        if drawdown_pct > 10.0:
-            triggers.append(f"Drawdown {drawdown_pct:.2f}% > 10%")
+        if daily_loss_pct > self.daily_loss_limit:
+            triggers.append(f"Daily loss {daily_loss_pct:.2f}% > {self.daily_loss_limit:g}%")
+        if weekly_loss_pct > self.weekly_loss_limit:
+            triggers.append(f"Weekly loss {weekly_loss_pct:.2f}% > {self.weekly_loss_limit:g}%")
+        if monthly_loss_pct > self.monthly_loss_limit:
+            triggers.append(f"Monthly loss {monthly_loss_pct:.2f}% > {self.monthly_loss_limit:g}%")
+        if drawdown_pct > self.drawdown_limit:
+            triggers.append(f"Drawdown {drawdown_pct:.2f}% > {self.drawdown_limit:g}%")
         if not broker_connected:
             triggers.append("Broker disconnected")
         if not market_data_ok:
@@ -896,3 +917,43 @@ class ExtendedAnalysis(BaseModel):
     paper_trading_status: str
     kill_switch_status: str
     final_decision: str
+
+# ---------- App Settings (user-configurable) ----------
+class AppSettings(BaseModel):
+    """Single global configuration row — editable from the Settings page.
+
+    Field defaults match the shipped engine defaults so that an empty
+    `app_settings` table behaves byte-identically to the pre-settings system.
+    """
+    risk_profile: RiskProfile = RiskProfile.moderate
+    capital: float = 10_000.0
+    min_confidence: float = 70.0
+    min_opportunity: float = 60.0
+
+    max_trades_daily: int = 6
+    max_trades_weekly: int = 30
+    max_open_positions: int = 4
+    risk_per_trade_pct: float = 1.0
+
+    max_drawdown_pct: float = 10.0
+    kill_daily_loss_pct: float = 2.0
+    kill_weekly_loss_pct: float = 5.0
+    kill_monthly_loss_pct: float = 8.0
+    drawdown_throttle_pct: float = 5.0
+
+    news_block_minutes: float = 30.0
+    news_caution_minutes: float = 120.0
+    correlation_cap: float = 80.0
+    order_mode: str = "auto"
+    default_equity: float = 10_000.0
+    paper_virtual_capital: float = 100_000.0
+
+    backtest_days: int = 120
+    backtest_indicator: str = "EMA"
+    backtest_asset: str = "EURUSD"
+
+
+class SettingsSaveResult(BaseModel):
+    ok: bool
+    settings: AppSettings
+    message: str = ""

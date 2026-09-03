@@ -5,7 +5,34 @@ import PortfolioAllocation from "@/components/PortfolioAllocation";
 import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
-import { DbCheckResult, DbCounts, PortfolioRecommendation } from "@/lib/types";
+import {
+  AppSettings, DbCheckResult, DbCounts, PortfolioRecommendation, RiskProfile,
+} from "@/lib/types";
+
+const DEFAULT_SETTINGS: AppSettings = {
+  risk_profile: "moderate",
+  capital: 10_000,
+  min_confidence: 70,
+  min_opportunity: 60,
+  max_trades_daily: 6,
+  max_trades_weekly: 30,
+  max_open_positions: 4,
+  risk_per_trade_pct: 1.0,
+  max_drawdown_pct: 10,
+  kill_daily_loss_pct: 2,
+  kill_weekly_loss_pct: 5,
+  kill_monthly_loss_pct: 8,
+  drawdown_throttle_pct: 5,
+  news_block_minutes: 30,
+  news_caution_minutes: 120,
+  correlation_cap: 80,
+  order_mode: "auto",
+  default_equity: 10_000,
+  paper_virtual_capital: 100_000,
+  backtest_days: 120,
+  backtest_indicator: "EMA",
+  backtest_asset: "EURUSD",
+};
 
 export default function SettingsPage() {
   const { capital, setCapital } = usePortfolio();
@@ -17,6 +44,50 @@ export default function SettingsPage() {
   const [dbCheck, setDbCheck] = useState<DbCheckResult | null>(null);
   const [dbCounts, setDbCounts] = useState<DbCounts | null>(null);
   const [dbTesting, setDbTesting] = useState(false);
+
+  // --- trading config state (loaded from /api/settings) ---
+  const [cfg, setCfg] = useState<AppSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [loadErr, setLoadErr] = useState("");
+
+  useEffect(() => {
+    api.getSettings()
+      .then((s) => setCfg(s))
+      .catch((e) => setLoadErr(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const save = async () => {
+    if (!cfg) return;
+    setSaving(true);
+    setSaveMsg("");
+    try {
+      const res = await api.saveSettings(cfg);
+      setCfg(res.settings);
+      setSaveMsg(res.ok ? "✅ บันทึกลง Supabase แล้ว" : `❌ ${res.message}`);
+    } catch (e) {
+      setSaveMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    setSaving(true);
+    setSaveMsg("");
+    try {
+      const res = await api.resetSettings();
+      setCfg(res.settings);
+      setSaveMsg("↩️ รีเซ็ตเป็นค่าเริ่มต้นแล้ว");
+    } catch (e) {
+      setSaveMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
+    setCfg((c) => (c ? { ...c, [key]: v } : c));
 
   const recommend = async () => {
     setLoading(true);
@@ -92,6 +163,99 @@ export default function SettingsPage() {
           </div>
         ) : (
           <p className="text-slate-500 text-sm">กำลังโหลด...</p>
+        )}
+      </div>
+
+      {/* ---------------- Trading Configuration ---------------- */}
+      <div className="panel md:col-span-2">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="panel-title">การตั้งค่าระบบเทรด (ใช้จริงทั้งระบบ)</h2>
+          <div className="flex items-center gap-2">
+            {saveMsg && <span className="text-xs text-slate-400">{saveMsg}</span>}
+            <button onClick={reset} disabled={saving || !cfg}
+              className="text-xs text-slate-400 border border-slate-700 rounded px-3 py-1.5 hover:text-slate-200 disabled:opacity-40">
+              ↩️ ค่าเริ่มต้น
+            </button>
+            <button onClick={save} disabled={saving || !cfg}
+              className="bg-accent text-surface font-semibold rounded px-4 py-1.5 disabled:opacity-50">
+              {saving ? "กำลังบันทึก..." : "💾 บันทึกการตั้งค่า"}
+            </button>
+          </div>
+        </div>
+        <p className="text-sm text-slate-400 mt-1">
+          ค่าที่บันทึกที่นี่จะถูกใช้จริงโดย Frequency Guard, Risk Officer, Kill Switch,
+          News Gate, Correlation, Paper Trading และ Extended Analysis ทันที
+        </p>
+
+        {loadErr && <p className="text-loss text-sm mt-2">โหลดค่าไม่สำเร็จ: {loadErr}</p>}
+        {!cfg && !loadErr && <p className="text-slate-500 text-sm mt-3">กำลังโหลด...</p>}
+
+        {cfg && (
+          <div className="mt-4 grid md:grid-cols-4 gap-4">
+            {/* --- Profile & signal gates --- */}
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">โปรไฟล์ &amp; Signal Gates</p>
+              <label className="block text-sm">
+                Risk Profile
+                <select value={cfg.risk_profile}
+                  onChange={(e) => set("risk_profile", e.target.value as RiskProfile)}
+                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+                  <option value="conservative">Conservative</option>
+                  <option value="moderate">Moderate</option>
+                  <option value="aggressive">Aggressive</option>
+                </select>
+              </label>
+              <NumField label="Min Confidence (%)" value={cfg.min_confidence}
+                onChange={(v) => set("min_confidence", v)} step={1} />
+              <NumField label="Min Opportunity (%)" value={cfg.min_opportunity}
+                onChange={(v) => set("min_opportunity", v)} step={1} />
+              <NumField label="Capital (USD)" value={cfg.capital}
+                onChange={(v) => set("capital", v)} step={100} />
+            </div>
+
+            {/* --- Frequency limits --- */}
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ลิมิตการเทรด</p>
+              <NumField label="เทรดสูงสุด/วัน" value={cfg.max_trades_daily}
+                onChange={(v) => set("max_trades_daily", v)} step={1} />
+              <NumField label="เทรดสูงสุด/สัปดาห์" value={cfg.max_trades_weekly}
+                onChange={(v) => set("max_trades_weekly", v)} step={1} />
+              <NumField label="ไม้ที่เปิดค้างสูงสุด" value={cfg.max_open_positions}
+                onChange={(v) => set("max_open_positions", v)} step={1} />
+              <NumField label="Risk ต่อไม้ (%)" value={cfg.risk_per_trade_pct}
+                onChange={(v) => set("risk_per_trade_pct", v)} step={0.1} />
+            </div>
+
+            {/* --- Kill switch / drawdown --- */}
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Kill Switch &amp; Risk</p>
+              <NumField label="ขาทุนรายวันสูงสุด (%)" value={cfg.kill_daily_loss_pct}
+                onChange={(v) => set("kill_daily_loss_pct", v)} step={0.5} />
+              <NumField label="ขาทุนรายสัปดาห์ (%)" value={cfg.kill_weekly_loss_pct}
+                onChange={(v) => set("kill_weekly_loss_pct", v)} step={0.5} />
+              <NumField label="ขาทุนรายเดือน (%)" value={cfg.kill_monthly_loss_pct}
+                onChange={(v) => set("kill_monthly_loss_pct", v)} step={0.5} />
+              <NumField label="Max Drawdown — Kill (%)" value={cfg.max_drawdown_pct}
+                onChange={(v) => set("max_drawdown_pct", v)} step={0.5} />
+              <NumField label="DD เริ่มลดความถี่ (%)" value={cfg.drawdown_throttle_pct}
+                onChange={(v) => set("drawdown_throttle_pct", v)} step={0.5} />
+            </div>
+
+            {/* --- News / correlation / order / backtest --- */}
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ข่าว / Correlation / Backtest</p>
+              <NumField label="บล็อกข่าวก่อน event (นาที)" value={cfg.news_block_minutes}
+                onChange={(v) => set("news_block_minutes", v)} step={5} />
+              <NumField label="ระวังข่าวก่อน event (นาที)" value={cfg.news_caution_minutes}
+                onChange={(v) => set("news_caution_minutes", v)} step={5} />
+              <NumField label="Correlation Cap (0-100)" value={cfg.correlation_cap}
+                onChange={(v) => set("correlation_cap", v)} step={1} />
+              <NumField label="Paper Capital เสมือน" value={cfg.paper_virtual_capital}
+                onChange={(v) => set("paper_virtual_capital", v)} step={10_000} />
+              <NumField label="Backtest: จำนวนวัน" value={cfg.backtest_days}
+                onChange={(v) => set("backtest_days", v)} step={10} />
+            </div>
+          </div>
         )}
       </div>
 

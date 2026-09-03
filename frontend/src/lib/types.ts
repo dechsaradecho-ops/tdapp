@@ -225,4 +225,36 @@ export interface ExtendedAnalysis {
   final_decision: string;
 }
 
+// ---------- App Settings ----------
+export interface AppSettings {
+  risk_profile: RiskProfile;
+  capital: number;
+  min_confidence: number;
+  min_opportunity: number;
+  max_trades_daily: number;
+  max_trades_weekly: number;
+  max_open_positions: number;
+  risk_per_trade_pct: number;
+  max_drawdown_pct: number;
+  kill_daily_loss_pct: number;
+  kill_weekly_loss_pct: number;
+  kill_monthly_loss_pct: number;
+  drawdown_throttle_pct: number;
+  news_block_minutes: number;
+  news_caution_minutes: number;
+  correlation_cap: number;
+  order_mode: string;
+  default_equity: number;
+  paper_virtual_capital: number;
+  backtest_days: number;
+  backtest_indicator: string;
+  backtest_asset: string;
+}
+
+export interface SettingsSaveResult {
+  ok: boolean;
+  settings: AppSettings;
+  message: string;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
