@@ -35,10 +35,15 @@ function headers(): Record<string, string> {
   return h;
 }
 
-/** Shared 401 handling: clear the dead token + tell the UI to re-lock. */
+/** Shared 401 handling: clear the dead token + tell the UI to re-lock.
+ *
+ * Fires the auth-expired event ONLY when the failed request actually carried
+ * a token — background polls made before login (no token) would otherwise
+ * spam the event every second and keep resetting the PIN pad's message.
+ */
 function handle401(res: Response, path: string): never {
   if (res.status === 401) {
-    notifyAuthExpired();
+    if (getToken()) notifyAuthExpired();
     throw new Error(`ต้องเข้าสู่ระบบ (${path})`);
   }
   throw new Error(`${path} → ${res.status}`);
