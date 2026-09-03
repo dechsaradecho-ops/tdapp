@@ -321,11 +321,28 @@ class TestAutoTrader:
 # ---------------------------------------------------------------------------
 # 3. Position guard (SL/TP enforcement)
 # ---------------------------------------------------------------------------
-def make_pos(direction="BUY", entry=100.0, sl=95.0, tp=110.0, price=100.0):
+def make_pos(direction="BUY", entry=100.0, sl=95.0, tp=110.0, price=100.0,
+             asset="XAUUSD"):
     return SimpleNamespace(
-        ticket="PAPER-000001", user_id="demo", asset="XAUUSD",
+        ticket="PAPER-000001", user_id="demo", asset=asset,
         direction=direction, volume=1.0, entry_price=entry,
         stop_loss=sl, take_profit=tp, current_price=price)
+
+
+@pytest.fixture(autouse=True)
+def _fake_live_marks(monkeypatch):
+    """Pin the live spot feed so guard tests never touch the network.
+
+    The guard now prefers live marks (that's the TP-not-closing fix); tests
+    inject exactly the price the scenario needs via this registry.
+    """
+    registry: dict[str, float] = {}
+
+    async def fake_fetch(assets):
+        return ({a: registry[a] for a in assets if a in registry}, {})
+
+    monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_fetch)
+    return registry
 
 
 class GuardBroker(FakeBroker):
@@ -349,12 +366,13 @@ class GuardBroker(FakeBroker):
 
 class TestPositionGuard:
     @pytest.mark.asyncio
-    async def test_stop_loss_closes_buy(self, notifier):
+    async def test_stop_loss_closes_buy(self, notifier, _fake_live_marks):
         db = FakeDatabase(rows={"paper_trades": [
             {"id": "pt1", "ticket": "PAPER-000001", "asset": "XAUUSD",
              "direction": "BUY", "volume": 1.0, "entry_price": 100.0,
              "status": "open", "source": "auto"}]})
         broker = GuardBroker([make_pos(direction="BUY", price=94.0)])
+        _fake_live_marks["XAUUSD"] = 94.0  # below SL 95 → SL hit
         out = await position_guard.guard_once(db, broker, notifier)
         assert out["closed"] == 1
         assert broker.closed == ["PAPER-000001"]
@@ -364,13 +382,14 @@ class TestPositionGuard:
         assert notifier.sent and notifier.sent[0][0] == "stop_loss"
 
     @pytest.mark.asyncio
-    async def test_take_profit_closes_sell(self, notifier):
+    async def test_take_profit_closes_sell(self, notifier, _fake_live_marks):
         db = FakeDatabase(rows={"paper_trades": [
             {"id": "pt1", "ticket": "PAPER-000001", "asset": "XAUUSD",
              "direction": "SELL", "volume": 1.0, "entry_price": 100.0,
              "status": "open", "source": "auto"}]})
         broker = GuardBroker([make_pos(direction="SELL", entry=100.0,
                                        sl=105.0, tp=90.0, price=89.0)])
+        _fake_live_marks["XAUUSD"] = 89.0  # below TP 90 on a SELL → TP hit
         out = await position_guard.guard_once(db, broker, notifier)
         assert out["closed"] == 1
         row = db.rows["paper_trades"][0]
@@ -379,19 +398,39 @@ class TestPositionGuard:
         assert notifier.sent[0][0] == "trade_closed"
 
     @pytest.mark.asyncio
-    async def test_price_between_sl_tp_leaves_position_open(self, notifier):
+    async def test_price_between_sl_tp_leaves_position_open(self, notifier, _fake_live_marks):
         db = FakeDatabase()
         broker = GuardBroker([make_pos(price=100.0)])
+        _fake_live_marks["XAUUSD"] = 100.0  # between SL 95 and TP 110
         out = await position_guard.guard_once(db, broker, notifier)
         assert out["closed"] == 0
         assert broker.closed == []
 
     @pytest.mark.asyncio
-    async def test_no_sl_tp_never_closes(self, notifier):
+    async def test_no_sl_tp_never_closes(self, notifier, _fake_live_marks):
         db = FakeDatabase()
         broker = GuardBroker([make_pos(sl=None, tp=None, price=50.0)])
+        _fake_live_marks["XAUUSD"] = 50.0
         out = await position_guard.guard_once(db, broker, notifier)
         assert out["closed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_mark_but_live_tp_breach_closes(self, notifier, _fake_live_marks):
+        """Regression: GBPUSD TP was breached live but the paper book never
+        ticks, so mark_price() returned the entry forever and the position
+        sat open. The guard must prefer the live mark over the stale one."""
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "pt1", "ticket": "PAPER-000001", "asset": "GBPUSD",
+             "direction": "BUY", "volume": 0.01, "entry_price": 1.26797,
+             "status": "open", "source": "auto"}]})
+        # current_price pinned at entry (1.26797) — below TP 1.31286
+        broker = GuardBroker([make_pos(asset="GBPUSD", entry=1.26797, sl=1.24553,
+                                       tp=1.31286, price=1.26797)])
+        _fake_live_marks["GBPUSD"] = 1.3536  # live price past TP
+        out = await position_guard.guard_once(db, broker, notifier)
+        assert out["closed"] == 1
+        row = db.rows["paper_trades"][0]
+        assert row["close_reason"] == "tp"
 
 
 # ---------------------------------------------------------------------------

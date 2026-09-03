@@ -12,9 +12,10 @@ const DECISION_STYLE: Record<string, string> = {
   "INCREASE CASH": "bg-slate-500/20 text-slate-300 border-slate-500",
 };
 
-export default function SignalCard({ signal }: { signal: SignalProposal }) {
+export default function SignalCard({ signal, orderMode }: { signal: SignalProposal; orderMode?: string }) {
   const [approving, setApproving] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+  const isAuto = orderMode === "auto";
 
   const decide = async (approve: boolean) => {
     setApproving(true);
@@ -62,14 +63,19 @@ export default function SignalCard({ signal }: { signal: SignalProposal }) {
         </ol>
       </details>
       {signal.approval === "approved" ? (
-        // อนุมัติแล้ว — แสดงสแตมป์เวลาแทนปุ่ม (อยู่กลุ่มล่างของหน้า signals)
+        // อนุมัติแล้ว/ยิงแล้ว — แสดงสแตมป์เวลาแทนปุ่ม
         <div className="mt-3 flex items-center gap-2 rounded border border-profit/40 bg-profit/10 px-2 py-1.5 text-xs text-profit">
-          <span>✓ อนุมัติแล้ว</span>
+          <span>{isAuto ? "🤖 ยิงออเดอร์แล้ว" : "✓ อนุมัติแล้ว"}</span>
           <span className="text-slate-400">
             {new Date(
               signal.approved_at ?? signal.created_at ?? ""
             ).toLocaleString("th-TH")}
           </span>
+        </div>
+      ) : isAuto ? (
+        // โหมด auto — ไม่มีปุ่มให้กด: auto trader จะยิงเองผ่าน gate ทั้งหมด
+        <div className="mt-3 flex items-center gap-2 rounded border border-accent/40 bg-accent/10 px-2 py-1.5 text-xs text-accent">
+          <span>🤖 ระบบจะยิงออเดอร์เองภายใน ~1 นาที</span>
         </div>
       ) : (
         <div className="mt-3 flex gap-2">

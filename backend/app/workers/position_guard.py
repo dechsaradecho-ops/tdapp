@@ -13,10 +13,27 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.integrations import quotes
 from app.services import execution
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
+
+
+async def _live_marks(assets: list[str]) -> dict[str, float]:
+    """Spot marks from the live quote feed; empty dict on failure (offline-safe).
+
+    The PaperBroker book never ticks on its own — mark_price() returns the
+    entry price forever, which made positions whose TP was already breached
+    (e.g. GBPUSD TP 1.31286 vs live 1.3536) sit open indefinitely. Live marks
+    come first; broker book values are only a fallback for unknown assets.
+    """
+    try:
+        prices, _failures = await quotes.fetch_spot_prices(assets)
+        return prices
+    except Exception as exc:
+        log.warning("live marks unavailable (%s) — falling back to broker book", exc)
+        return {}
 
 
 async def guard_once(db, broker, notifier: NotificationService) -> dict:
@@ -28,16 +45,20 @@ async def guard_once(db, broker, notifier: NotificationService) -> dict:
         log.error("position guard cannot list positions: %s", exc)
         return {"checked": 0, "closed": 0}
 
+    # One batched live-mark fetch per cycle (30s feed cache keeps it cheap)
+    live = await _live_marks(sorted({p.asset.upper() for p in positions})) \
+        if positions else {}
+
     for pos in positions:
-        # refresh mark price: broker-native first, live feed fallback
-        price = 0.0
-        try:
-            price = await broker.mark_price(pos.ticket)
-        except Exception:
-            price = 0.0
+        # refresh mark price: live feed first, then broker-native, then book
+        price = live.get(pos.asset.upper()) or 0.0
         if not price:
             try:
-                from app.integrations import quotes
+                price = await broker.mark_price(pos.ticket)
+            except Exception:
+                price = 0.0
+        if not price:
+            try:
                 price = await broker.quote(pos.asset)
             except Exception:
                 price = 0.0

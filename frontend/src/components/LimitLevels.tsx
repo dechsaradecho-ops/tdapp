@@ -11,20 +11,24 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
   if (!signal.limit_levels?.length) return null;
   const buy = signal.direction === "BUY";
   const label = buy ? "Buy Limit" : "Sell Limit";
+  // 3 ระดับ: สั้น (rung 1) / กลาง (rung 2) / ยาว (rung 3) — แต่ละระดับมี SL/TP ของตัวเอง
+  const tierLabels = ["สั้น", "กลาง", "ยาว"];
+  const tierBadge = (i: number) =>
+    tierLabels[i] ?? `ระดับ ${i + 1}`;
 
   return (
     <div className="mt-2">
       <p className="text-xs text-slate-500 mb-1">
-        แนวรับ {label} — กระจายน้ำหนัก {signal.limit_levels.map((l) => `${l.risk_pct}%`).join(" / ")} (RR 1:{signal.expected_rr})
+        SL/TP 3 ระดับ — {label} กระจายน้ำหนัก {signal.limit_levels.map((l) => `${l.risk_pct}%`).join(" / ")} (RR 1:{signal.expected_rr})
       </p>
       <div className="grid grid-cols-3 gap-2">
         {signal.limit_levels.map((lv: LimitLevel, i: number) => (
           <div key={i} className={`rounded p-2 border ${buy ? "border-profit/40 bg-profit/5" : "border-loss/40 bg-loss/5"}`}>
             <div className="flex items-center justify-between mb-1">
               <span className={`text-xs font-bold ${buy ? "text-profit" : "text-loss"}`}>
-                {label} {i + 1}
+                {tierBadge(i)}
               </span>
-              <span className="text-xs text-slate-500">{lv.risk_pct}%</span>
+              <span className="text-xs text-slate-500">{label} {i + 1} · {lv.risk_pct}%</span>
             </div>
             <p className="font-semibold text-sm">{fmtNum(lv.price, 5)}</p>
             <div className="mt-1 space-y-0.5 text-xs">
