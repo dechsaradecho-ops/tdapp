@@ -32,6 +32,22 @@ async def _safe_job(coro) -> None:
         log.exception("Worker job failed")
 
 
+def _safe(factory):
+    """Wrap a coroutine factory in a coroutine function APScheduler can await.
+
+    GOTCHA (prod 2026-09-03): scheduling a plain sync lambda that calls
+    asyncio.create_task() silently never runs — AsyncIOScheduler executes sync
+    callables in an executor thread with NO running event loop, so every tick
+    raised "RuntimeError: no running event loop" before the task was created
+    (all six workers quietly did nothing; scanner wrote nothing, position
+    guard never marked/closed). A coroutine function is awaited directly on
+    the scheduler's event loop and works.
+    """
+    async def _job() -> None:
+        await _safe_job(factory())
+    return _job
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -56,21 +72,21 @@ async def lifespan(app: FastAPI):
         scheduler = AsyncIOScheduler()
         db = app.state.db
         notifier = NotificationService(db, app.state.line)
-        scheduler.add_job(lambda: asyncio.create_task(_safe_job(market_scanner.scan_once(db))),
+        scheduler.add_job(_safe(lambda: market_scanner.scan_once(db)),
                           "interval", minutes=5, id="market_scanner", max_instances=1)
-        scheduler.add_job(lambda: asyncio.create_task(_safe_job(news_analysis.analyze_once(db))),
+        scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db)),
                           "interval", minutes=15, id="news_analysis", max_instances=1)
-        scheduler.add_job(lambda: asyncio.create_task(_safe_job(asyncio.to_thread(
-            portfolio_monitor.monitor_once, db, app.state.broker, notifier))),
+        scheduler.add_job(_safe(lambda: asyncio.to_thread(
+            portfolio_monitor.monitor_once, db, app.state.broker, notifier)),
             "interval", minutes=1, id="portfolio_monitor", max_instances=1)
-        scheduler.add_job(lambda: asyncio.create_task(_safe_job(
-            notification_worker.dispatch_pending(db, notifier))),
+        scheduler.add_job(_safe(lambda:
+            notification_worker.dispatch_pending(db, notifier)),
             "interval", minutes=1, id="notifications", max_instances=1)
-        scheduler.add_job(lambda: asyncio.create_task(_safe_job(
-            auto_trader.trade_once(db, app.state.broker, notifier))),
+        scheduler.add_job(_safe(lambda:
+            auto_trader.trade_once(db, app.state.broker, notifier)),
             "interval", minutes=1, id="auto_trader", max_instances=1)
-        scheduler.add_job(lambda: asyncio.create_task(_safe_job(
-            position_guard.guard_once(db, app.state.broker, notifier))),
+        scheduler.add_job(_safe(lambda:
+            position_guard.guard_once(db, app.state.broker, notifier)),
             "interval", minutes=1, id="position_guard", max_instances=1)
         scheduler.start()
         app.state.scheduler = scheduler
