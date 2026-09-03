@@ -1,7 +1,12 @@
-"""Live market data fetcher — Yahoo Finance chart API (no API key required).
+"""Live market data fetcher.
 
-Converts OHLCV candles into the IndicatorSnapshot fields the Strategy Engine
-expects (EMA, ADX, Supertrend direction, RSI, MACD histogram, ATR%, etc).
+Sources (สวนกลับไปใช้ API ที่เสถียรกว่า Yahoo):
+  - FX pairs (EURUSD/GBPUSD/USDJPY/AUDUSD) → Frankfurter (ECB reference rates).
+    ฟรี ไม่ต้องมี API key แต่ให้เฉพาะราคาปิดรายวัน (วันทำการ) — OHLC ถูก
+    สังเคราะห์จาก close ต่อเนื่อง (open = close วันก่อน) เพื่อให้ indicator
+    กลุ่ม ADX/ATR/Supertrend ยังคำนวณได้
+  - Gold (XAUUSD) → Twelve Data /time_series (free key, OHLC จริง)
+    ใช้ env var TWELVEDATA_API_KEY (free tier: 800 credits/day)
 
 Degrades gracefully: on network failure it raises QuotesUnavailable and the
 market scanner falls back to the random-walk demo feed.
@@ -12,23 +17,37 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import httpx
 
+from app.core.config import get_settings
+
 log = logging.getLogger(__name__)
 
-# Asset → Yahoo Finance symbol (FX daily candles; XAUUSD = gold futures in USD)
-YAHOO_SYMBOLS = {
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "AUDUSD": "AUDUSD=X",
-    "XAUUSD": "GC=F",
+# Feed routing per asset
+FEED_FRANKFURTER = "frankfurter"   # FX daily closes (no key)
+FEED_TWELVEDATA = "twelvedata"     # Gold OHLC (free key required)
+
+ASSET_FEEDS: dict[str, str] = {
+    "EURUSD": FEED_FRANKFURTER,
+    "GBPUSD": FEED_FRANKFURTER,
+    "USDJPY": FEED_FRANKFURTER,
+    "AUDUSD": FEED_FRANKFURTER,
+    "XAUUSD": FEED_TWELVEDATA,
 }
 
-CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+# asset → (base, quote) for Frankfurter
+FX_PAIRS: dict[str, tuple[str, str]] = {
+    "EURUSD": ("EUR", "USD"),
+    "GBPUSD": ("GBP", "USD"),
+    "USDJPY": ("USD", "JPY"),
+    "AUDUSD": ("AUD", "USD"),
+}
+
+FRANKFURTER_URL = "https://api.frankfurter.dev/v1"  # .app domain 301-redirects มาที่นี่
+TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+GOLD_SYMBOL = "XAU/USD"
 
 
 class QuotesUnavailable(Exception):
@@ -43,40 +62,93 @@ class Candle:
     c: float
 
 
-async def fetch_candles(asset: str, client: httpx.AsyncClient,
-                        days: int = 40) -> list[Candle]:
-    """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable."""
-    symbol = YAHOO_SYMBOLS.get(asset)
-    if not symbol:
-        raise QuotesUnavailable(f"no symbol mapping for {asset}")
+async def _fetch_fx(asset: str, client: httpx.AsyncClient,
+                    days: int) -> list[Candle]:
+    """Frankfurter time series → daily-close candles (oldest-first).
 
-    url = CHART_URL.format(symbol=symbol)
-    params = {"interval": "1d", "range": f"{days}d", "includePrePost": "false"}
+    ECB publishes one close per business day; weekends/holidays are absent
+    from the payload entirely (no null-gap rows to filter).
+    """
+    base, quote = FX_PAIRS[asset]
+    # ~1.6 calendar days per trading day covers weekends + ECB holidays,
+    # +10 days slack so short months still satisfy the 30-bar minimum.
+    start = (date.today() - timedelta(days=int(days * 1.6) + 10)).isoformat()
+    end = date.today().isoformat()
+    url = f"{FRANKFURTER_URL}/{start}..{end}"
     try:
-        resp = await client.get(url, params=params, headers={"User-Agent": UA},
+        resp = await client.get(url, params={"from": base, "to": quote},
                                 timeout=15.0)
         resp.raise_for_status()
         payload = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        raise QuotesUnavailable(f"{asset}: request failed ({exc})") from exc
+        raise QuotesUnavailable(f"{asset}: frankfurter request failed ({exc})") from exc
 
-    result = (payload.get("chart") or {}).get("result")
-    if not result:
-        raise QuotesUnavailable(f"{asset}: empty chart result")
+    rates = payload.get("rates") or {}
+    if not rates:
+        raise QuotesUnavailable(f"{asset}: empty frankfurter rates")
 
-    ts = result[0].get("timestamp") or []
-    quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
-    opens = quote.get("open") or []
-    highs = quote.get("high") or []
-    lows = quote.get("low") or []
-    closes = quote.get("close") or []
-
-    candles: list[Candle] = []
-    for i in range(min(len(ts), len(closes))):
-        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-        if None in (o, h, l, c):
+    closes: list[float] = []
+    for day in sorted(rates):  # ISO dates sort chronologically
+        val = (rates[day] or {}).get(quote)
+        if val is None:
             continue
-        candles.append(Candle(o=float(o), h=float(h), l=float(l), c=float(c)))
+        closes.append(float(val))
+
+    # Synthesize OHLC from consecutive closes: open = previous close,
+    # high/low envelope the bar. Honest representation of close-only data
+    # and keeps TR/DM math (hence ATR/ADX) meaningful.
+    candles: list[Candle] = []
+    prev: float | None = None
+    for c in closes:
+        o = prev if prev is not None else c
+        candles.append(Candle(o=o, h=max(o, c), l=min(o, c), c=c))
+        prev = c
+    return candles
+
+
+async def _fetch_gold(client: httpx.AsyncClient, days: int) -> list[Candle]:
+    """Twelve Data /time_series → real XAU/USD daily OHLC (oldest-first)."""
+    api_key = get_settings().twelvedata_api_key
+    if not api_key:
+        raise QuotesUnavailable("XAUUSD: TWELVEDATA_API_KEY not set (free key: twelvedata.com)")
+    params = {"symbol": GOLD_SYMBOL, "interval": "1day",
+              "outputsize": str(days), "apikey": api_key}
+    try:
+        resp = await client.get(TWELVEDATA_URL, params=params, timeout=15.0)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise QuotesUnavailable(f"XAUUSD: twelvedata request failed ({exc})") from exc
+
+    if str(payload.get("status", "")) == "error":
+        raise QuotesUnavailable(
+            f"XAUUSD: twelvedata error {payload.get('code')}: {payload.get('message')}")
+
+    values = payload.get("values") or []
+    candles: list[Candle] = []
+    for row in reversed(values):  # TD returns newest-first → flip
+        try:
+            o = float(row["open"])
+            h = float(row["high"])
+            l = float(row["low"])
+            c = float(row["close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        candles.append(Candle(o=o, h=h, l=l, c=c))
+    return candles
+
+
+async def fetch_candles(asset: str, client: httpx.AsyncClient,
+                        days: int = 40) -> list[Candle]:
+    """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable."""
+    feed = ASSET_FEEDS.get(asset)
+    if feed is None:
+        raise QuotesUnavailable(f"no feed mapping for {asset}")
+
+    if feed == FEED_TWELVEDATA:
+        candles = await _fetch_gold(client, days)
+    else:
+        candles = await _fetch_fx(asset, client, days)
 
     if len(candles) < 30:  # need enough bars for EMA200-substitute + ADX
         raise QuotesUnavailable(f"{asset}: only {len(candles)} candles")

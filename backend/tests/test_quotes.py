@@ -1,8 +1,8 @@
 """Unit tests for app/integrations/quotes.py — all offline (httpx mocked).
 
 Covers: indicator math (EMA/RSI/ATR/ADX/Supertrend), candle parsing with
-None gaps, Yahoo payload handling, snapshot field consistency and
-snapshot_from_candles output ranges.
+None gaps, Frankfurter + Twelve Data payload handling, snapshot field
+consistency and snapshot_from_candles output ranges.
 
 Run from backend/: C:/Python314/python.exe -m pytest tests/test_quotes.py -v
 """
@@ -49,17 +49,26 @@ def _resp(payload, status: int = 200):
     return r
 
 
-def _chart_payload(closes: list[float]) -> dict:
-    n = len(closes)
-    return {"chart": {"result": [{
-        "timestamp": list(range(n)),
-        "indicators": {"quote": [{
-            "open": closes,
-            "high": [c * 1.01 if c is not None else None for c in closes],
-            "low": [c * 0.99 if c is not None else None for c in closes],
-            "close": closes,
-        }]},
-    }]}}
+def _fx_payload(closes: list[float]) -> dict:
+    """Frankfurter time-series shape: rates = {ISO-date: {QUOTE: rate}}."""
+    from datetime import date, timedelta
+    start = date(2026, 6, 1)
+    rates = {}
+    for i, c in enumerate(closes):
+        day = start + timedelta(days=i)   # consecutive days incl. weekends —
+        rates[day.isoformat()] = {"USD": c}  # sort order is what matters
+    return {"amount": 1.0, "base": "EUR", "start_date": "2026-06-01",
+            "end_date": "2026-12-31", "rates": rates}
+
+
+def _gold_payload(closes: list[float]) -> dict:
+    """Twelve Data /time_series shape: values = newest-first OHLC rows."""
+    values = []
+    for i in range(len(closes) - 1, -1, -1):  # newest-first like the real API
+        c = closes[i]
+        values.append({"datetime": f"2026-06-{i + 1:02d}", "open": str(c),
+                       "high": str(c * 1.01), "low": str(c * 0.99), "close": str(c)})
+    return {"meta": {"symbol": "XAU/USD", "interval": "1day"}, "values": values, "status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -125,21 +134,66 @@ class TestIndicatorMath:
 
 
 # ---------------------------------------------------------------------------
-# fetch_candles — payload parsing & error mapping
+# fetch_candles — payload parsing & error mapping (Frankfurter + Twelve Data)
 # ---------------------------------------------------------------------------
 class TestFetchCandles:
     @pytest.mark.asyncio
-    async def test_parses_closes_and_skips_none_rows(self):
+    async def test_fx_parses_closes_and_skips_null_rows(self):
         closes = [100.0 + i for i in range(35)]
-        closes[5] = None  # gap row → skipped
+        payload = _fx_payload(closes)
+        payload["rates"]["2026-06-10"]["USD"] = None  # gap row → skipped
         client = httpx.AsyncClient()
-        resp = _resp(_chart_payload(closes))
+
         async def fake_get(*a, **kw):
-            return resp
+            return _resp(payload)
         client.get = fake_get
         candles = await quotes.fetch_candles("EURUSD", client)
         assert len(candles) == 34
         assert candles[0].c == 100.0
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_fx_synthesizes_ohlc_from_closes(self):
+        """open = prev close, high/low envelope — close-only feed contract."""
+        closes = [1.10 + 0.01 * i for i in range(35)]
+        client = httpx.AsyncClient()
+
+        async def fake_get(*a, **kw):
+            return _resp(_fx_payload(closes))
+        client.get = fake_get
+        candles = await quotes.fetch_candles("GBPUSD", client)
+        assert candles[1].o == candles[0].c  # open = previous close
+        assert candles[1].h >= candles[1].o and candles[1].h >= candles[1].c
+        assert candles[1].l <= candles[1].o and candles[1].l <= candles[1].c
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_gold_parses_twelvedata_and_flips_order(self, monkeypatch):
+        closes = [2400.0 + i for i in range(35)]
+        client = httpx.AsyncClient()
+
+        async def fake_get(*a, **kw):
+            return _resp(_gold_payload(closes))
+        client.get = fake_get
+        monkeypatch.setattr(quotes.get_settings, "twelvedata_api_key", "td-demo-key",
+                            raising=False)
+        # get_settings เป็น lru_cache — ต้องแก้ที่ instance ที่ cache ไว้ด้วย
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "td-demo-key", raising=False)
+        candles = await quotes.fetch_candles("XAUUSD", client)
+        assert len(candles) == 35
+        assert candles[0].c == closes[0]            # oldest-first after flip
+        assert candles[-1].c == closes[-1]          # newest last
+        assert abs(candles[0].h - closes[0] * 1.01) < 1e-9  # real OHLC kept
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_gold_without_key_raises_unavailable(self, monkeypatch):
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
+        client = httpx.AsyncClient()
+        with pytest.raises(quotes.QuotesUnavailable):
+            await quotes.fetch_candles("XAUUSD", client)
         await client.aclose()
 
     @pytest.mark.asyncio
@@ -152,6 +206,7 @@ class TestFetchCandles:
     @pytest.mark.asyncio
     async def test_http_error_maps_to_unavailable(self):
         client = httpx.AsyncClient()
+
         async def fake_get(*a, **kw):
             return _resp({}, status=429)
         client.get = fake_get
@@ -160,10 +215,23 @@ class TestFetchCandles:
         await client.aclose()
 
     @pytest.mark.asyncio
-    async def test_empty_chart_result_raises(self):
+    async def test_twelvedata_error_status_raises(self):
         client = httpx.AsyncClient()
+
         async def fake_get(*a, **kw):
-            return _resp({"chart": {"result": None}})
+            return _resp({"status": "error", "code": 401,
+                          "message": "invalid api key"})
+        client.get = fake_get
+        with pytest.raises(quotes.QuotesUnavailable):
+            await quotes.fetch_candles("XAUUSD", client)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_empty_fx_rates_raises(self):
+        client = httpx.AsyncClient()
+
+        async def fake_get(*a, **kw):
+            return _resp({"rates": {}})
         client.get = fake_get
         with pytest.raises(quotes.QuotesUnavailable):
             await quotes.fetch_candles("EURUSD", client)
@@ -172,8 +240,9 @@ class TestFetchCandles:
     @pytest.mark.asyncio
     async def test_too_few_candles_raises(self):
         client = httpx.AsyncClient()
+
         async def fake_get(*a, **kw):
-            return _resp(_chart_payload([100.0] * 10))
+            return _resp(_fx_payload([100.0] * 10))
         client.get = fake_get
         with pytest.raises(quotes.QuotesUnavailable):
             await quotes.fetch_candles("EURUSD", client)
@@ -181,7 +250,9 @@ class TestFetchCandles:
 
     def test_all_five_assets_mapped(self):
         for asset in ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"):
-            assert asset in quotes.YAHOO_SYMBOLS
+            assert asset in quotes.ASSET_FEEDS
+        assert quotes.ASSET_FEEDS["XAUUSD"] == quotes.FEED_TWELVEDATA
+        assert quotes.ASSET_FEEDS["GBPUSD"] == quotes.FEED_FRANKFURTER
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +320,7 @@ class TestFetchAllSnapshots:
             calls["n"] += 1
             if calls["n"] <= 2:
                 return _resp({}, status=500)  # first two fail
-            return _resp(_chart_payload([100.0 + i for i in range(40)]))
+            return _resp(_fx_payload([100.0 + i for i in range(40)]))
         client.get = fake_get
         try:
             result = await quotes.fetch_all_snapshots(["EURUSD", "GBPUSD", "AUDUSD"])

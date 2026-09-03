@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { API_BASE } from "@/lib/types";
+import { getToken } from "@/lib/auth";
 
 interface Msg { role: "user" | "assistant"; content: string }
 
@@ -26,9 +27,13 @@ export default function ChatPage() {
     setInput("");
     setLoading(true);
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE}/api/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ messages: next }),
       });
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);

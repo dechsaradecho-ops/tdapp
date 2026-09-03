@@ -1,11 +1,17 @@
 """Application settings loaded from environment variables (.env supported)."""
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# backend/ directory — .env lives here regardless of the process CWD
+# (fixes "key not set" when uvicorn is started from another folder)
+BASE_DIR = Path(__file__).resolve().parents[2]
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=BASE_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
     # App
     app_env: str = "development"
@@ -50,6 +56,10 @@ class Settings(BaseSettings):
     # LINE
     line_channel_access_token: str = ""
     line_channel_secret: str = ""
+
+    # Market data — Twelve Data free key for gold (XAU/USD) OHLC.
+    # FX pairs use Frankfurter (ECB) — free, no key needed.
+    twelvedata_api_key: str = ""
 
     # Supabase table names for worker pipelines (worker #2 output, AI daily report log)
     news_analysis_table: str = "news_analysis"

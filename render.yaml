@@ -25,6 +25,9 @@ services:
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
       - key: LINE_CHANNEL_SECRET
+        sync: false      - key: TWELVEDATA_API_KEY
+        sync: false      # ราคาทอง XAU/USD ผ่าน Twelve Data (free key) — FX ใช้ Frankfurter ไม่ต้องมี key
+      - key: TWELVEDATA_API_KEY
         sync: false
     # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret, ใส่ใน repo ได้)
     # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment

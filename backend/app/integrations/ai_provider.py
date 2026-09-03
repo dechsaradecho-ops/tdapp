@@ -88,8 +88,9 @@ class AIProvider(ABC):
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             yield (
                 f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
-                "ตรวจสอบว่า AI_API_KEY ตรงกับ provider ใน ai.config.json หรือไม่ "
-                "(key ของ DeepSeek ขึ้นต้น sk- / key ของ GLM เป็นรูปแบบ id.secret)"
+                "ตรวจสอบว่า AI_API_KEY ตรงกับ provider/url ใน ai.config.json หรือไม่ "
+                "(provider ปัจจุบันดูได้ที่ GET /health) — key ต้องเป็นของ gateway "
+                "ตาม url ใน ai.config.json เท่านั้น"
             )
 
 
