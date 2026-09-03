@@ -10,7 +10,12 @@ class Settings(BaseSettings):
     # App
     app_env: str = "development"
     log_level: str = "INFO"
-    frontend_origin: str = "http://localhost:3000"
+    # Comma-separated list of allowed CORS origins (e.g. prod + new static site + localhost)
+    frontend_origins: str = "http://localhost:3000"
+
+    @property
+    def frontend_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.frontend_origins.split(",") if o.strip()]
 
     # Supabase — new naming (publishable/secret, see Supabase dashboard)
     supabase_url: str = ""
