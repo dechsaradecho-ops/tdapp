@@ -97,7 +97,7 @@ def test_app_settings_defaults_match_engine_defaults():
     assert s.kill_monthly_loss_pct == 8.0
     assert s.max_drawdown_pct == 10.0
     assert s.drawdown_throttle_pct == 5.0
-    assert s.news_block_minutes == 30.0
+    assert s.news_block_minutes == 30
     assert s.correlation_cap == 80.0
     assert s.risk_profile == RiskProfile.moderate
     # moderate profile limits unchanged

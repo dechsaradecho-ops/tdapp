@@ -941,8 +941,9 @@ class AppSettings(BaseModel):
     kill_monthly_loss_pct: float = 8.0
     drawdown_throttle_pct: float = 5.0
 
-    news_block_minutes: float = 30.0
-    news_caution_minutes: float = 120.0
+    # int to match trading_settings integer columns (float JSON like 30.0 fails Postgres int cast)
+    news_block_minutes: int = 30
+    news_caution_minutes: int = 120
     correlation_cap: float = 80.0
     order_mode: str = "auto"
     default_equity: float = 10_000.0

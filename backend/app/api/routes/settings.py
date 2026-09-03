@@ -62,7 +62,9 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     db = request.app.state.db
     current = _load_settings(db)
     patch = {k: v for k, v in (payload or {}).items() if k in _FIELDS and v is not None}
-    merged = current.model_copy(update=patch)
+    # model_validate (NOT model_copy) so client values are coerced to field types —
+    # e.g. float 30.0 → int 30; Postgres integer columns reject "30.0" (22P02)
+    merged = AppSettings.model_validate({**current.model_dump(), **patch})
 
     if not db or not db.available:
         return SettingsSaveResult(
