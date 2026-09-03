@@ -13,6 +13,7 @@ import { PinStatus } from "@/lib/types";
  */
 export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [checking, setChecking] = useState(true);
+  const [authed, setAuthed] = useState(false);
   const [status, setStatus] = useState<PinStatus | null>(null);
   const [pin, setPin] = useState("");
   const [msg, setMsg] = useState("");
@@ -51,7 +52,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
               new Promise<never>((_, rej) =>
                 setTimeout(() => rej(new Error("probe timeout")), 20000)),
             ]);
-            setChecking(false);   // token still valid → straight in
+            setAuthed(true);      // token still valid → straight in
+            setChecking(false);
             return;
           } catch (e) {
             const m = e instanceof Error ? e.message : String(e);
@@ -71,6 +73,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const onExpired = () => {
       clearToken();
+      setAuthed(false);        // re-lock the gate
       setMsg("เซสชันหมดอายุ — กรอก PIN อีกครั้ง");
       setMsgType("error");
       loadStatus();
@@ -96,8 +99,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
         setToken(r.token);
         setPin("");
         setMsg("");
+        setAuthed(true);              // remount nothing — render children in place
         await loadStatus();
-        window.location.reload();     // remount everything with the token in place
       } else {
         setMsg(r.message || "PIN ไม่ถูกต้อง");
         setMsgType("error");
@@ -138,6 +141,9 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
+
+  // Valid session → render the dashboard in place.
+  if (authed) return <>{children}</>;
 
   // Bootstrap mode: no PIN set → let the user in (they can set one on /settings).
   if (!status?.pin_set) return <>{children}</>;
