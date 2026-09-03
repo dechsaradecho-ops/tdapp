@@ -40,6 +40,14 @@ async def lifespan(app: FastAPI):
     app.state.broker = PaperBroker()
     await app.state.broker.connect()
 
+    # The PaperBroker book is in-memory — restore any DB rows still marked
+    # "open" so position_guard can enforce their SL/TP again after a restart
+    # (otherwise positions survive restarts in the DB but lose enforcement).
+    try:
+        await position_guard.rehydrate_book(app.state.db, app.state.broker)
+    except Exception:
+        log.exception("broker book rehydrate failed (continuing)")
+
     # Background workers run inside this single web service when
     # ENABLE_WORKERS=1 (set on tdapp-api only — never on more than one
     # instance, or jobs will run duplicated).

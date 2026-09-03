@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from app.integrations import quotes
+from app.integrations.brokers import Position
 from app.services import execution
 from app.services.notification_service import NotificationService
 
@@ -106,3 +107,48 @@ async def guard_once(db, broker, notifier: NotificationService) -> dict:
 def run_guard_blocking(db, broker, notifier) -> dict:
     """Sync wrapper for asyncio.to_thread callers (matches portfolio_monitor style)."""
     return asyncio.run(guard_once(db, broker, notifier))
+
+
+async def rehydrate_book(db, broker) -> int:
+    """Rebuild the in-memory broker book from open paper_trades rows.
+
+    The PaperBroker book is in-memory, so every redeploy/restart on Render
+    silently wiped it — open positions stayed "open" in the DB (shown on the
+    monitor) while guard_once saw an empty book and never enforced SL/TP
+    again. On startup, re-open any DB row still marked open so the guard
+    can close it when the live feed touches its SL/TP.
+
+    Returns the number of positions restored.
+    """
+    try:
+        rows = db.select("paper_trades", filters={"status": "open"}, limit=200)
+    except Exception as exc:
+        log.warning("rehydrate: cannot read open paper_trades: %s", exc)
+        return 0
+    book = getattr(broker, "_positions", None)
+    if book is None:
+        log.warning("rehydrate: broker exposes no in-memory book; skipped")
+        return 0
+    restored = 0
+    for row in rows or []:
+        ticket = str(row.get("ticket") or "")
+        if not ticket or ticket in book:
+            continue
+        try:
+            book[ticket] = Position(
+                ticket=ticket,
+                user_id=str(row.get("user_id") or ""),
+                asset=str(row.get("asset") or "").upper(),
+                direction=str(row.get("direction") or "BUY").upper(),
+                volume=float(row.get("volume") or 0),
+                entry_price=float(row.get("entry_price") or 0),
+                stop_loss=float(row["stop_loss"]) if row.get("stop_loss") is not None else None,
+                take_profit=float(row["take_profit"]) if row.get("take_profit") is not None else None,
+                current_price=float(row.get("entry_price") or 0),
+            )
+            restored += 1
+        except Exception as exc:
+            log.warning("rehydrate: skip %s: %s", ticket or "?", exc)
+    if restored:
+        log.info("rehydrate: restored %d open position(s) into the broker book", restored)
+    return restored

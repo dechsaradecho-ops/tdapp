@@ -350,7 +350,8 @@ class GuardBroker(FakeBroker):
 
     def __init__(self, positions):
         super().__init__()
-        self._pos = {p.ticket: p for p in positions}
+        self._positions = {p.ticket: p for p in positions}  # the book
+        self._pos = self._positions  # same dict (alias)
         self.closed: list[str] = []
 
     async def all_positions(self):
@@ -431,6 +432,56 @@ class TestPositionGuard:
         assert out["closed"] == 1
         row = db.rows["paper_trades"][0]
         assert row["close_reason"] == "tp"
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_restores_guard_enforcement_after_restart(self, notifier,
+                                                                     _fake_live_marks):
+        """Regression: the PaperBroker book is in-memory, so a Render restart
+        wiped it — the DB still said "open" (visible on the monitor) but
+        guard_once saw an empty book and stopped enforcing SL/TP forever.
+        rehydrate_book() must rebuild the book from DB rows on startup."""
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "pt1", "ticket": "PAPER-000001", "user_id": "demo",
+             "asset": "GBPUSD", "direction": "BUY", "volume": 0.01,
+             "entry_price": 1.26797, "stop_loss": 1.24553,
+             "take_profit": 1.31286, "status": "open", "source": "auto"}]})
+        broker = GuardBroker([])  # post-restart: book wiped
+        restored = await position_guard.rehydrate_book(db, broker)
+        assert restored == 1
+        _fake_live_marks["GBPUSD"] = 1.3536  # live price past TP
+        out = await position_guard.guard_once(db, broker, notifier)
+        assert out["closed"] == 1
+        assert broker.closed == ["PAPER-000001"]
+        row = db.rows["paper_trades"][0]
+        assert row["close_reason"] == "tp"
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_skips_tickets_already_in_book(self, notifier):
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "pt1", "ticket": "PAPER-000001", "user_id": "demo",
+             "asset": "GBPUSD", "direction": "BUY", "volume": 0.01,
+             "entry_price": 1.26797, "status": "open", "source": "auto"}]})
+        existing = SimpleNamespace(ticket="PAPER-000001")
+        broker = GuardBroker([])
+        broker._pos = {}
+        broker._positions = {"PAPER-000001": existing}  # already live in book
+        restored = await position_guard.rehydrate_book(db, broker)
+        assert restored == 0
+        assert broker._positions["PAPER-000001"] is existing
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_tolerates_bad_rows(self, notifier):
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "bad", "ticket": "", "status": "open"},      # no ticket
+            {"id": "pt2", "ticket": "PAPER-000002", "user_id": "demo",
+             "asset": "XAUUSD", "direction": "BUY", "volume": "not-a-number",
+             "entry_price": None, "status": "open"},            # bad numeric
+        ]})
+        broker = GuardBroker([])
+        broker._pos = {}
+        broker._positions = {}
+        restored = await position_guard.rehydrate_book(db, broker)
+        assert restored <= 1  # only the valid row (or none on parse error)
 
 
 # ---------------------------------------------------------------------------
