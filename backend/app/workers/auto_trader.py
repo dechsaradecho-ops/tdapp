@@ -27,9 +27,11 @@ async def trade_once(db, broker, notifier) -> dict:
         return {"mode": s.order_mode, "picked": 0, "fired": 0}
 
     pending = db.select("signals", filters={"approval": "pending"}, limit=10)
-    fired, blocked = 0, 0
+    fired, blocked, expired = 0, 0, 0
     for sig in pending:
-        # skip stale signals older than 30 minutes — the entry may be long gone
+        # skip stale signals older than 30 minutes — the entry may be long gone.
+        # They are MARKED expired (not silently skipped) so they stop showing
+        # on the signals page and stop being re-picked every cycle.
         created = str(sig.get("created_at") or "")
         if created:
             try:
@@ -38,6 +40,8 @@ async def trade_once(db, broker, notifier) -> dict:
                     dt = dt.replace(tzinfo=timezone.utc)
                 age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60
                 if age_min > 30:
+                    db.update("signals", sig["id"], {"approval": "expired"})
+                    expired += 1
                     continue
             except ValueError:
                 pass
@@ -63,4 +67,5 @@ async def trade_once(db, broker, notifier) -> dict:
             log.info("AutoTrader blocked %s %s: %s",
                      sig["direction"], sig["asset"], report.rejects[:1])
 
-    return {"mode": "auto", "picked": len(pending), "fired": fired, "blocked": blocked}
+    return {"mode": "auto", "picked": len(pending), "fired": fired,
+            "blocked": blocked, "expired": expired}

@@ -27,9 +27,15 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     engine = StrategyEngine()
     proposals: list[SignalProposal] = []
 
-    rows = db.select("signals", limit=5)
+    rows = db.select("signals", limit=20)
+    # Only live candidates: pending (semi-auto queue) + approved (auto-fired).
+    # 'expired'/'rejected' rows are history — showing them made the page look
+    # stuck on yesterday's entries. Rows with no approval value (legacy) count
+    # as pending.
+    rows = [r for r in rows
+            if (r.get("approval") or "pending") in ("pending", "approved")]
     if rows:
-        for r in rows:
+        for r in rows[:5]:
             entry = float(r["entry"] or 0)
             stop_loss = float(r["stop_loss"] or 0)
             sl_distance = abs(entry - stop_loss)
