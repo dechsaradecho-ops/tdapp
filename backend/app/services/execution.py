@@ -167,12 +167,22 @@ def close_trade_rows(db, ticket: str, exit_price: float, pnl: float,
 
 
 class PaperBrokerPnl:
-    """PnL helper shared with the position guard (mirrors PaperBroker math)."""
+    """PnL helper shared with the position guard (mirrors PaperBroker math).
+
+    Volume is in lots: FX standard lot = 100,000 units, XAUUSD = 100 oz.
+    Without the contract multiplier a 0.01-lot FX move of 100 pips would
+    report PnL 0.10 instead of 100.00 — the monitor page showed PnL stuck
+    at 0.00 because of this.
+    """
+
+    CONTRACT_SIZES = {"XAUUSD": 100.0}  # everything else defaults to FX 100k
 
     @staticmethod
     def compute(pos) -> float:
         sign = 1 if pos.direction == "BUY" else -1
-        return sign * (pos.current_price - pos.entry_price) * pos.volume
+        asset = str(getattr(pos, "asset", "") or "").upper()
+        contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset, 100_000.0)
+        return sign * (pos.current_price - pos.entry_price) * pos.volume * contract
 
 
 # ---------------------------------------------------------------------------

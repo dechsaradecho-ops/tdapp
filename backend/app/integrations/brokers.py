@@ -141,9 +141,17 @@ class PaperBroker(Broker):
                 if asset in self._prices:
                     pos.current_price = self._prices[asset]
 
+    # Contract multiplier per asset: XAUUSD trades 100 oz per standard lot;
+    # FX pairs default to 100,000 units. PnL is reported in dollars — without
+    # this, a 0.01-lot FX position with a 100-pip move showed 0.10 instead
+    # of 100.00 (monitor page PnL stuck near 0.00).
+    CONTRACT_SIZES = {"XAUUSD": 100.0}
+
     @staticmethod
     def _approx_pnl(pos: Position) -> float:
         if pos.current_price == 0:
             return 0.0
         sign = 1 if pos.direction == "BUY" else -1
-        return sign * (pos.current_price - pos.entry_price) * pos.volume
+        asset = str(getattr(pos, "asset", "") or "").upper()
+        contract = PaperBroker.CONTRACT_SIZES.get(asset, 100_000.0)
+        return sign * (pos.current_price - pos.entry_price) * pos.volume * contract

@@ -360,7 +360,7 @@ class TestPositionGuard:
         assert broker.closed == ["PAPER-000001"]
         row = db.rows["paper_trades"][0]
         assert row["status"] == "closed" and row["close_reason"] == "sl"
-        assert row["pnl"] == pytest.approx(-6.0, abs=0.01)
+        assert row["pnl"] == pytest.approx(-600.0, abs=0.01)  # 1 lot XAUUSD = 100 oz
         assert notifier.sent and notifier.sent[0][0] == "stop_loss"
 
     @pytest.mark.asyncio
@@ -375,7 +375,7 @@ class TestPositionGuard:
         assert out["closed"] == 1
         row = db.rows["paper_trades"][0]
         assert row["close_reason"] == "tp"
-        assert row["pnl"] == pytest.approx(11.0, abs=0.01)
+        assert row["pnl"] == pytest.approx(1100.0, abs=0.01)  # 1 lot XAUUSD = 100 oz
         assert notifier.sent[0][0] == "trade_closed"
 
     @pytest.mark.asyncio

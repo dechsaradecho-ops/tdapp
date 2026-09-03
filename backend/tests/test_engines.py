@@ -487,7 +487,7 @@ class TestPaperBroker:
         ))
         pos = (await broker.positions("u1"))[0]
         pos.current_price = 110.0
-        assert PaperBroker._approx_pnl(pos) == pytest.approx(10.0)
+        assert PaperBroker._approx_pnl(pos) == pytest.approx(1000.0)  # 100 oz/lot
 
     async def test_pnl_sell_positive_when_price_falls(self):
         broker = PaperBroker()
@@ -497,7 +497,7 @@ class TestPaperBroker:
         ))
         pos = (await broker.positions("u1"))[0]
         pos.current_price = 90.0
-        assert PaperBroker._approx_pnl(pos) == pytest.approx(10.0)
+        assert PaperBroker._approx_pnl(pos) == pytest.approx(1000.0)  # 100 oz/lot
 
     async def test_quote_known_and_unknown(self):
         broker = PaperBroker()
