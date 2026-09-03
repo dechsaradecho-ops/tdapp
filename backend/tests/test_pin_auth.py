@@ -185,6 +185,19 @@ class TestHttpGate:
         assert r.status_code == 401
 
     @pytest.mark.asyncio
+    async def test_gate_401_carries_cors_headers(self):
+        # Regression: the gate used to answer 401 OUTSIDE the CORS wrapper, so
+        # the browser blocked the response entirely and the frontend could not
+        # react (the PIN pad / re-lock flow silently broke).
+        app.state.db = auth_db()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get("/api/market/summary",
+                            headers={"Origin": "http://localhost:3000"})
+        assert r.status_code == 401
+        assert r.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+    @pytest.mark.asyncio
     async def test_login_then_access(self):
         app.state.db = auth_db()
         r = await call("POST", "/api/auth/login", {"pin": "123456"})

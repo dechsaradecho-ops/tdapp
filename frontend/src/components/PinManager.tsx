@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { clearToken } from "@/lib/auth";
+import { clearToken, setToken } from "@/lib/auth";
 import { PinStatus } from "@/lib/types";
 
 /** Settings panel: first-time PIN setup + change PIN (requires session). */
@@ -31,8 +31,10 @@ export default function PinManager() {
       setOk(r.ok);
       setMsg(r.message || (r.ok ? "บันทึกแล้ว" : "ตั้ง PIN ไม่สำเร็จ"));
       if (r.ok) {
+        // set-pin returns a fresh token — SAVE it, otherwise the very next
+        // API call 401s and the gate locks the owner out right after setup.
+        if (r.token) setToken(r.token);
         setPin(""); setConfirm("");
-        // set-pin returns a fresh token — keep the session alive with it.
         await load();
       }
     } catch (e) {

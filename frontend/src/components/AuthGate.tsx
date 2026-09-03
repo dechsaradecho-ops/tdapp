@@ -38,11 +38,17 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       const st = await loadStatus();
       if (st?.pin_set && getToken()) {
         try {
-          await api.dbCounts();     // cheap authenticated probe
+          // Cheap authenticated probe with a hard timeout so a slow/hanging
+          // API can never leave the gate stuck on the "checking" screen.
+          await Promise.race([
+            api.dbCounts(),
+            new Promise<never>((_, rej) =>
+              setTimeout(() => rej(new Error("probe timeout")), 15000)),
+          ]);
           setChecking(false);       // token still valid → straight in
           return;
         } catch {
-          clearToken();             // dead token → show PIN pad
+          clearToken();             // dead token / timeout → show PIN pad
         }
       }
       setChecking(false);

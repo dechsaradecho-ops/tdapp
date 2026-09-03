@@ -91,32 +91,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.frontend_origin_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(goal.router, prefix="/api/goal", tags=["goal"])
-app.include_router(market.router, prefix="/api/market", tags=["market"])
-app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
-app.include_router(risk.router, prefix="/api/risk", tags=["risk"])
-app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
-app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
-app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
-app.include_router(webhook.router, prefix="/api/line", tags=["line"])
-app.include_router(system.router, prefix="/api/system", tags=["system"])
-app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
-app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-
-
 # ---------------------------------------------------------------------------
 # PIN gate — every /api/* request needs a valid session token, except the
 # whitelist below. The token comes from POST /api/auth/login (6-digit PIN).
 # Fail-CLOSED: if the check errors out, the request is rejected.
+#
+# Registered BEFORE CORSMiddleware (last-added = outermost) so CORS wraps the
+# gate's 401s with Access-Control-Allow-Origin. Without this the browser
+# blocks the 401 entirely and the frontend can never react to it (the PIN pad
+# and re-lock flow silently break).
 # ---------------------------------------------------------------------------
 _PIN_EXEMPT_PATHS = {
     "/ping", "/health",
@@ -141,6 +124,28 @@ async def pin_gate(request, call_next):
     if not pin_auth.session_valid(token):
         return JSONResponse(status_code=401, content={"detail": "unauthorized"})
     return await call_next(request)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.frontend_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(goal.router, prefix="/api/goal", tags=["goal"])
+app.include_router(market.router, prefix="/api/market", tags=["market"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(risk.router, prefix="/api/risk", tags=["risk"])
+app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
+app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
+app.include_router(webhook.router, prefix="/api/line", tags=["line"])
+app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
+app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 
 
 @app.get("/ping", tags=["system"])
