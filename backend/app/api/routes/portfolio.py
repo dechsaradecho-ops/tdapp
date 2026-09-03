@@ -44,7 +44,6 @@ async def recommend(payload: PortfolioInput, request: Request) -> PortfolioRecom
 
     if not opportunities:
         from app.api.routes.market import DEMO
-        from app.engine.strategy_engine import StrategyEngine
         opportunities = [StrategyEngine().opportunity_score(DEMO[a]) for a in DEMO]
 
     return PortfolioEngine().recommend(payload, opportunities)  # type: ignore[arg-type]
