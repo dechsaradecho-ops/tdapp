@@ -28,6 +28,7 @@ from app.models.schemas import (
     OrderPlan,
     OrderStrategyEngine,
     PaperTradingStatus,
+    PauseStatus,
     RiskOfficer,
     RiskOfficerReview,
     RiskProfile,
@@ -39,6 +40,7 @@ from app.models.schemas import (
     run_backtest,
     walk_forward,
 )
+from app.services import execution
 
 router = APIRouter()
 
@@ -235,6 +237,24 @@ async def review(payload: RiskOfficerRequest, request: Request) -> RiskOfficerRe
         correlation_score=payload.correlation_score,
         correlation_cap=s.correlation_cap,
     )
+
+
+# ------------------------------------------------------------ trading pause
+@router.get("/pause", response_model=PauseStatus)
+async def get_pause(request: Request) -> PauseStatus:
+    """Live manual kill-switch state (read by UI badge + LINE /status)."""
+    return execution.get_pause(request.app.state.db)
+
+
+class PauseRequest(BaseModel):
+    paused: bool
+    reason: str = ""
+
+
+@router.post("/pause", response_model=PauseStatus)
+async def set_pause(payload: PauseRequest, request: Request) -> PauseStatus:
+    """Engage/clear the manual kill switch — blocks BOTH auto and approved orders."""
+    return execution.set_pause(request.app.state.db, payload.paused, payload.reason)
 
 
 # ----------------------------------------------------------------- journal

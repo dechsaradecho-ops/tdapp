@@ -30,7 +30,8 @@ class FakeBroker:
         return None
 
     async def place_order(self, order) -> object:
-        return SimpleNamespace(broker_order_id="TCK-123")
+        # must satisfy the broker result contract used by execution.execute_signal
+        return SimpleNamespace(ok=True, broker_order_id="TCK-123", message="opened")
 
 
 class FakeLine:
@@ -257,8 +258,27 @@ class TestApproveFlow:
                        {"signal_id": "sig-2", "approve": True})
         assert r.status_code == 200
         assert r.json()["status"] == "executed"
-        assert r.json()["ticket"] == "TCK-123"
         assert db.rows["signals"][0]["approval"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_approve_paused_returns_blocked(self):
+        """Manual kill switch must block even an approved order (Phase 1)."""
+        from app.services import execution as exec_mod
+        from tests.test_auto_trader import db_with_client
+        db = db_with_client()
+        db.rows["signals"] = [
+            {"id": "sig-3", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "expected_rr": 2.0, "explanation": "x",
+             "approval": "pending"}]
+        set_state(db)
+        exec_mod.set_pause(db, True, "test pause")
+        r = await call("POST", "/api/signals/approve",
+                       {"signal_id": "sig-3", "approve": True})
+        assert r.status_code == 200
+        assert r.json()["status"] == "blocked"
+        assert any("paused" in x.lower() for x in r.json()["rejects"])
+        assert db.rows["signals"][0]["approval"] == "rejected"
 
 
 # ---------------------------------------------------------------------------

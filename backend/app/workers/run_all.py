@@ -17,7 +17,7 @@ from app.integrations.brokers import PaperBroker
 from app.integrations.line_client import LineClient
 from app.services.database import Database
 from app.services.notification_service import NotificationService
-from app.workers import market_scanner, news_analysis, notification_worker, portfolio_monitor
+from app.workers import auto_trader, market_scanner, news_analysis, notification_worker, portfolio_monitor, position_guard
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +41,14 @@ async def main() -> None:
         "interval", minutes=1, id="portfolio_monitor", max_instances=1)
     scheduler.add_job(lambda: asyncio.create_task(_safe(notification_worker.dispatch_pending(db, notifier))),
                       "interval", minutes=1, id="notifications", max_instances=1)
+    scheduler.add_job(lambda: asyncio.create_task(_safe(auto_trader.trade_once(db, broker, notifier))),
+                      "interval", minutes=1, id="auto_trader", max_instances=1)
+    scheduler.add_job(lambda: asyncio.create_task(_safe(position_guard.guard_once(db, broker, notifier))),
+                      "interval", minutes=1, id="position_guard", max_instances=1)
 
     scheduler.start()
-    log.info("Workers started: scanner(5m) news(15m) monitor(1m) notify(1m)")
+    log.info("Workers started: scanner(5m) news(15m) monitor(1m) notify(1m) "
+             "auto_trader(1m) position_guard(1m)")
 
     try:
         while True:

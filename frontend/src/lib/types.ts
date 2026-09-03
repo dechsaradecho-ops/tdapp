@@ -266,4 +266,11 @@ export interface SettingsSaveResult {
   message: string;
 }
 
+/** Shared trading kill-switch state (read by auto trader + /approve). */
+export interface PauseStatus {
+  paused: boolean;
+  reason: string;
+  paused_at: string | null;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";

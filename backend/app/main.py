@@ -18,7 +18,7 @@ from app.services.database import Database
 from app.services.notification_service import NotificationService
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
-from app.workers import market_scanner, news_analysis, notification_worker, portfolio_monitor
+from app.workers import auto_trader, market_scanner, news_analysis, notification_worker, portfolio_monitor, position_guard
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +57,16 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(lambda: asyncio.create_task(_safe_job(
             notification_worker.dispatch_pending(db, notifier))),
             "interval", minutes=1, id="notifications", max_instances=1)
+        scheduler.add_job(lambda: asyncio.create_task(_safe_job(
+            auto_trader.trade_once(db, app.state.broker, notifier))),
+            "interval", minutes=1, id="auto_trader", max_instances=1)
+        scheduler.add_job(lambda: asyncio.create_task(_safe_job(
+            position_guard.guard_once(db, app.state.broker, notifier))),
+            "interval", minutes=1, id="position_guard", max_instances=1)
         scheduler.start()
         app.state.scheduler = scheduler
-        log.info("In-app workers ENABLED: scanner(5m) news(15m) monitor(1m) notify(1m)")
+        log.info("In-app workers ENABLED: scanner(5m) news(15m) monitor(1m) "
+                 "notify(1m) auto_trader(1m) position_guard(1m)")
     else:
         app.state.scheduler = None
         log.info("In-app workers disabled (ENABLE_WORKERS not set)")

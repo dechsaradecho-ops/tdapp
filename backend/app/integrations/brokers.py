@@ -62,6 +62,14 @@ class Broker(ABC):
     @abstractmethod
     async def quote(self, asset: str) -> float: ...
 
+    async def all_positions(self) -> list[Position]:
+        """Every open position regardless of user (position-guard loop)."""
+        return []
+
+    async def mark_price(self, ticket: str) -> float:
+        """Current price for an open ticket (0.0 when unavailable)."""
+        return 0.0
+
 
 class PaperBroker(Broker):
     """Simulated execution for development/demo."""
@@ -105,8 +113,33 @@ class PaperBroker(Broker):
     async def positions(self, user_id: str) -> list[Position]:
         return [p for p in self._positions.values() if p.user_id == user_id]
 
+    async def all_positions(self) -> list[Position]:
+        return list(self._positions.values())
+
+    async def mark_price(self, ticket: str) -> float:
+        pos = self._positions.get(ticket)
+        return pos.current_price if pos else 0.0
+
     async def quote(self, asset: str) -> float:
         return self._prices.get(asset.upper(), 0.0)
+
+    async def set_quote(self, asset: str, price: float) -> None:
+        """Feed a live price into the paper book (used by tests + position guard)."""
+        self._prices[asset.upper()] = price
+
+    async def refresh_prices(self) -> None:
+        """Tick paper prices with a small random walk so SL/TP can trigger.
+
+        Live feeds replace this when a real broker adapter lands; kept here so
+        the paper book behaves like a market instead of frozen prices.
+        """
+        import random
+        for asset in self._prices:
+            self._prices[asset] *= 1 + random.uniform(-0.0005, 0.0005)
+        for pos in self._positions.values():
+            if asset := pos.asset.upper():
+                if asset in self._prices:
+                    pos.current_price = self._prices[asset]
 
     @staticmethod
     def _approx_pnl(pos: Position) -> float:

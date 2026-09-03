@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import {
-  AppSettings, DbCheckResult, DbCounts, PortfolioRecommendation, RiskProfile,
+  AppSettings, DbCheckResult, DbCounts, PauseStatus, PortfolioRecommendation, RiskProfile,
 } from "@/lib/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -50,6 +50,25 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   const [loadErr, setLoadErr] = useState("");
+
+  // --- execution switch (Phase 1) ---
+  const [pause, setPause] = useState<PauseStatus | null>(null);
+  const [pauseBusy, setPauseBusy] = useState(false);
+
+  useEffect(() => {
+    api.getTradingPause().then(setPause).catch(() => setPause(null));
+  }, []);
+
+  const togglePause = async () => {
+    setPauseBusy(true);
+    try {
+      const next = !(pause?.paused ?? false);
+      const res = await api.setTradingPause(next, next ? "paused from settings UI" : "");
+      setPause(res);
+    } finally {
+      setPauseBusy(false);
+    }
+  };
 
   useEffect(() => {
     api.getSettings()
@@ -192,11 +211,44 @@ export default function SettingsPage() {
         {loadErr && <p className="text-loss text-sm mt-2">โหลดค่าไม่สำเร็จ: {loadErr}</p>}
         {!cfg && !loadErr && <p className="text-slate-500 text-sm mt-3">กำลังโหลด...</p>}
 
+        {/* --- Execution switch (blocks BOTH auto trader and /approve) --- */}
+        <div className={`mt-4 rounded border px-4 py-3 flex items-center justify-between flex-wrap gap-3 ${
+          pause?.paused ? "border-loss bg-loss/10" : "border-slate-700 bg-surface/40"}`}>
+          <div>
+            <p className="text-sm font-semibold">
+              {pause?.paused
+                ? "🛑 Auto Trading หยุดชั่วคราว — บล็อกทั้ง auto + approve"
+                : "✅ Auto Trading ทำงานปกติ"}
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {pause?.paused
+                ? `เหตุผล: ${pause.reason || "ไม่ระบุ"} — กด Resume เพื่อกลับมาเทรดต่อ`
+                : "ระบบจะยิง order ผ่าน gate (pause/kill switch/ข่าว/correlation) ทุกครั้ง"}
+            </p>
+          </div>
+          <button onClick={togglePause} disabled={pauseBusy}
+            className={pause?.paused
+              ? "bg-profit text-surface font-semibold rounded px-4 py-2 disabled:opacity-50"
+              : "bg-loss text-surface font-semibold rounded px-4 py-2 disabled:opacity-50"}>
+            {pauseBusy ? "กำลังส่ง..." : pause?.paused ? "▶️ Resume Auto Trading" : "⏸️ Pause Auto Trading"}
+          </button>
+        </div>
+
         {cfg && (
           <div className="mt-4 grid md:grid-cols-4 gap-4">
             {/* --- Profile & signal gates --- */}
             <div className="space-y-3">
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">โปรไฟล์ &amp; Signal Gates</p>
+              <label className="block text-sm">
+                โหมดเทรด (order_mode)
+                <select value={cfg.order_mode}
+                  onChange={(e) => set("order_mode", e.target.value)}
+                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+                  <option value="auto">🤖 Auto — ระบบเทรดเอง</option>
+                  <option value="semi_auto">👤 Semi-Auto — รอยืนยันก่อน</option>
+                  <option value="manual">✋ Manual — ระบบไม่ยิง order</option>
+                </select>
+              </label>
               <label className="block text-sm">
                 Risk Profile
                 <select value={cfg.risk_profile}

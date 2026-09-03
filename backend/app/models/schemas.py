@@ -919,6 +919,31 @@ def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTra
         ai_coaching=coaching, live_readiness_score=readiness)
 
 
+# ---------- Auto-Trader: execution gate + pause state ----------
+class GateReport(BaseModel):
+    """Result of running a candidate order through the full safety pipeline.
+
+    Everything the execution path needs to decide (and to explain itself in
+    the UI / LINE messages) in one object:
+      allowed      — all gates passed; the order may fire
+      size_lots    — risk-based volume from risk_to_lot (0 when blocked)
+      rejects      — human-readable failure reasons, in gate order
+      pause        — live trading_pause state the gate evaluated against
+    """
+    allowed: bool
+    size_lots: float = 0.0
+    rejects: list[str] = Field(default_factory=list)
+    pause: "PauseStatus"
+    checks: list[str] = Field(default_factory=list)
+
+
+class PauseStatus(BaseModel):
+    """Live state of the manual kill switch (trading_pause row)."""
+    paused: bool = False
+    reason: str = ""
+    paused_at: Optional[datetime] = None
+
+
 # ---------- Extended Output Format ----------
 class ExtendedAnalysis(BaseModel):
     """The 11-section extended output format (spec)."""

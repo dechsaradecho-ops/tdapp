@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import FinalDecision, SignalProposal
+from app.services import execution
 from app.services.notification_service import NotificationService
 
 from app.api.routes.market import DEMO
@@ -69,28 +70,41 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
 
 @router.post("/approve")
 async def approve_signal(payload: ApprovalRequest, request: Request):
-    """SEMI-AUTO flow: user approves/rejects → execute via broker → LINE confirmation."""
+    """SEMI-AUTO flow: user approves/rejects → execution gate → broker.
+
+    The approved order goes through the SAME gate pipeline as the auto trader
+    (pause → kill switch → frequency → news → correlation → risk officer) and
+    is sized by risk_to_lot from settings — never the old hardcoded 0.01.
+    """
     db = request.app.state.db
     status = "approved" if payload.approve else "rejected"
     db.update("signals", payload.signal_id, {"approval": status})
 
-    if payload.approve:
-        broker = request.app.state.broker
-        signals = db.select("signals", filters={"id": payload.signal_id}, limit=1)
-        if signals:
-            s = signals[0]
-            from app.integrations.brokers import OrderRequest
-            result = await broker.place_order(OrderRequest(
-                user_id=s.get("user_id", "demo"),
-                asset=s["asset"], direction=s["direction"].upper(), volume=0.01,
-                entry_price=float(s["entry"] or 0), stop_loss=s.get("stop_loss"),
-                take_profit=s.get("take_profit"),
-            ))
-            notifier = NotificationService(db, request.app.state.line)
-            await notifier.notify(
-                s.get("user_id", "demo"), "trade_opened",
-                f"✅ Trade Opened\nAsset: {s['asset']}\nDirection: {s['direction']}"
-                f"\nVolume: 0.01\nTicket: {result.broker_order_id}",
-            )
-            return {"status": "executed", "ticket": result.broker_order_id}
-    return {"status": status}
+    if not payload.approve:
+        return {"status": status}
+
+    broker = request.app.state.broker
+    signals = db.select("signals", filters={"id": payload.signal_id}, limit=1)
+    if not signals:
+        return {"status": status, "executed": False,
+                "message": "signal row not found"}
+
+    s = signals[0]
+    srow = execution.get_app_settings(db)
+    notifier = NotificationService(db, request.app.state.line)
+    report = await execution.execute_signal(
+        db, broker, notifier, srow,
+        user_id=s.get("user_id", execution.DEFAULT_USER),
+        asset=s["asset"], direction=s["direction"].upper(),
+        entry=float(s["entry"] or 0), stop_loss=s.get("stop_loss"),
+        take_profit=s.get("take_profit"),
+        confidence=float(s.get("confidence") or 0),
+        opportunity=float(s.get("opportunity_score") or s.get("confidence") or 0),
+        signal_id=payload.signal_id, source="approved",
+    )
+    if not report.allowed:
+        db.update("signals", payload.signal_id, {"approval": "rejected"})
+        return {"status": "blocked", "executed": False,
+                "rejects": report.rejects, "checks": report.checks}
+    return {"status": "executed", "executed": True,
+            "volume": report.size_lots, "checks": report.checks}

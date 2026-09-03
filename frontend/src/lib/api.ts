@@ -15,6 +15,7 @@ import {
   NewsRisk,
   OrderPlan,
   PaperTrading,
+  PauseStatus,
   PortfolioRecommendation,
   RiskStatus,
   SessionStatus,
@@ -133,4 +134,9 @@ export const api = {
     put<SettingsSaveResult>("/api/settings", data),
 
   resetSettings: () => post<SettingsSaveResult>("/api/settings/reset", {}),
+
+  // ---------- Execution switch (Phase 1) ----------
+  getTradingPause: () => get<PauseStatus>("/api/trading/pause"),
+  setTradingPause: (paused: boolean, reason = "") =>
+    post<PauseStatus>("/api/trading/pause", { paused, reason }),
 };

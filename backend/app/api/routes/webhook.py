@@ -10,6 +10,7 @@ from fastapi import APIRouter, Header, Request, Response
 from app.api.routes.settings import get_app_settings
 from app.core.config import get_settings
 from app.integrations.line_client import LineClient
+from app.services import execution
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,8 +72,10 @@ async def handle_command(text: str, db) -> str:
         return (f"📊 Daily Summary\nPnL today: +{pnl:,.2f}\n"
                 f"Goal 3%: achieved {achievement:.0f}%\nTop: XAUUSD (85)")
     if cmd == "/pause":
-        return "⏸ Auto trading PAUSED. Use /resume to continue."
+        execution.set_pause(db, True, "paused from LINE /pause")
+        return "🛑 Auto trading PAUSED — ทุก order (auto + approve) ถูกบล็อก.\nUse /resume to continue."
     if cmd == "/resume":
+        execution.set_pause(db, False, "")
         return "▶️ Auto trading RESUMED (risk checks active)."
     if text in ("[Approve]", "[Reject]"):
         return f"Received {text}. Processing SEMI-AUTO decision..."
