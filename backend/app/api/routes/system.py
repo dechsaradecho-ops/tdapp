@@ -22,6 +22,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Request
 
 from app.services.database import Database
+from app.services import execution
 
 router = APIRouter()
 
@@ -160,4 +161,55 @@ async def scan_now(request: Request) -> dict:
     if not rows:
         out["hint"] = ("scan ran but market_analysis is still empty — the "
                        "insert failed; run /api/system/db-check for the raw error")
+    return out
+
+
+@router.post("/autotrader-dry-run")
+async def autotrader_dry_run(request: Request) -> dict:
+    """Run ONE auto-trader cycle inline and report every gate verdict.
+
+    The scheduler's trade_once only logs blocks — this endpoint surfaces the
+    same information over HTTP: which pending signals were picked, whether
+    each passed the gate (pause/kill/frequency/news/correlation/risk-officer),
+    and the broker result. Use it to answer 'why is nothing firing?'.
+    """
+    app = request.app
+    db: Database = app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    pending = db.select("signals", filters={"approval": "pending"}, limit=10)
+    out["pending_signals"] = [
+        {"id": r.get("id"), "asset": r.get("asset"),
+         "direction": r.get("direction"), "confidence": r.get("confidence"),
+         "created_at": r.get("created_at")}
+        for r in pending
+    ]
+
+    from app.workers.auto_trader import trade_once
+    try:
+        out["trade_once"] = await trade_once(
+            db, app.state.broker, app.state.line)
+    except Exception as exc:  # surface anything the worker swallowed
+        out["verdict"] = "fail"
+        out["error"] = f"{exc.__class__.__name__}: {exc}"
+        return out
+
+    s = execution.get_app_settings(db)
+    out["order_mode"] = s.order_mode
+    out["capital"] = s.capital
+
+    # Post-state: did anything actually open?
+    open_rows = db.select("paper_trades", filters={"status": "open"}, limit=50)
+    out["open_paper_trades"] = len(open_rows)
+    out["open_detail"] = [
+        {"asset": r.get("asset"), "direction": r.get("direction"),
+         "volume": r.get("volume"), "ticket": r.get("ticket"),
+         "created_at": r.get("created_at")}
+        for r in open_rows
+    ]
+    out["verdict"] = "ok"
     return out
