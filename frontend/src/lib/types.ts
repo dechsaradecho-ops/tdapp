@@ -113,6 +113,11 @@ export interface SignalProposal {
   reason: string[];
   recommendation: FinalDecision;
   limit_levels: LimitLevel[];
+  // Present only for DB-backed signals (tier 1) — live/demo tiers omit them.
+  // approval === "approved" renders an approval stamp instead of buttons.
+  approval?: string | null;
+  approved_at?: string | null;
+  created_at?: string | null;
 }
 
 // ---------- Extended Trading System ----------

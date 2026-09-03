@@ -61,16 +61,28 @@ export default function SignalCard({ signal }: { signal: SignalProposal }) {
           {signal.reason.map((r, i) => <li key={i}>{r}</li>)}
         </ol>
       </details>
-      <div className="mt-3 flex gap-2">
-        <button disabled={approving} onClick={() => decide(true)}
-          className="flex-1 bg-profit text-surface font-semibold rounded py-1.5 text-sm hover:brightness-110 disabled:opacity-50">
-          Approve
-        </button>
-        <button disabled={approving} onClick={() => decide(false)}
-          className="flex-1 border border-loss text-loss rounded py-1.5 text-sm hover:bg-loss/10 disabled:opacity-50">
-          Reject
-        </button>
-      </div>
+      {signal.approval === "approved" ? (
+        // อนุมัติแล้ว — แสดงสแตมป์เวลาแทนปุ่ม (อยู่กลุ่มล่างของหน้า signals)
+        <div className="mt-3 flex items-center gap-2 rounded border border-profit/40 bg-profit/10 px-2 py-1.5 text-xs text-profit">
+          <span>✓ อนุมัติแล้ว</span>
+          <span className="text-slate-400">
+            {new Date(
+              signal.approved_at ?? signal.created_at ?? ""
+            ).toLocaleString("th-TH")}
+          </span>
+        </div>
+      ) : (
+        <div className="mt-3 flex gap-2">
+          <button disabled={approving} onClick={() => decide(true)}
+            className="flex-1 bg-profit text-surface font-semibold rounded py-1.5 text-sm hover:brightness-110 disabled:opacity-50">
+            Approve
+          </button>
+          <button disabled={approving} onClick={() => decide(false)}
+            className="flex-1 border border-loss text-loss rounded py-1.5 text-sm hover:bg-loss/10 disabled:opacity-50">
+            Reject
+          </button>
+        </div>
+      )}
       {done && <p className="text-xs text-slate-500 mt-2 break-all">{done}</p>}
     </div>
   );

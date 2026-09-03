@@ -42,6 +42,61 @@ log = logging.getLogger(__name__)
 # Fixed demo user until multi-user auth lands (same id /approve already used).
 DEFAULT_USER = "demo"
 
+# Pending signals older than this leave the queue (marked 'expired') no matter
+# which order_mode the platform is in — otherwise the signals page shows
+# yesterday's entry prices forever in semi_auto/manual modes.
+SIGNAL_TTL_MIN = 30
+
+
+def expire_stale_pending_signals(db) -> int:
+    """Mark pending signals older than SIGNAL_TTL_MIN as expired.
+
+    Safe to call on every /signals/latest request — updates only rows that
+    are actually stale, and degrades to 'rejected' when the DB lacks the
+    009 migration's 'expired' enum value. Returns the number expired.
+    """
+    if not db or not getattr(db, "available", False) \
+            or not callable(getattr(db, "select", None)):
+        return 0
+    now = datetime.now(timezone.utc)
+    expired = 0
+    try:
+        pending = db.select("signals", filters={"approval": "pending"}, limit=200)
+    except Exception:
+        return 0
+    for sig in pending:
+        created = str(sig.get("created_at") or "")
+        if not created:
+            continue
+        dt = _parse_dt(created)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if (now - dt).total_seconds() / 60 > SIGNAL_TTL_MIN:
+            if not db.update("signals", sig["id"], {"approval": "expired"}):
+                db.update("signals", sig["id"], {"approval": "rejected"})
+            expired += 1
+    return expired
+
+
+def is_stale(row: dict, max_age_min: int = SIGNAL_TTL_MIN) -> bool:
+    """True when the row has a parseable created_at older than max_age_min.
+
+    Rows without a parseable created_at (legacy/test data) are never stale —
+    callers keep showing them rather than silently dropping history.
+    """
+    dt = _parse_dt(str(row.get("created_at") or ""))
+    if dt is None:
+        return False
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60 > max_age_min
+
+
+def now_iso() -> str:
+    """UTC timestamp for *_at stamps (signals.approved_at etc.)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 JOURNAL_INSERT = {
     "asset": "XAUUSD",  # sentinel replaced per trade; keeps insert contract explicit
 }

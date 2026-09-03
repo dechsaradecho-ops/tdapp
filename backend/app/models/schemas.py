@@ -136,6 +136,12 @@ class SignalProposal(BaseModel):
     recommendation: FinalDecision
     # laddered entries (แนวรับหลายระดับ) — empty for legacy rows without it
     limit_levels: list[LimitLevel] = []
+    # Present only for rows served from the signals table (tier 1). Live/demo
+    # tiers never carry these — the UI uses approved_at to render an
+    # "อนุมัติแล้ว เวลา ..." stamp instead of Approve/Reject buttons.
+    approval: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
 
 
 class TradeRecord(BaseModel):

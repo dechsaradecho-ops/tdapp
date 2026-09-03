@@ -13,6 +13,7 @@ Run from backend/: C:/Python314/python.exe -m pytest tests/test_api_routes.py -v
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -224,6 +225,86 @@ class TestSignalsLatestTiers:
         set_state(db)
         body = (await call("GET", "/api/signals/latest")).json()
         assert body[0]["direction"] == "SELL"
+
+    @pytest.mark.asyncio
+    async def test_stale_pending_expired_and_hidden(self):
+        """Regression: pending signal older than TTL must leave the queue —
+        the page was pinning GBPUSD at 1.26797 while the live rate was 1.35."""
+        from app.services.execution import SIGNAL_TTL_MIN
+        old = (datetime.now(timezone.utc)
+               - timedelta(minutes=SIGNAL_TTL_MIN + 10)).isoformat()
+        db = FakeDatabase(rows={"signals": [
+            {"id": "s-old", "asset": "GBPUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 1.26797, "stop_loss": 1.26,
+             "take_profit": 1.28, "expected_rr": 2.0,
+             "approval": "pending", "created_at": old},
+            {"id": "s-fresh", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "expected_rr": 2.0,
+             "approval": "pending",
+             "created_at": datetime.now(timezone.utc).isoformat()},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assets = [s["asset"] for s in body]
+        assert "GBPUSD" not in assets           # stale row gone
+        assert assets == ["XAUUSD"]             # fresh row survives
+        assert db.rows["signals"][0]["approval"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_stale_approved_row_stamped_not_queued_first(self):
+        """Approved rows past the TTL leave the action queue: they render at
+        the bottom with an approval stamp instead of pinning a dead price at
+        the top (GBPUSD 1.26797 bug)."""
+        from app.services.execution import SIGNAL_TTL_MIN
+        old = (datetime.now(timezone.utc)
+               - timedelta(minutes=SIGNAL_TTL_MIN + 10)).isoformat()
+        db = FakeDatabase(rows={"signals": [
+            {"id": "s1", "asset": "GBPUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 1.26797, "stop_loss": 1.26,
+             "take_profit": 1.28, "expected_rr": 2.0,
+             "approval": "approved", "created_at": old,
+             "approved_at": old},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["approval"] == "approved"
+        assert body[0]["approved_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_fresh_approved_row_still_shown(self):
+        db = FakeDatabase(rows={"signals": [
+            {"id": "s1", "asset": "GBPUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 1.35, "stop_loss": 1.34,
+             "take_profit": 1.37, "expected_rr": 2.0,
+             "approval": "approved",
+             "created_at": datetime.now(timezone.utc).isoformat()},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert len(body) == 1 and body[0]["asset"] == "GBPUSD"
+
+    @pytest.mark.asyncio
+    async def test_approved_sorted_after_pending(self):
+        """Pending cards first (action queue), approved cards below them."""
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "a1", "asset": "EURUSD", "direction": "buy",
+             "confidence": 70.0, "entry": 1.16, "stop_loss": 1.15,
+             "take_profit": 1.18, "expected_rr": 2.0,
+             "approval": "approved", "created_at": now.isoformat(),
+             "approved_at": now.isoformat()},
+            {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+             "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+             "take_profit": 2380.0, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert [s["asset"] for s in body] == ["XAUUSD", "EURUSD"]
+        assert body[0]["approval"] == "pending"
+        assert body[1]["approval"] == "approved"
+        assert body[1]["approved_at"] is not None
 
 
 # ---------------------------------------------------------------------------

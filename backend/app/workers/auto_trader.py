@@ -12,10 +12,10 @@ correlation cap and risk officer apply identically to both paths.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 from app.models.schemas import AppSettings
 from app.services import execution
+from app.services.execution import SIGNAL_TTL_MIN, expire_stale_pending_signals, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -24,33 +24,15 @@ async def trade_once(db, broker, notifier) -> dict:
     """One auto-trader cycle. Returns a small summary for logs/tests."""
     s: AppSettings = execution.get_app_settings(db)
     if s.order_mode != "auto":
-        return {"mode": s.order_mode, "picked": 0, "fired": 0}
+        # Still expire stale pending signals so the signals page never shows
+        # dead entries — expiry is not an auto-mode-only concern.
+        expired = expire_stale_pending_signals(db)
+        return {"mode": s.order_mode, "picked": 0, "fired": 0, "expired": expired}
 
+    expired = expire_stale_pending_signals(db)
     pending = db.select("signals", filters={"approval": "pending"}, limit=10)
-    fired, blocked, expired = 0, 0, 0
+    fired, blocked = 0, 0
     for sig in pending:
-        # skip stale signals older than 30 minutes — the entry may be long gone.
-        # They are MARKED expired (not silently skipped) so they stop showing
-        # on the signals page and stop being re-picked every cycle.
-        created = str(sig.get("created_at") or "")
-        if created:
-            try:
-                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60
-                if age_min > 30:
-                    # 'expired' needs the 009 migration (enum value). If it
-                    # fails (un-migrated DB), fall back to 'rejected' so the
-                    # row still leaves the pending queue either way.
-                    if not db.update("signals", sig["id"],
-                                     {"approval": "expired"}):
-                        db.update("signals", sig["id"], {"approval": "rejected"})
-                    expired += 1
-                    continue
-            except ValueError:
-                pass
-
         entry = float(sig.get("entry") or 0)
         if entry <= 0:
             continue
@@ -65,7 +47,8 @@ async def trade_once(db, broker, notifier) -> dict:
             signal_id=sig.get("id"), source="auto",
         )
         if report.allowed:
-            db.update("signals", sig["id"], {"approval": "approved"})
+            db.update("signals", sig["id"],
+                      {"approval": "approved", "approved_at": now_iso()})
             fired += 1
         else:
             blocked += 1

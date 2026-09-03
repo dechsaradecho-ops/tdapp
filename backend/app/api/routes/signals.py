@@ -8,6 +8,11 @@ from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import FinalDecision, SignalProposal
 from app.services import execution
+from app.services.execution import (
+    SIGNAL_TTL_MIN,
+    expire_stale_pending_signals,
+    now_iso,
+)
 from app.services.notification_service import NotificationService
 
 from app.api.routes.market import DEMO
@@ -27,6 +32,12 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     engine = StrategyEngine()
     proposals: list[SignalProposal] = []
 
+    # Self-heal: pending signals older than 30 min leave the queue first —
+    # otherwise the page pins yesterday's entry prices (e.g. GBPUSD stuck
+    # at 1.26797 while the live rate is 1.35) in semi_auto/manual modes
+    # where the auto-trader never runs its expiry pass.
+    expire_stale_pending_signals(db)
+
     rows = db.select("signals", limit=20)
     # Only live candidates: pending (semi-auto queue) + approved (auto-fired).
     # 'expired'/'rejected' rows are history — showing them made the page look
@@ -34,8 +45,17 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     # as pending.
     rows = [r for r in rows
             if (r.get("approval") or "pending") in ("pending", "approved")]
+    # Pending signals past the TTL were already expired by the pass above;
+    # approved rows always stay visible — the user explicitly asked to see
+    # them at the bottom with an approval-time stamp (GBPUSD 1.26797 bug).
     if rows:
-        for r in rows[:5]:
+        # Pending first (waiting for action), then approved (already fired)
+        # newest-first so the newest approval is always the top card.
+        rows.sort(key=lambda r: (
+            (r.get("approval") or "pending") == "approved",
+            r.get("approved_at") or r.get("created_at") or "",
+        ))
+        for r in rows[:8]:
             entry = float(r["entry"] or 0)
             stop_loss = float(r["stop_loss"] or 0)
             sl_distance = abs(entry - stop_loss)
@@ -51,6 +71,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 reason=[r.get("explanation", "")],
                 recommendation=FinalDecision.trade,
                 limit_levels=ladder,
+                approval=r.get("approval") or "pending",
+                approved_at=r.get("approved_at"),
+                created_at=r.get("created_at"),
             ))
         return proposals
 
@@ -112,5 +135,8 @@ async def approve_signal(payload: ApprovalRequest, request: Request):
         db.update("signals", payload.signal_id, {"approval": "rejected"})
         return {"status": "blocked", "executed": False,
                 "rejects": report.rejects, "checks": report.checks}
+    # Approval stamp — shown on the signals page (010 migration).
+    db.update("signals", payload.signal_id,
+              {"approval": "approved", "approved_at": now_iso()})
     return {"status": "executed", "executed": True,
             "volume": report.size_lots, "checks": report.checks}

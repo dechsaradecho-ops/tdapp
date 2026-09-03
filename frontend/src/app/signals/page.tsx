@@ -105,9 +105,32 @@ export default function SignalsPage() {
       {!signals.length && !error && !loading && (
         <p className="text-slate-500 text-sm">ยังไม่มีสัญญาณ — รอ Market Scanner</p>
       )}
-      <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {signals.map((s) => <SignalCard key={s.asset} signal={s} />)}
-      </div>
+      {/* รออนุมัติ — action queue ด้านบน */}
+      {signals.some((s) => s.approval !== "approved") && (
+        <>
+          <h3 className="text-sm font-semibold text-slate-300">
+            รอการอนุมัติ ({signals.filter((s) => s.approval !== "approved").length})
+          </h3>
+          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {signals.filter((s) => s.approval !== "approved").map((s) => (
+              <SignalCard key={`${s.asset}-${s.approval ?? "pending"}`} signal={s} />
+            ))}
+          </div>
+        </>
+      )}
+      {/* อนุมัติแล้ว — แสดงด้านล่างพร้อมสแตมป์เวลาที่อนุมัติ */}
+      {signals.some((s) => s.approval === "approved") && (
+        <>
+          <h3 className="text-sm font-semibold text-profit">
+            อนุมัติแล้ว ({signals.filter((s) => s.approval === "approved").length})
+          </h3>
+          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {signals.filter((s) => s.approval === "approved").map((s) => (
+              <SignalCard key={`${s.asset}-${s.approved_at ?? "approved"}`} signal={s} />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
