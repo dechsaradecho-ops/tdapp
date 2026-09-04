@@ -128,6 +128,10 @@ export interface SignalProposal {
   approval?: string | null;
   approved_at?: string | null;
   created_at?: string | null;
+  // Set on pending cards that cannot become an order right now because a
+  // user limit is hit (open positions / daily / weekly) — the card shows the
+  // reason instead of the "ระบบจะยิงออเดอร์เอง" note.
+  order_blocked?: string | null;
   feed_status?: QuoteFeedStatus | null;
 }
 

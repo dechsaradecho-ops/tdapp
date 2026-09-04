@@ -286,7 +286,8 @@ class TestSignalsLatestTiers:
 
     @pytest.mark.asyncio
     async def test_approved_sorted_after_pending(self):
-        """Pending cards first (action queue), approved cards below them."""
+        """Approved cards render FIRST (oldest→newest page order, user request
+        2026-09-04): approved history above, pending action queue below."""
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={"signals": [
             {"id": "a1", "asset": "EURUSD", "direction": "buy",
@@ -301,10 +302,78 @@ class TestSignalsLatestTiers:
         ]})
         set_state(db)
         body = (await call("GET", "/api/signals/latest")).json()
-        assert [s["asset"] for s in body] == ["XAUUSD", "EURUSD"]
-        assert body[0]["approval"] == "pending"
-        assert body[1]["approval"] == "approved"
-        assert body[1]["approved_at"] is not None
+        assert [s["asset"] for s in body] == ["EURUSD", "XAUUSD"]
+        assert body[0]["approval"] == "approved"
+        assert body[0]["approved_at"] is not None
+        assert body[1]["approval"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_cards_sorted_oldest_to_newest(self):
+        """User request (2026-09-04): cards render oldest → newest. Approved
+        cards come first in approval order, pending cards follow oldest-first
+        — the newest setup is the LAST card on the page."""
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p2", "asset": "AUDUSD", "direction": "buy",
+             "confidence": 75.0, "entry": 0.72, "stop_loss": 0.71,
+             "take_profit": 0.74, "expected_rr": 2.0,
+             "approval": "pending",
+             "created_at": (now + timedelta(minutes=5)).isoformat()},
+            {"id": "a1", "asset": "EURUSD", "direction": "buy",
+             "confidence": 70.0, "entry": 1.16, "stop_loss": 1.15,
+             "take_profit": 1.18, "expected_rr": 2.0,
+             "approval": "approved", "created_at": now.isoformat(),
+             "approved_at": (now + timedelta(minutes=1)).isoformat()},
+            {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+             "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+             "take_profit": 2380.0, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()},
+            {"id": "a2", "asset": "GBPUSD", "direction": "buy",
+             "confidence": 72.0, "entry": 1.35, "stop_loss": 1.34,
+             "take_profit": 1.37, "expected_rr": 2.0,
+             "approval": "approved", "created_at": now.isoformat(),
+             "approved_at": (now + timedelta(minutes=3)).isoformat()},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert [s["asset"] for s in body] == [
+            "EURUSD", "GBPUSD",   # approved, oldest approval first
+            "XAUUSD", "AUDUSD",   # pending, oldest first
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pending_card_carries_order_blocked_note_at_limit(self):
+        """User request (2026-09-04): signals keep generating past the limits;
+        a pending card that cannot become an order right now must carry the
+        reason "ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว (...)"."""
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={
+            "signals": [
+                {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+                 "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+                 "take_profit": 2380.0, "expected_rr": 2.0,
+                 "approval": "pending", "created_at": now.isoformat()}],
+            "paper_trades": [
+                {"id": f"t{i}", "asset": "EURUSD", "status": "open",
+                 "created_at": now.isoformat()} for i in range(4)],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["order_blocked"], "limit hit must set order_blocked"
+        assert "limit" in body[0]["order_blocked"]
+
+    @pytest.mark.asyncio
+    async def test_pending_card_no_note_when_under_limits(self):
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+             "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+             "take_profit": 2380.0, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["order_blocked"] is None
 
 
 # ---------------------------------------------------------------------------

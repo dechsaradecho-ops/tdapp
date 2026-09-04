@@ -1,6 +1,8 @@
 """Signal generation + SEMI-AUTO approval endpoints."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -40,7 +42,6 @@ async def _feed_status_for(assets: list[str]) -> QuoteFeedStatus | None:
     except Exception as exc:  # fetch_spot_prices isolates per-asset errors;
         # this guard is for anything unexpected above it
         failures = {a: str(exc) for a in assets}
-    from datetime import datetime, timezone
     return QuoteFeedStatus(
         state="ok" if not failures else "error",
         source="exchangerate+yahoo",
@@ -77,15 +78,32 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     feed = await _feed_status_for(
         sorted({str(r.get("asset") or "").upper() for r in rows}))
     # Pending signals past the TTL were already expired by the pass above;
-    # approved rows always stay visible — the user explicitly asked to see
-    # them at the bottom with an approval-time stamp (GBPUSD 1.26797 bug).
+    # approved rows always stay visible. Cards render OLDEST → NEWEST (the
+    # user's requested order): approved cards first in approval order, then
+    # pending cards oldest-first so the newest setup is the last card.
     if rows:
-        # Pending first (waiting for action), then approved (already fired)
-        # newest-first so the newest approval is always the top card.
+        # OLDEST → NEWEST across the whole page (user request 2026-09-04):
+        # approved cards first in approval order (they are the older history),
+        # then pending cards oldest-first — the newest setup is the last card.
         rows.sort(key=lambda r: (
-            (r.get("approval") or "pending") == "approved",
+            (r.get("approval") or "pending") != "approved",
             r.get("approved_at") or r.get("created_at") or "",
         ))
+        # Read-time limit note — the scanner keeps generating signals all day
+        # even past the user's limits (limits gate ORDER EXECUTION, not signal
+        # generation), so pending cards that cannot fire right now carry the
+        # reason: "ไม่ได้เปิดออเดอร์เพราะถึง limit แล้ว".
+        open_count = len(db.select("paper_trades", filters={"status": "open"},
+                                   limit=100))
+        today = datetime.now(timezone.utc).date().isoformat()
+        todays = db.select("paper_trades", limit=500)
+        today_count = len([r for r in todays
+                           if str(r.get("created_at", ""))[:10] == today
+                           and r.get("status") != "rejected"])
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()[:10]
+        week_count = len([r for r in todays
+                          if str(r.get("created_at", "")) >= week_ago
+                          and r.get("status") != "rejected"])
         for r in rows[:8]:
             entry = float(r["entry"] or 0)
             stop_loss = float(r["stop_loss"] or 0)
@@ -94,6 +112,22 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 StrategyEngine.limit_ladder(r["direction"].upper(), entry, sl_distance)
                 if entry > 0 and sl_distance > 0 else []
             )
+            # Why this pending signal cannot become an order right now —
+            # limits only (quality/regime throttles are scanner-side).
+            order_block = ""
+            if (r.get("approval") or "pending") == "pending":
+                if open_count >= s.max_open_positions:
+                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
+                                   f"(open positions {open_count}/"
+                                   f"{s.max_open_positions})")
+                elif today_count >= s.max_trades_daily:
+                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
+                                   f"(วันนี้ {today_count}/"
+                                   f"{s.max_trades_daily})")
+                elif week_count >= s.max_trades_weekly:
+                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
+                                   f"(สัปดาห์นี้ {week_count}/"
+                                   f"{s.max_trades_weekly})")
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
@@ -106,6 +140,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 approval=r.get("approval") or "pending",
                 approved_at=r.get("approved_at"),
                 created_at=r.get("created_at"),
+                order_blocked=order_block or None,
                 feed_status=feed,
             ))
         return proposals

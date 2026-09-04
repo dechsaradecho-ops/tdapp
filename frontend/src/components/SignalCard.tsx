@@ -72,6 +72,11 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
             ).toLocaleString("th-TH")}
           </span>
         </div>
+      ) : signal.order_blocked ? (
+        // ถึง limit แล้ว — สัญญาณยัง generate ต่อทุกวัน แต่ยังไม่เปิดออเดอร์
+        <div className="mt-3 flex items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-400">
+          <span>⏸ {signal.order_blocked}</span>
+        </div>
       ) : isAuto ? (
         // โหมด auto — ไม่มีปุ่มให้กด: auto trader จะยิงเองผ่าน gate ทั้งหมด
         <div className="mt-3 flex items-center gap-2 rounded border border-accent/40 bg-accent/10 px-2 py-1.5 text-xs text-accent">

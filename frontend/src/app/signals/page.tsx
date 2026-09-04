@@ -84,6 +84,13 @@ export default function SignalsPage() {
       : "SEMI-AUTO — ข้อเสนอการเทรด (รอการอนุมัติ)";
   const pending = signals.filter((s) => s.approval !== "approved");
   const approved = signals.filter((s) => s.approval === "approved");
+  // เรียงเก่า → ใหม่ (ผู้ใช้ขอ): approved เรียงตามเวลาอนุมัติ/สร้างจากเก่าไปใหม่
+  // แล้ว pending ต่อท้ายแบบเดียวกัน — การ์ดใหม่ล่าสุดอยู่ท้ายสุดของหน้า
+  const byTime = (a: SignalProposal, b: SignalProposal) =>
+    String(a.approved_at ?? a.created_at ?? "")
+      .localeCompare(String(b.approved_at ?? b.created_at ?? ""));
+  approved.sort(byTime);
+  pending.sort(byTime);
 
   return (
     <div className="space-y-4">

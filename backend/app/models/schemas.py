@@ -142,6 +142,10 @@ class SignalProposal(BaseModel):
     approval: Optional[str] = None
     approved_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    # Read-time note on pending cards that cannot become an order right now
+    # because a user limit is hit (open positions / daily / weekly). Signals
+    # keep generating all day — limits gate execution, not generation.
+    order_blocked: Optional[str] = None
     # Live-price feed health for the page banner (set once per request, on
     # every card of the response — cards share the same fetch).
     feed_status: Optional[QuoteFeedStatus] = None

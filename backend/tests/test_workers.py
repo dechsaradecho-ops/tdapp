@@ -187,9 +187,12 @@ class TestMarketScanner:
         assert len(eurusd) == 1, "pending signal for EURUSD must suppress a duplicate"
 
     @pytest.mark.asyncio
-    async def test_no_signal_while_position_open(self, monkeypatch):
-        """Same runaway-loop class: an open position on the asset means the
-        move is already being ridden — no new signal for it until it closes."""
+    async def test_open_position_does_not_stop_signal_generation(self, monkeypatch):
+        """Regression (2026-09-04, user request): the first dedup fix also
+        suppressed signals for assets with an OPEN position — the page went
+        silent because all 3 main assets had open positions. Signals must keep
+        generating all day; the auto-trader's open-position gate is what
+        prevents duplicate orders, not the scanner."""
         db = FakeDatabase(rows={"paper_trades": [
             {"id": "p1", "asset": "EURUSD", "status": "open"}]})
 
@@ -200,7 +203,74 @@ class TestMarketScanner:
         await market_scanner.scan_once(db)
         emitted = [row for table, row in db.inserted
                    if table == "signals" and row["asset"] == "EURUSD"]
-        assert emitted == []
+        assert emitted, "open position must NOT stop signal generation"
+
+    @pytest.mark.asyncio
+    async def test_limit_hit_still_emits_signal(self, monkeypatch):
+        """Regression (2026-09-04, user request): hitting the daily limit must
+        NOT stop signal generation — limits gate ORDER EXECUTION only. The
+        card carries the block reason instead ("ไม่ได้เปิดออเดอร์เพราะถึง
+        limit แล้ว")."""
+        from datetime import datetime, timezone
+
+        from app.models.schemas import AppSettings
+
+        db = FakeDatabase()
+        today = datetime.now(timezone.utc).date().isoformat()
+        for i in range(3):  # 3 signals today, limit = 3 → limit hit
+            db.insert("signals", {"asset": "GBPUSD", "direction": "buy",
+                                  "confidence": 75.0,
+                                  "created_at": f"{today}T0{i}:00:00Z",
+                                  "approval": "approved"})
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(max_trades_daily=3))
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assert len(emitted) == len(market_scanner.SCAN_ASSETS), (
+            "daily limit reached must not stop signal generation")
+
+    @pytest.mark.asyncio
+    async def test_market_closed_generates_no_signals(self, monkeypatch):
+        """Weekend (Sat, or Sun before 21:00 UTC, or Fri after 21:00 UTC) →
+        no signals: entries would pin Friday's close all weekend (the
+        "ราคาเก่า" complaint)."""
+        from datetime import datetime, timezone
+
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        # Saturday 2026-09-05 12:00 UTC
+        monkeypatch.setattr(market_scanner, "_market_closed",
+                            lambda now=None: True)
+        await market_scanner.scan_once(db)
+        assert not [row for table, row in db.inserted if table == "signals"]
+        assert [row for table, row in db.inserted if table == "market_analysis"]
+
+    def test_market_closed_boundaries(self):
+        """Unit-check the weekend window: Fri 21:00 UTC → Sun 21:00 UTC."""
+        from datetime import datetime, timezone
+        # Fri 2026-09-04 20:59 UTC → open; 21:00 UTC → closed
+        assert market_scanner._market_closed(
+            datetime(2026, 9, 4, 20, 59, tzinfo=timezone.utc)) is False
+        assert market_scanner._market_closed(
+            datetime(2026, 9, 4, 21, 0, tzinfo=timezone.utc)) is True
+        # Sat any hour → closed
+        assert market_scanner._market_closed(
+            datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)) is True
+        # Sun 20:59 UTC → closed; 21:00 UTC → open again
+        assert market_scanner._market_closed(
+            datetime(2026, 9, 6, 20, 59, tzinfo=timezone.utc)) is True
+        assert market_scanner._market_closed(
+            datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc)) is False
 
     @pytest.mark.asyncio
     async def test_weak_setup_writes_no_signal(self, monkeypatch):

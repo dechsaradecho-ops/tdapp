@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.api.routes.settings import get_app_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
@@ -50,25 +50,28 @@ async def scan_once(db: Database) -> list[dict]:
         # Strong setups produce a signal (SEMI-AUTO approval flow)
         # Signal quality filter: confidence < 70 => NO TRADE (spec)
         if opp.score >= 70:
-            # Dedup guard — a strong regime persists for hours, so without this
-            # the scanner re-emits the SAME setup every cycle (every ~4 min).
-            # The auto-trader then fires each duplicate and the account fills
-            # with stacked positions on one asset (14 open on 3 assets,
-            # 2026-09-04). Skip when the asset already has a pending signal
-            # awaiting action OR an open position riding the move.
-            open_assets = {
-                str(r.get("asset") or "").upper()
-                for r in db.select("paper_trades", filters={"status": "open"},
-                                   limit=200)
-            }
+            # Market-closed guard — FX/gold trade Sun 21:00 UTC → Fri 21:00
+            # UTC. Emitting signals into a closed market would pin entries at
+            # Friday's close for the whole weekend (the "ราคาเก่า" complaint).
+            if _market_closed():
+                results[-1]["market_closed"] = True
+                continue
+
+            # Pending-dedup guard — a strong regime persists for hours, so
+            # without this the scanner re-emits the SAME setup every cycle
+            # (~4 min) and the queue floods with identical cards. Skip only
+            # while a pending signal for the asset is still awaiting action.
+            # NOTE: an OPEN position does NOT suppress signals — the user
+            # wants the page to keep generating all day; the auto-trader's
+            # open-position gate is what prevents duplicate orders.
             pending_assets = {
                 str(r.get("asset") or "").upper()
                 for r in db.select("signals", filters={"approval": "pending"},
                                    limit=200)
             }
-            if asset in open_assets or asset in pending_assets:
-                log.info("Signal for %s skipped: pending signal or open "
-                         "position already exists for this asset", asset)
+            if asset in pending_assets:
+                log.info("Signal for %s skipped: pending signal already "
+                         "awaiting action for this asset", asset)
                 results[-1]["dedup_skipped"] = True
                 continue
 
@@ -93,10 +96,12 @@ async def scan_once(db: Database) -> list[dict]:
             ).evaluate(
                 confidence=opp.score, trades_today=today_count,
                 regime=regime_of(ind), volatility_index=ind.volatility_index)
-            if not freq.allowed:
-                log.info("Signal for %s throttled by frequency engine: %s", asset, freq.reason)
-                results[-1]["frequency_blocked"] = freq.reason
-                continue
+            # LIMITS DO NOT STOP SIGNAL GENERATION — they only stop ORDER
+            # EXECUTION (the auto-trader/approve gate enforces them). The
+            # signals page must keep generating cards all day so the user
+            # always sees what the strategy WOULD trade; blocked cards carry
+            # the reason ("ไม่ได้เปิดออเดอร์เพราะถึง limit") instead.
+            blocked_reason = "" if freq.allowed else freq.reason
 
             bullish = ind.ema_fast > ind.ema_slow
             proposal = engine.build_proposal(
@@ -112,6 +117,25 @@ async def scan_once(db: Database) -> list[dict]:
 
     log.info("Scan done: %d live, %d demo", live_used, demo_used)
     return results
+
+
+def _market_closed(now: datetime | None = None) -> bool:
+    """True when the FX/gold market is closed (weekend).
+
+    FX & gold trade continuously from Sunday 21:00 UTC to Friday 21:00 UTC
+    (Friday close rolls into Saturday 00:00 UTC). Signals emitted during the
+    weekend would carry Friday's close price all weekend — the "ราคาเก่า"
+    complaint — so the scanner simply stops generating until reopen.
+    """
+    now = now or datetime.now(timezone.utc)
+    wd, h = now.weekday(), now.hour
+    if wd == 5:                      # Saturday
+        return True
+    if wd == 6 and h < 21:           # Sunday before 21:00 UTC reopen
+        return True
+    if wd == 4 and h >= 21:          # Friday after 21:00 UTC close
+        return True
+    return False
 
 
 async def _snapshot_for(asset: str, news_sentiment: float) -> IndicatorSnapshot:
