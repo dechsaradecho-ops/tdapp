@@ -1,6 +1,8 @@
 """AI Chat Assistant endpoint — answers grounded in engine outputs."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
@@ -13,15 +15,16 @@ from app.integrations import quotes
 from app.api.routes.settings import get_app_settings
 from app.models.schemas import GoalInput
 from app.api.routes.market import DEMO as market_demo
+from app.services.execution import monitor_snapshot
 
 router = APIRouter()
 
 
 @router.post("", response_model=ChatResponse)
 async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
-    """Every reply is grounded in real Market Condition / Risk / Opportunity / Portfolio status."""
+    """Every reply is grounded in real Market Condition / Risk / Orders / Portfolio status."""
     db = request.app.state.db
-    context = await _build_context(db)
+    context = await _build_context(db, request.app.state.broker)
 
     provider = get_ai_provider()
     messages = [m.model_dump() for m in payload.messages]
@@ -30,7 +33,8 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     reply = await provider.chat(messages)
     return ChatResponse(
         reply=reply,
-        grounded_on=["market_condition", "risk_analysis", "opportunity_score", "portfolio_status"],
+        grounded_on=["market_condition", "risk_analysis", "opportunity_score",
+                     "portfolio_status", "open_orders", "recent_orders"],
     )
 
 
@@ -49,7 +53,7 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
         try:
             messages = [m.model_dump() for m in payload.messages]
             # context is built once here (DB + engines are fast); tokens stream after
-            ctx = await _build_context(db)
+            ctx = await _build_context(db, request.app.state.broker)
             messages[-1] = {"role": "user", "content": f"{messages[-1]['content']}\n\n{ctx}"}
             provider = get_ai_provider()
             async for piece in provider.chat_stream(messages):
@@ -64,7 +68,7 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
     )
 
 
-async def _build_context(db) -> str:
+async def _build_context(db, broker=None) -> str:
     """Shared grounded-context block for both /api/chat and /api/chat/stream."""
     engine = StrategyEngine()
 
@@ -113,16 +117,65 @@ async def _build_context(db) -> str:
         capital=cap, target_return_pct=3.0,
         max_drawdown_pct=s.max_drawdown_pct, risk_profile=s.risk_profile,
     ))
+
+    # ---- REAL portfolio + orders (monitor snapshot — same data the dashboard shows) ----
+    # Fail-safe: a broken broker/DB degrades to zeros, never raises.
+    snap = None
+    try:
+        snap = await monitor_snapshot(db, broker, s)
+    except Exception:
+        snap = None
+    st = snap.stats if snap else None
+    open_pos = snap.open_positions if snap else []
+    recent = snap.recent if snap else []
+
+    def _fmt_pos(p) -> str:
+        return (f"{p.asset} {p.direction} {p.volume} lot @ {p.entry_price:.5g} "
+                f"mark {p.current_price:.5g} uPnL {p.unrealized_pnl:+.2f} "
+                f"SL {p.stop_loss if p.stop_loss is not None else '-'} "
+                f"TP {p.take_profit if p.take_profit is not None else '-'} "
+                f"[{p.source}]")
+
+    def _fmt_trade(t) -> str:
+        pnl = f"{t.pnl:+.2f}" if t.pnl is not None else "-"
+        return (f"{t.asset} {t.direction} {t.volume} lot entry {t.entry_price:.5g} "
+                f"exit {t.exit_price if t.exit_price is not None else '-'} "
+                f"pnl {pnl} [{t.status}/{t.close_reason or '-'}]")
+
+    open_orders_str = ("; ".join(_fmt_pos(p) for p in open_pos)
+                       if open_pos else "none (no open positions)")
+    recent_orders_str = ("; ".join(_fmt_trade(t) for t in recent[:10])
+                         if recent else "none (no orders yet)")
+
+    # Realized PnL from closed trades (real, not the old hardcoded demo values)
+    pnl_today = st.pnl_today if st else 0.0
+    pnl_week = st.pnl_week if st else 0.0
+    pnl_total = st.pnl_total if st else 0.0
+    unrealized_total = round(sum(p.unrealized_pnl for p in open_pos), 2)
+    equity = round(cap + pnl_total + unrealized_total, 2)
+
     risk = RiskEngine().check(PortfolioSnapshot(
-        starting_capital=cap, peak_equity=cap * 1.02, current_equity=cap * 1.012,
-        realized_pnl_today=-cap * 0.0012, realized_pnl_week=cap * 0.003,
-        realized_pnl_month=cap * 0.012, open_risk=cap * 0.005,
+        starting_capital=cap, peak_equity=max(cap, equity), current_equity=equity,
+        realized_pnl_today=pnl_today, realized_pnl_week=pnl_week,
+        realized_pnl_month=pnl_total, open_risk=cap * 0.005,
     ))
+
+    portfolio_status = (
+        f"capital={cap:.2f}, realized_pnl_total={pnl_total:+.2f}, "
+        f"unrealized_pnl_open={unrealized_total:+.2f}, equity={equity:.2f}, "
+        f"pnl_today={pnl_today:+.2f}, pnl_week={pnl_week:+.2f}, "
+        f"win_rate={st.win_rate if st else 0.0}%, closed_trades={st.closed_count if st else 0}, "
+        f"open_positions={len(open_pos)}, "
+        f"goal_probability={goal.probability.value}, "
+        f"normal_case={goal.scenarios[1].expected_return_pct}%"
+    )
 
     return build_context_block({
         "market_condition": f"{regime_str} (score {regime_confidence:.0f}%), "
                             f"top asset {top_asset}",
         "opportunity_score": opportunity_str,
         "risk_analysis": risk.model_dump(),
-        "portfolio_status": f"goal_probability={goal.probability.value}, normal_case={goal.scenarios[1].expected_return_pct}%",
+        "portfolio_status": portfolio_status,
+        "open_orders": open_orders_str,
+        "recent_orders": recent_orders_str,
     })

@@ -116,6 +116,11 @@ export default function MonitorPage() {
   };
 
   const st = snap?.stats;
+  // ยอดรวม PnL ทั้งหมด = realized (ไม้ที่ปิดแล้ว) + unrealized (ไม้ที่เปิดค้าง)
+  const unrealizedTotal = snap
+    ? snap.open_positions.reduce((sum, p) => sum + p.unrealized_pnl, 0)
+    : 0;
+  const totalPnl = (st?.pnl_total ?? 0) + unrealizedTotal;
 
   return (
     <div className="space-y-4">
@@ -176,7 +181,7 @@ export default function MonitorPage() {
             {resetMsg}
           </p>
         )}
-        <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
           <div className="panel">
             <p className="text-xs text-slate-500">เทรดวันนี้</p>
             <p className="text-xl font-bold">{st?.trades_today ?? "-"}</p>
@@ -192,6 +197,17 @@ export default function MonitorPage() {
           <div className="panel">
             <p className="text-xs text-slate-500">PnL รวม (ปิดแล้ว)</p>
             <PnlText v={st?.pnl_total} />
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">PnL ไม้ค้าง (ยังไม่ปิด)</p>
+            <PnlText v={snap ? unrealizedTotal : undefined} />
+          </div>
+          <div className={`panel ${snap ? (totalPnl >= 0 ? "border-profit/50" : "border-loss/50") : ""}`}>
+            <p className="text-xs text-slate-500">💰 ยอดรวม PnL สุทธิ</p>
+            <PnlText v={snap ? totalPnl : undefined} />
+            <p className="text-xs text-slate-500">
+              ปิดแล้ว {st ? `${st.pnl_total >= 0 ? "+" : ""}$${fmtNum(st.pnl_total, 2)}` : "-"} + ค้าง {snap ? `${unrealizedTotal >= 0 ? "+" : ""}$${fmtNum(unrealizedTotal, 2)}` : "-"}
+            </p>
           </div>
           <div className="panel">
             <p className="text-xs text-slate-500">Win Rate</p>
@@ -289,6 +305,13 @@ export default function MonitorPage() {
                     </td>
                   </tr>
                 ))}
+                <tr className="border-t-2 border-slate-700 font-bold">
+                  <td className="py-2 pr-4" colSpan={7}>รวม uPnL ({snap.open_positions.length} ไม้)</td>
+                  <td className={`py-2 pr-4 ${unrealizedTotal >= 0 ? "text-profit" : "text-loss"}`}>
+                    {unrealizedTotal >= 0 ? "+" : ""}${fmtNum(unrealizedTotal, 2)}
+                  </td>
+                  <td colSpan={3} />
+                </tr>
               </tbody>
             </table>
           </div>
