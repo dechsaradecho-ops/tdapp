@@ -114,6 +114,28 @@ def test_risk_to_lot_math():
     assert risk_to_lot(10_000, 1.0, 0.0100) == pytest.approx(0.1, abs=0.01)
 
 
+# -------------------------------------------------------- paper PnL math
+def test_paper_pnl_xauusd_uses_gold_contract():
+    """XAUUSD 0.01 lot ต่างราคา 0.2 → PnL ต้องเป็น -0.20 (100 oz/lot)
+    ไม่ใช่ -200 (FX 100k) — monitor เคยแสดง $-200 เพราะ SimpleNamespace
+    ไม่ส่ง asset เข้า PaperBrokerPnl.compute (bug 2026-09-04)."""
+    from types import SimpleNamespace
+    from app.services.execution import PaperBrokerPnl
+    pos = SimpleNamespace(direction="BUY", current_price=4521.5,
+                          entry_price=4521.7, volume=0.01, asset="XAUUSD")
+    assert PaperBrokerPnl.compute(pos) == pytest.approx(-0.20, abs=0.01)
+
+
+def test_paper_pnl_fx_uses_100k_contract():
+    """FX 0.01 lot ต่างราคา 0.0010 (10 pips) → PnL = 1.00
+    (0.001 × 0.01 lot × 100,000 = 1.0; floating point → abs=0.1)"""
+    from types import SimpleNamespace
+    from app.services.execution import PaperBrokerPnl
+    pos = SimpleNamespace(direction="BUY", current_price=1.1637,
+                          entry_price=1.1627, volume=0.01, asset="EURUSD")
+    assert PaperBrokerPnl.compute(pos) == pytest.approx(1.0, abs=0.1)
+
+
 # -------------------------------------------------------- correlation/exposure
 def test_correlation_forex_cluster_scores_high():
     score = CorrelationEngine().portfolio_correlation(["EURUSD", "GBPUSD", "AUDUSD"])

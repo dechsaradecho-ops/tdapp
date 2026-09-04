@@ -615,11 +615,14 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     for r in open_rows:
         mark = mark_for(r)
         entry = float(r.get("entry_price") or 0)
+        # asset ต้องส่งเข้าไปด้วย — ไม่งั้น PaperBrokerPnl ใช้ FX contract
+        # 100,000 กับ XAUUSD (ควรเป็น 100 oz) → uPnL ผิด 1,000 เท่า
         unrealized = round(PaperBrokerPnl.compute(SimpleNamespace(
             direction=str(r["direction"]).upper(),
             current_price=mark,
             entry_price=entry,
-            volume=float(r.get("volume") or 0))), 2)
+            volume=float(r.get("volume") or 0),
+            asset=str(r.get("asset") or ""))), 2)
         open_positions.append(MonitorOpenPosition(
             id=str(r.get("id")), ticket=str(r.get("ticket") or ""),
             asset=r["asset"], direction=str(r["direction"]).upper(),
