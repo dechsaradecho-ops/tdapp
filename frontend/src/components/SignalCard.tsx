@@ -16,6 +16,11 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
   const [approving, setApproving] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const isAuto = orderMode === "auto";
+  // % gap between the live market price and the card's entry — positive
+  // means the market has moved UP past the entry (entry is stale/behind).
+  const liveDeltaPct = signal.live_price && signal.entry > 0
+    ? (signal.live_price - signal.entry) / signal.entry * 100
+    : 0;
 
   const decide = async (approve: boolean) => {
     setApproving(true);
@@ -55,6 +60,20 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         <Field label="Stop Loss" value={fmtNum(signal.stop_loss, 5)} />
         <Field label="Take Profit" value={fmtNum(signal.take_profit, 5)} />
       </div>
+      {signal.live_price != null && signal.live_price > 0 && (
+        // ราคาตลาดปัจจุบัน (spot feed) เทียบกับ entry บนการ์ด — ถ้า entry
+        // ห่างจากราคาสดมาก ผู้ใช้เห็นทันทีว่า entry เป็นราคาเก่า (daily close)
+        // แทนที่จะดูเหมือนราคาปัจจุบัน
+        <div className="mb-2 flex items-center gap-2 rounded border border-accent/30 bg-accent/5 px-2 py-1 text-xs">
+          <span className="text-slate-400">ราคาตลาดตอนนี้</span>
+          <span className="font-semibold text-accent">{fmtNum(signal.live_price, 5)}</span>
+          {signal.entry > 0 && (
+            <span className={liveDeltaPct >= 0 ? "text-profit" : "text-loss"}>
+              {liveDeltaPct >= 0 ? "▲" : "▼"} {Math.abs(liveDeltaPct).toFixed(2)}%
+            </span>
+          )}
+        </div>
+      )}
       <LimitLevels signal={signal} />
       <details className="text-sm">
         <summary className="cursor-pointer text-accent">Reason ({signal.reason.length})</summary>

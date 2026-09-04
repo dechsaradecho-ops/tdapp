@@ -146,6 +146,11 @@ class SignalProposal(BaseModel):
     # because a user limit is hit (open positions / daily / weekly). Signals
     # keep generating all day — limits gate execution, not generation.
     order_blocked: Optional[str] = None
+    # CURRENT market price for this card's asset from the intraday spot feed
+    # (None when the feed failed). Rendered next to the entry so a stale
+    # entry (daily-close anchor) is visible at a glance — the "ราคาเก่า"
+    # complaint was entries that LOOKED like live quotes.
+    live_price: Optional[float] = None
     # Live-price feed health for the page banner (set once per request, on
     # every card of the response — cards share the same fetch).
     feed_status: Optional[QuoteFeedStatus] = None

@@ -375,6 +375,52 @@ class TestSignalsLatestTiers:
         body = (await call("GET", "/api/signals/latest")).json()
         assert body[0]["order_blocked"] is None
 
+    @pytest.mark.asyncio
+    async def test_card_carries_live_price_from_spot_feed(self, monkeypatch):
+        """Regression (2026-09-04, "ราคาเก่า"): entries are anchored at the
+        daily-close snapshot, so a card can look like a live quote while the
+        market has moved. Every card must carry the CURRENT spot price
+        (live_price) so the UI can show the gap next to the entry."""
+        import app.api.routes.signals as signals_route
+
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+             "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+             "take_profit": 2380.0, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"XAUUSD": 4517.0}, {}
+
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", fake_spot)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["live_price"] == 4517.0
+        assert body[0]["feed_status"]["state"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_card_live_price_none_when_feed_fails(self, monkeypatch):
+        import app.api.routes.signals as signals_route
+
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+             "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+             "take_profit": 2380.0, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+
+        async def dead_spot(assets, **_kw):
+            return {}, {"XAUUSD": "timeout"}
+
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", dead_spot)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["live_price"] is None
+        assert body[0]["feed_status"]["state"] == "error"
+
 
 # ---------------------------------------------------------------------------
 # /api/signals/approve — write path

@@ -51,6 +51,24 @@ async def _feed_status_for(assets: list[str]) -> QuoteFeedStatus | None:
     )
 
 
+async def _live_prices(assets: list[str]) -> tuple[dict[str, float], QuoteFeedStatus | None]:
+    """Spot prices + feed health in one probe (prices feed the cards' live_price)."""
+    if not assets:
+        return {}, None
+    try:
+        prices, failures = await quotes.fetch_spot_prices(assets)
+    except Exception as exc:
+        prices, failures = {}, {a: str(exc) for a in assets}
+    status = QuoteFeedStatus(
+        state="ok" if not failures else "error",
+        source="exchangerate+yahoo",
+        fetched_at=datetime.now(timezone.utc),
+        failed_assets=sorted(failures),
+        message="; ".join(failures[a] for a in sorted(failures))[:300],
+    )
+    return prices, status
+
+
 @router.get("/latest", response_model=list[SignalProposal])
 async def latest_signals(request: Request) -> list[SignalProposal]:
     """Build explainable proposals from the latest opportunity snapshot."""
@@ -74,8 +92,11 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     # as pending.
     rows = [r for r in rows
             if (r.get("approval") or "pending") in ("pending", "approved")]
-    # Feed health probe (shared by every card below) — non-fatal.
-    feed = await _feed_status_for(
+    # Feed health probe + live spot prices (shared by every card below) —
+    # non-fatal. live_price lets each card show the CURRENT market price
+    # next to its entry, so a stale entry is visible at a glance instead of
+    # silently looking like a fresh quote.
+    live_prices, feed = await _live_prices(
         sorted({str(r.get("asset") or "").upper() for r in rows}))
     # Pending signals past the TTL were already expired by the pass above;
     # approved rows always stay visible. Cards render OLDEST → NEWEST (the
@@ -141,6 +162,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 approved_at=r.get("approved_at"),
                 created_at=r.get("created_at"),
                 order_blocked=order_block or None,
+                live_price=live_prices.get(str(r["asset"]).upper()),
                 feed_status=feed,
             ))
         return proposals

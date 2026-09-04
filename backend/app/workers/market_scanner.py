@@ -107,6 +107,30 @@ async def scan_once(db: Database) -> list[dict]:
             proposal = engine.build_proposal(
                 ind, opp, risk_per_trade_pct=settings.risk_per_trade_pct,
                 regime_bullish=bullish)
+            # Re-anchor the proposal at the LIVE spot price before persisting.
+            # ind.price comes from fetch_all_snapshots (Frankfurter daily ECB
+            # closes + TwelveData gold) — one close per business day — so a
+            # card created at 10:00 would carry the SAME price as one created
+            # at 20:00 ("ราคาเก่า" on the signals page). The intraday spot
+            # feed (Yahoo) is the freshest price we have; when it fails we
+            # keep the snapshot price rather than guessing.
+            try:
+                spot, _spot_fail = await quotes.fetch_spot_prices([asset])
+                live_price = float(spot.get(asset) or 0)
+            except Exception as exc:
+                log.warning("spot re-anchor failed for %s: %s", asset, exc)
+                live_price = 0.0
+            if live_price > 0 and live_price != ind.price:
+                shift = live_price / ind.price
+                proposal = proposal.model_copy(update={
+                    "entry": round(live_price, 5),
+                    "stop_loss": round(proposal.stop_loss * shift, 5),
+                    "take_profit": round(proposal.take_profit * shift, 5),
+                    "limit_levels": [
+                        lv.model_copy(update={"price": round(lv.price * shift, 5)})
+                        for lv in proposal.limit_levels
+                    ],
+                })
             db.insert("signals", {
                 "asset": asset, "direction": proposal.direction.lower(),
                 "confidence": proposal.confidence, "opportunity_score": opp.score,

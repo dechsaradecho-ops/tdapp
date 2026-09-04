@@ -539,13 +539,22 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         )
 
     def mark_for(row: dict) -> float:
-        """Resolve the best mark: broker ticket mark → live feed → entry."""
+        """Resolve the best mark: live feed → broker book → entry.
+
+        Priority matters: the PaperBroker book is in-memory and rehydrate
+        seeds it with current_price == entry, so after every deploy the book
+        pins marks at the entry price until the guard's first tick. Ticket
+        marks used to win, which showed uPnL 0.00 for every position right
+        after a restart even while the live feed was healthy. The live spot
+        feed is the real market — it wins; the broker book is only a
+        fallback for assets the feed doesn't cover.
+        """
         ticket = str(row.get("ticket") or "")
         asset = "asset:" + str(row.get("asset") or "").upper()
-        if ticket in marks:
-            return marks[ticket]
         if asset in marks:
             return marks[asset]
+        if ticket in marks:
+            return marks[ticket]
         return float(row.get("entry_price") or 0)  # unknown → flat PnL, no guess
 
     open_positions = []

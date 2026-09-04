@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 
+from types import SimpleNamespace
+
 import pytest
 
-from app.workers import market_scanner, news_analysis
+from app.workers import market_scanner, news_analysis, position_guard
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +94,14 @@ def choppy_snapshot(asset: str, news_sentiment: float = 0.0):
 
 
 class TestMarketScanner:
+    @pytest.fixture(autouse=True)
+    def _no_network_spot(self, monkeypatch):
+        """The emit block re-anchors entries at the live spot price — patch
+        the feed so tests stay offline and deterministic."""
+        async def fake_spot(assets, **_kw):
+            return {a: 101.0 for a in assets}, {}
+        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", fake_spot)
+
     @pytest.mark.asyncio
     async def test_scan_persists_market_analysis_for_all_assets(self, monkeypatch):
         db = FakeDatabase()
@@ -273,6 +283,56 @@ class TestMarketScanner:
             datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc)) is False
 
     @pytest.mark.asyncio
+    async def test_signal_entry_anchored_to_live_spot(self, monkeypatch):
+        """Regression (2026-09-04, "ราคาเก่า" on signals): ind.price comes from
+        fetch_all_snapshots (Frankfurter daily ECB closes + TwelveData gold) —
+        ONE close per business day — so every card created that day carried the
+        same stale price. The scanner must re-anchor entry/SL/TP at the live
+        intraday spot price before persisting."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)  # price=100.0
+
+        async def live_spot(assets, **_kw):
+            return {a: 102.5 for a in assets}, {}
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", live_spot)
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assert emitted, "strong setup must emit"
+        for row in emitted:
+            assert row["entry"] == 102.5, (
+                "entry must be re-anchored at the live spot price, not the "
+                "daily-close snapshot price")
+            # SL/TP shift proportionally with the entry (same distances)
+            assert row["stop_loss"] < row["entry"] < row["take_profit"]
+
+    @pytest.mark.asyncio
+    async def test_signal_entry_keeps_snapshot_price_when_spot_fails(self, monkeypatch):
+        """Spot feed failure must NOT zero/garbage the entry — fall back to the
+        snapshot price (better than nothing) and still emit."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)  # price=100.0
+
+        async def dead_spot(assets, **_kw):
+            raise RuntimeError("feed down")
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", dead_spot)
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assert emitted
+        for row in emitted:
+            assert row["entry"] == 100.0, (
+                "spot failure must keep the snapshot price as entry")
+
+    @pytest.mark.asyncio
     async def test_weak_setup_writes_no_signal(self, monkeypatch):
         """Choppy market → no signal rows, but market_analysis still written."""
         db = FakeDatabase()
@@ -424,3 +484,143 @@ class TestNewsAnalysis:
                             lambda: SimpleProvider("stub"))
         result = await news_analysis.analyze_once(db)  # must not raise
         assert result["event"] in news_analysis.EVENT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Position guard — live marks beat the (possibly frozen) broker book
+# ---------------------------------------------------------------------------
+class _AsyncList:
+    """Awaitable list — mirrors the async Broker.all_positions contract."""
+
+    def __init__(self, items):
+        self._items = items
+
+    def __await__(self):
+        async def _coro():
+            return self._items
+        return _coro().__await__()
+
+
+class _AsyncFloat:
+    """Awaitable float — mirrors the async Broker.mark_price/quote contract."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def __await__(self):
+        async def _coro():
+            return self._value
+        return _coro().__await__()
+
+
+class _AsyncClosed:
+    ok = True
+    message = "closed"
+
+    def __await__(self):
+        async def _coro():
+            return self
+        return _coro().__await__()
+
+
+class _AsyncClosedWith:
+    """Awaitable close result that records the ticket (close spy)."""
+
+    def __init__(self, sink: list, ticket: str):
+        self._sink, self._ticket = sink, ticket
+
+    def __await__(self):
+        async def _coro():
+            self._sink.append(self._ticket)
+            return _AsyncClosed()
+        return _coro().__await__()
+
+
+class TestPositionGuard:
+    @pytest.fixture(autouse=True)
+    def _no_network_spot(self, monkeypatch):
+        async def fake_spot(assets, **_kw):
+            return {a: 1.2500 for a in assets}, {}
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+
+    def _broker_with(self, asset="EURUSD", entry=1.1000, sl=None, tp=None):
+        from app.integrations.brokers import Position
+        broker = SimpleNamespace()
+        broker._positions = {"T1": Position(
+            ticket="T1", user_id="u1", asset=asset, direction="BUY",
+            volume=0.01, entry_price=entry, stop_loss=sl, take_profit=tp,
+            current_price=entry)}  # rehydrate seeds current_price == entry
+        broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+        broker.mark_price = lambda ticket: _AsyncFloat(broker._positions.get(
+            ticket, Position(ticket="", user_id="", asset="", direction="BUY",
+                             volume=0, entry_price=0)).current_price)
+        broker.quote = lambda asset: _AsyncFloat(0.0)
+        broker.close_position = lambda ticket: _AsyncClosed()
+        return broker
+
+    @pytest.mark.asyncio
+    async def test_live_mark_beats_frozen_book(self, monkeypatch):
+        """Regression (2026-09-04, "ราคาเก่า" on monitor): after a deploy the
+        rehydrated book pins current_price == entry, and the monitor's
+        mark_for preferred ticket marks → every position showed uPnL 0.00
+        while the feed was healthy. The guard must mark positions at the
+        LIVE feed price, not the frozen book value."""
+        from app.workers import position_guard
+
+        class Notifier:
+            async def notify(self, *a, **k):
+                return None
+
+        broker = self._broker_with(entry=1.1000)  # book frozen at entry
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.1000}]})
+        summary = await position_guard.guard_once(
+            db, broker, Notifier())
+        assert summary["checked"] == 1
+        # live spot 1.2500 (fixture) must overwrite the frozen book value
+        assert broker._positions["T1"].current_price == 1.2500
+
+    @pytest.mark.asyncio
+    async def test_tp_breach_closes_at_live_price(self):
+        """The original guard bug: TP already breached but the book never
+        ticked → position sat open forever. With live marks the TP fires."""
+        from app.workers import position_guard
+
+        closed: list[str] = []
+
+        class Notifier:
+            async def notify(self, *a, **k):
+                return None
+
+        broker = self._broker_with(entry=1.1000, tp=1.2000)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.1000,
+             "take_profit": 1.2000}]})
+        summary = await position_guard.guard_once(db, broker, Notifier())
+        assert summary["closed"] == 1 and closed == ["T1"]
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_seeds_entry_price(self):
+        """Rehydrate rebuilds the book from open paper_trades rows with
+        current_price == entry (the guard's live marks then take over)."""
+        from app.workers import position_guard
+
+        class BookBroker:
+            def __init__(self):
+                self._positions = {}
+                self._seq = 0
+
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "PAPER-000007", "asset": "EURUSD",
+             "status": "open", "direction": "buy", "volume": 0.01,
+             "entry_price": 1.1615, "user_id": "u1"}]})
+        broker = BookBroker()
+        restored = await position_guard.rehydrate_book(db, broker)
+        assert restored == 1
+        pos = broker._positions["PAPER-000007"]
+        assert pos.entry_price == 1.1615
+        assert pos.current_price == 1.1615  # seeded at entry; guard ticks it
+        assert broker._seq == 7  # sequence walked past restored tickets

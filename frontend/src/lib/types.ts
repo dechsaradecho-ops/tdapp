@@ -132,6 +132,9 @@ export interface SignalProposal {
   // user limit is hit (open positions / daily / weekly) — the card shows the
   // reason instead of the "ระบบจะยิงออเดอร์เอง" note.
   order_blocked?: string | null;
+  // CURRENT market price for this card's asset (intraday spot feed) — lets
+  // the card show live price next to entry so a stale entry is obvious.
+  live_price?: number | null;
   feed_status?: QuoteFeedStatus | null;
 }
 
