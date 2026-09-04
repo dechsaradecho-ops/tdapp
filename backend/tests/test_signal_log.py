@@ -75,6 +75,58 @@ class TestLogEvent:
 
 
 # ---------------------------------------------------------------------------
+# order_blocked dedup — auto-trader re-evaluates the same pending signal every
+# minute; without dedup each cycle appends an identical ⛔ row to signal-logs.
+# ---------------------------------------------------------------------------
+class TestOrderBlockedDedup:
+    def test_first_block_logs_second_skipped(self):
+        db = FakeDatabase()
+        signal_log.log_event(db=db, event="order_blocked", signal_id="s1",
+                             asset="XAUUSD", reason="risk officer veto")
+        signal_log.log_event(db=db, event="order_blocked", signal_id="s1",
+                             asset="XAUUSD", reason="risk officer veto")
+        blocked = [row for table, row in db.inserted
+                   if table == "signal_logs" and row["event"] == "order_blocked"]
+        assert len(blocked) == 1, "same signal blocked twice → one ⛔ row only"
+
+    def test_different_signals_both_logged(self):
+        db = FakeDatabase()
+        signal_log.log_event(db=db, event="order_blocked", signal_id="s1")
+        signal_log.log_event(db=db, event="order_blocked", signal_id="s2")
+        assert len(db.inserted) == 2
+
+    def test_empty_signal_id_always_logged(self):
+        db = FakeDatabase()
+        signal_log.log_event(db=db, event="order_blocked", signal_id="")
+        signal_log.log_event(db=db, event="order_blocked", signal_id="")
+        assert len(db.inserted) == 2
+
+    def test_other_events_not_deduped(self):
+        db = FakeDatabase()
+        signal_log.log_event(db=db, event="created", signal_id="s1")
+        signal_log.log_event(db=db, event="created", signal_id="s1")
+        assert len(db.inserted) == 2
+
+    def test_dedup_check_failure_still_logs(self):
+        class FlakySelect(FakeDatabase):
+            def select(self, *a, **k):
+                raise RuntimeError("select down")
+
+        db = FlakySelect()
+        signal_log.log_event(db=db, event="order_blocked", signal_id="s1")
+        assert len(db.inserted) == 1, "dedup probe failing must not swallow the log"
+
+    def test_dedup_matches_real_auto_trader_flow(self):
+        """Simulate 3 auto-trader cycles on one blocked pending signal."""
+        db = FakeDatabase()
+        for _ in range(3):
+            signal_log.log_event(db=db, event="order_blocked",
+                                 signal_id="sig-xau-1", asset="XAUUSD",
+                                 reason="Reject Trade: confidence 66 < 70")
+        assert len(db.inserted) == 1
+
+
+# ---------------------------------------------------------------------------
 # TTL purge — FakeDatabase has no delete_before → per-row fallback path
 # ---------------------------------------------------------------------------
 class TestPurge:

@@ -166,6 +166,33 @@ class TestGatePipeline:
         assert journal[0]["ticket"] == "PAPER-000001"
 
     @pytest.mark.asyncio
+    async def test_gold_confidence_override_reaches_risk_officer(self, broker, notifier):
+        """Regression: XAUUSD 65.8% passed the scanner (Min Confidence (gold)
+        = 60) but Gate 5's RiskOfficer vetoed it with a hardcoded 'confidence
+        65 < 70'. The officer must use the same effective threshold."""
+        db = FakeDatabase()
+        s = clean_settings(min_confidence_gold=60.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2390.0, take_profit=2420.0,
+            confidence=65.8, opportunity=65.0, signal_id="sig-gold", source="auto",
+        )
+        assert report.allowed, report.rejects
+        assert len(broker.orders) == 1
+        # and the same confidence on the base bar still blocks
+        db2 = FakeDatabase()
+        s2 = clean_settings()  # min_confidence=70, no gold override
+        report2 = await execution.execute_signal(
+            db2, broker, notifier, s2,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2390.0, take_profit=2420.0,
+            confidence=65.8, opportunity=65.0, signal_id="sig-gold2", source="auto",
+        )
+        assert not report2.allowed
+        assert any("confidence" in r for r in report2.rejects)
+
+    @pytest.mark.asyncio
     async def test_sl_distance_mode_short_widens_tightens_sl(self, broker, notifier):
         """sl_distance_mode=สั้น (short, ×1.0 ATR): SL re-derived from the
         stored กลาง (×1.5) row — distance ×(1.0/1.5), TP keeps the row's RR.

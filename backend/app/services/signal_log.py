@@ -51,8 +51,23 @@ def log_event(*, event: str, signal_id: str = "", asset: str = "",
         return
     if event not in EVENTS:
         event = "created"
+    sid = str(signal_id or "")
+    if event == "order_blocked" and sid:
+        # Dedup: the auto-trader re-evaluates the same pending signal every
+        # minute, so a blocked signal would spam signal-logs with an identical
+        # ⛔ row each cycle. Log the FIRST block per signal only — the reason
+        # rarely changes between cycles, and the row stays for the 7-day TTL.
+        try:
+            existing = db.select(TABLE, filters={"signal_id": sid,
+                                                 "event": "order_blocked"},
+                                 order="created_at", desc=True, limit=1)
+            if existing:
+                log.debug("order_blocked for %s already logged — skipping", sid)
+                return
+        except Exception as exc:
+            log.debug("order_blocked dedup check failed (logging anyway): %s", exc)
     row = {
-        "signal_id": str(signal_id or ""),
+        "signal_id": sid,
         "asset": str(asset or ""),
         "direction": str(direction or "").lower(),
         "event": event,

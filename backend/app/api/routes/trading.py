@@ -224,6 +224,7 @@ class RiskOfficerRequest(BaseModel):
     opportunity_score: float
     correlation_score: float = 0.0
     profile: RiskProfile = RiskProfile.moderate
+    asset: str = ""  # picks the gold Min Confidence override when set
 
 
 @router.post("/risk-officer", response_model=RiskOfficerReview)
@@ -239,6 +240,8 @@ async def review(payload: RiskOfficerRequest, request: Request) -> RiskOfficerRe
         frequency=freq, news_risk=news, kill_switch=ks,
         correlation_score=payload.correlation_score,
         correlation_cap=s.correlation_cap,
+        min_confidence=effective_min_confidence(s, payload.asset),
+        min_opportunity=s.min_opportunity,
     )
 
 
@@ -543,7 +546,9 @@ async def extended_analysis(request: Request) -> dict:
         confidence=confidence, opportunity_score=confidence,
         frequency=freq, news_risk=news, kill_switch=ks,
         correlation_score=corr["portfolio_correlation"],
-        correlation_cap=s.correlation_cap)
+        correlation_cap=s.correlation_cap,
+        min_confidence=effective_min_confidence(s, asset),
+        min_opportunity=s.min_opportunity)
 
     plan = OrderStrategyEngine().build_plan(
         asset=asset, direction="BUY", entry=1.0, stop_loss=0.99,

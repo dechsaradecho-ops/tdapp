@@ -741,13 +741,23 @@ class RiskOfficer:
         correlation_score: float = 0.0,
         correlation_cap: float = 80.0,
         order_plan: Optional[OrderPlan] = None,
+        min_confidence: float = 70.0,
+        min_opportunity: float = 60.0,
     ) -> RiskOfficerReview:
+        """Quality thresholds come from the caller's AppSettings (Min
+        Confidence — including the gold override via effective_min_confidence —
+        and Min Opportunity), NOT hardcoded. The officer is the final veto on
+        RISK; it must not re-reject a quality bar the user already lowered.
+        Bug (2026-09-04): hardcoded 70 vetoed XAUUSD 65.8% even though the
+        user's Min Confidence (gold) allowed the signal through the scanner."""
         rejects: list[str] = []
         notes: list[str] = []
-        if confidence < 70:
-            rejects.append(f"Reject Trade: confidence {confidence:.0f} < 70")
-        if opportunity_score < 60:
-            rejects.append(f"Reject Trade: opportunity score {opportunity_score:.0f} < 60")
+        if confidence < min_confidence:
+            rejects.append(
+                f"Reject Trade: confidence {confidence:.0f} < {min_confidence:.0f}")
+        if opportunity_score < min_opportunity:
+            rejects.append(
+                f"Reject Trade: opportunity score {opportunity_score:.0f} < {min_opportunity:.0f}")
         if not frequency.allowed:
             rejects.append(f"Reject Trade: {frequency.reason}")
         if news_risk.status == "DANGER":

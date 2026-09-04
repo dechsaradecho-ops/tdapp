@@ -373,6 +373,10 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
         kill_switch=ks,
         correlation_score=corr_score,
         correlation_cap=s.correlation_cap,
+        # Quality bar follows the user's Settings page (incl. gold override),
+        # same source the scanner used to create the signal — no drift.
+        min_confidence=effective_min_confidence(s, asset),
+        min_opportunity=s.min_opportunity,
     )
     if officer.verdict == "REJECTED":
         rejects.extend(officer.rejects)

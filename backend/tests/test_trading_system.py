@@ -224,6 +224,41 @@ def test_risk_officer_respects_correlation_cap():
     assert any("correlation" in r for r in review.rejects)
 
 
+def test_risk_officer_uses_custom_thresholds():
+    """The officer must honor the caller's thresholds, not hardcoded 70/60.
+
+    Regression: XAUUSD 65.8% passed the scanner (user's Min Confidence (gold)
+    = 60) but Gate 5 vetoed it with the hardcoded 'confidence 65 < 70'."""
+    from app.models.schemas import FrequencyDecision, NewsRiskStatus, KillSwitchStatus
+    freq = FrequencyDecision(allowed=True, reason="ok")
+    news = NewsRiskStatus(status="SAFE", reason="ปลอดภัย")
+    ks = KillSwitchStatus(engaged=False, triggers=[], checked=[])
+    # 65.8% with a lowered gold threshold → must APPROVE
+    review = RiskOfficer().review_trade(
+        confidence=65.8, opportunity_score=65.0, frequency=freq,
+        news_risk=news, kill_switch=ks,
+        min_confidence=60.0, min_opportunity=60.0)
+    assert review.verdict == "APPROVED"
+    # same numbers with the default bar → still REJECTED
+    review = RiskOfficer().review_trade(
+        confidence=65.8, opportunity_score=65.0, frequency=freq,
+        news_risk=news, kill_switch=ks)
+    assert review.verdict == "REJECTED"
+    assert any("confidence 66 < 70" in r for r in review.rejects)
+
+
+def test_risk_officer_threshold_message_shows_actual_bar():
+    from app.models.schemas import FrequencyDecision, NewsRiskStatus, KillSwitchStatus
+    freq = FrequencyDecision(allowed=True, reason="ok")
+    news = NewsRiskStatus(status="SAFE", reason="ปลอดภัย")
+    ks = KillSwitchStatus(engaged=False, triggers=[], checked=[])
+    review = RiskOfficer().review_trade(
+        confidence=55, opportunity_score=70, frequency=freq,
+        news_risk=news, kill_switch=ks, min_confidence=60.0)
+    assert review.verdict == "REJECTED"
+    assert any("confidence 55 < 60" in r for r in review.rejects)
+
+
 # ----------------------------------------------------------------- journal
 def test_journal_analysis_win_rate_and_profit_factor():
     from app.models.schemas import JournalEntry
