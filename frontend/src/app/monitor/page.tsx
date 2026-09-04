@@ -23,6 +23,7 @@ export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string>("");
   // อ่านค่าตั้งต้นจาก localStorage (จำค่าที่เลือกไว้) — init function กัน SSR mismatch
   const [intervalSec, setIntervalSec] = useState<number>(() => {
@@ -35,6 +36,7 @@ export default function MonitorPage() {
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const s = await api.monitor();
       setSnap(s);
@@ -42,6 +44,8 @@ export default function MonitorPage() {
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -184,9 +188,9 @@ export default function MonitorPage() {
                 : "bg-loss text-surface font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"}>
               {busy ? "..." : snap?.pause.paused ? "▶️ Resume" : "⏸️ Pause"}
             </button>
-            <button onClick={load} disabled={busy}
+            <button onClick={load} disabled={loading}
               className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50">
-              🔄 รีเฟรช
+              {loading ? "กำลังโหลด..." : "🔄 รีเฟรช"}
             </button>
           </div>
         </div>

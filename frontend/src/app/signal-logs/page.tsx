@@ -35,8 +35,10 @@ export default function SignalLogsPage() {
   const [err, setErr] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
   const [filter, setFilter] = useState<string>("all");
+  const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const res = await api.signalLogs(200);
       setLogs(res.logs ?? []);
@@ -46,6 +48,8 @@ export default function SignalLogsPage() {
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -66,7 +70,10 @@ export default function SignalLogsPage() {
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
-        <button onClick={load} className="btn-secondary">🔄 รีเฟรช</button>
+        <button onClick={load} disabled={loading}
+          className="btn-secondary disabled:opacity-50">
+          {loading ? "กำลังโหลด..." : "🔄 รีเฟรช"}
+        </button>
       </section>
 
       {err && <p className="text-loss text-sm">⚠️ {err}</p>}

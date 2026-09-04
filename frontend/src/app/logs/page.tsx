@@ -37,11 +37,13 @@ export default function LogsPage() {
   const [ttlDays, setTtlDays] = useState(7);
   const [err, setErr] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
+  const [loading, setLoading] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<QuoteTestResult | null>(null);
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const res = await api.quoteLogs(200);
       setLogs(res.logs ?? []);
@@ -51,6 +53,8 @@ export default function LogsPage() {
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -91,7 +95,10 @@ export default function LogsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={load} className="btn-secondary">🔄 รีเฟรช</button>
+          <button onClick={load} disabled={loading}
+            className="btn-secondary disabled:opacity-50">
+            {loading ? "กำลังโหลด..." : "🔄 รีเฟรช"}
+          </button>
           <button onClick={runTest} disabled={testing} className="btn-primary">
             {testing ? "⏳ กำลังทดสอบ..." : "⚡ ทดสอบดึงราคา"}
           </button>
