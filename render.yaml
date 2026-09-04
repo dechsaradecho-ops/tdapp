@@ -61,7 +61,10 @@ services:
     # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret)
     # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment
 
-  # Next.js frontend
+  # Next.js frontend — Node web service (npm run build + npm run start)
+  # เปลี่ยนจาก Static Site เพราะ static deploy ช้ามาก (~10 นาที) — user request 2026-09-04
+  # Node service ใช้ next start ได้เพราะ next.config.js มี output:"export" อยู่แล้ว
+  # (Next จะเซิร์ฟจาก out/ แบบ static เหมือนเดิม แต่ deploy เร็วขึ้นมาก)
   - type: web
     name: tdapp-web
     runtime: node
