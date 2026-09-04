@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 
 from app.models.close_position import ClosePositionResult
+from app.models.stats_reset import StatsResetResult
 from app.models.schemas import (
     AppSettings,
     BacktestConfig,
@@ -429,6 +430,119 @@ async def close_position(payload: ClosePositionRequest,
         pnl_today=pnl_today, wins=wins, losses=losses,
         trade_id=trade_id, warnings=warnings,
     )
+
+
+# ----------------------------------------------------------------- stats reset
+class StatsResetRequest(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/stats/reset", response_model=StatsResetResult)
+async def reset_stats(payload: StatsResetRequest,
+                      request: Request) -> StatsResetResult:
+    """Reset the monitor statistics (🗑 รีเซ็ตสถิติ button).
+
+    Every monitor stat (PnL วันนี้ / PnL 7 วัน / PnL รวม, Win Rate,
+    ไม้ที่ปิดแล้ว) is derived from CLOSED paper_trades rows, so the reset
+    deletes exactly those. OPEN positions are preserved — the SL/TP guard
+    and the monitor still need them. Side effect (intended): the kill
+    switch's realized-loss counters also start fresh.
+
+    Requires confirm=true (the UI sends it after window.confirm) so a stray
+    POST can never wipe history.
+    """
+    import logging
+
+    from app.services.notification_service import NotificationService
+
+    log = logging.getLogger(__name__)
+    db = request.app.state.db
+
+    if not payload.confirm:
+        return StatsResetResult(
+            ok=False, deleted=0,
+            message="ต้องยืนยัน (confirm=true) ก่อนรีเซ็ตสถิติ")
+
+    closed_rows = db.select("paper_trades", filters={"status": "closed"},
+                            limit=1000)
+    if not closed_rows:
+        return StatsResetResult(
+            ok=True, deleted=0,
+            message="ไม่มีสถิติให้รีเซ็ต (ไม่มีไม้ที่ปิดแล้ว)",
+            stats=_fresh_stats(db))
+
+    deleted = 0
+    for r in closed_rows:
+        if db.delete("paper_trades", {"id": r.get("id"), "status": "closed"}):
+            deleted += 1
+
+    # Lifecycle log: one row per reset (source=user) — the audit trail shows
+    # WHEN stats were wiped, since the closed trades themselves are gone.
+    signal_log.log_event(
+        db=db, event="closed", source="user",
+        reason=f"รีเซ็ตสถิติ — ลบไม้ที่ปิดแล้ว {deleted} ไม้")
+
+    warnings: list[str] = []
+    try:
+        notifier = NotificationService(db, request.app.state.line)
+        await notifier.notify(
+            "", "trade_closed",
+            f"🗑 Stats Reset\nลบสถิติการเทรดที่ปิดแล้ว {deleted} ไม้ "
+            f"(ไม้ที่เปิดค้างยังอยู่)",
+        )
+    except Exception as exc:
+        warnings.append(f"notify failed: {exc}")
+
+    log.info("stats reset: deleted %s closed paper_trades", deleted)
+    return StatsResetResult(
+        ok=True, deleted=deleted,
+        message=f"รีเซ็ตสถิติแล้ว — ลบไม้ที่ปิดแล้ว {deleted} ไม้ "
+                f"(ไม้ที่เปิดค้างยังอยู่)",
+        stats=_fresh_stats(db), warnings=warnings)
+
+
+def _fresh_stats(db) -> dict:
+    """Recompute MonitorStats from the remaining rows (post-reset snapshot).
+
+    Mirrors execution.monitor_snapshot's stats block so the numbers the UI
+    shows right after the reset match the next /monitor refresh exactly.
+    """
+    from app.models.schemas import MonitorStats
+
+    rows = db.select("paper_trades", limit=500)
+    closed_rows = [r for r in rows
+                   if r.get("status") == "closed" and r.get("pnl") is not None]
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    week_ago = now - timedelta(days=7)
+
+    def created(r: dict):
+        raw = r.get("created_at")
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    today_rows = [r for r in rows
+                  if (c := created(r)) and c.date().isoformat() == today]
+    week_rows = [r for r in rows
+                 if (c := created(r)) and c >= week_ago
+                 and r.get("status") != "rejected"]
+    wins = [r for r in closed_rows if float(r.get("pnl") or 0) > 0]
+    stats = MonitorStats(
+        trades_today=len(today_rows),
+        trades_week=len(week_rows),
+        open_positions=len([r for r in rows if r.get("status") == "open"]),
+        closed_count=len(closed_rows),
+        win_rate=round(len(wins) / len(closed_rows) * 100, 1) if closed_rows else 0.0,
+        pnl_today=round(sum(float(r.get("pnl") or 0) for r in today_rows), 2),
+        pnl_week=round(sum(float(r.get("pnl") or 0) for r in week_rows), 2),
+        pnl_total=round(sum(float(r.get("pnl") or 0) for r in closed_rows), 2),
+    )
+    return stats.model_dump()
 
 
 # ----------------------------------------------------------------- journal

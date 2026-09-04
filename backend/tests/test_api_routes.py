@@ -665,3 +665,118 @@ class TestClosePosition:
         assert body["pnl_today"] == 100.0
         assert body["wins"] == 1
         assert body["losses"] == 0
+
+
+# ---------------------------------------------------------------------------
+# /api/trading/stats/reset — 🗑 รีเซ็ตสถิติ (monitor page)
+# ---------------------------------------------------------------------------
+class TestStatsReset:
+    @staticmethod
+    def _closed_row(row_id: str, pnl: float, **over) -> dict:
+        now = datetime.now(timezone.utc)
+        return {
+            "id": row_id, "ticket": f"PAPER-{row_id}", "asset": "EURUSD",
+            "direction": "buy", "volume": 0.01, "entry_price": 1.08,
+            "exit_price": 1.09, "pnl": pnl, "status": "closed",
+            "close_reason": "tp", "closed_at": now.isoformat(),
+            "created_at": now.isoformat(), **over,
+        }
+
+    @pytest.mark.asyncio
+    async def test_reset_deletes_closed_keeps_open(self):
+        """Happy path: closed rows deleted, open rows untouched, fresh stats."""
+        db = FakeDatabase(rows={"paper_trades": [
+            self._closed_row("row-c1", 100.0),
+            self._closed_row("row-c2", -30.0),
+            self._closed_row("row-c3", 50.0),
+            {"id": "row-open", "ticket": "PAPER-open", "asset": "XAUUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 2400.0,
+             "status": "open", "source": "auto",
+             "created_at": datetime.now(timezone.utc).isoformat()},
+        ]})
+        set_state(db)
+        r = await call("POST", "/api/trading/stats/reset", {"confirm": True})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["deleted"] == 3
+        assert "3" in body["message"]
+        # open row survives
+        remaining = db.rows["paper_trades"]
+        assert [row["id"] for row in remaining] == ["row-open"]
+        # fresh stats: everything zeroed, open position still counted
+        st = body["stats"]
+        assert st["closed_count"] == 0
+        assert st["pnl_total"] == 0.0
+        assert st["pnl_today"] == 0.0
+        assert st["pnl_week"] == 0.0
+        assert st["win_rate"] == 0.0
+        assert st["open_positions"] == 1
+        # audit trail: one signal_logs row records the reset
+        resets = [row for table, row in db.inserted
+                  if table == "signal_logs" and "รีเซ็ตสถิติ" in row.get("reason", "")]
+        assert len(resets) == 1
+
+    @pytest.mark.asyncio
+    async def test_reset_requires_confirm(self):
+        """Without confirm=true the endpoint refuses (no rows deleted)."""
+        db = FakeDatabase(rows={"paper_trades": [self._closed_row("row-c1", 10.0)]})
+        set_state(db)
+        r = await call("POST", "/api/trading/stats/reset", {})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert body["deleted"] == 0
+        assert len(db.rows["paper_trades"]) == 1  # untouched
+
+    @pytest.mark.asyncio
+    async def test_reset_with_no_closed_rows_is_ok(self):
+        """Nothing closed yet → ok, deleted=0, zeroed stats, no crash."""
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "row-open", "ticket": "PAPER-open", "asset": "EURUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.08,
+             "status": "open", "source": "auto",
+             "created_at": datetime.now(timezone.utc).isoformat()}]})
+        set_state(db)
+        r = await call("POST", "/api/trading/stats/reset", {"confirm": True})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["deleted"] == 0
+        assert body["stats"]["open_positions"] == 1
+        assert body["stats"]["closed_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_reset_empty_db(self):
+        db = FakeDatabase()
+        set_state(db)
+        body = (await call("POST", "/api/trading/stats/reset",
+                           {"confirm": True})).json()
+        assert body["ok"] is True and body["deleted"] == 0
+        assert body["stats"]["closed_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_reset_recomputes_stats_matching_monitor(self):
+        """Fresh stats must mirror monitor_snapshot's math — a closed row
+        created today counts in pnl_today/pnl_week BEFORE deletion; after
+        reset everything realized is 0 while open positions remain."""
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"paper_trades": [
+            self._closed_row("row-c1", 173.68),
+            {"id": "row-open", "ticket": "PAPER-open", "asset": "EURUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.08,
+             "status": "open", "source": "auto",
+             "created_at": now.isoformat()},
+        ]})
+        set_state(db)
+        body = (await call("POST", "/api/trading/stats/reset",
+                           {"confirm": True})).json()
+        assert body["deleted"] == 1
+        st = body["stats"]
+        assert st["pnl_total"] == 0.0 and st["closed_count"] == 0
+        assert st["open_positions"] == 1
+        # and the monitor endpoint agrees with the reset response
+        mon = (await call("GET", "/api/trading/monitor")).json()
+        assert mon["stats"]["pnl_total"] == 0.0
+        assert mon["stats"]["closed_count"] == 0
+        assert mon["stats"]["open_positions"] == 1

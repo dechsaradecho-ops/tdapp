@@ -487,6 +487,16 @@ export interface ClosePositionResult {
   warnings: string[];
 }
 
+/** Response of POST /api/trading/stats/reset (🗑 รีเซ็ตสถิติ on monitor). */
+export interface StatsResetResult {
+  ok: boolean;
+  deleted: number;
+  message: string;
+  /** Fresh stats after the reset (same shape as MonitorStats). */
+  stats: MonitorStats;
+  warnings: string[];
+}
+
 // ---------- Auth: 6-digit PIN gate ----------
 export interface PinStatus {
   pin_set: boolean;

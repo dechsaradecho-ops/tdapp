@@ -27,6 +27,7 @@ import {
   SessionStatus,
   SettingsSaveResult,
   SignalLogsResponse,
+  StatsResetResult,
   SignalProposal,
   WalkForwardResult,
 } from "./types";
@@ -176,6 +177,11 @@ export const api = {
   closePosition: (ticket: string, close_reason = "manual") =>
     post<ClosePositionResult>("/api/trading/positions/close",
       { ticket, close_reason }),
+
+  // POST /api/trading/stats/reset — 🗑 รีเซ็ตสถิติ (deletes closed trades,
+  // keeps open positions; confirm=true required)
+  resetStats: () =>
+    post<StatsResetResult>("/api/trading/stats/reset", { confirm: true }),
 
   // ---------- Quote API call log (7-day auto-expiry) ----------
   quoteLogs: (limit = 100) =>

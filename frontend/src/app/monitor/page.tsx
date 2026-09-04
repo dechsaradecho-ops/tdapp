@@ -34,6 +34,8 @@ export default function MonitorPage() {
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
   const [closeError, setCloseError] = useState("");
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [resetMsg, setResetMsg] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -91,6 +93,28 @@ export default function MonitorPage() {
     }
   };
 
+  // รีเซ็ตสถิติ — ลบไม้ที่ปิดแล้วทั้งหมด (ไม้เปิดค้างไม่ถูกแตะ) → PnL/Win Rate กลับเป็น 0
+  const handleResetStats = async () => {
+    if (resetting) return;
+    const ok = window.confirm(
+      "รีเซ็ตสถิติการเทรด?\n\n" +
+      "• ลบไม้ที่ปิดแล้วทั้งหมด (PnL วันนี้ / 7 วัน / รวม, Win Rate กลับเป็น 0)\n" +
+      "• ไม้ที่เปิดค้างจะไม่ถูกลบ — SL/TP ยังทำงานตามปกติ\n" +
+      "• ทำแล้วย้อนกลับไม่ได้");
+    if (!ok) return;
+    setResetting(true);
+    setResetMsg("");
+    try {
+      const res = await api.resetStats();
+      setResetMsg(res.ok ? res.message : `รีเซ็ตไม่สำเร็จ: ${res.message}`);
+      await load();
+    } catch (e) {
+      setResetMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const st = snap?.stats;
 
   return (
@@ -138,30 +162,45 @@ export default function MonitorPage() {
       </section>
 
       {/* ---------- Stats ---------- */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <div className="panel">
-          <p className="text-xs text-slate-500">เทรดวันนี้</p>
-          <p className="text-xl font-bold">{st?.trades_today ?? "-"}</p>
+      <section className="space-y-2">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="panel-title">สถิติการเทรด</h2>
+          <button onClick={handleResetStats} disabled={resetting}
+            className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
+            title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
+            {resetting ? "กำลังรีเซ็ต..." : "🗑 รีเซ็ตสถิติ"}
+          </button>
         </div>
-        <div className="panel">
-          <p className="text-xs text-slate-500">PnL วันนี้</p>
-          <PnlText v={st?.pnl_today} />
-        </div>
-        <div className="panel">
-          <p className="text-xs text-slate-500">PnL 7 วัน</p>
-          <PnlText v={st?.pnl_week} />
-        </div>
-        <div className="panel">
-          <p className="text-xs text-slate-500">PnL รวม (ปิดแล้ว)</p>
-          <PnlText v={st?.pnl_total} />
-        </div>
-        <div className="panel">
-          <p className="text-xs text-slate-500">Win Rate</p>
-          <p className={`text-xl font-bold ${(st?.win_rate ?? 0) >= 50 ? "text-profit" : "text-loss"}`}>
-            {st ? `${fmtNum(st.win_rate, 1)}%` : "-"}
+        {resetMsg && (
+          <p className="text-xs text-slate-400 bg-slate-800/60 border border-slate-700 rounded px-3 py-2">
+            {resetMsg}
           </p>
-          <p className="text-xs text-slate-500">{st?.closed_count ?? 0} ไม้ที่ปิดแล้ว</p>
-        </div>
+        )}
+        <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="panel">
+            <p className="text-xs text-slate-500">เทรดวันนี้</p>
+            <p className="text-xl font-bold">{st?.trades_today ?? "-"}</p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">PnL วันนี้</p>
+            <PnlText v={st?.pnl_today} />
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">PnL 7 วัน</p>
+            <PnlText v={st?.pnl_week} />
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">PnL รวม (ปิดแล้ว)</p>
+            <PnlText v={st?.pnl_total} />
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">Win Rate</p>
+            <p className={`text-xl font-bold ${(st?.win_rate ?? 0) >= 50 ? "text-profit" : "text-loss"}`}>
+              {st ? `${fmtNum(st.win_rate, 1)}%` : "-"}
+            </p>
+            <p className="text-xs text-slate-500">{st?.closed_count ?? 0} ไม้ที่ปิดแล้ว</p>
+          </div>
+        </section>
       </section>
 
       {/* ---------- Open positions ---------- */}
