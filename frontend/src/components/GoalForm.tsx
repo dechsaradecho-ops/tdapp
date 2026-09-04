@@ -4,12 +4,22 @@ import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtMoney, probabilityLabel } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
-import { GoalAssessment } from "@/lib/types";
+import { GoalAssessment, GoalRealityContext } from "@/lib/types";
 
 const SCENARIO_LABELS: Record<string, string> = {
   best_case: "Best Case",
   normal_case: "Normal Case",
   worst_case: "Worst Case",
+};
+
+const REGIME_LABELS: Record<string, string> = {
+  strong_bull_trend: "🐂 Bull แรง",
+  bull_trend: "📈 Bull Trend",
+  sideway: "↔️ Sideway",
+  high_volatility: "⚡ ผันผวนสูง",
+  bear_trend: "📉 Bear Trend",
+  strong_bear_trend: "🐻 Bear แรง",
+  news_driven_market: "📰 ขับเคลื่อนด้วยข่าว",
 };
 
 export default function GoalForm() {
@@ -100,6 +110,7 @@ export default function GoalForm() {
         {!result && <p className="text-slate-500 text-sm">กรอกข้อมูลแล้วกดปุ่มเพื่อประเมิน</p>}
         {result && (
           <div className="space-y-4">
+            {result.reality && <RealityPanel reality={result.reality} />}
             <div>
               <p className="text-sm text-slate-400">Expected Profit</p>
               <p className="text-2xl font-bold">{fmtMoney(result.expected_profit)}</p>
@@ -132,6 +143,44 @@ export default function GoalForm() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Live trading state the assessment was adjusted by — "ประเมินจากสถานะจริงของคุณ". */
+function RealityPanel({ reality }: { reality: GoalRealityContext }) {
+  if (!reality.data_available) {
+    return (
+      <div className="border border-slate-700 bg-slate-900/40 rounded p-3 text-sm text-slate-400">
+        📭 ยังไม่มีข้อมูลการเทรดจริง — ผลนี้คำนวณจากสูตรทฤษฎีล้วน
+        (เริ่มเทรดแล้วระบบจะปรับผลตาม PnL / Win Rate / ตลาดจริงให้อัตโนมัติ)
+      </div>
+    );
+  }
+  const regime = REGIME_LABELS[reality.market_regime] ?? reality.market_regime;
+  const pnlColor = reality.pnl_total > 0 ? "text-profit" : reality.pnl_total < 0 ? "text-loss" : "";
+  const blocked = reality.kill_switch_engaged || reality.trading_paused;
+  return (
+    <div className={`border rounded p-3 text-sm space-y-2 ${blocked ? "border-loss/40 bg-loss/10" : "border-accent/30 bg-accent/5"}`}>
+      <p className="font-semibold text-slate-200">🎯 ประเมินจากสถานะจริงของคุณ</p>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-slate-300">
+        <span>PnL รวม (ปิดแล้ว)</span>
+        <span className={`text-right font-semibold ${pnlColor}`}>
+          {reality.pnl_total >= 0 ? "+" : ""}{fmtMoney(reality.pnl_total)}
+        </span>
+        <span>Win Rate</span>
+        <span className="text-right font-semibold">{reality.win_rate.toFixed(0)}% ({reality.closed_count} ไม้)</span>
+        <span>ไม้เปิดค้าง</span>
+        <span className="text-right font-semibold">{reality.open_positions}</span>
+        <span>ตลาดตอนนี้</span>
+        <span className="text-right font-semibold">{regime}</span>
+      </div>
+      {reality.kill_switch_engaged && (
+        <p className="text-loss">🛑 Kill Switch: {reality.kill_triggers.join("; ")}</p>
+      )}
+      {reality.trading_paused && (
+        <p className="text-amber-400">⏸️ หยุดเทรดด้วยตนเอง{reality.pause_reason ? ` — ${reality.pause_reason}` : ""}</p>
+      )}
     </div>
   );
 }

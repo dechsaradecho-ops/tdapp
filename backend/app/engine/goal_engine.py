@@ -3,6 +3,11 @@
 Calculates Best/Normal/Worst case scenarios, probability classification and
 emits a risk warning when the target implies drawdown beyond the user's limit.
 
+Reality-aware (2026-09-04): when the caller supplies a GoalRealityContext the
+base envelope math is ADJUSTED by the user's actual trading state — realized
+PnL, win rate, current market regime, kill switch and manual pause. Without a
+context the engine stays a pure deterministic calculator (backward compatible).
+
 Never guarantees profit — output is a probabilistic assessment only.
 """
 from __future__ import annotations
@@ -10,6 +15,7 @@ from __future__ import annotations
 from app.models.schemas import (
     GoalAssessment,
     GoalInput,
+    GoalRealityContext,
     Probability,
     Scenario,
 )
@@ -22,11 +28,29 @@ PROFILE_ENVELOPES: dict[str, tuple[float, float, float, float]] = {
     "aggressive": (2.0, 6.0, 12.0, -15.0),
 }
 
+# Reality adjustments (percentage points on the probability scale). Deliberately
+# small and explainable — each one maps to a reasoning line the user can read.
+WIN_RATE_BONUS_THRESHOLD = 55.0   # win rate ≥ 55% → +1 tier of confidence
+WIN_RATE_PENALTY_THRESHOLD = 35.0 # win rate ≤ 35% → −1 tier
+PNL_BONUS_THRESHOLD = 0.0         # realized PnL > 0 → +1 tier
+PNL_PENALTY_THRESHOLD = 0.0       # realized PnL < 0 → −1 tier
+BULL_REGIME_BONUS = True          # bull_trend/strong_bull → +1 tier
+BEAR_REGIME_PENALTY = True        # bear_trend/strong_bear → −1 tier
+
+_PROBABILITY_ORDER = [Probability.low, Probability.moderate, Probability.high]
+
+
+def _shift_probability(base: Probability, steps: int) -> Probability:
+    """Move the probability tier by `steps` (+1 = more confident), clamped."""
+    idx = _PROBABILITY_ORDER.index(base)
+    return _PROBABILITY_ORDER[max(0, min(len(_PROBABILITY_ORDER) - 1, idx + steps))]
+
 
 class GoalEngine:
     """Assess goal feasibility under risk constraints."""
 
-    def assess(self, goal: GoalInput) -> GoalAssessment:
+    def assess(self, goal: GoalInput,
+               reality: GoalRealityContext | None = None) -> GoalAssessment:
         expected_profit = self.expected_profit(goal.capital, goal.target_return_pct)
         lo, hi, best, worst = PROFILE_ENVELOPES[goal.risk_profile.value]
 
@@ -44,6 +68,22 @@ class GoalEngine:
         if probability != Probability.high or goal.target_return_pct > hi:
             risk_warning = self._build_warning(goal, worst)
 
+        reasoning = self._reasoning(goal, probability, hi)
+
+        # ---- reality adjustment (only when live state is available) --------
+        if reality is not None and reality.data_available:
+            probability, adj_reasons, blocked = self._apply_reality(
+                probability, goal, reality, worst)
+            reasoning.extend(adj_reasons)
+            if blocked:
+                # Trading is hard-blocked right now — the assessment must say so
+                # regardless of how good the envelope math looks.
+                risk_warning = (
+                    f"⚠️ ระบบหยุดเทรดอยู่ตอนนี้ — "
+                    + ("; ".join(reality.kill_triggers) if reality.kill_triggers
+                       else reality.pause_reason or "manual pause")
+                    + " — ประเมินนี้เป็นไปได้เมื่อระบบกลับมาเทรดได้แล้ว")
+
         return GoalAssessment(
             capital=goal.capital,
             target_return_pct=goal.target_return_pct,
@@ -51,13 +91,74 @@ class GoalEngine:
             probability=probability,
             scenarios=scenarios,
             risk_warning=risk_warning,
-            reasoning=self._reasoning(goal, probability, hi),
+            reasoning=reasoning,
+            reality=reality,
         )
 
     # ------------------------------------------------------------------
     @staticmethod
     def expected_profit(capital: float, target_return_pct: float) -> float:
         return round(capital * target_return_pct / 100.0, 2)
+
+    def _apply_reality(
+        self,
+        probability: Probability,
+        goal: GoalInput,
+        reality: GoalRealityContext,
+        worst: float,
+    ) -> tuple[Probability, list[str], bool]:
+        """Fold live portfolio/market state into the probability tier.
+
+        Returns (new_probability, reasoning_lines, hard_blocked).
+        Each adjustment is one explainable reasoning line — no black box.
+        """
+        reasons: list[str] = []
+        steps = 0
+
+        # 1) Realized PnL — the most honest signal of how trading is going
+        if reality.pnl_total > PNL_BONUS_THRESHOLD:
+            steps += 1
+            reasons.append(
+                f"📊 สถิติจริง: PnL รวม +{reality.pnl_total:,.2f} (บวก) → ปรับความเป็นไปได้ขึ้น 1 ระดับ")
+        elif reality.pnl_total < PNL_PENALTY_THRESHOLD:
+            steps -= 1
+            reasons.append(
+                f"📊 สถิติจริง: PnL รวม {reality.pnl_total:,.2f} (ติดลบ) → ปรับความเป็นไปได้ลง 1 ระดับ")
+
+        # 2) Win rate — only meaningful with a few closed trades
+        if reality.closed_count >= 3:
+            if reality.win_rate >= WIN_RATE_BONUS_THRESHOLD:
+                steps += 1
+                reasons.append(
+                    f"📊 สถิติจริง: Win Rate {reality.win_rate:.0f}% จาก {reality.closed_count} ไม้ที่ปิดแล้ว (สูง) → ปรับขึ้น 1 ระดับ")
+            elif reality.win_rate <= WIN_RATE_PENALTY_THRESHOLD:
+                steps -= 1
+                reasons.append(
+                    f"📊 สถิติจริง: Win Rate {reality.win_rate:.0f}% จาก {reality.closed_count} ไม้ที่ปิดแล้ว (ต่ำ) → ปรับลง 1 ระดับ")
+
+        # 3) Market regime — trending market helps trend-following systems
+        regime = (reality.market_regime or "").lower()
+        if BULL_REGIME_BONUS and regime in ("bull_trend", "strong_bull_trend"):
+            steps += 1
+            reasons.append(
+                f"📈 ตลาดจริงตอนนี้: {regime} ({reality.market_sentiment}) → ระบบเทรดตามเทรนด์ได้เปรียบ → ปรับขึ้น 1 ระดับ")
+        elif BEAR_REGIME_PENALTY and regime in ("bear_trend", "strong_bear_trend"):
+            steps -= 1
+            reasons.append(
+                f"📉 ตลาดจริงตอนนี้: {regime} ({reality.market_sentiment}) → สวนทางกับระบบ → ปรับลง 1 ระดับ")
+
+        # 4) Kill switch / manual pause — hard block, cannot be offset by bonuses
+        blocked = bool(reality.kill_switch_engaged or reality.trading_paused)
+        if reality.kill_switch_engaged:
+            steps = min(steps, 0)  # a kill switch cancels positive adjustments
+            reasons.append(
+                "🛑 Kill Switch ทำงานอยู่ — ระบบหยุดเทรดทั้งหมดชั่วคราว (ผลประเมินไม่นับระดับบวกจากสถิติ)")
+        if reality.trading_paused:
+            steps = min(steps, 0)
+            reasons.append(
+                f"⏸️ เทรดถูกหยุดด้วยตนเอง{(' — ' + reality.pause_reason) if reality.pause_reason else ''}")
+
+        return _shift_probability(probability, steps), reasons, blocked
 
     def _scenarios(
         self,

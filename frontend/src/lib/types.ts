@@ -11,6 +11,21 @@ export interface Scenario {
   note: string;
 }
 
+/** Live portfolio/market state the goal assessment was adjusted by. */
+export interface GoalRealityContext {
+  data_available: boolean;
+  pnl_total: number;
+  win_rate: number;
+  closed_count: number;
+  open_positions: number;
+  market_regime: string;
+  market_sentiment: string;
+  kill_switch_engaged: boolean;
+  kill_triggers: string[];
+  trading_paused: boolean;
+  pause_reason: string;
+}
+
 export interface GoalAssessment {
   capital: number;
   target_return_pct: number;
@@ -19,6 +34,8 @@ export interface GoalAssessment {
   scenarios: Scenario[];
   risk_warning: string | null;
   reasoning: string[];
+  /** Present when the backend folded real trading state into the result. */
+  reality?: GoalRealityContext | null;
 }
 
 export interface AssetOpportunity {

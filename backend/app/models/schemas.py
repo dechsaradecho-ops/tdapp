@@ -82,6 +82,26 @@ class Scenario(BaseModel):
     note: str
 
 
+class GoalRealityContext(BaseModel):
+    """Live portfolio/market state folded into the goal assessment.
+
+    All fields are optional-safe: when the DB has no data yet (fresh install,
+    stats just reset) the engine falls back to the pure envelope math and
+    `data_available=False` tells the UI to show "ยังไม่มีข้อมูลการเทรดจริง".
+    """
+    data_available: bool = False
+    pnl_total: float = 0.0            # realized PnL of closed trades (USD)
+    win_rate: float = 0.0             # % of closed trades that won
+    closed_count: int = 0
+    open_positions: int = 0
+    market_regime: str = "sideway"    # bull_trend / bear_trend / sideway / ...
+    market_sentiment: str = "neutral" # bullish / bearish / neutral
+    kill_switch_engaged: bool = False
+    kill_triggers: list[str] = Field(default_factory=list)
+    trading_paused: bool = False
+    pause_reason: str = ""
+
+
 class GoalAssessment(BaseModel):
     capital: float
     target_return_pct: float
@@ -90,6 +110,9 @@ class GoalAssessment(BaseModel):
     scenarios: list[Scenario]
     risk_warning: Optional[str] = None
     reasoning: list[str]
+    # Live portfolio/market state the assessment was adjusted by (None on the
+    # pure-theory path — kept for backward compatibility with old clients).
+    reality: Optional[GoalRealityContext] = None
 
 
 # ---------- Market ----------

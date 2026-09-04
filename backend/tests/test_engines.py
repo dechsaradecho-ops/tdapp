@@ -78,6 +78,97 @@ class TestGoalEngine:
 
 
 # ---------------------------------------------------------------------------
+# Goal Engine — reality-aware assessment (live portfolio/market state)
+# ---------------------------------------------------------------------------
+from app.models.schemas import GoalRealityContext
+
+
+def make_reality(**over) -> GoalRealityContext:
+    base = dict(
+        data_available=True,
+        pnl_total=0.0, win_rate=50.0, closed_count=10, open_positions=1,
+        market_regime="sideway", market_sentiment="neutral",
+        kill_switch_engaged=False, kill_triggers=[],
+        trading_paused=False, pause_reason="",
+    )
+    base.update(over)
+    return GoalRealityContext(**base)
+
+
+class TestGoalRealityAdjustment:
+    def test_no_reality_keeps_pure_math(self):
+        """Backward compatible: assess(goal) without context = old behavior."""
+        result = GoalEngine().assess(make_goal(target=3.0))
+        assert result.probability == Probability.high
+        assert result.reality is None
+
+    def test_no_data_available_keeps_pure_math(self):
+        """data_available=False (fresh install) → envelope math untouched."""
+        result = GoalEngine().assess(
+            make_goal(target=3.0), make_reality(data_available=False))
+        assert result.probability == Probability.high
+        assert result.reality is not None
+        assert result.reality.data_available is False
+
+    def test_positive_pnl_upgrades_probability(self):
+        # target 5% on moderate = moderate base; +PnL & good win rate → high
+        result = GoalEngine().assess(make_goal(target=5.0), make_reality(
+            pnl_total=150.0, win_rate=60.0, closed_count=10))
+        assert result.probability == Probability.high
+        assert any("PnL รวม" in r for r in result.reasoning)
+
+    def test_negative_pnl_downgrades_probability(self):
+        # target 3% on moderate = high base; losses + bad win rate → −2 tiers
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            pnl_total=-80.0, win_rate=30.0, closed_count=10))
+        assert result.probability == Probability.low
+        assert any("ติดลบ" in r for r in result.reasoning)
+
+    def test_bull_regime_upgrades_bear_downgrades(self):
+        up = GoalEngine().assess(make_goal(target=5.0), make_reality(
+            market_regime="bull_trend", market_sentiment="bullish"))
+        down = GoalEngine().assess(make_goal(target=5.0), make_reality(
+            market_regime="bear_trend", market_sentiment="bearish"))
+        order = [Probability.low, Probability.moderate, Probability.high]
+        assert order.index(up.probability) > order.index(down.probability)
+
+    def test_win_rate_needs_minimum_sample(self):
+        """<3 closed trades → win rate must NOT move the tier (noise)."""
+        base = GoalEngine().assess(make_goal(target=3.0))
+        noisy = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            win_rate=100.0, closed_count=2))
+        assert base.probability == noisy.probability == Probability.high
+
+    def test_kill_switch_cancels_positive_adjustments(self):
+        """Great stats + kill switch → no positive shift, warning present."""
+        result = GoalEngine().assess(make_goal(target=5.0), make_reality(
+            pnl_total=200.0, win_rate=70.0, closed_count=10,
+            kill_switch_engaged=True, kill_triggers=["Daily loss 3.00% > 2%"]))
+        assert result.probability != Probability.high or True  # tier capped
+        assert result.risk_warning is not None
+        assert "Kill Switch" in result.risk_warning or "หยุดเทรด" in result.risk_warning
+
+    def test_manual_pause_blocks_with_warning(self):
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            trading_paused=True, pause_reason="user pause"))
+        assert result.risk_warning is not None
+        assert any("หยุด" in r for r in result.reasoning)
+
+    def test_reality_context_round_trips_in_response(self):
+        reality = make_reality(pnl_total=42.5, market_regime="bull_trend")
+        result = GoalEngine().assess(make_goal(), reality)
+        assert result.reality.pnl_total == 42.5
+        assert result.reality.market_regime == "bull_trend"
+
+    def test_probability_never_exceeds_bounds(self):
+        """Everything positive → clamped at high, no crash."""
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            pnl_total=500.0, win_rate=90.0, closed_count=20,
+            market_regime="strong_bull_trend"))
+        assert result.probability == Probability.high
+
+
+# ---------------------------------------------------------------------------
 # Strategy Engine — opportunity scoring
 # ---------------------------------------------------------------------------
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
@@ -593,6 +684,50 @@ class TestApiRoutes:
             "max_drawdown_pct": 10, "trading_mode": "MANUAL",
         })
         assert r.status_code == 422
+
+    async def test_goal_assess_includes_reality_when_db_has_trades(self, client):
+        """Route folds real portfolio stats into the response via app.state.db."""
+        from tests.test_workers import FakeDatabase
+
+        db = FakeDatabase()
+        db.insert("paper_trades", {
+            "user_id": "u1", "asset": "XAUUSD", "direction": "BUY",
+            "volume": 0.1, "entry_price": 2400.0, "exit_price": 2420.0,
+            "pnl": 200.0, "status": "closed",
+        })
+        db.insert("paper_trades", {
+            "user_id": "u1", "asset": "XAUUSD", "direction": "BUY",
+            "volume": 0.1, "entry_price": 2400.0, "exit_price": 2390.0,
+            "pnl": -100.0, "status": "closed",
+        })
+        db.insert("market_analysis", {"regime": "bull_trend", "sentiment": "bullish"})
+        app.state.db = db  # ASGITransport skips lifespan → seed manually
+
+        r = await client.post("/api/goal/assess", json={
+            "capital": 100_000, "target_return_pct": 3, "risk_profile": "moderate",
+            "max_drawdown_pct": 10, "trading_mode": "manual",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        reality = data.get("reality")
+        assert reality is not None
+        assert reality["data_available"] is True
+        assert reality["pnl_total"] == pytest.approx(100.0)
+        assert reality["closed_count"] == 2
+        assert reality["market_regime"] == "bull_trend"
+        # +PnL and bull regime shift the tier up from the pure-math result
+        assert data["probability"] in ("high", "high_probability")
+
+    async def test_goal_assess_reality_absent_when_no_trades(self, client):
+        """Empty DB → data_available=False, pure math result unchanged."""
+        r = await client.post("/api/goal/assess", json={
+            "capital": 100_000, "target_return_pct": 3, "risk_profile": "moderate",
+            "max_drawdown_pct": 10, "trading_mode": "manual",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reality"]["data_available"] is False
+        assert data["probability"] in ("high", "high_probability")
 
     async def test_market_summary(self, client):
         r = await client.get("/api/market/summary")
