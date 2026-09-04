@@ -61,17 +61,17 @@ services:
     # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret)
     # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment
 
-  # Next.js frontend — Node web service (npm run build + npm run start)
-  # เปลี่ยนจาก Static Site เพราะ static deploy ช้ามาก (~10 นาที) — user request 2026-09-04
-  # Node service ใช้ next start ได้เพราะ next.config.js มี output:"export" อยู่แล้ว
-  # (Next จะเซิร์ฟจาก out/ แบบ static เหมือนเดิม แต่ deploy เร็วขึ้นมาก)
+  # Next.js frontend — Static Site (npm run build → publish out/)
+  # คง static site เดิมไว้ (tdappstatic.onrender.com) — user ไม่ต้องการ Web Service ใหม่
+  # หมายเหตุ: static publish ช้ากว่า node service (~10 นาที vs ~2-3 นาที)
   - type: web
     name: tdapp-web
-    runtime: node
+    runtime: static
     rootDir: frontend
     plan: starter
     buildCommand: npm ci && npm run build
-    startCommand: npm run start
+    staticPublishPath: ./out
+    pullRequestPreviewsEnabled: true
     envVars:
       - key: NODE_VERSION
         value: "20.11.1"
@@ -81,6 +81,11 @@ services:
         sync: false
       - key: NEXT_PUBLIC_API_BASE_URL
         sync: false
+    routes:
+      # SPA fallback: ทุก path ส่ง index.html (ยกเว้นไฟล์ static ที่มีอยู่จริง)
+      - type: rewrite
+        source: /*
+        destination: /index.html
 
   # Redis cache (ยังไม่ถูกใช้ในโค้ด — ปิดไว้ก่อนเพื่อไม่เสียค่าใช้จ่าย)
   # เปิดเมื่อไหร่: พอมีการใช้ cache/queue จริง แล้วตั้ง REDIS_URL ผ่าน Secret File หรือ env var
