@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
-import { MonitorSnapshot } from "@/lib/types";
+import { ClosePositionResult, MonitorSnapshot } from "@/lib/types";
 
 // ความถี่รีเฟรชเลือกได้จาก UI (จำค่าใน localStorage) — backend cache spot
 // quotes 30s ดังนั้นยิงถี่กว่า 10s ก็ไม่เพิ่มโหลด feed
@@ -29,6 +30,9 @@ export default function MonitorPage() {
     const saved = Number(window.localStorage.getItem(LS_KEY));
     return REFRESH_OPTIONS.some((o) => o.value === saved) ? saved : 10;
   });
+  const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
+  const [closeError, setCloseError] = useState("");
+  const [closingTicket, setClosingTicket] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -60,6 +64,26 @@ export default function MonitorPage() {
       await load();
     } finally {
       setBusy(false);
+    }
+  };
+
+  // ปิดไม้ด้วยมือ → เด้ง popup สรุปกำไร/ขาดทุน
+  const handleClosePosition = async (ticket: string) => {
+    if (!ticket) return;
+    setClosingTicket(ticket);
+    setCloseError("");
+    try {
+      const res = await api.closePosition(ticket);
+      if (res.ok) {
+        setCloseResult(res);
+        await load();
+      } else {
+        setCloseError(res.message);
+      }
+    } catch (e) {
+      setCloseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setClosingTicket(null);
     }
   };
 
@@ -167,6 +191,11 @@ export default function MonitorPage() {
           </div>
         </div>
         {err && <p className="text-loss text-sm mt-2">โหลดไม่สำเร็จ: {err}</p>}
+        {closeError && (
+          <p className="text-loss text-sm mt-2 bg-loss/10 border border-loss/40 rounded px-3 py-2">
+            ปิดไม้ไม่สำเร็จ: {closeError}
+          </p>
+        )}
 
         {snap && snap.open_positions.length === 0 && (
           <p className="text-slate-500 text-sm mt-3">ไม่มีไม้เปิดค้าง — auto trader จะยิงเมื่อเจอ signal ที่ผ่าน gate</p>
@@ -185,7 +214,8 @@ export default function MonitorPage() {
                   <th className="py-2 pr-4">TP</th>
                   <th className="py-2 pr-4">PnL (ยังไม่ปิด)</th>
                   <th className="py-2 pr-4">ที่มา</th>
-                  <th className="py-2">Ticket</th>
+                  <th className="py-2 pr-4">Ticket</th>
+                  <th className="py-2">จัดการ</th>
                 </tr>
               </thead>
               <tbody>
@@ -205,6 +235,15 @@ export default function MonitorPage() {
                     </td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "🤖 Auto" : "👤 Approve"}</td>
                     <td className="py-2 text-xs text-slate-500">{p.ticket || "-"}</td>
+                    <td className="py-2">
+                      <button
+                        onClick={() => handleClosePosition(p.ticket)}
+                        disabled={!p.ticket || closingTicket === p.ticket}
+                        className="bg-loss text-surface font-semibold rounded px-2.5 py-1 text-xs disabled:opacity-50"
+                      >
+                        {closingTicket === p.ticket ? "..." : "✋ ปิด"}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -273,6 +312,9 @@ export default function MonitorPage() {
           </div>
         )}
       </div>
+
+      {/* ---------- Popup สรุปผลการปิดไม้ ---------- */}
+      <ClosePositionModal result={closeResult} onClose={() => setCloseResult(null)} />
     </div>
   );
 }

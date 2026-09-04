@@ -3,6 +3,7 @@ import {
   AppSettings,
   BacktestConfig,
   BacktestResult,
+  ClosePositionResult,
   CorrelationResponse,
   DbCheckResult,
   DbCounts,
@@ -169,6 +170,11 @@ export const api = {
 
   // ---------- Monitor dashboard ----------
   monitor: () => get<MonitorSnapshot>("/api/trading/monitor"),
+
+  // POST /api/trading/positions/close — manual close from the monitor page
+  closePosition: (ticket: string, close_reason = "manual") =>
+    post<ClosePositionResult>("/api/trading/positions/close",
+      { ticket, close_reason }),
 
   // ---------- Quote API call log (7-day auto-expiry) ----------
   quoteLogs: (limit = 100) =>

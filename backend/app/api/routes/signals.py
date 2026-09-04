@@ -99,17 +99,17 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     live_prices, feed = await _live_prices(
         sorted({str(r.get("asset") or "").upper() for r in rows}))
     # Pending signals past the TTL were already expired by the pass above;
-    # approved rows always stay visible. Cards render OLDEST → NEWEST (the
-    # user's requested order): approved cards first in approval order, then
-    # pending cards oldest-first so the newest setup is the last card.
+    # approved rows always stay visible. Cards render NEWEST → OLDEST (the
+    # user's requested order): approved cards first (newest approval first),
+    # then pending cards newest-first — the newest setup is the first card.
     if rows:
-        # OLDEST → NEWEST across the whole page (user request 2026-09-04):
-        # approved cards first in approval order (they are the older history),
-        # then pending cards oldest-first — the newest setup is the last card.
+        # NEWEST → OLDEST across the whole page (user request 2026-09-04):
+        # approved cards first in approval order (newest first), then pending
+        # cards newest-first — the newest setup is the first card.
         rows.sort(key=lambda r: (
-            (r.get("approval") or "pending") != "approved",
+            (r.get("approval") or "pending") == "approved",
             r.get("approved_at") or r.get("created_at") or "",
-        ))
+        ), reverse=True)
         # Read-time limit note — the scanner keeps generating signals all day
         # even past the user's limits (limits gate ORDER EXECUTION, not signal
         # generation), so pending cards that cannot fire right now carry the

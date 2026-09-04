@@ -4,6 +4,7 @@ import { useState } from "react";
 import { API_BASE, SignalProposal } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
 import LimitLevels from "@/components/LimitLevels";
+import ReasonList from "@/components/ReasonList";
 
 const DECISION_STYLE: Record<string, string> = {
   "TRADE": "bg-profit/20 text-profit border-profit",
@@ -75,12 +76,8 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         </div>
       )}
       <LimitLevels signal={signal} />
-      <details className="text-sm">
-        <summary className="cursor-pointer text-accent">Reason ({signal.reason.length})</summary>
-        <ol className="list-decimal list-inside mt-2 space-y-1 text-slate-300">
-          {signal.reason.map((r, i) => <li key={i}>{r}</li>)}
-        </ol>
-      </details>
+      {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
+      <ReasonList reasons={signal.reason} />
       {signal.approval === "approved" ? (
         // อนุมัติแล้ว/ยิงแล้ว — แสดงสแตมป์เวลาแทนปุ่ม
         <div className="mt-3 flex items-center gap-2 rounded border border-profit/40 bg-profit/10 px-2 py-1.5 text-xs text-profit">

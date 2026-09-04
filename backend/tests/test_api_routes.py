@@ -34,6 +34,17 @@ class FakeBroker:
         # must satisfy the broker result contract used by execution.execute_signal
         return SimpleNamespace(ok=True, broker_order_id="TCK-123", message="opened")
 
+    async def close_position(self, ticket: str) -> object:
+        # manual-close endpoint contract: ok + message
+        return SimpleNamespace(ok=True, broker_order_id=ticket,
+                               message=f"closed {ticket} pnl=0.00")
+
+    async def mark_price(self, ticket: str) -> float:
+        return 0.0  # no book → endpoint falls back to live feed / entry
+
+    async def quote(self, asset: str) -> float:
+        return 0.0
+
 
 class FakeLine:
     async def push(self, user_id: str, message: str) -> None:
@@ -286,7 +297,7 @@ class TestSignalsLatestTiers:
 
     @pytest.mark.asyncio
     async def test_approved_sorted_after_pending(self):
-        """Approved cards render FIRST (oldest→newest page order, user request
+        """Approved cards render FIRST (newest→oldest page order, user request
         2026-09-04): approved history above, pending action queue below."""
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={"signals": [
@@ -308,10 +319,10 @@ class TestSignalsLatestTiers:
         assert body[1]["approval"] == "pending"
 
     @pytest.mark.asyncio
-    async def test_cards_sorted_oldest_to_newest(self):
-        """User request (2026-09-04): cards render oldest → newest. Approved
-        cards come first in approval order, pending cards follow oldest-first
-        — the newest setup is the LAST card on the page."""
+    async def test_cards_sorted_newest_to_oldest(self):
+        """User request (2026-09-04, updated): cards render newest → oldest.
+        Approved cards come first in approval order (newest first), pending
+        cards follow newest-first — the newest setup is the FIRST card."""
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={"signals": [
             {"id": "p2", "asset": "AUDUSD", "direction": "buy",
@@ -337,8 +348,8 @@ class TestSignalsLatestTiers:
         set_state(db)
         body = (await call("GET", "/api/signals/latest")).json()
         assert [s["asset"] for s in body] == [
-            "EURUSD", "GBPUSD",   # approved, oldest approval first
-            "XAUUSD", "AUDUSD",   # pending, oldest first
+            "GBPUSD", "EURUSD",   # approved, newest approval first
+            "AUDUSD", "XAUUSD",   # pending, newest first
         ]
 
     @pytest.mark.asyncio
@@ -503,3 +514,131 @@ class TestRiskCheck:
         body = r.json()
         assert body["trading_paused"] is True
         assert body["risk_level"] == "critical"
+
+
+# ---------------------------------------------------------------------------
+# /api/trading/positions/close — manual close from the monitor page
+# ---------------------------------------------------------------------------
+class TestClosePosition:
+    def _open_row(self, ticket: str = "PAPER-000001", asset: str = "EURUSD",
+                  direction: str = "buy", entry: float = 1.08500,
+                  volume: float = 0.01) -> dict:
+        return {
+            "id": "row-1", "ticket": ticket, "asset": asset,
+            "direction": direction, "volume": volume, "entry_price": entry,
+            "stop_loss": 1.08000, "take_profit": 1.09500,
+            "status": "open", "source": "auto",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_close_returns_full_summary(self, monkeypatch):
+        """Happy path: open row → close → summary with entry/exit/PnL/stats."""
+        import app.api.routes.trading as trading_route
+
+        row = self._open_row()
+        db = FakeDatabase(rows={"paper_trades": [row]})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.09500}, {}  # +100 pips → BUY wins
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        r = await call("POST", "/api/trading/positions/close",
+                       {"ticket": "PAPER-000001"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["ticket"] == "PAPER-000001"
+        assert body["asset"] == "EURUSD"
+        assert body["direction"] == "BUY"
+        assert body["entry_price"] == 1.085
+        assert body["exit_price"] == 1.095
+        # BUY 0.01 lot, +0.01 price → 0.01 * 0.01 * 100_000 = +10.00
+        assert body["pnl"] == 10.0
+        assert body["pnl_pct"] == 0.1          # 10 / 10_000 capital
+        assert body["close_reason"] == "manual"
+        assert body["remaining_open"] == 0
+        # journal row must be closed
+        assert row["status"] == "closed"
+        assert row["exit_price"] == 1.095
+        assert row["close_reason"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_close_sell_position_negative_pnl(self, monkeypatch):
+        """SELL + price up → loss; summary carries negative PnL."""
+        import app.api.routes.trading as trading_route
+
+        row = self._open_row(direction="sell", entry=1.08500)
+        db = FakeDatabase(rows={"paper_trades": [row]})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.09000}, {}  # +50 pips against SELL
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        body = (await call("POST", "/api/trading/positions/close",
+                           {"ticket": "PAPER-000001"})).json()
+        assert body["ok"] is True
+        assert body["pnl"] == -5.0
+        assert body["pnl_pct"] == -0.05
+
+    @pytest.mark.asyncio
+    async def test_close_unknown_ticket_fails_cleanly(self):
+        db = FakeDatabase(rows={"paper_trades": []})
+        set_state(db)
+        r = await call("POST", "/api/trading/positions/close",
+                       {"ticket": "PAPER-999999"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert "ไม่พบไม้ที่เปิดอยู่" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_close_offline_falls_back_to_entry(self, monkeypatch):
+        """No live feed + no broker book → exit = entry → PnL 0 (no crash)."""
+        import app.api.routes.trading as trading_route
+
+        row = self._open_row()
+        db = FakeDatabase(rows={"paper_trades": [row]})
+        set_state(db)
+
+        async def dead_spot(assets, **_kw):
+            return {}, {"EURUSD": "timeout"}
+
+        monkeypatch.setattr(trading_route, "_spot_prices", dead_spot)
+        body = (await call("POST", "/api/trading/positions/close",
+                           {"ticket": "PAPER-000001"})).json()
+        assert body["ok"] is True
+        assert body["exit_price"] == 1.085
+        assert body["pnl"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_close_updates_portfolio_summary(self, monkeypatch):
+        """Popup stats: remaining_open, pnl_today, wins/losses after close."""
+        import app.api.routes.trading as trading_route
+
+        now = datetime.now(timezone.utc)
+        closed_win = {
+            "id": "row-old", "ticket": "PAPER-000001", "asset": "EURUSD",
+            "direction": "buy", "volume": 0.01, "entry_price": 1.08,
+            "exit_price": 1.09, "pnl": 100.0, "status": "closed",
+            "close_reason": "tp", "closed_at": now.isoformat(),
+            "created_at": now.isoformat(),
+        }
+        row = self._open_row(ticket="PAPER-000002")
+        db = FakeDatabase(rows={"paper_trades": [closed_win, row]})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.08500}, {}  # flat → PnL 0
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        body = (await call("POST", "/api/trading/positions/close",
+                           {"ticket": "PAPER-000002"})).json()
+        assert body["ok"] is True
+        assert body["remaining_open"] == 0
+        assert body["total_realized_pnl"] == 100.0
+        assert body["pnl_today"] == 100.0
+        assert body["wins"] == 1
+        assert body["losses"] == 0

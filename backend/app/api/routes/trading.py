@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 
+from app.models.close_position import ClosePositionResult
 from app.models.schemas import (
     AppSettings,
     BacktestConfig,
@@ -269,6 +270,154 @@ async def monitor(request: Request) -> MonitorSnapshot:
     # the old sync version silently dropped the broker coroutine and pinned
     # current_price to the entry price (PnL stuck at 0.00).
     return await execution.monitor_snapshot(db, request.app.state.broker, s)
+
+
+# ------------------------------------------------------- manual position close
+async def _spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[str, str]]:
+    """Thin wrapper over quotes.fetch_spot_prices — module-level so tests can
+    monkeypatch it (the endpoint imports this module, not quotes directly)."""
+    from app.integrations import quotes as quotes_mod
+    return await quotes_mod.fetch_spot_prices(assets)
+
+
+class ClosePositionRequest(BaseModel):
+    ticket: str
+    close_reason: str = "manual"
+
+
+@router.post("/positions/close", response_model=ClosePositionResult)
+async def close_position(payload: ClosePositionRequest,
+                         request: Request) -> ClosePositionResult:
+    """Manually close ONE open paper position (monitor page button).
+
+    Flow mirrors position_guard's SL/TP close: broker.close_position →
+    close_trade_rows (journal) → LINE notify. The response carries a full
+    summary (entry/exit/PnL/holding time + portfolio stats) so the UI can
+    render the confirmation popup without a second round-trip.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    from app.services.notification_service import NotificationService
+
+    log = logging.getLogger(__name__)
+    db = request.app.state.db
+    broker = request.app.state.broker
+    ticket = payload.ticket.strip()
+
+    # ---- find the open journal row ---------------------------------------
+    rows = db.select("paper_trades", filters={"ticket": ticket, "status": "open"},
+                     limit=1)
+    if not rows:
+        return ClosePositionResult(
+            ok=False, ticket=ticket,
+            message=f"ไม่พบไม้ที่เปิดอยู่กับ ticket {ticket} "
+                    f"(อาจถูกปิดไปแล้วโดย SL/TP)")
+    row = rows[0]
+
+    # ---- resolve the exit mark (live feed → broker book → entry) ---------
+    # Same priority as monitor_snapshot.mark_for: the live spot feed is the
+    # real market; the broker book is only a fallback for uncovered assets.
+    exit_price = 0.0
+    try:
+        asset = str(row.get("asset") or "").upper()
+        prices, _failures = await _spot_prices([asset])
+        exit_price = float(prices.get(asset) or 0)
+    except Exception as exc:
+        log.warning("close %s: live mark unavailable: %s", ticket, exc)
+    if not exit_price:
+        try:
+            exit_price = float(await broker.mark_price(ticket))
+        except Exception:
+            exit_price = 0.0
+    if not exit_price:
+        try:
+            exit_price = float(await broker.quote(row.get("asset", "")))
+        except Exception:
+            exit_price = 0.0
+    if not exit_price:
+        exit_price = float(row.get("entry_price") or 0)  # last resort: flat PnL
+
+    # ---- close at the broker ---------------------------------------------
+    result = await broker.close_position(ticket)
+    if not result.ok:
+        return ClosePositionResult(
+            ok=False, ticket=ticket, asset=str(row.get("asset") or ""),
+            message=f"ปิดไม่สำเร็จ: {result.message}")
+
+    # ---- compute PnL (same math as the monitor + guard) -------------------
+    pos = SimpleNamespace(
+        direction=str(row.get("direction") or "BUY").upper(),
+        current_price=exit_price,
+        entry_price=float(row.get("entry_price") or 0),
+        volume=float(row.get("volume") or 0),
+        asset=str(row.get("asset") or ""),
+    )
+    pnl = round(execution.PaperBrokerPnl.compute(pos), 2)
+    entry = float(row.get("entry_price") or 0)
+    capital = max(_settings(request).capital, 1.0)
+    pnl_pct = round(pnl / capital * 100, 2)
+
+    # ---- holding time -----------------------------------------------------
+    holding_min: float | None = None
+    created_raw = row.get("created_at")
+    if created_raw:
+        try:
+            created = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            holding_min = round((datetime.now(timezone.utc) - created).total_seconds() / 60, 1)
+        except ValueError:
+            holding_min = None
+
+    # ---- journal + notify -------------------------------------------------
+    execution.close_trade_rows(db, ticket, exit_price, pnl, payload.close_reason)
+    warnings: list[str] = []
+    try:
+        notifier = NotificationService(db, request.app.state.line)
+        emoji = "✋"
+        await notifier.notify(
+            row.get("user_id", ""), "trade_closed",
+            f"{emoji} Manual Close\n"
+            f"Asset: {row.get('asset')}\nDirection: {pos.direction}\n"
+            f"Entry: {entry:g} → Exit: {exit_price:g}\n"
+            f"PnL: {pnl:+,.2f} ({pnl_pct:+.2f}%)",
+        )
+    except Exception as exc:
+        warnings.append(f"notify failed: {exc}")
+
+    # ---- portfolio summary for the popup ----------------------------------
+    all_rows = db.select("paper_trades", limit=500)
+    closed = [r for r in all_rows
+              if r.get("status") == "closed" and r.get("pnl") is not None]
+    open_count = len([r for r in all_rows if r.get("status") == "open"])
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    pnl_today = round(sum(float(r.get("pnl") or 0) for r in closed
+                          if str(r.get("closed_at") or r.get("created_at") or "")[:10] == today), 2)
+    wins = len([r for r in closed if float(r.get("pnl") or 0) > 0])
+    losses = len([r for r in closed if float(r.get("pnl") or 0) < 0])
+
+    # journal row id of the just-closed trade (close_trade_rows updated it)
+    trade_id = ""
+    try:
+        updated = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
+        if updated:
+            trade_id = str(updated[0].get("id") or "")
+    except Exception:
+        trade_id = ""
+
+    return ClosePositionResult(
+        ok=True, ticket=ticket, asset=str(row.get("asset") or ""),
+        direction=pos.direction, volume=pos.volume,
+        entry_price=entry, exit_price=exit_price, pnl=pnl, pnl_pct=pnl_pct,
+        holding_time_min=holding_min, close_reason=payload.close_reason,
+        message=result.message,
+        remaining_open=open_count,
+        total_realized_pnl=round(sum(float(r.get("pnl") or 0) for r in closed), 2),
+        pnl_today=pnl_today, wins=wins, losses=losses,
+        trade_id=trade_id, warnings=warnings,
+    )
 
 
 # ----------------------------------------------------------------- journal

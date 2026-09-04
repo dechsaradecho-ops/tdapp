@@ -401,6 +401,29 @@ export interface MonitorSnapshot {
   feed_status?: QuoteFeedStatus | null;
 }
 
+/** Response of POST /api/trading/positions/close (manual close popup). */
+export interface ClosePositionResult {
+  ok: boolean;
+  ticket: string;
+  asset: string;
+  direction: string;
+  volume: number;
+  entry_price: number;
+  exit_price: number;
+  pnl: number;
+  pnl_pct: number;
+  holding_time_min: number | null;
+  close_reason: string;
+  message: string;
+  remaining_open: number;
+  total_realized_pnl: number;
+  pnl_today: number;
+  wins: number;
+  losses: number;
+  trade_id: string;
+  warnings: string[];
+}
+
 // ---------- Auth: 6-digit PIN gate ----------
 export interface PinStatus {
   pin_set: boolean;
