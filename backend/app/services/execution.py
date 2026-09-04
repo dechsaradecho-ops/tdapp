@@ -38,6 +38,8 @@ from app.models.schemas import (
     risk_to_lot,
 )
 
+from app.services import signal_log
+
 log = logging.getLogger(__name__)
 
 # Fixed demo user until multi-user auth lands (same id /approve already used).
@@ -78,6 +80,14 @@ def expire_stale_pending_signals(db) -> int:
             if not db.update("signals", sig["id"], {"approval": "expired"}):
                 db.update("signals", sig["id"], {"approval": "rejected"})
             expired += 1
+            # Lifecycle log: pending past the 30-min TTL → never became an order.
+            signal_log.log_event(
+                db=db, event="expired", signal_id=str(sig.get("id") or ""),
+                asset=str(sig.get("asset") or ""),
+                direction=str(sig.get("direction") or ""),
+                confidence=sig.get("confidence"), entry=sig.get("entry"),
+                source="scanner",
+                reason=f"pending เกิน {SIGNAL_TTL_MIN} นาที — ไม่ได้เปิดออเดอร์")
     return expired
 
 
@@ -395,12 +405,21 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)
+        # Lifecycle log: the gate said NO (pause/limits/news/correlation/...).
+        signal_log.log_event(
+            db=db, event="order_blocked", signal_id=str(signal_id or ""),
+            asset=asset, direction=direction, confidence=confidence, entry=entry,
+            source=source, reason="; ".join(report.rejects[:2]) or "gate blocked")
         return report
 
     lots = size_position(s, entry, stop_loss)
     if lots <= 0:
         report.allowed = False
         report.rejects.append("Position sizing returned 0 lots (bad entry/SL)")
+        signal_log.log_event(
+            db=db, event="order_blocked", signal_id=str(signal_id or ""),
+            asset=asset, direction=direction, confidence=confidence, entry=entry,
+            source=source, reason=report.rejects[-1])
         return report
     report.size_lots = lots
 
@@ -411,6 +430,10 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     if not result.ok:
         report.allowed = False
         report.rejects.append(f"Broker rejected order: {result.message}")
+        signal_log.log_event(
+            db=db, event="order_blocked", signal_id=str(signal_id or ""),
+            asset=asset, direction=direction, confidence=confidence, entry=entry,
+            source=source, reason=report.rejects[-1])
         return report
 
     record_trade(db, {
@@ -419,6 +442,14 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         "stop_loss": stop_loss, "take_profit": take_profit,
         "status": "open", "source": source, "ticket": result.broker_order_id,
     })
+    # Lifecycle log: the order actually opened (ticket + volume recorded).
+    signal_log.log_event(
+        db=db, event="order_opened", signal_id=str(signal_id or ""),
+        asset=asset, direction=direction, confidence=confidence, entry=entry,
+        stop_loss=stop_loss, take_profit=take_profit, source=source,
+        ticket=str(result.broker_order_id or ""), volume=lots,
+        reason=f"เปิดออเดอร์ {direction} {lots:g} lots @ {entry:g} (" + (
+            "auto" if source == "auto" else "อนุมัติเอง") + ")")
     if notifier is not None:
         try:
             await notifier.notify(

@@ -10,6 +10,7 @@ from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal)
 from app.services import execution
+from app.services import signal_log
 from app.services.execution import (
     SIGNAL_TTL_MIN,
     expire_stale_pending_signals,
@@ -175,6 +176,16 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 live_price=live_prices.get(str(r["asset"]).upper()),
                 feed_status=feed,
             ))
+            # Countdown for pending cards: how long until this signal ages out
+            # of the queue (30-min TTL) and the scanner re-evaluates the setup.
+            if (r.get("approval") or "pending") == "pending" and r.get("created_at"):
+                dt = execution._parse_dt(str(r["created_at"]))
+                if dt is not None:
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    left = SIGNAL_TTL_MIN - (
+                        datetime.now(timezone.utc) - dt).total_seconds() / 60
+                    proposals[-1].expires_min_left = round(max(left, 0.0), 1)
         return proposals
 
     # No stored signals → analyze live quotes right now (demo only as last resort)
@@ -216,6 +227,21 @@ async def approve_signal(payload: ApprovalRequest, request: Request):
     db.update("signals", payload.signal_id, {"approval": status})
 
     if not payload.approve:
+        # Lifecycle log: user said NO — pull the row so the log shows what
+        # setup was rejected (asset/price), not just an opaque id.
+        row = None
+        try:
+            rows = db.select("signals", filters={"id": payload.signal_id}, limit=1)
+            row = rows[0] if rows else None
+        except Exception:
+            row = None
+        signal_log.log_event(
+            db=db, event="rejected", signal_id=str(payload.signal_id),
+            asset=str((row or {}).get("asset") or ""),
+            direction=str((row or {}).get("direction") or ""),
+            confidence=(row or {}).get("confidence"),
+            entry=(row or {}).get("entry"), source="user",
+            reason="ผู้ใช้กดไม่อนุมัติสัญญาณ")
         return {"status": status}
 
     broker = request.app.state.broker

@@ -26,6 +26,7 @@ import {
   RiskStatus,
   SessionStatus,
   SettingsSaveResult,
+  SignalLogsResponse,
   SignalProposal,
   WalkForwardResult,
 } from "./types";
@@ -180,6 +181,10 @@ export const api = {
   quoteLogs: (limit = 100) =>
     get<QuoteLogsResponse>(`/api/system/quote-logs?limit=${limit}`),
   quoteTest: () => post<QuoteTestResult>("/api/system/quote-test", {}),
+
+  // ---------- Signal lifecycle log (7-day auto-expiry) ----------
+  signalLogs: (limit = 100) =>
+    get<SignalLogsResponse>(`/api/system/signal-logs?limit=${limit}`),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

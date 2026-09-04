@@ -75,6 +75,20 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
           )}
         </div>
       )}
+      {signal.approval !== "approved" && signal.expires_min_left != null && (
+        // นับถอยหลัง: อีกกี่นาทีก่อนสัญญาณหมดอายุและระบบเริ่มประเมินใหม่
+        // (TTL 30 นาที) — เหลือ <10 นาทีเปลี่ยนเป็นสีเตือน
+        <div className={`mb-2 flex items-center gap-2 rounded border px-2 py-1 text-xs ${
+          signal.expires_min_left < 10
+            ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
+            : "border-slate-700 bg-surface text-slate-400"
+        }`}>
+          <span>⏳</span>
+          <span>
+            อีก {Math.max(signal.expires_min_left, 0).toFixed(0)} นาที ระบบจะหมดอายุและเริ่มประเมินใหม่
+          </span>
+        </div>
+      )}
       <LimitLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
       <ReasonList reasons={signal.reason} />

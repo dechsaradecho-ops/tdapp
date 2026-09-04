@@ -99,6 +99,47 @@ export interface QuoteLogsResponse {
   ttl_days: number;
 }
 
+// ---------- Signal lifecycle log (7-day retention) ----------
+export interface SignalLog {
+  id: string;
+  created_at: string | null;
+  signal_id: string | null;
+  asset: string;
+  direction: string;
+  event: "created" | "order_opened" | "order_blocked" | "rejected"
+    | "expired" | "closed";
+  confidence: number | null;
+  entry: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  source: string;
+  reason: string;
+  ticket: string | null;
+  volume: number | null;
+  pnl: number | null;
+  exit_price: number | null;
+}
+
+export interface SignalLogSummary {
+  total: number;
+  by_event: Record<string, number>;
+  by_asset: Record<string, number>;
+  opened: number;
+  blocked: number;
+  expired: number;
+  rejected: number;
+  closed: number;
+}
+
+export interface SignalLogsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  logs: SignalLog[];
+  summary: SignalLogSummary;
+  ttl_days: number;
+}
+
 export interface QuoteTestResult {
   verdict: "ok" | "fail";
   prices: Record<string, number>;
@@ -185,6 +226,8 @@ export interface SignalProposal {
   // the card show live price next to entry so a stale entry is obvious.
   live_price?: number | null;
   feed_status?: QuoteFeedStatus | null;
+  // Pending-only: นาทีที่เหลือก่อนหมดอายุและระบบเริ่มประเมินใหม่ (TTL 30 นาที)
+  expires_min_left?: number | null;
 }
 
 // ---------- Extended Trading System ----------

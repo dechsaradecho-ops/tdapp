@@ -21,6 +21,7 @@ from app.models.schemas import (
     TradeLimits,
     effective_min_confidence,
 )
+from app.services import signal_log
 from app.services.database import Database
 
 log = logging.getLogger(__name__)
@@ -140,13 +141,23 @@ async def scan_once(db: Database) -> list[dict]:
                         for lv in proposal.limit_levels
                     ],
                 })
-            db.insert("signals", {
+            inserted = db.insert("signals", {
                 "asset": asset, "direction": proposal.direction.lower(),
                 "confidence": proposal.confidence, "opportunity_score": opp.score,
                 "entry": proposal.entry, "stop_loss": proposal.stop_loss,
                 "take_profit": proposal.take_profit, "expected_rr": proposal.expected_rr,
                 "approval": "pending", "explanation": " | ".join(proposal.reason[:4]),
             })
+            # Lifecycle log: the signal was created (survives 7 days even after
+            # the signals row itself expires/approves — audit trail).
+            signal_log.log_event(
+                db=db, event="created",
+                signal_id=str((inserted or {}).get("id") or ""),
+                asset=asset, direction=proposal.direction,
+                confidence=proposal.confidence, entry=proposal.entry,
+                stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
+                source="scanner", reason=" | ".join(proposal.reason[:3]),
+            )
 
     log.info("Scan done: %d live, %d demo", live_used, demo_used)
     return results

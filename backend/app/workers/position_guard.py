@@ -16,6 +16,7 @@ import logging
 from app.integrations import quotes
 from app.integrations.brokers import Position
 from app.services import execution
+from app.services import signal_log
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
@@ -88,6 +89,13 @@ async def guard_once(db, broker, notifier: NotificationService) -> dict:
 
         pnl = execution.PaperBrokerPnl.compute(pos)
         execution.close_trade_rows(db, pos.ticket, price, pnl, reason)
+        signal_log.log_event(
+            db=db, event="closed", asset=str(pos.asset or ""),
+            direction=str(pos.direction or ""), entry=pos.entry_price,
+            exit_price=price, pnl=pnl, ticket=str(pos.ticket or ""),
+            source="auto",
+            reason=("ตัดขาดทุน (SL) ที่ " if hit_sl else "ปิดกำไร (TP) ที่ ")
+            + f"{price:g}")
         closed += 1
         try:
             emoji = "🛑" if hit_sl else "🎯"

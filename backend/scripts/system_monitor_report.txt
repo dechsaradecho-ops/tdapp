@@ -1,0 +1,63 @@
+=== 1. HEALTH === HTTP 200 {"status":"ok","platform":"AI Wealth & Trading Advisor","deployment":"render","workers":"running","jobs":["portfolio_mon
+=== 2. LOGIN === HTTP 200 token=yes
+=== 3. WORKER TABLES (/api/system/counts) === HTTP 200
+  market_analysis  rows=100  latest=2026-09-04T06:11:42.180528+00:00  age=3m
+  signals          rows=45  latest=2026-09-04T05:56:40.810593+00:00  age=18m
+  news_analysis    rows=40  latest=2026-09-04T06:06:37.886348+00:00  age=8m
+  trades           rows=0  latest=None  age=?
+=== 4. SIGNALS (/api/signals/latest) === HTTP 200
+  count=2
+  feed: state=ok source=exchangerate+yahoo failed=[]
+  XAUUSD  BUY  conf=72.20 approval=approved  entry=4469.59541 live=4516.3 drift=+1.04% created=4.3h ago
+  AUDUSD  BUY  conf=75.00 approval=pending   entry=0.721 live=0.7212 drift=+0.03% created=18m ago BLOCKED: ไม่ได้เปิดออเดอร์ใหม่เพราะ AUDUSD มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน
+=== 5. PAUSE (/api/trading/pause) === HTTP 200 paused=False reason=
+=== 6. MONITOR (/api/trading/monitor) === HTTP 200
+  stats: {"trades_today": 12, "trades_week": 15, "open_positions": 10, "closed_count": 5, "win_rate": 100.0, "pnl_today": 173.68, "pnl_week": 254.21, "pnl_total": 254.21}
+  OPEN EURUSD  BUY  vol=0.01 entry=1.1615 current=1.1633 uPnL=1.8 [live-mark OK]
+  OPEN AUDUSD  BUY  vol=0.01 entry=0.71933 current=0.7212 uPnL=1.87 [live-mark OK]
+  OPEN EURUSD  BUY  vol=0.01 entry=1.1615 current=1.1633 uPnL=1.8 [live-mark OK]
+  OPEN AUDUSD  BUY  vol=0.01 entry=0.71933 current=0.7212 uPnL=1.87 [live-mark OK]
+  OPEN EURUSD  BUY  vol=0.01 entry=1.1615 current=1.1633 uPnL=1.8 [live-mark OK]
+  OPEN AUDUSD  BUY  vol=0.01 entry=0.71933 current=0.7212 uPnL=1.87 [live-mark OK]
+  OPEN EURUSD  BUY  vol=0.01 entry=1.1615 current=1.1633 uPnL=1.8 [live-mark OK]
+  OPEN AUDUSD  BUY  vol=0.01 entry=0.71933 current=0.7212 uPnL=1.87 [live-mark OK]
+  OPEN EURUSD  BUY  vol=0.01 entry=1.1615 current=1.1633 uPnL=1.8 [live-mark OK]
+  OPEN AUDUSD  BUY  vol=0.01 entry=0.71933 current=0.7212 uPnL=1.87 [live-mark OK]
+=== 7. AUTOTRADER DRY-RUN (one real trade_once cycle) === HTTP 200
+  client=ok order_mode=auto capital=100.0
+  pending_signals=1
+    - AUDUSD buy conf=75.0 created=18m ago
+  trade_once: {"mode": "auto", "picked": 1, "fired": 0, "blocked": 0, "skipped": 1, "expired": 0}
+  open_paper_trades=10
+    - EURUSD BUY vol=0.01 ticket=PAPER-000014
+    - AUDUSD BUY vol=0.01 ticket=PAPER-000013
+    - EURUSD BUY vol=0.01 ticket=PAPER-000011
+    - AUDUSD BUY vol=0.01 ticket=PAPER-000010
+    - EURUSD BUY vol=0.01 ticket=PAPER-000008
+    - AUDUSD BUY vol=0.01 ticket=PAPER-000007
+    - EURUSD BUY vol=0.01 ticket=PAPER-000005
+    - AUDUSD BUY vol=0.01 ticket=PAPER-000004
+    - EURUSD BUY vol=0.01 ticket=PAPER-000002
+    - AUDUSD BUY vol=0.01 ticket=PAPER-000001
+=== 8. QUOTE LOGS (/api/system/quote-logs) === HTTP 200
+  recent calls: 100
+    2026-09-04T06:14:34 EURUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:14:32 XAUUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:14:31 AUDUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:13:00 EURUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:12:59 AUDUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:11:42 EURUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:11:42 XAUUSD  provider=yahoo status=success latency=?ms
+    2026-09-04T06:11:42 AUDUSD  provider=yahoo status=success latency=?ms
+
+=== SUMMARY ===
+  [PASS       ] health
+  [PASS       ] login
+  [PASS       ] scanner_fresh
+  [PASS       ] signals_fresh
+  [PASS       ] signals_present
+  [PASS       ] feed_ok
+  [PASS       ] pause_off
+  [PASS       ] live_marks
+  [PASS       ] autotrader
+OVERALL: ALL PASS

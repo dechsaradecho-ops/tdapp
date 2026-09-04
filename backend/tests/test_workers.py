@@ -427,7 +427,9 @@ class TestMarketScanner:
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
         results = await market_scanner.scan_once(db)
         assert len(results) == 5           # scan still completes
-        assert db.inserted == []           # but nothing was persisted
+        # nothing persisted except the lifecycle log rows (signal_log logs
+        # the 'created' attempt even when the signals insert silently fails)
+        assert [row for table, row in db.inserted if table != "signal_logs"] == []
 
     @pytest.mark.asyncio
     async def test_news_sentiment_reaches_snapshot(self, monkeypatch):

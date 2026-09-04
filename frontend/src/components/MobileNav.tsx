@@ -14,6 +14,7 @@ const LINKS = [
   { href: "/signals", label: "Signals", icon: "⚡" },
   { href: "/monitor", label: "Monitor", icon: "📊" },
   { href: "/logs", label: "Logs", icon: "📜" },
+  { href: "/signal-logs", label: "Signal Logs", icon: "🗂️" },
   { href: "/risk", label: "Risk", icon: "🛡️" },
   { href: "/performance", label: "Performance", icon: "🎯" },
   { href: "/settings", label: "Settings", icon: "⚙️" },

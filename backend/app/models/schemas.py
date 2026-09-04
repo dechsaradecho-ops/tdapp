@@ -154,6 +154,10 @@ class SignalProposal(BaseModel):
     # Live-price feed health for the page banner (set once per request, on
     # every card of the response — cards share the same fetch).
     feed_status: Optional[QuoteFeedStatus] = None
+    # Pending-only: minutes remaining before this signal leaves the queue and
+    # the system re-evaluates (SIGNAL_TTL_MIN = 30). Approved/expired cards
+    # omit it (None) — no countdown needed once the fate is decided.
+    expires_min_left: Optional[float] = None
 
 
 class TradeRecord(BaseModel):

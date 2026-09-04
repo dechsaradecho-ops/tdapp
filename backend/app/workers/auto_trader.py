@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 
 from app.models.schemas import AppSettings
-from app.services import execution
+from app.services import execution, signal_log
 from app.services.execution import SIGNAL_TTL_MIN, expire_stale_pending_signals, now_iso
 
 log = logging.getLogger(__name__)
@@ -43,11 +43,24 @@ async def trade_once(db, broker, notifier) -> dict:
     for sig in pending:
         entry = float(sig.get("entry") or 0)
         if entry <= 0:
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(sig.get("id") or ""),
+                asset=str(sig.get("asset") or ""),
+                direction=str(sig.get("direction") or ""),
+                confidence=sig.get("confidence"), entry=sig.get("entry"),
+                source="auto", reason="entry ไม่ถูกต้อง (0) — ไม่เปิดออเดอร์")
             continue
         if str(sig.get("asset") or "").upper() in open_assets:
             skipped += 1
             log.info("AutoTrader skipped %s %s: position already open",
                      sig["direction"], sig["asset"])
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(sig.get("id") or ""),
+                asset=str(sig.get("asset") or ""),
+                direction=str(sig.get("direction") or ""),
+                confidence=sig.get("confidence"), entry=sig.get("entry"),
+                source="auto",
+                reason=f"{sig.get('asset')} มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน")
             continue
         report = await execution.execute_signal(
             db, broker, notifier, s,

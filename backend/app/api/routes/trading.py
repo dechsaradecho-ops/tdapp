@@ -44,7 +44,7 @@ from app.models.schemas import (
     walk_forward,
 )
 from app.services import execution
-
+from app.services import signal_log
 router = APIRouter()
 
 JOURNAL_TABLE = "trading_journal"
@@ -373,6 +373,13 @@ async def close_position(payload: ClosePositionRequest,
 
     # ---- journal + notify -------------------------------------------------
     execution.close_trade_rows(db, ticket, exit_price, pnl, payload.close_reason)
+    # Lifecycle log: manual close (user clicked ปิดไม้) — reason records why.
+    signal_log.log_event(
+        db=db, event="closed", asset=str(row.get("asset") or ""),
+        direction=str(row.get("direction") or ""), entry=entry,
+        exit_price=exit_price, pnl=pnl, ticket=str(ticket),
+        source="user",
+        reason=f"ปิดไม้เอง ({payload.close_reason}) @ {exit_price:g}")
     warnings: list[str] = []
     try:
         notifier = NotificationService(db, request.app.state.line)

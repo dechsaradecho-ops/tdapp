@@ -260,6 +260,55 @@ async def quote_logs(request: Request, limit: int = 100) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Signal lifecycle log — created/blocked/opened/rejected/expired/closed (7-day)
+# ---------------------------------------------------------------------------
+@router.get("/signal-logs")
+async def signal_logs(request: Request, limit: int = 100) -> dict:
+    """Recent signal lifecycle events + summary card data.
+
+    ทุกสัญญาณจะถูกบันทึกตั้งแต่เกิด (created) จนจบชะตา (opened / blocked /
+    rejected / expired / closed) เก็บย้อนหลัง 7 วัน — rows เก่าถูก purge
+    อัตโนมัติ (throttled 5 นาที; force=True ตอนเปิดหน้าเพื่อ cleanup เสมอ)
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    from app.services import signal_log
+    signal_log.purge_old_logs(db, force=True)
+    rows = db.select(signal_log.TABLE, order="created_at", desc=True,
+                     limit=max(1, min(limit, 500)))
+    out["logs"] = [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "signal_id": r.get("signal_id"),
+            "asset": r.get("asset"),
+            "direction": r.get("direction"),
+            "event": r.get("event"),
+            "confidence": r.get("confidence"),
+            "entry": r.get("entry"),
+            "stop_loss": r.get("stop_loss"),
+            "take_profit": r.get("take_profit"),
+            "source": r.get("source"),
+            "reason": r.get("reason"),
+            "ticket": r.get("ticket"),
+            "volume": r.get("volume"),
+            "pnl": r.get("pnl"),
+            "exit_price": r.get("exit_price"),
+        }
+        for r in rows
+    ]
+    out["summary"] = signal_log.summary(db)
+    out["ttl_days"] = signal_log.SIGNAL_LOG_TTL_DAYS
+    out["verdict"] = "ok"
+    return out
+
+
 @router.post("/quote-test")
 async def quote_test(request: Request) -> dict:
     """Force-fetch live prices for ALL assets (bypasses the 30s cache).

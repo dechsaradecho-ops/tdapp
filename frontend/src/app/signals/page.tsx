@@ -133,34 +133,70 @@ export default function SignalsPage() {
       {!signals.length && !error && !loading && (
         <p className="text-slate-500 text-sm">ยังไม่มีสัญญาณ — รอ Market Scanner</p>
       )}
-      {/* รอดำเนินการ — action queue ด้านบน (auto = ระบบยิงเอง, semi/manual = รอกด) */}
+      {/* รอดำเนินการ — action queue ด้านบน (auto = ระบบยิงเอง, semi/manual = รอกด)
+          กลุ่มพับ/กางได้ (ค่าเริ่มต้น: กาง) — defaultExpanded กัน hydration mismatch */}
       {pending.length > 0 && (
-        <>
-          <h3 className="text-sm font-semibold text-slate-300">
-            {isAuto
-              ? `🤖 ระบบกำลังดำเนินการ (${pending.length}) — การ์ดไหนพร้อมยิง ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที`
-              : `รอการอนุมัติ (${pending.length})`}
-          </h3>
+        <SignalGroup
+          title={isAuto
+            ? `🤖 ระบบกำลังดำเนินการ (${pending.length}) — การ์ดไหนพร้อมยิง ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที`
+            : `รอการอนุมัติ (${pending.length})`}
+          count={pending.length}
+          defaultExpanded
+        >
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
             {pending.map((s) => (
               <SignalCard key={`${s.asset}-${s.approval ?? "pending"}`} signal={s} orderMode={mode} />
             ))}
           </div>
-        </>
+        </SignalGroup>
       )}
       {/* อนุมัติ/ยิงแล้ว — แสดงด้านล่างพร้อมสแตมป์เวลา */}
       {approved.length > 0 && (
-        <>
-          <h3 className="text-sm font-semibold text-profit">
-            {isAuto ? `🤖 ยิงออเดอร์แล้ว (${approved.length})` : `อนุมัติแล้ว (${approved.length})`}
-          </h3>
+        <SignalGroup
+          title={isAuto ? `🤖 ยิงออเดอร์แล้ว (${approved.length})` : `อนุมัติแล้ว (${approved.length})`}
+          count={approved.length}
+          defaultExpanded={false}
+        >
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
             {approved.map((s) => (
               <SignalCard key={`${s.asset}-${s.approved_at ?? "approved"}`} signal={s} orderMode={mode} />
             ))}
           </div>
-        </>
+        </SignalGroup>
       )}
+    </div>
+  );
+}
+
+/** หัวข้อกลุ่มที่กดพับ/กางได้ — chevron หมุนตามสถานะ */
+function SignalGroup({ title, count, defaultExpanded, children }: {
+  title: string;
+  count: number;
+  defaultExpanded: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultExpanded);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between rounded-lg bg-surface border border-slate-800 px-3 py-2.5 min-h-[44px] active:brightness-90 transition"
+        aria-expanded={open}
+      >
+        <span className={`text-sm font-semibold ${title.includes("ยิง") || title.includes("อนุมัติ") ? "text-profit" : "text-slate-300"}`}>
+          {title}
+        </span>
+        <span className="flex items-center gap-2 text-xs text-slate-500">
+          <span>{count} รายการ</span>
+          <svg
+            className={`w-4 h-4 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+            fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        </span>
+      </button>
+      {open && <div className="mt-3">{children}</div>}
     </div>
   );
 }
