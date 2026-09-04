@@ -33,18 +33,29 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // On mount: if we hold a token, try a cheap authenticated call to validate it.
+  // On mount: decide FAST. A stored token renders the dashboard immediately
+  // (optimistic) while a background probe re-validates it — page navigation
+  // no longer blocks on the full-screen "กำลังตรวจสอบเซสชั่น..." every hop.
+  // Safety net: any 401 from the probe OR the page's own API calls fires
+  // AUTH_EXPIRED_EVENT → the gate re-locks to the PIN pad.
   useEffect(() => {
     (async () => {
+      const hasToken = !!getToken();
+      if (hasToken) {
+        setAuthed(true);        // optimistic — validated in background below
+        setChecking(false);
+      }
       const st = await loadStatus();
-      if (st?.pin_set && getToken()) {
+      if (!hasToken) {
+        setChecking(false);     // no token → PIN pad (or bootstrap when no PIN)
+        return;
+      }
+      if (st?.pin_set) {
         // Cheap authenticated probe with a hard timeout so a slow/hanging
-        // API can never leave the gate stuck on the "checking" screen.
-        // A cold Render instance can take 30s+ to answer, so retry a few
-        // times. Only a definitive 401 clears the token — a timeout keeps
-        // it (the session is still alive server-side) and retries instead,
-        // otherwise slow starts turn into an enter-PIN → checking → PIN
-        // pad loop.
+        // API can never leave the session unvalidated forever. A cold Render
+        // instance can take 30s+ to answer, so retry a few times. Only a
+        // definitive 401 clears the token — a timeout keeps it (the session
+        // is still alive server-side) and retries instead.
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
             await Promise.race([
@@ -52,20 +63,21 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
               new Promise<never>((_, rej) =>
                 setTimeout(() => rej(new Error("probe timeout")), 20000)),
             ]);
-            setAuthed(true);      // token still valid → straight in
-            setChecking(false);
+            setAuthed(true);    // confirmed valid — children already visible
             return;
           } catch (e) {
             const m = e instanceof Error ? e.message : String(e);
             if (m.includes("ต้องเข้าสู่ระบบ")) {
-              clearToken();       // token definitively dead → show PIN pad
-              break;
+              clearToken();     // token definitively dead → re-lock to PIN pad
+              setAuthed(false);
+              setMsg("เซสชันหมดอายุ — กรอก PIN อีกครั้ง");
+              setMsgType("error");
+              return;
             }
             await new Promise((r) => setTimeout(r, 3000)); // back off, retry
           }
         }
       }
-      setChecking(false);
     })();
   }, [loadStatus]);
 

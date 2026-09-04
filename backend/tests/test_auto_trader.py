@@ -387,6 +387,18 @@ class TestGatePipeline:
         s = clean_settings(capital=100.0, risk_per_trade_pct=0.1)
         assert execution.size_position(s, 1.0850, 1.0800) >= 0.01
 
+    def test_size_position_honors_min_lot_setting(self):
+        """min_lot from Settings replaces the old hardcoded 0.01 floor."""
+        s = clean_settings(capital=100.0, risk_per_trade_pct=0.1, min_lot=0.02)
+        # risk_to_lot gives ~0.0002 lots → floored to the user's 0.02
+        assert execution.size_position(s, 1.0850, 1.0800) == pytest.approx(0.02, abs=1e-9)
+
+    def test_size_position_min_lot_does_not_shrink_risk_lots(self):
+        """min_lot is a FLOOR — a large risk-based size is never reduced."""
+        s = clean_settings(capital=10_000.0, risk_per_trade_pct=1.0, min_lot=0.02)
+        # $100 risk / (0.0050 × 100k) = 0.20 lots > 0.02 → sizing unchanged
+        assert execution.size_position(s, 1.0850, 1.0800) == pytest.approx(0.2, abs=0.02)
+
 
 # ---------------------------------------------------------------------------
 # 2. AutoTrader worker

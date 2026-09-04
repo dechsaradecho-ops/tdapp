@@ -1152,6 +1152,10 @@ class AppSettings(BaseModel):
     max_trades_weekly: int = 30
     max_open_positions: int = 4
     risk_per_trade_pct: float = 1.0
+    # Minimum lot size for every opened order (PaperBroker floor). The
+    # risk_to_lot result is raised to this value so tiny accounts still trade
+    # a visible size — user-configurable (e.g. 0.02) from the Settings page.
+    min_lot: float = 0.01
 
     max_drawdown_pct: float = 10.0
     kill_daily_loss_pct: float = 2.0

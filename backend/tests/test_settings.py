@@ -299,6 +299,35 @@ async def test_saved_settings_flow_into_frequency_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_put_settings_persists_min_lot():
+    """min_lot (ขนาด lot ขั้นต่ำ) round-trips through the settings API."""
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"min_lot": 0.02})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["min_lot"] == 0.02
+    assert db._client.row["min_lot"] == 0.02
+    # default stays 0.01 on fresh rows
+    res2 = await call("GET", "/api/settings")
+    assert res2.json()["min_lot"] in (0.01, 0.02)  # merge row exists now
+
+
+def test_app_settings_min_lot_default_is_0_01():
+    assert AppSettings().min_lot == 0.01
+
+
+@pytest.mark.asyncio
+async def test_get_settings_returns_min_lot_from_row():
+    row = AppSettings(min_lot=0.05).model_dump(mode="json")
+    set_state(SettingsDatabase(row))
+    res = await call("GET", "/api/settings")
+    assert res.status_code == 200
+    assert res.json()["min_lot"] == 0.05
+
+
+@pytest.mark.asyncio
 async def test_reset_settings_reverts_to_defaults():
     db = SettingsDatabase(AppSettings(min_confidence=85).model_dump(mode="json"))
     set_state(db)

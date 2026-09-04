@@ -388,12 +388,16 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
 
 
 def size_position(s: AppSettings, entry: float, stop_loss: Optional[float]) -> float:
-    """risk_per_trade_pct of settings.capital → lots (risk_to_lot)."""
+    """risk_per_trade_pct of settings.capital → lots (risk_to_lot).
+
+    The result is floored at s.min_lot (Settings page, default 0.01) so tiny
+    accounts still open a visible size — the user can raise it (e.g. 0.02).
+    """
     if not entry or not stop_loss:
         return 0.0
     stop_distance = abs(entry - stop_loss)
     lots = risk_to_lot(s.capital, s.risk_per_trade_pct, stop_distance)
-    return max(lots, 0.01)  # PaperBroker minimum lot — never 0
+    return max(lots, float(getattr(s, "min_lot", 0.01) or 0.01))
 
 
 # ---------------------------------------------------------------------------

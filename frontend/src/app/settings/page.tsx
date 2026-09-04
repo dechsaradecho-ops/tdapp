@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   max_trades_weekly: 30,
   max_open_positions: 4,
   risk_per_trade_pct: 1.0,
+  min_lot: 0.01,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
   kill_weekly_loss_pct: 5,
@@ -318,6 +319,11 @@ export default function SettingsPage() {
                 onChange={(v) => set("max_open_positions", v)} step={1} />
               <NumField label="Risk ต่อไม้ (%)" value={cfg.risk_per_trade_pct}
                 onChange={(v) => set("risk_per_trade_pct", v)} step={0.1} />
+              <NumField label="ขนาด Lot ขั้นต่ำ (min_lot)" value={cfg.min_lot}
+                onChange={(v) => set("min_lot", v)} step={0.01} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                ขนาด lot ต่ำสุดของทุกออเดอร์ — ระบบคำนวณจาก Risk ต่อไม้ก่อน แล้วปัดขึ้นเป็นค่านี้ (เช่น 0.02)
+              </span>
             </div>
 
             {/* --- Kill switch / drawdown --- */}

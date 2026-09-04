@@ -376,6 +376,8 @@ export interface AppSettings {
   max_trades_weekly: number;
   max_open_positions: number;
   risk_per_trade_pct: number;
+  /** Minimum lot size for opened orders (floor of risk_to_lot sizing) */
+  min_lot: number;
   max_drawdown_pct: number;
   kill_daily_loss_pct: number;
   kill_weekly_loss_pct: number;
