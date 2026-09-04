@@ -23,6 +23,7 @@ from datetime import date, timedelta
 import httpx
 
 from app.core.config import get_settings
+from app.services import quote_log
 
 log = logging.getLogger(__name__)
 
@@ -101,21 +102,49 @@ async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
     for _ in range(len(keys)):
         key = keys[_exchange_key_idx % len(keys)]
         _exchange_key_idx += 1
+        url = f"{EXCHANGERATE_URL}/{key}/latest/{base}"
+        t0 = time.monotonic()
         try:
             async with httpx.AsyncClient(follow_redirects=True) as client:
-                resp = await client.get(f"{EXCHANGERATE_URL}/{key}/latest/{base}",
-                                        timeout=10.0)
+                resp = await client.get(url, timeout=10.0)
+                dur = int((time.monotonic() - t0) * 1000)
                 if resp.status_code == 429 or resp.status_code >= 400:
                     last_err = f"exchangerate key #{_exchange_key_idx % len(keys)}: HTTP {resp.status_code}"
+                    quote_log.log_call(
+                        asset=asset, category=quote_log.category_for(asset),
+                        provider="exchangerate", url=url, status="error",
+                        http_status=resp.status_code,
+                        error=f"HTTP {resp.status_code}",
+                        duration_ms=dur,
+                        api_key_hint=quote_log.mask_key(key))
                     continue  # rotate to the next key
                 payload = resp.json()
                 rate = ((payload.get("conversion_rates") or {}).get(quote))
                 if not rate:
                     last_err = f"{asset}: no {quote} rate in exchangerate payload"
+                    quote_log.log_call(
+                        asset=asset, category=quote_log.category_for(asset),
+                        provider="exchangerate", url=url, status="error",
+                        http_status=resp.status_code,
+                        error=f"no {quote} rate in payload",
+                        duration_ms=dur,
+                        api_key_hint=quote_log.mask_key(key))
                     continue
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="exchangerate", url=url, status="success",
+                    http_status=resp.status_code, price=float(rate),
+                    duration_ms=dur,
+                    api_key_hint=quote_log.mask_key(key))
                 return float(rate), ""
         except (httpx.HTTPError, ValueError) as exc:
+            dur = int((time.monotonic() - t0) * 1000)
             last_err = f"exchangerate request failed ({exc})"
+            quote_log.log_call(
+                asset=asset, category=quote_log.category_for(asset),
+                provider="exchangerate", url=url, status="error",
+                error=str(exc), duration_ms=dur,
+                api_key_hint=quote_log.mask_key(key))
             continue
     return 0.0, f"{asset}: {last_err}"
 
@@ -145,17 +174,43 @@ async def _fetch_fx(asset: str, client: httpx.AsyncClient,
     start = (date.today() - timedelta(days=int(days * 1.6) + 10)).isoformat()
     end = date.today().isoformat()
     url = f"{FRANKFURTER_URL}/{start}..{end}"
+    t0 = time.monotonic()
     try:
         resp = await client.get(url, params={"from": base, "to": quote},
                                 timeout=15.0)
+        dur = int((time.monotonic() - t0) * 1000)
         resp.raise_for_status()
         payload = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
+        dur = int((time.monotonic() - t0) * 1000)
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="frankfurter", url=url, status="error",
+            error=str(exc), duration_ms=dur)
         raise QuotesUnavailable(f"{asset}: frankfurter request failed ({exc})") from exc
 
     rates = payload.get("rates") or {}
     if not rates:
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="frankfurter", url=url, status="error",
+            http_status=resp.status_code, error="empty rates payload",
+            duration_ms=dur)
         raise QuotesUnavailable(f"{asset}: empty frankfurter rates")
+
+    closes: list[float] = []
+    for day in sorted(rates):  # ISO dates sort chronologically
+        val = (rates[day] or {}).get(quote)
+        if val is None:
+            continue
+        closes.append(float(val))
+
+    quote_log.log_call(
+        asset=asset, category=quote_log.category_for(asset),
+        provider="frankfurter", url=url, status="success",
+        http_status=resp.status_code,
+        price=closes[-1] if closes else None,
+        duration_ms=dur)
 
     closes: list[float] = []
     for day in sorted(rates):  # ISO dates sort chronologically
@@ -183,14 +238,28 @@ async def _fetch_gold(client: httpx.AsyncClient, days: int) -> list[Candle]:
         raise QuotesUnavailable("XAUUSD: TWELVEDATA_API_KEY not set (free key: twelvedata.com)")
     params = {"symbol": GOLD_SYMBOL, "interval": "1day",
               "outputsize": str(days), "apikey": api_key}
+    t0 = time.monotonic()
     try:
         resp = await client.get(TWELVEDATA_URL, params=params, timeout=15.0)
+        dur = int((time.monotonic() - t0) * 1000)
         resp.raise_for_status()
         payload = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
+        dur = int((time.monotonic() - t0) * 1000)
+        quote_log.log_call(
+            asset="XAUUSD", category="gold", provider="twelvedata",
+            url=quote_log.strip_key_from_url(TWELVEDATA_URL), status="error",
+            error=str(exc), duration_ms=dur,
+            api_key_hint=quote_log.mask_key(api_key))
         raise QuotesUnavailable(f"XAUUSD: twelvedata request failed ({exc})") from exc
 
     if str(payload.get("status", "")) == "error":
+        quote_log.log_call(
+            asset="XAUUSD", category="gold", provider="twelvedata",
+            url=quote_log.strip_key_from_url(TWELVEDATA_URL), status="error",
+            http_status=resp.status_code,
+            error=f"twelvedata error {payload.get('code')}: {payload.get('message')}",
+            duration_ms=dur, api_key_hint=quote_log.mask_key(api_key))
         raise QuotesUnavailable(
             f"XAUUSD: twelvedata error {payload.get('code')}: {payload.get('message')}")
 
@@ -205,6 +274,13 @@ async def _fetch_gold(client: httpx.AsyncClient, days: int) -> list[Candle]:
         except (KeyError, TypeError, ValueError):
             continue
         candles.append(Candle(o=o, h=h, l=l, c=c))
+
+    quote_log.log_call(
+        asset="XAUUSD", category="gold", provider="twelvedata",
+        url=quote_log.strip_key_from_url(TWELVEDATA_URL), status="success",
+        http_status=resp.status_code,
+        price=candles[-1].c if candles else None,
+        duration_ms=dur, api_key_hint=quote_log.mask_key(api_key))
     return candles
 
 
@@ -403,22 +479,45 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
             sym = YAHOO_SYMBOLS.get(asset)
             if not sym:
                 return asset, None, f"no spot symbol mapping for {asset}"
+            url = f"{YAHOO_CHART_URL}/{sym}"
+            t0 = time.monotonic()
             try:
                 async with httpx.AsyncClient(follow_redirects=True) as client:
                     resp = await client.get(
-                        f"{YAHOO_CHART_URL}/{sym}",
+                        url,
                         params={"interval": "1m", "range": "1d"},
                         headers=headers, timeout=10.0)
+                    dur = int((time.monotonic() - t0) * 1000)
                     resp.raise_for_status()
                     meta = ((resp.json().get("chart") or {}).get("result")
                             or [{}])[0].get("meta", {})
                     price = meta.get("regularMarketPrice")
                     if not price:
+                        quote_log.log_call(
+                            asset=asset, category=quote_log.category_for(asset),
+                            provider="yahoo", url=url, status="error",
+                            http_status=resp.status_code,
+                            error="no regularMarketPrice", duration_ms=dur)
                         return asset, None, f"{asset}: no regularMarketPrice"
+                    quote_log.log_call(
+                        asset=asset, category=quote_log.category_for(asset),
+                        provider="yahoo", url=url, status="success",
+                        http_status=resp.status_code, price=float(price),
+                        duration_ms=dur)
                     return asset, float(price), ""
             except httpx.TimeoutException:
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="yahoo", url=url, status="error",
+                    error="spot feed timeout",
+                    duration_ms=int((time.monotonic() - t0) * 1000))
                 return asset, None, f"{asset}: spot feed timeout"
             except (httpx.HTTPError, ValueError, IndexError, KeyError) as exc:
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="yahoo", url=url, status="error",
+                    error=str(exc),
+                    duration_ms=int((time.monotonic() - t0) * 1000))
                 return asset, None, f"{asset}: spot feed error ({exc})"
 
         async def _one(asset: str) -> tuple[str, float | None, str]:
@@ -441,6 +540,7 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
             else:
                 failures[asset] = err
                 log.warning("spot feed: %s", err)
+    quote_log.purge_old_logs(quote_log.get_db())
     return out, failures
 
 

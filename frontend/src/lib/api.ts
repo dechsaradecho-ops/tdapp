@@ -20,6 +20,8 @@ import {
   PinLoginResponse,
   PinStatus,
   PortfolioRecommendation,
+  QuoteLogsResponse,
+  QuoteTestResult,
   RiskStatus,
   SessionStatus,
   SettingsSaveResult,
@@ -167,6 +169,11 @@ export const api = {
 
   // ---------- Monitor dashboard ----------
   monitor: () => get<MonitorSnapshot>("/api/trading/monitor"),
+
+  // ---------- Quote API call log (7-day auto-expiry) ----------
+  quoteLogs: (limit = 100) =>
+    get<QuoteLogsResponse>(`/api/system/quote-logs?limit=${limit}`),
+  quoteTest: () => post<QuoteTestResult>("/api/system/quote-test", {}),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

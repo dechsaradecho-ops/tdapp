@@ -17,6 +17,7 @@ from app.core.logging import setup_logging
 from app.integrations.ai_provider import get_ai_provider
 from app.services.database import Database
 from app.services.notification_service import NotificationService
+from app.services import quote_log
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
 from app.workers import auto_trader, market_scanner, news_analysis, notification_worker, portfolio_monitor, position_guard
@@ -55,6 +56,9 @@ async def lifespan(app: FastAPI):
     app.state.line = LineClient()
     app.state.broker = PaperBroker()
     await app.state.broker.connect()
+    # Quote API call log (7-day auto-expiry) writes through this module-level
+    # reference — quotes.py logs every external price fetch via quote_log.
+    quote_log.set_db(app.state.db)
 
     # The PaperBroker book is in-memory — restore any DB rows still marked
     # "open" so position_guard can enforce their SL/TP again after a restart

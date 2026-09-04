@@ -101,6 +101,24 @@ class Database:
             log.error("delete %s %s failed: %s", table, filters, exc)
             return False
 
+    def delete_before(self, table: str, column: str, iso_cutoff: str) -> int:
+        """Delete rows where `column` < iso_cutoff. Returns deleted count.
+
+        Used by quote_log's 7-day auto-expiry (one PostgREST call instead of
+        per-row deletes). Never raises.
+        """
+        if not self._client:
+            return 0
+        try:
+            resp = (self._client.table(table)
+                    .delete()
+                    .lt(column, iso_cutoff)
+                    .execute())
+            return len(resp.data or [])
+        except Exception as exc:
+            log.error("delete_before %s/%s failed: %s", table, column, exc)
+            return 0
+
 
 def queue_notification(db: Database, user_id: str, ntype: str, message: str,
                        channel: str = "line") -> None:

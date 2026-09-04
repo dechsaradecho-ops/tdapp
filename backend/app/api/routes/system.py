@@ -17,6 +17,7 @@ Also: GET /api/system/counts → live row counts for the 5 worker tables.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Request
@@ -213,3 +214,78 @@ async def autotrader_dry_run(request: Request) -> dict:
     ]
     out["verdict"] = "ok"
     return out
+
+
+# ---------------------------------------------------------------------------
+# Quote API call log — every external price fetch (7-day auto-expiry)
+# ---------------------------------------------------------------------------
+@router.get("/quote-logs")
+async def quote_logs(request: Request, limit: int = 100) -> dict:
+    """Recent quote-API calls + summary card data (forex vs gold).
+
+    Rows older than 7 days are purged automatically (throttled to once per
+    5 min; force=True here so opening the page always cleans up).
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    from app.services import quote_log
+    quote_log.purge_old_logs(db, force=True)
+    rows = db.select(quote_log.TABLE, order="created_at", desc=True,
+                     limit=max(1, min(limit, 500)))
+    out["logs"] = [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "asset": r.get("asset"),
+            "category": r.get("category"),
+            "provider": r.get("provider"),
+            "url": r.get("url"),
+            "api_key_hint": r.get("api_key_hint"),
+            "status": r.get("status"),
+            "http_status": r.get("http_status"),
+            "price": r.get("price"),
+            "error": r.get("error"),
+            "duration_ms": r.get("duration_ms"),
+        }
+        for r in rows
+    ]
+    out["summary"] = quote_log.summary(db)
+    out["ttl_days"] = quote_log.QUOTE_LOG_TTL_DAYS
+    out["verdict"] = "ok"
+    return out
+
+
+@router.post("/quote-test")
+async def quote_test(request: Request) -> dict:
+    """Force-fetch live prices for ALL assets (bypasses the 30s cache).
+
+    Exercises the real chain (exchangerate-api → Yahoo fallback) so the user
+    can verify the feed from the UI; every underlying HTTP call lands in the
+    quote log. Never raises — failures are reported per asset.
+    """
+    from app.integrations import quotes
+    from app.services import quote_log
+
+    assets = sorted(quotes.YAHOO_SYMBOLS)  # EURUSD GBPUSD USDJPY AUDUSD XAUUSD
+    quotes._spot_cache.clear()  # force real HTTP calls, not the 30s cache
+    try:
+        prices, failures = await quotes.fetch_spot_prices(assets)
+    except Exception as exc:
+        return {
+            "verdict": "fail",
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "prices": {}, "failures": {a: str(exc) for a in assets},
+        }
+    return {
+        "verdict": "ok" if prices else "fail",
+        "prices": prices,
+        "failures": failures,
+        "tested_at": datetime.now(timezone.utc).isoformat(),
+        "hint": ("ทุก call ถูกบันทึกใน log แล้ว — กดรีเฟรชเพื่อดูผลล่าสุด"
+                 if prices else "ทุก feed ล้มเหลว — ดูรายละเอียด error ใน log"),
+    }

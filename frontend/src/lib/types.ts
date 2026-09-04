@@ -59,6 +59,55 @@ export interface DbCounts {
   trades_latest?: string;
 }
 
+// ---------- Quote API call log (7-day auto-expiry) ----------
+export interface QuoteApiLog {
+  id: string;
+  created_at: string;
+  asset: string;
+  category: "forex" | "gold";
+  provider: string;
+  url: string;
+  api_key_hint: string | null;
+  status: "success" | "error";
+  http_status: number | null;
+  price: number | null;
+  error: string | null;
+  duration_ms: number | null;
+}
+
+export interface QuoteLogBucket {
+  total: number;
+  success: number;
+  error: number;
+}
+
+export interface QuoteLogSummary {
+  total: number;
+  success: number;
+  error: number;
+  forex: QuoteLogBucket;
+  gold: QuoteLogBucket;
+  by_provider: Record<string, QuoteLogBucket>;
+}
+
+export interface QuoteLogsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  logs: QuoteApiLog[];
+  summary: QuoteLogSummary;
+  ttl_days: number;
+}
+
+export interface QuoteTestResult {
+  verdict: "ok" | "fail";
+  prices: Record<string, number>;
+  failures: Record<string, string>;
+  tested_at?: string;
+  hint?: string;
+  error?: string;
+}
+
 export interface MarketSummary {
   regime: string;
   confidence: number;
