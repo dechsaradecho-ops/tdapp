@@ -154,7 +154,7 @@ export default function ChatWidget() {
         onClick={() => setOpen((v) => !v)}
         aria-label="เปิดแชท AI"
         className="fixed bottom-6 right-4 sm:right-6 z-40 w-14 h-14 rounded-full bg-accent text-surface text-2xl shadow-lg active:scale-95 sm:hover:scale-105 transition-transform flex items-center justify-center"
-        style={{ bottom: "calc(1.5rem + env(safe-area-inset-bottom, 0px))" }}
+        style={{ bottom: "calc(4.75rem + env(safe-area-inset-bottom, 0px))" }}
       >
         {open ? "✕" : "💬"}
       </button>

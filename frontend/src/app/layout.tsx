@@ -55,11 +55,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/performance" className="hover:text-accent">Performance</a>
             <a href="/settings" className="hover:text-accent">Settings</a>
           </nav>
-          <MobileNav />
         </header>
-        <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto safe-bottom">
+        <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto safe-bottom pb-24 md:pb-5">
           <AuthGate>{children}</AuthGate>
         </main>
+        <MobileNav />
         <CapitalSync />
         <ChatWidget />
         <PwaRegister />
