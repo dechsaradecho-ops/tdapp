@@ -387,6 +387,29 @@ class TestSignalsLatestTiers:
         assert body[0]["order_blocked"] is None
 
     @pytest.mark.asyncio
+    async def test_pending_card_notes_open_position_on_same_asset(self):
+        """User report (2026-09-04): auto mode promised "~1 นาที" forever while
+        the auto-trader silently skipped the signal because the asset already
+        had an open position. The card must carry that reason instead."""
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={
+            "signals": [
+                {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+                 "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+                 "take_profit": 2380.0, "expected_rr": 2.0,
+                 "approval": "pending", "created_at": now.isoformat()}],
+            "paper_trades": [
+                {"id": "t1", "asset": "XAUUSD", "status": "open",
+                 "created_at": now.isoformat()}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["order_blocked"], (
+            "open position on the same asset must set order_blocked")
+        assert "XAUUSD" in body[0]["order_blocked"]
+        assert "เปิดอยู่แล้ว" in body[0]["order_blocked"]
+
+    @pytest.mark.asyncio
     async def test_card_carries_live_price_from_spot_feed(self, monkeypatch):
         """Regression (2026-09-04, "ราคาเก่า"): entries are anchored at the
         daily-close snapshot, so a card can look like a live quote while the

@@ -138,7 +138,7 @@ export default function SignalsPage() {
         <>
           <h3 className="text-sm font-semibold text-slate-300">
             {isAuto
-              ? `🤖 ระบบกำลังดำเนินการ (${pending.length}) — auto trader จะยิงออเดอร์ภายใน ~1 นาที`
+              ? `🤖 ระบบกำลังดำเนินการ (${pending.length}) — การ์ดไหนพร้อมยิง ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที`
               : `รอการอนุมัติ (${pending.length})`}
           </h3>
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">

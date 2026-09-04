@@ -96,7 +96,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       ) : isAuto ? (
         // โหมด auto — ไม่มีปุ่มให้กด: auto trader จะยิงเองผ่าน gate ทั้งหมด
         <div className="mt-3 flex items-center gap-2 rounded border border-accent/40 bg-accent/10 px-2 py-1.5 text-xs text-accent">
-          <span>🤖 ระบบจะยิงออเดอร์เองภายใน ~1 นาที</span>
+          <span>🤖 พร้อมยิง — ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที</span>
         </div>
       ) : (
         <div className="mt-3 flex gap-2">

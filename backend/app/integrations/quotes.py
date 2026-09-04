@@ -546,6 +546,8 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
 
 _QUOTE_TTL = 60.0  # seconds — protects Twelve Data's 800 credits/day
 # from 10s dashboard polling (8,640 req/day → 1,440/day cached).
+# (2026-09-04: tried 30 min to cut Frankfurter calls — user prefers fresh
+# snapshots every minute, reverted.)
 _quote_cache: dict[str, tuple[float, dict]] = {}
 
 
