@@ -38,6 +38,7 @@ from app.models.schemas import (
     TradeLimits,
     WalkForwardResult,
     analyze_journal,
+    effective_min_confidence,
     paper_trading_status,
     run_backtest,
     walk_forward,
@@ -560,7 +561,7 @@ async def extended_analysis(request: Request) -> dict:
         "backtest_result": "ยิง POST /api/trading/backtest เพื่อรันตาม indicator (ไม่รันอัตโนมัติเพราะใช้เวลา)",
         "paper_trading_status": f"readiness {paper.live_readiness_score}/100 — {paper.ai_coaching}",
         "kill_switch_status": ks.message,
-        "final_decision": _final_decision(officer, news, ks, confidence),
+        "final_decision": _final_decision(officer, news, ks, confidence, asset, s),
         "context_block": ctx,
     }
 
@@ -570,13 +571,17 @@ def get_session_sync() -> MarketSessionStatus:
 
 
 def _final_decision(officer: RiskOfficerReview, news: NewsRiskStatus,
-                    ks: KillSwitchStatus, confidence: float) -> str:
+                    ks: KillSwitchStatus, confidence: float,
+                    asset: str = "", s: AppSettings | None = None) -> str:
     if ks.engaged:
         return "WAIT — Kill Switch ทำงานอยู่"
     if officer.verdict == "REJECTED":
         return "WAIT — Risk Officer ไม่อนุมัติ"
     if news.status == "DANGER":
         return "WAIT — ข่าว impact สูงใกล้ตัว"
-    if confidence >= s.min_confidence:
+    # Per-asset quality gate — gold uses Min Confidence (gold) when set.
+    threshold = (effective_min_confidence(s, asset)
+                 if s is not None else 70.0)
+    if confidence >= threshold:
         return "TRADE — ผ่านทุกด่าน อนุมัติเข้าไม้ตามแผน"
     return "WAIT — Confidence ต่ำกว่าเกณฑ์"

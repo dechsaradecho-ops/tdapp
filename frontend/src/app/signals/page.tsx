@@ -107,7 +107,7 @@ export default function SignalsPage() {
           <select
             value={intervalSec}
             onChange={(e) => changeInterval(Number(e.target.value))}
-            className="bg-surface border border-slate-700 rounded px-2 py-1.5 text-xs"
+            className="bg-surface border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
             aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
           >
             {REFRESH_OPTIONS.map((o) => (
@@ -120,7 +120,7 @@ export default function SignalsPage() {
           <button
             onClick={refresh}
             disabled={loading}
-            className="border border-accent text-accent rounded px-3 py-1.5 text-xs font-semibold hover:bg-accent/10 disabled:opacity-50"
+            className="border border-accent text-accent rounded px-3 py-2 text-xs min-h-[40px] font-semibold active:bg-accent/10 disabled:opacity-50"
           >
             {loading ? "กำลังโหลด..." : "↻ รีเฟรช"}
           </button>

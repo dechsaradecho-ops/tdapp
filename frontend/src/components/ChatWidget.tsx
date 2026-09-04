@@ -90,11 +90,12 @@ export default function ChatWidget() {
   return (
     <>
       {open && (
-        <div className="fixed bottom-24 right-6 z-50 w-[360px] max-w-[calc(100vw-3rem)] h-[520px] max-h-[70vh] panel flex flex-col shadow-2xl">
+        // มือถือ: เต็มจอ (sheet) — เดสก์ท็อป: กล่องลอยขวาล่างเหมือนเดิม
+        <div className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:z-50 sm:w-[360px] sm:max-w-[calc(100vw-3rem)] sm:h-[520px] sm:max-h-[70vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top">
           <div className="flex items-center justify-between pb-2 border-b border-slate-800">
             <p className="text-sm font-semibold">💬 AI Assistant</p>
             <button onClick={() => setOpen(false)}
-              className="text-slate-500 hover:text-slate-300 text-lg leading-none"
+              className="w-11 h-11 -mr-2 flex items-center justify-center text-slate-500 hover:text-slate-300 text-lg leading-none active:bg-slate-800 rounded-lg"
               aria-label="ปิดแชท">✕</button>
           </div>
 
@@ -133,16 +134,16 @@ export default function ChatWidget() {
             </div>
           )}
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 pb-[env(safe-area-inset-bottom,0px)]">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send(input)}
               placeholder="พิมพ์คำถาม..."
-              className="flex-1 bg-surface border border-slate-700 rounded px-3 py-2 text-xs"
+              className="flex-1 bg-surface border border-slate-700 rounded px-3 py-2.5 text-sm min-h-[44px]"
             />
             <button onClick={() => send(input)} disabled={loading}
-              className="bg-accent text-surface font-semibold rounded px-3 text-xs disabled:opacity-50">
+              className="bg-accent text-surface font-semibold rounded px-4 min-h-[44px] text-sm disabled:opacity-50 active:brightness-90">
               ส่ง
             </button>
           </div>
@@ -152,7 +153,8 @@ export default function ChatWidget() {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label="เปิดแชท AI"
-        className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-accent text-surface text-2xl shadow-lg hover:scale-105 transition-transform flex items-center justify-center"
+        className="fixed bottom-6 right-4 sm:right-6 z-40 w-14 h-14 rounded-full bg-accent text-surface text-2xl shadow-lg active:scale-95 sm:hover:scale-105 transition-transform flex items-center justify-center"
+        style={{ bottom: "calc(1.5rem + env(safe-area-inset-bottom, 0px))" }}
       >
         {open ? "✕" : "💬"}
       </button>

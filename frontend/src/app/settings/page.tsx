@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   risk_profile: "moderate",
   capital: 10_000,
   min_confidence: 70,
+  min_confidence_gold: null,
   min_opportunity: 60,
   max_trades_daily: 6,
   max_trades_weekly: 30,
@@ -196,11 +197,11 @@ export default function SettingsPage() {
           <div className="flex items-center gap-2">
             {saveMsg && <span className="text-xs text-slate-400">{saveMsg}</span>}
             <button onClick={reset} disabled={saving || !cfg}
-              className="text-xs text-slate-400 border border-slate-700 rounded px-3 py-1.5 hover:text-slate-200 disabled:opacity-40">
+              className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[40px] active:bg-slate-800 disabled:opacity-40">
               ↩️ ค่าเริ่มต้น
             </button>
             <button onClick={save} disabled={saving || !cfg}
-              className="bg-accent text-surface font-semibold rounded px-4 py-1.5 disabled:opacity-50">
+              className="bg-accent text-surface font-semibold rounded px-4 min-h-[40px] disabled:opacity-50 active:brightness-90">
               {saving ? "กำลังบันทึก..." : "💾 บันทึกการตั้งค่า"}
             </button>
           </div>
@@ -230,8 +231,8 @@ export default function SettingsPage() {
           </div>
           <button onClick={togglePause} disabled={pauseBusy}
             className={pause?.paused
-              ? "bg-profit text-surface font-semibold rounded px-4 py-2 disabled:opacity-50"
-              : "bg-loss text-surface font-semibold rounded px-4 py-2 disabled:opacity-50"}>
+              ? "bg-profit text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"
+              : "bg-loss text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"}>
             {pauseBusy ? "กำลังส่ง..." : pause?.paused ? "▶️ Resume Auto Trading" : "⏸️ Pause Auto Trading"}
           </button>
         </div>
@@ -263,6 +264,29 @@ export default function SettingsPage() {
               </label>
               <NumField label="Min Confidence (%)" value={cfg.min_confidence}
                 onChange={(v) => set("min_confidence", v)} step={1} />
+              <label className="block text-sm">
+                Min Confidence (gold) (%)
+                <div className="flex items-center gap-2 mt-1">
+                  <input type="number"
+                    value={cfg.min_confidence_gold ?? ""}
+                    placeholder={`ใช้ค่าเดิม ${cfg.min_confidence}`}
+                    step={1}
+                    onChange={(e) =>
+                      set("min_confidence_gold",
+                        e.target.value === "" ? null : Number(e.target.value))}
+                    className="w-full bg-surface border border-slate-700 rounded px-3 py-2" />
+                  {cfg.min_confidence_gold != null && (
+                    <button type="button" onClick={() => set("min_confidence_gold", null)}
+                      title="ล้างค่า — ใช้ Min Confidence ปกติ"
+                      className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded px-2 py-2">
+                      ล้าง
+                    </button>
+                  )}
+                </div>
+                <span className="block text-xs text-slate-500 mt-1">
+                  เกณฑ์เฉพาะ XAUUSD — เว้นว่างเพื่อใช้ Min Confidence ปกติ
+                </span>
+              </label>
               <NumField label="Min Opportunity (%)" value={cfg.min_opportunity}
                 onChange={(v) => set("min_opportunity", v)} step={1} />
               <NumField label="Capital (USD)" value={cfg.capital}
@@ -322,7 +346,7 @@ export default function SettingsPage() {
           พร้อมแสดงจำนวน row จริงในตาราง worker ทั้งหมด
         </p>
         <button onClick={runDbCheck} disabled={dbTesting}
-          className="bg-accent text-surface font-semibold rounded px-4 py-2 disabled:opacity-50">
+          className="bg-accent text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
           {dbTesting ? "กำลังทดสอบ..." : "🧪 ทดสอบ อ่าน/เขียน DB"}
         </button>
 

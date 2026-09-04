@@ -4,6 +4,57 @@
 
 body {
   @apply bg-surface text-slate-200;
+  /* กัน iOS ซูมอัตโนมัติเมื่อแตะ input ครั้งเดียว (font-size < 16px) */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* กันแถบสีขาว/ดำเมื่อ pull-to-refresh บนมือถือ */
+  overscroll-behavior-y: none;
+}
+
+/* ---------- Mobile-first theme tweaks ---------- */
+
+/* ลบ highlight สีฟ้าตอนแตะบน Android/iOS — ให้ใช้ active: แทน */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ปุ่ม/ลิงก์แตะแล้วตอบสนองทันที ไม่มี delay 300ms */
+button,
+a,
+select,
+input[type="checkbox"] {
+  touch-action: manipulation;
+}
+
+/* แถบเลื่อนบาง ๆ สไตล์มืด (desktop) — มือถือไม่มีผล */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* รองรับจอมี notch (iPhone) — เว้นระยะ safe area */
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ป้องกัน iOS input zoom: บนจอ < 640px บังคับ input/select ให้ >= 16px
+   (iOS จะซูมหน้าเองถ้า font-size < 16px ตอน focus) */
+@media (max-width: 639px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }
 
 .panel {
@@ -12,4 +63,20 @@ body {
 
 .panel-title {
   @apply text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3;
+}
+
+/* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */
+/* ปุ่มหลัก — สูง >= 44px บนมือถือเพื่อให้แตะง่าย */
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-1 bg-accent text-surface font-semibold rounded-lg px-4 py-2.5 text-sm min-h-[44px] active:brightness-90 disabled:opacity-50 transition;
+}
+
+/* ปุ่มรอง — ขอบเท่านั้น */
+.btn-secondary {
+  @apply inline-flex items-center justify-center gap-1 border border-slate-700 text-slate-300 rounded-lg px-4 py-2.5 text-sm min-h-[44px] active:bg-slate-800 disabled:opacity-50 transition;
+}
+
+/* ปุ่มเล็ก (ใช้ในแถวที่มีที่จำกัด) — ยังคง >= 40px */
+.btn-sm {
+  @apply inline-flex items-center justify-center gap-1 rounded-lg px-3 min-h-[40px] text-sm active:opacity-80 disabled:opacity-50 transition;
 }

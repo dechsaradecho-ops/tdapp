@@ -62,6 +62,12 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     db = request.app.state.db
     current = _load_settings(db)
     patch = {k: v for k, v in (payload or {}).items() if k in _FIELDS and v is not None}
+    # Optional per-asset overrides: an explicit null CLEARS the override so the
+    # engine falls back to the base field (the Settings page "ล้าง" button).
+    # Absent keys keep the stored value (merge semantics).
+    for opt in ("min_confidence_gold",):
+        if opt in (payload or {}) and (payload or {})[opt] is None:
+            patch[opt] = None
     # model_validate (NOT model_copy) so client values are coerced to field types —
     # e.g. float 30.0 → int 30; Postgres integer columns reject "30.0" (22P02)
     merged = AppSettings.model_validate({**current.model_dump(), **patch})

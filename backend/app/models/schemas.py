@@ -253,6 +253,24 @@ class FrequencyDecision(BaseModel):
     limits: Optional[TradeLimits] = None
 
 
+GOLD_ASSET = "XAUUSD"
+
+
+def effective_min_confidence(settings: "AppSettings", asset: str) -> float:
+    """Per-asset signal-quality threshold.
+
+    Gold (XAUUSD) uses its own Min Confidence (gold) when the user set one;
+    every other asset (and gold without an override) uses the base
+    min_confidence. Used by BOTH the scanner (signal generation) and the
+    execution gate (order opening) so the two paths never drift apart.
+    """
+    base = float(settings.min_confidence)
+    if str(asset or "").upper() != GOLD_ASSET:
+        return base
+    gold = settings.min_confidence_gold
+    return base if gold is None else float(gold)
+
+
 class FrequencyEngine:
     """Guards against overtrading — evaluates every order against profile limits."""
 
@@ -1091,6 +1109,10 @@ class AppSettings(BaseModel):
     risk_profile: RiskProfile = RiskProfile.moderate
     capital: float = 10_000.0
     min_confidence: float = 70.0
+    # Per-asset override for gold (XAUUSD) — applied to BOTH signal generation
+    # (market_scanner) and order opening (execution gate). Falls back to
+    # min_confidence when unset (None) so old settings rows keep working.
+    min_confidence_gold: Optional[float] = None
     min_opportunity: float = 60.0
 
     max_trades_daily: int = 6

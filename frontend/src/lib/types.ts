@@ -311,6 +311,8 @@ export interface AppSettings {
   risk_profile: RiskProfile;
   capital: number;
   min_confidence: number;
+  /** Gold (XAUUSD) override — null/undefined = use min_confidence */
+  min_confidence_gold: number | null;
   min_opportunity: number;
   max_trades_daily: number;
   max_trades_weekly: number;

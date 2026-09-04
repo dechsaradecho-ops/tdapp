@@ -23,6 +23,7 @@ from app.models.schemas import (
     KillSwitchEngine,
     RiskProfile,
     TradeLimits,
+    effective_min_confidence,
 )
 from tests.test_workers import FakeDatabase
 
@@ -138,6 +139,28 @@ def test_frequency_engine_drawdown_throttle_override():
     assert "throttled" in d.reason
 
 
+# ---------------------------------------------------------------------------
+# 2b) Per-asset Min Confidence (gold)
+# ---------------------------------------------------------------------------
+def test_effective_min_confidence_gold_uses_override():
+    s = AppSettings(min_confidence=70.0, min_confidence_gold=85.0)
+    assert effective_min_confidence(s, "XAUUSD") == 85.0
+    assert effective_min_confidence(s, "xauusd") == 85.0   # case-insensitive
+    # other assets keep the base threshold
+    assert effective_min_confidence(s, "EURUSD") == 70.0
+    assert effective_min_confidence(s, "GBPUSD") == 70.0
+    assert effective_min_confidence(s, "AUDUSD") == 70.0
+    assert effective_min_confidence(s, "USDJPY") == 70.0
+
+
+def test_effective_min_confidence_gold_falls_back_to_base():
+    # No override (None) → gold behaves exactly like before the feature
+    s = AppSettings(min_confidence=70.0, min_confidence_gold=None)
+    assert effective_min_confidence(s, "XAUUSD") == 70.0
+    # Default settings (no gold field set) → base threshold everywhere
+    assert effective_min_confidence(AppSettings(), "XAUUSD") == 70.0
+
+
 def test_kill_switch_threshold_overrides():
     loose = KillSwitchEngine(daily_loss_limit=10.0, weekly_loss_limit=20.0,
                              monthly_loss_limit=30.0, drawdown_limit=40.0)
@@ -204,6 +227,43 @@ async def test_put_settings_ignores_unknown_and_none_fields():
     body = res.json()
     assert body["settings"]["correlation_cap"] == 70
     assert body["settings"]["min_confidence"] == 70  # None ignored → default kept
+
+
+@pytest.mark.asyncio
+async def test_put_settings_persists_gold_confidence():
+    """Min Confidence (gold) round-trips through the settings API."""
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"min_confidence_gold": 85})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["min_confidence_gold"] == 85
+    assert db._client.row["min_confidence_gold"] == 85
+    # base threshold untouched
+    assert body["settings"]["min_confidence"] == 70
+
+
+@pytest.mark.asyncio
+async def test_put_settings_gold_none_clears_override():
+    """Sending null clears the gold override → falls back to base."""
+    db = SettingsDatabase(AppSettings(min_confidence_gold=85.0).model_dump(mode="json"))
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"min_confidence_gold": None})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["settings"]["min_confidence_gold"] is None
+    # effective threshold for gold is the base value again
+    assert effective_min_confidence(AppSettings(**body["settings"]), "XAUUSD") == 70.0
+
+
+@pytest.mark.asyncio
+async def test_get_settings_returns_gold_override_from_row():
+    row = AppSettings(min_confidence=70.0, min_confidence_gold=90.0).model_dump(mode="json")
+    set_state(SettingsDatabase(row))
+    res = await call("GET", "/api/settings")
+    assert res.status_code == 200
+    assert res.json()["min_confidence_gold"] == 90.0
 
 
 @pytest.mark.asyncio

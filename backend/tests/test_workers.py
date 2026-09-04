@@ -246,6 +246,75 @@ class TestMarketScanner:
             "daily limit reached must not stop signal generation")
 
     @pytest.mark.asyncio
+    async def test_gold_min_confidence_gates_signal_generation(self, monkeypatch):
+        """Min Confidence (gold) applies to signal generation: with the gold
+        threshold at 90, a strong XAUUSD setup scoring 75 must NOT emit a
+        signal while the same setup on EURUSD (base 70) still does."""
+        from app.models.schemas import AppSettings
+
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)  # score ~75
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(min_confidence=70.0,
+                                                    min_confidence_gold=90.0))
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assets = {row["asset"] for row in emitted}
+        assert "XAUUSD" not in assets, (
+            "gold setup scoring 75 must be blocked by Min Confidence (gold)=90")
+        assert "EURUSD" in assets, (
+            "same-strength EURUSD setup must still pass the base threshold 70")
+
+    @pytest.mark.asyncio
+    async def test_gold_min_confidence_lower_emits_gold_signal(self, monkeypatch):
+        """A LOWER gold threshold must let weak gold setups through while the
+        base threshold still blocks the same setup on FX pairs."""
+        from app.models.schemas import AppSettings
+
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return choppy_snapshot(asset, news_sentiment)  # weak setup
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(min_confidence=70.0,
+                                                    min_confidence_gold=30.0))
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assets = {row["asset"] for row in emitted}
+        assert "XAUUSD" in assets, (
+            "weak gold setup must emit when Min Confidence (gold)=30")
+        assert "EURUSD" not in assets, (
+            "same weak setup on EURUSD must stay blocked by base threshold 70")
+
+    @pytest.mark.asyncio
+    async def test_gold_min_confidence_unset_uses_base(self, monkeypatch):
+        """No gold override → behaviour identical to before the feature."""
+        from app.models.schemas import AppSettings
+
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(min_confidence=70.0))
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assets = {row["asset"] for row in emitted}
+        assert assets == set(market_scanner.SCAN_ASSETS), (
+            "without a gold override every strong setup emits as before")
+
+    @pytest.mark.asyncio
     async def test_market_closed_generates_no_signals(self, monkeypatch):
         """Weekend (Sat, or Sun before 21:00 UTC, or Fri after 21:00 UTC) →
         no signals: entries would pin Friday's close all weekend (the

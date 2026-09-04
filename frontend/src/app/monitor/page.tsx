@@ -169,7 +169,7 @@ export default function MonitorPage() {
             <select
               value={intervalSec}
               onChange={(e) => changeInterval(Number(e.target.value))}
-              className="bg-surface border border-slate-700 rounded px-2 py-1.5 text-xs"
+              className="bg-surface border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
               aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
             >
               {REFRESH_OPTIONS.map((o) => (
@@ -180,12 +180,12 @@ export default function MonitorPage() {
             </select>
             <button onClick={togglePause} disabled={busy || !snap}
               className={snap?.pause.paused
-                ? "bg-profit text-surface font-semibold rounded px-3 py-1.5 text-sm disabled:opacity-50"
-                : "bg-loss text-surface font-semibold rounded px-3 py-1.5 text-sm disabled:opacity-50"}>
+                ? "bg-profit text-surface font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"
+                : "bg-loss text-surface font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"}>
               {busy ? "..." : snap?.pause.paused ? "▶️ Resume" : "⏸️ Pause"}
             </button>
             <button onClick={load} disabled={busy}
-              className="border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300 hover:text-accent disabled:opacity-50">
+              className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50">
               🔄 รีเฟรช
             </button>
           </div>
@@ -239,7 +239,7 @@ export default function MonitorPage() {
                       <button
                         onClick={() => handleClosePosition(p.ticket)}
                         disabled={!p.ticket || closingTicket === p.ticket}
-                        className="bg-loss text-surface font-semibold rounded px-2.5 py-1 text-xs disabled:opacity-50"
+                        className="bg-loss text-surface font-semibold rounded px-3 py-2 text-xs min-h-[40px] disabled:opacity-50 active:brightness-90"
                       >
                         {closingTicket === p.ticket ? "..." : "✋ ปิด"}
                       </button>

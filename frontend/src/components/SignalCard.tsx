@@ -101,11 +101,11 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       ) : (
         <div className="mt-3 flex gap-2">
           <button disabled={approving} onClick={() => decide(true)}
-            className="flex-1 bg-profit text-surface font-semibold rounded py-1.5 text-sm hover:brightness-110 disabled:opacity-50">
+            className="flex-1 bg-profit text-surface font-semibold rounded-lg py-2.5 text-sm min-h-[44px] active:brightness-90 disabled:opacity-50 transition">
             Approve
           </button>
           <button disabled={approving} onClick={() => decide(false)}
-            className="flex-1 border border-loss text-loss rounded py-1.5 text-sm hover:bg-loss/10 disabled:opacity-50">
+            className="flex-1 border border-loss text-loss rounded-lg py-2.5 text-sm min-h-[44px] active:bg-loss/10 disabled:opacity-50 transition">
             Reject
           </button>
         </div>

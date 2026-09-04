@@ -231,6 +231,54 @@ class TestGatePipeline:
         assert any("confidence" in r.lower() for r in report.rejects)
 
     @pytest.mark.asyncio
+    async def test_gold_min_confidence_blocks_gold_order(self, broker, notifier):
+        """Min Confidence (gold) applies to ORDER OPENING: confidence 75 passes
+        the base gate (70) but must be blocked by the gold override (90)."""
+        db = FakeDatabase()
+        report = await execution.execute_signal(
+            db, broker, notifier,
+            clean_settings(min_confidence=70.0, min_confidence_gold=90.0),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=75.0, opportunity=90.0, signal_id="sig-gold-1",
+            source="auto",
+        )
+        assert not report.allowed
+        assert any("confidence" in r.lower() for r in report.rejects)
+        assert broker.orders == []
+        assert db.rows.get("paper_trades", []) == []
+
+    @pytest.mark.asyncio
+    async def test_gold_min_confidence_does_not_block_fx_order(self, broker, notifier):
+        """The gold override must NOT leak into other assets — the same
+        confidence 75 on EURUSD still passes the base gate (70)."""
+        db = FakeDatabase()
+        report = await execution.execute_signal(
+            db, broker, notifier,
+            clean_settings(min_confidence=70.0, min_confidence_gold=90.0),
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=75.0, opportunity=90.0, signal_id="sig-gold-2",
+            source="auto",
+        )
+        assert report.allowed, report.rejects
+        assert len(broker.orders) == 1
+
+    @pytest.mark.asyncio
+    async def test_gold_min_confidence_unset_uses_base(self, broker, notifier):
+        """No gold override → gold orders gate at the base threshold."""
+        db = FakeDatabase()
+        report = await execution.execute_signal(
+            db, broker, notifier, clean_settings(min_confidence=70.0),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=75.0, opportunity=90.0, signal_id="sig-gold-3",
+            source="auto",
+        )
+        assert report.allowed, report.rejects
+        assert len(broker.orders) == 1
+
+    @pytest.mark.asyncio
     async def test_news_danger_blocks(self, broker, notifier):
         db = FakeDatabase()
         soon = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()

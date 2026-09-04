@@ -34,6 +34,7 @@ from app.models.schemas import (
     RiskOfficer,
     RiskProfile,
     TradeLimits,
+    effective_min_confidence,
     risk_to_lot,
 )
 
@@ -310,7 +311,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                 max_open_positions=s.max_open_positions,
                 risk_per_trade_pct=s.risk_per_trade_pct,
             ),
-            min_confidence=s.min_confidence,
+            min_confidence=effective_min_confidence(s, asset),
             drawdown_throttle_pct=s.drawdown_throttle_pct,
         ).evaluate(
             confidence=confidence,

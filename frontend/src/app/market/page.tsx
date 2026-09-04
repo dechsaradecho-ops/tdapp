@@ -51,10 +51,10 @@ export default function MarketPage() {
 
       <section className="grid md:grid-cols-3 gap-4">
         <div className="panel md:col-span-2">
-          <div className="flex gap-2 mb-3">
+          <div className="flex flex-wrap gap-2 mb-3">
             {Object.keys(SYMBOLS).map((a) => (
               <button key={a} onClick={() => setSelected(a)}
-                className={`px-3 py-1 rounded text-sm border ${selected === a ? "border-accent text-accent" : "border-slate-700 text-slate-400"}`}>
+                className={`px-3 py-2 min-h-[40px] rounded text-sm border ${selected === a ? "border-accent text-accent" : "border-slate-700 text-slate-400 active:bg-slate-800"}`}>
                 {a}
               </button>
             ))}

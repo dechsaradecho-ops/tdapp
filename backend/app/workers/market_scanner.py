@@ -15,7 +15,12 @@ from datetime import datetime, timedelta, timezone
 from app.api.routes.settings import get_app_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
-from app.models.schemas import FrequencyEngine, TradeLimits
+from app.models.schemas import (
+    GOLD_ASSET,
+    FrequencyEngine,
+    TradeLimits,
+    effective_min_confidence,
+)
 from app.services.database import Database
 
 log = logging.getLogger(__name__)
@@ -29,6 +34,9 @@ async def scan_once(db: Database) -> list[dict]:
     results: list[dict] = []
     news_by_asset = _news_sentiment_by_asset(db)
     live_used, demo_used = 0, 0
+    # Settings loaded once per cycle — the per-asset Min Confidence (gold)
+    # gate below needs them BEFORE the emit block.
+    settings = get_app_settings(db)
 
     for asset in SCAN_ASSETS:
         ind = await _snapshot_for(asset, news_by_asset.get(asset, 0.0))
@@ -48,8 +56,10 @@ async def scan_once(db: Database) -> list[dict]:
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})
 
         # Strong setups produce a signal (SEMI-AUTO approval flow)
-        # Signal quality filter: confidence < 70 => NO TRADE (spec)
-        if opp.score >= 70:
+        # Signal quality filter: confidence < min_confidence => NO TRADE
+        # (gold uses its own Min Confidence (gold) threshold).
+        min_conf = effective_min_confidence(settings, asset)
+        if opp.score >= min_conf:
             # Market-closed guard — FX/gold trade Sun 21:00 UTC → Fri 21:00
             # UTC. Emitting signals into a closed market would pin entries at
             # Friday's close for the whole weekend (the "ราคาเก่า" complaint).
@@ -79,7 +89,6 @@ async def scan_once(db: Database) -> list[dict]:
             # Limits come from the user's saved settings (Settings page) — NOT the
             # hardcoded moderate profile. Bug (2026-09-04): user raised max_trades_daily
             # to 20 but the scanner kept throttling at the profile default 6/day.
-            settings = get_app_settings(db)
             today = datetime.now(timezone.utc).date().isoformat()
             todays = db.select("signals", limit=200)
             today_count = len([r for r in todays if str(r.get("created_at", ""))[:10] == today])
@@ -91,7 +100,7 @@ async def scan_once(db: Database) -> list[dict]:
                     max_open_positions=settings.max_open_positions,
                     risk_per_trade_pct=settings.risk_per_trade_pct,
                 ),
-                min_confidence=settings.min_confidence,
+                min_confidence=min_conf,
                 drawdown_throttle_pct=settings.drawdown_throttle_pct,
             ).evaluate(
                 confidence=opp.score, trades_today=today_count,
