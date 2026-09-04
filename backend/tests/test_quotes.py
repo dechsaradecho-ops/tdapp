@@ -306,7 +306,7 @@ class TestSnapshotFromCandles:
 
 
 # ---------------------------------------------------------------------------
-# Spot feed — exchangerate-api.com primary + Yahoo fallback
+# Spot feed — Yahoo chart API primary + exchangerate-api.com fallback
 # ---------------------------------------------------------------------------
 def _ex_resp(quote: str, rate: float, status: int = 200):
     """exchangerate-api.com /latest/{base} payload shape."""
@@ -339,7 +339,7 @@ def _fake_client_factory(calls: list[str], responses: list):
     return _FakeClient
 
 
-class TestSpotFeedExchangerate:
+class TestSpotFeed:
     @pytest.fixture(autouse=True)
     def _reset_spot_state(self):
         quotes._spot_cache.clear()
@@ -429,47 +429,48 @@ class TestSpotFeedExchangerate:
         assert calls == []
 
     @pytest.mark.asyncio
-    async def test_fetch_spot_prices_chain_exchangerate_then_yahoo(self, monkeypatch):
-        """FX pairs served by exchangerate; XAUUSD falls through to Yahoo."""
+    async def test_fetch_spot_prices_chain_yahoo_then_exchangerate(self, monkeypatch):
+        """Yahoo serves both FX and gold; exchangerate stays untouched."""
         from app.core.config import get_settings as _gs
         monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
         calls: list[str] = []
         responses = [
-            _ex_resp("USD", 1.15),          # EURUSD → exchangerate ok
-            _yahoo_payload(4540.2),          # XAUUSD → yahoo fallback ok
+            _yahoo_payload(1.15),            # EURUSD → yahoo primary ok
+            _yahoo_payload(4540.2),          # XAUUSD → yahoo (GC=F) ok
         ]
         monkeypatch.setattr(quotes.httpx, "AsyncClient",
                             _fake_client_factory(calls, responses))
         prices, failures = await quotes.fetch_spot_prices(["EURUSD", "XAUUSD"])
         assert prices == {"EURUSD": 1.15, "XAUUSD": 4540.2}
         assert failures == {}
-        assert any("/keyA/latest/EUR" in c for c in calls)
+        assert any(f"{quotes.YAHOO_CHART_URL}/EURUSD=X" in c for c in calls)
         assert any(f"{quotes.YAHOO_CHART_URL}/GC=F" in c for c in calls)
+        assert not any("exchangerate" in c for c in calls)  # fallback not needed
 
     @pytest.mark.asyncio
-    async def test_fetch_spot_prices_yahoo_fallback_when_exchangerate_dead(self, monkeypatch):
-        """Every exchangerate key 429s → GBPUSD still priced via Yahoo."""
+    async def test_fetch_spot_prices_exchangerate_fallback_when_yahoo_dead(self, monkeypatch):
+        """Yahoo 429s → GBPUSD still priced via exchangerate fallback."""
         from app.core.config import get_settings as _gs
         monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
         calls: list[str] = []
         responses = [
-            _ex_resp("USD", 1.0, status=429),   # keyA dead
-            _yahoo_payload(1.3485),              # yahoo saves the day
+            _resp({}, status=429),               # yahoo dead
+            _ex_resp("USD", 1.3485),             # exchangerate saves the day
         ]
         monkeypatch.setattr(quotes.httpx, "AsyncClient",
                             _fake_client_factory(calls, responses))
         prices, failures = await quotes.fetch_spot_prices(["GBPUSD"])
         assert prices == {"GBPUSD": 1.3485}
         assert failures == {}
-        assert len([c for c in calls if "exchangerate" in c]) == 1
         assert len([c for c in calls if "yahoo" in c]) == 1
+        assert len([c for c in calls if "exchangerate" in c]) == 1
 
     @pytest.mark.asyncio
     async def test_fetch_spot_prices_second_call_is_cached(self, monkeypatch):
         from app.core.config import get_settings as _gs
         monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
         calls: list[str] = []
-        responses = [_ex_resp("USD", 1.3485)]
+        responses = [_yahoo_payload(1.3485)]
         monkeypatch.setattr(quotes.httpx, "AsyncClient",
                             _fake_client_factory(calls, responses))
         prices1, _ = await quotes.fetch_spot_prices(["GBPUSD"])

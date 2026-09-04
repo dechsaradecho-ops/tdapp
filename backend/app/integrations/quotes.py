@@ -51,11 +51,11 @@ FRANKFURTER_URL = "https://api.frankfurter.dev/v1"  # .app domain 301-redirects 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 GOLD_SYMBOL = "XAU/USD"
 
-# --- Spot feed (exchangerate-api.com first, Yahoo chart API fallback) -----
+# --- Spot feed (Yahoo chart API first, exchangerate-api.com fallback) -----
 # Frankfurter only publishes ONE close per business day (ECB), so intraday
 # positions opened at today's close look "pinned" until tomorrow.
-# Priority: v6.exchangerate-api.com (6 rotating keys) → Yahoo chart API
-# (real intraday FX spots + gold via the COMEX future GC=F).
+# Priority: Yahoo chart API (real intraday FX spots + gold via the COMEX
+# future GC=F) → v6.exchangerate-api.com (6 rotating keys, FX pairs only).
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -455,7 +455,7 @@ async def fetch_snapshot(asset: str, client: httpx.AsyncClient,
 
 
 async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[str, str]]:
-    """Intraday spot prices via Yahoo chart API, cached ~30s.
+    """Intraday spot prices via Yahoo chart API (exchangerate fallback), cached ~30s.
 
     Returns (prices, failures) where failures maps asset → human-readable
     reason (timeout/HTTP/missing data). Prices that fail are simply absent
@@ -521,15 +521,15 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                 return asset, None, f"{asset}: spot feed error ({exc})"
 
         async def _one(asset: str) -> tuple[str, float | None, str]:
-            # 1) exchangerate-api.com first (6 rotating keys — FX pairs only)
-            price, err = await _fetch_spot_exchangerate(asset)
-            if price:
-                return asset, price, ""
-            # 2) Yahoo chart API fallback (also the only XAUUSD source)
+            # 1) Yahoo chart API first (real intraday spots; only XAUUSD source)
             asset_y, y_price, y_err = await _yahoo_one(asset)
             if y_price:
                 return asset, y_price, ""
-            return asset, None, f"{err}; {y_err}"
+            # 2) exchangerate-api.com fallback (6 rotating keys — FX pairs only)
+            price, err = await _fetch_spot_exchangerate(asset)
+            if price:
+                return asset, price, ""
+            return asset, None, f"{y_err}; {err}"
 
         results = await asyncio.gather(*[_one(a) for a in todo])
         now = time.monotonic()
