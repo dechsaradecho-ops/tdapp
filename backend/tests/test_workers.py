@@ -134,6 +134,39 @@ class TestMarketScanner:
         assert all(r["confidence"] >= 70 for r in signal_rows)
 
     @pytest.mark.asyncio
+    async def test_frequency_limits_come_from_user_settings(self, monkeypatch):
+        """Regression (2026-09-04): the scanner hardcoded FrequencyEngine(moderate)
+        (max 6/day) and ignored the user's saved settings — raising max_trades_daily
+        to 20 on the Settings page had no effect and strong setups were silently
+        throttled. With settings wired, 6 signals today + limit 20 → still emits."""
+        from datetime import datetime, timezone
+
+        from app.models.schemas import AppSettings
+
+        db = FakeDatabase()
+        today = datetime.now(timezone.utc).date().isoformat()
+        for i in range(6):  # 6 signals already emitted today (>= moderate's 6 cap)
+            db.insert("signals", {"asset": "EURUSD", "direction": "buy",
+                                  "confidence": 75.0,
+                                  "created_at": f"{today}T0{i}:00:00Z",
+                                  "approval": "approved"})
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(max_trades_daily=20))
+
+        await market_scanner.scan_once(db)
+        # scanner-emitted rows carry no created_at (the 6 seeded ones do)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assert len(emitted) == len(market_scanner.SCAN_ASSETS), (
+            "user's max_trades_daily=20 must allow all 5 strong setups "
+            "despite 6 signals already emitted today")
+
+    @pytest.mark.asyncio
     async def test_weak_setup_writes_no_signal(self, monkeypatch):
         """Choppy market → no signal rows, but market_analysis still written."""
         db = FakeDatabase()

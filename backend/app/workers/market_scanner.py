@@ -12,9 +12,10 @@ import logging
 import random
 from datetime import datetime, timezone
 
+from app.api.routes.settings import get_app_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
-from app.models.schemas import FrequencyEngine, RiskProfile
+from app.models.schemas import FrequencyEngine, TradeLimits
 from app.services.database import Database
 
 log = logging.getLogger(__name__)
@@ -49,11 +50,25 @@ async def scan_once(db: Database) -> list[dict]:
         # Strong setups produce a signal (SEMI-AUTO approval flow)
         # Signal quality filter: confidence < 70 => NO TRADE (spec)
         if opp.score >= 70:
-            # Frequency guard — count today's emitted signals before adding another
+            # Frequency guard — count today's emitted signals before adding another.
+            # Limits come from the user's saved settings (Settings page) — NOT the
+            # hardcoded moderate profile. Bug (2026-09-04): user raised max_trades_daily
+            # to 20 but the scanner kept throttling at the profile default 6/day.
+            settings = get_app_settings(db)
             today = datetime.now(timezone.utc).date().isoformat()
             todays = db.select("signals", limit=200)
             today_count = len([r for r in todays if str(r.get("created_at", ""))[:10] == today])
-            freq = FrequencyEngine(RiskProfile.moderate).evaluate(
+            freq = FrequencyEngine(
+                settings.risk_profile,
+                limits_override=TradeLimits(
+                    max_trades_daily=settings.max_trades_daily,
+                    max_trades_weekly=settings.max_trades_weekly,
+                    max_open_positions=settings.max_open_positions,
+                    risk_per_trade_pct=settings.risk_per_trade_pct,
+                ),
+                min_confidence=settings.min_confidence,
+                drawdown_throttle_pct=settings.drawdown_throttle_pct,
+            ).evaluate(
                 confidence=opp.score, trades_today=today_count,
                 regime=regime_of(ind), volatility_index=ind.volatility_index)
             if not freq.allowed:
