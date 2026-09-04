@@ -77,7 +77,9 @@ async def scan_once(db: Database) -> list[dict]:
                 continue
 
             bullish = ind.ema_fast > ind.ema_slow
-            proposal = engine.build_proposal(ind, opp, risk_per_trade_pct=0.5, regime_bullish=bullish)
+            proposal = engine.build_proposal(
+                ind, opp, risk_per_trade_pct=settings.risk_per_trade_pct,
+                regime_bullish=bullish)
             db.insert("signals", {
                 "asset": asset, "direction": proposal.direction.lower(),
                 "confidence": proposal.confidence, "opportunity_score": opp.score,

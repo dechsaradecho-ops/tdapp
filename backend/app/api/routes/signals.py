@@ -16,6 +16,7 @@ from app.services.execution import (
 from app.services.notification_service import NotificationService
 
 from app.api.routes.market import DEMO
+from app.api.routes.settings import get_app_settings
 
 router = APIRouter()
 
@@ -55,6 +56,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     db = request.app.state.db
     engine = StrategyEngine()
     proposals: list[SignalProposal] = []
+    # One settings load per request — risk sizing must follow the user's
+    # saved risk_per_trade_pct, not a hardcoded 0.5.
+    s = get_app_settings(db)
 
     # Self-heal: pending signals older than 30 min leave the queue first —
     # otherwise the page pins yesterday's entry prices (e.g. GBPUSD stuck
@@ -94,7 +98,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
                 stop_loss=stop_loss, take_profit=float(r["take_profit"] or 0),
-                expected_rr=float(r["expected_rr"] or 2.0), risk_per_trade_pct=0.5,
+                expected_rr=float(r["expected_rr"] or 2.0),
+                risk_per_trade_pct=s.risk_per_trade_pct,
                 reason=[r.get("explanation", "")],
                 recommendation=FinalDecision.trade,
                 limit_levels=ladder,
@@ -115,7 +120,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         ind = IndicatorSnapshot(**{**snap, "source": "live"})
         opp = engine.opportunity_score(ind)
         proposals.append(engine.build_proposal(
-            ind, opp, 0.5, ind.ema_fast > ind.ema_slow))
+            ind, opp, s.risk_per_trade_pct, ind.ema_fast > ind.ema_slow))
     if proposals:
         for p in proposals:
             p.feed_status = live_feed
@@ -125,7 +130,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     for asset, ind in DEMO.items():
         opp = engine.opportunity_score(ind)
         bullish = ind.ema_fast > ind.ema_slow
-        proposals.append(engine.build_proposal(ind, opp, 0.5, bullish))
+        proposals.append(engine.build_proposal(ind, opp, s.risk_per_trade_pct, bullish))
     for p in proposals:
         p.feed_status = demo_feed
     return proposals
