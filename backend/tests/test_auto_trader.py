@@ -304,6 +304,26 @@ class TestAutoTrader:
         assert db.rows["signals"][0]["approval"] == "pending"
 
     @pytest.mark.asyncio
+    async def test_open_position_blocks_duplicate_fire(self, broker, notifier):
+        """Regression (2026-09-04): the auto-trader fired every pending signal
+        with no check for an existing open position on the same asset — the
+        account stacked 14 positions (EURUSD×5, AUDUSD×5, XAUUSD×4) in ~10
+        minutes. A pending signal for an asset with an open position must be
+        skipped, not fired, and must stay pending."""
+        db = FakeDatabase(rows={
+            "signals": [
+                {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+                 "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+                 "take_profit": 2500.0, "approval": "pending",
+                 "created_at": datetime.now(timezone.utc).isoformat()}],
+            "paper_trades": [
+                {"id": "p1", "asset": "XAUUSD", "status": "open"}]})
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["fired"] == 0 and out["skipped"] == 1
+        assert broker.orders == []
+        assert db.rows["signals"][0]["approval"] == "pending"
+
+    @pytest.mark.asyncio
     async def test_stale_signal_skipped(self, broker, notifier):
         old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         db = FakeDatabase(rows={"signals": [

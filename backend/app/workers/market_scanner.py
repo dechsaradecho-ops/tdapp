@@ -50,6 +50,28 @@ async def scan_once(db: Database) -> list[dict]:
         # Strong setups produce a signal (SEMI-AUTO approval flow)
         # Signal quality filter: confidence < 70 => NO TRADE (spec)
         if opp.score >= 70:
+            # Dedup guard — a strong regime persists for hours, so without this
+            # the scanner re-emits the SAME setup every cycle (every ~4 min).
+            # The auto-trader then fires each duplicate and the account fills
+            # with stacked positions on one asset (14 open on 3 assets,
+            # 2026-09-04). Skip when the asset already has a pending signal
+            # awaiting action OR an open position riding the move.
+            open_assets = {
+                str(r.get("asset") or "").upper()
+                for r in db.select("paper_trades", filters={"status": "open"},
+                                   limit=200)
+            }
+            pending_assets = {
+                str(r.get("asset") or "").upper()
+                for r in db.select("signals", filters={"approval": "pending"},
+                                   limit=200)
+            }
+            if asset in open_assets or asset in pending_assets:
+                log.info("Signal for %s skipped: pending signal or open "
+                         "position already exists for this asset", asset)
+                results[-1]["dedup_skipped"] = True
+                continue
+
             # Frequency guard — count today's emitted signals before adding another.
             # Limits come from the user's saved settings (Settings page) — NOT the
             # hardcoded moderate profile. Bug (2026-09-04): user raised max_trades_daily

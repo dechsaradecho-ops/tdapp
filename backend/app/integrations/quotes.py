@@ -120,16 +120,6 @@ async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
     return 0.0, f"{asset}: {last_err}"
 
 
-async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[str, str]]:
-    """Intraday spot prices: exchangerate-api.com first, Yahoo fallback, cached ~30s.
-
-    Returns (prices, failures) where failures maps asset → human-readable
-    reason (timeout/HTTP/missing data). Prices that fail are simply absent
-    from the dict — callers show a feed-status banner instead of guessing.
-    Per-asset failures are isolated: one dead symbol never blocks the rest.
-    """
-
-
 class QuotesUnavailable(Exception):
     """Raised when the live data feed fails — caller decides on fallback."""
 

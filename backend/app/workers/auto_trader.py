@@ -31,10 +31,23 @@ async def trade_once(db, broker, notifier) -> dict:
 
     expired = expire_stale_pending_signals(db)
     pending = db.select("signals", filters={"approval": "pending"}, limit=10)
-    fired, blocked = 0, 0
+    # Defense-in-depth for the duplicate-position loop (2026-09-04): never
+    # stack a second position on an asset that already has one open. The
+    # scanner now dedups too, but this gate is the last line before an order
+    # leaves the platform.
+    open_assets = {
+        str(r.get("asset") or "").upper()
+        for r in db.select("paper_trades", filters={"status": "open"}, limit=200)
+    }
+    fired, blocked, skipped = 0, 0, 0
     for sig in pending:
         entry = float(sig.get("entry") or 0)
         if entry <= 0:
+            continue
+        if str(sig.get("asset") or "").upper() in open_assets:
+            skipped += 1
+            log.info("AutoTrader skipped %s %s: position already open",
+                     sig["direction"], sig["asset"])
             continue
         report = await execution.execute_signal(
             db, broker, notifier, s,
@@ -57,4 +70,4 @@ async def trade_once(db, broker, notifier) -> dict:
                      sig["direction"], sig["asset"], report.rejects[:1])
 
     return {"mode": "auto", "picked": len(pending), "fired": fired,
-            "blocked": blocked, "expired": expired}
+            "blocked": blocked, "skipped": skipped, "expired": expired}

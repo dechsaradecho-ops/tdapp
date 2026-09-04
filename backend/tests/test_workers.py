@@ -167,6 +167,42 @@ class TestMarketScanner:
             "despite 6 signals already emitted today")
 
     @pytest.mark.asyncio
+    async def test_no_duplicate_signal_while_pending_exists(self, monkeypatch):
+        """Regression (2026-09-04): the scanner re-emitted the same strong setup
+        every cycle (~4 min) because a strong regime persists for hours. The
+        auto-trader fired each duplicate and the account stacked 14 open
+        positions on 3 assets. A pending signal for the asset must suppress a
+        second one until it is approved/expired."""
+        db = FakeDatabase()
+        db.insert("signals", {"asset": "EURUSD", "direction": "buy",
+                              "confidence": 75.0, "approval": "pending"})
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        await market_scanner.scan_once(db)
+        # the seed is the ONLY EURUSD signal row — the scan added none
+        eurusd = [r for r in db.rows["signals"] if r["asset"] == "EURUSD"]
+        assert len(eurusd) == 1, "pending signal for EURUSD must suppress a duplicate"
+
+    @pytest.mark.asyncio
+    async def test_no_signal_while_position_open(self, monkeypatch):
+        """Same runaway-loop class: an open position on the asset means the
+        move is already being ridden — no new signal for it until it closes."""
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "asset": "EURUSD", "status": "open"}]})
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and row["asset"] == "EURUSD"]
+        assert emitted == []
+
+    @pytest.mark.asyncio
     async def test_weak_setup_writes_no_signal(self, monkeypatch):
         """Choppy market → no signal rows, but market_analysis still written."""
         db = FakeDatabase()
