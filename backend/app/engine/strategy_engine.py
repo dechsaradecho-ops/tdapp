@@ -15,6 +15,7 @@ from app.models.schemas import (
     LimitLevel,
     OpportunityBand,
     RiskProfile,
+    SLTPLevel,
     SignalProposal,
 )
 
@@ -178,7 +179,34 @@ class StrategyEngine:
             limit_levels=self.limit_ladder(
                 direction, ind.price, sl_distance,
                 rr_target=rr_target, atr_multiple_sl=atr_multiple_sl),
+            sltp_levels=self.sltp_preview(
+                direction, ind.price, sl_distance, rr_target=rr_target),
         )
+
+    # ------------------------------------------------------------------
+    # SL/TP distance tiers preview (สั้น / กลาง / ยาว)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def sltp_preview(direction: str, entry: float, sl_distance: float,
+                     rr_target: float = 2.0) -> list[SLTPLevel]:
+        """Preview SL/TP at 3 stop distances (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR).
+
+        The card always shows all 3 tiers; the user's sl_distance_mode setting
+        decides which tier execute_signal actually uses for the real order.
+        """
+        sign = 1 if direction == "BUY" else -1
+        tiers = (("สั้น", 1.0), ("กลาง", 1.5), ("ยาว", 2.0))
+        levels: list[SLTPLevel] = []
+        for label, mult in tiers:
+            dist = sl_distance * (mult / 1.5)  # sl_distance is the ×1.5 (กลาง) tier
+            levels.append(SLTPLevel(
+                label=label,
+                atr_multiple=mult,
+                stop_loss=round(entry - sign * dist, 5),
+                take_profit=round(entry + sign * dist * rr_target, 5),
+                rr=rr_target,
+            ))
+        return levels
 
     # ------------------------------------------------------------------
     @staticmethod

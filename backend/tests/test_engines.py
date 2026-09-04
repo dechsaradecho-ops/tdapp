@@ -244,6 +244,41 @@ class TestLimitLadder:
             assert lv.tp < lv.price < lv.sl            # short: mirrored
 
 
+class TestSltpPreview:
+    """SL/TP distance tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR)."""
+
+    def setup_method(self):
+        self.engine = StrategyEngine()
+
+    def test_proposal_includes_three_tiers(self):
+        ind = make_ind()
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True)
+        assert [lv.label for lv in p.sltp_levels] == ["สั้น", "กลาง", "ยาว"]
+        assert [lv.atr_multiple for lv in p.sltp_levels] == [1.0, 1.5, 2.0]
+
+    def test_tier_distances_scale_from_base(self):
+        ind = make_ind(price=2400.0, atr_pct=1.0)  # base ×1.5 dist = 36.0
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True, atr_multiple_sl=1.5, rr_target=2.0)
+        short, medium, long_ = p.sltp_levels
+        assert abs((p.entry - short.stop_loss) - 24.0) < 0.01   # 36 × (1.0/1.5)
+        assert abs((p.entry - medium.stop_loss) - 36.0) < 0.01  # base tier
+        assert abs((p.entry - long_.stop_loss) - 48.0) < 0.01   # 36 × (2.0/1.5)
+        # every tier keeps RR 1:2 and medium matches the card's main SL/TP
+        for lv in p.sltp_levels:
+            assert abs((lv.take_profit - p.entry) - (p.entry - lv.stop_loss) * 2.0) < 0.05
+        assert abs(medium.stop_loss - p.stop_loss) < 0.001
+        assert abs(medium.take_profit - p.take_profit) < 0.001
+
+    def test_sell_tiers_mirrored(self):
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, False, atr_multiple_sl=1.5, rr_target=2.0)
+        for lv in p.sltp_levels:
+            assert lv.take_profit < p.entry < lv.stop_loss  # short: SL above, TP below
+
+
 # ---------------------------------------------------------------------------
 # Risk Engine
 # ---------------------------------------------------------------------------

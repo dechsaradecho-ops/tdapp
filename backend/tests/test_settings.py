@@ -245,6 +245,26 @@ async def test_put_settings_persists_gold_confidence():
 
 
 @pytest.mark.asyncio
+async def test_put_settings_persists_sl_distance_mode():
+    """sl_distance_mode (สั้น/กลาง/ยาว) round-trips through the settings API."""
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"sl_distance_mode": "long"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["sl_distance_mode"] == "long"
+    assert db._client.row["sl_distance_mode"] == "long"
+    # default stays medium on fresh rows
+    res2 = await call("GET", "/api/settings")
+    assert res2.json()["sl_distance_mode"] in ("medium", "long")  # merge row exists now
+
+
+def test_app_settings_sl_distance_mode_default_is_medium():
+    assert AppSettings().sl_distance_mode == "medium"
+
+
+@pytest.mark.asyncio
 async def test_put_settings_gold_none_clears_override():
     """Sending null clears the gold override → falls back to base."""
     db = SettingsDatabase(AppSettings(min_confidence_gold=85.0).model_dump(mode="json"))

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { API_BASE, SignalProposal } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
 import LimitLevels from "@/components/LimitLevels";
+import SltpLevels from "@/components/SltpLevels";
 import ReasonList from "@/components/ReasonList";
 
 const DECISION_STYLE: Record<string, string> = {
@@ -90,6 +91,8 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         </div>
       )}
       <LimitLevels signal={signal} />
+      {/* ระยะ SL/TP 3 ระดับ (สั้น/กลาง/ยาว) จาก entry เดียวกัน — highlight ตาม sl_distance_mode */}
+      <SltpLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
       <ReasonList reasons={signal.reason} />
       {signal.approval === "approved" ? (

@@ -11,15 +11,16 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
   if (!signal.limit_levels?.length) return null;
   const buy = signal.direction === "BUY";
   const label = buy ? "Buy Limit" : "Sell Limit";
-  // 3 ระดับ: สั้น (rung 1) / กลาง (rung 2) / ยาว (rung 3) — แต่ละระดับมี SL/TP ของตัวเอง
-  const tierLabels = ["สั้น", "กลาง", "ยาว"];
+  // 3 ระดับแนวรับ (rung 1-3) — ใช้ "ระดับ" เพื่อไม่ซ้ำกับ tier ระยะ SL/TP
+  // (สั้น/กลาง/ยาว) ที่แสดงแยกใน SltpLevels
+  const tierLabels = ["ระดับ 1", "ระดับ 2", "ระดับ 3"];
   const tierBadge = (i: number) =>
     tierLabels[i] ?? `ระดับ ${i + 1}`;
 
   return (
     <div className="mt-2">
       <p className="text-xs text-slate-500 mb-1">
-        SL/TP 3 ระดับ — {label} กระจายน้ำหนัก {signal.limit_levels.map((l) => `${l.risk_pct}%`).join(" / ")} (RR 1:{signal.expected_rr})
+        SL/TP 3 ระดับ — {label} แนวรับกระจายน้ำหนัก {signal.limit_levels.map((l) => `${l.risk_pct}%`).join(" / ")} (RR 1:{signal.expected_rr})
       </p>
       <div className="grid grid-cols-3 gap-2">
         {signal.limit_levels.map((lv: LimitLevel, i: number) => (

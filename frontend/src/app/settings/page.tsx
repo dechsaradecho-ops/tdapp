@@ -29,6 +29,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   news_caution_minutes: 120,
   correlation_cap: 80,
   order_mode: "auto",
+  sl_distance_mode: "medium",
   default_equity: 10_000,
   paper_virtual_capital: 100_000,
   backtest_days: 120,
@@ -251,6 +252,19 @@ export default function SettingsPage() {
                   <option value="semi_auto">👤 Semi-Auto — รอยืนยันก่อน</option>
                   <option value="manual">✋ Manual — ระบบไม่ยิง order</option>
                 </select>
+              </label>
+              <label className="block text-sm">
+                ระยะ SL/TP ที่ใช้เปิด order (sl_distance_mode)
+                <select value={cfg.sl_distance_mode}
+                  onChange={(e) => set("sl_distance_mode", e.target.value as AppSettings["sl_distance_mode"])}
+                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+                  <option value="short">สั้น ×1.0 ATR — SL เข้ม ปิดไว</option>
+                  <option value="medium">กลาง ×1.5 ATR — ตามสัญญาณ (ค่าเริ่มต้น)</option>
+                  <option value="long">ยาว ×2.0 ATR — SL กว้าง ทนผันผวน</option>
+                </select>
+                <span className="text-xs text-slate-500 mt-1 block">
+                  การ์ดสัญญาณเก็บราคากลาง (×1.5) — ตอนยิง order ระบบคำนวณ SL/TP ใหม่ตามระดับนี้
+                </span>
               </label>
               <label className="block text-sm">
                 Risk Profile

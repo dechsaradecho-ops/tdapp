@@ -402,6 +402,24 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          opportunity: float, signal_id: Optional[str],
                          source: str) -> GateReport:
     """Gate → size → place order → journal → notify. The single execution path."""
+    # sl_distance_mode: stored signal rows always carry the กลาง (×1.5 ATR)
+    # SL/TP (the default tier). If the user picked สั้น/ยาว in Settings,
+    # re-derive SL/TP for the chosen tier from the entry and the base
+    # (×1.5) distance so the REAL order matches the tier shown on the card.
+    # Sizing also uses the re-derived SL so risk_per_trade_pct stays honest.
+    if entry > 0 and stop_loss:
+        base_dist = abs(entry - float(stop_loss))
+        if base_dist > 0 and getattr(s, "sl_distance_mode", "medium") != "medium":
+            sign = 1 if str(direction).upper() == "BUY" else -1
+            tier = {"short": 1.0, "medium": 1.5, "long": 2.0}.get(
+                s.sl_distance_mode, 1.5)
+            dist = base_dist * (tier / 1.5)
+            stop_loss = round(entry - sign * dist, 5)
+            if take_profit:
+                rr = abs(float(take_profit) - entry) / base_dist
+                take_profit = round(entry + sign * dist * rr, 5)
+            log.info("sl_distance_mode=%s → %s %s SL %.5f", s.sl_distance_mode,
+                     direction, asset, stop_loss)
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)

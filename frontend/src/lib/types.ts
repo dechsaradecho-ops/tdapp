@@ -191,6 +191,16 @@ export interface LimitLevel {
   rr: number;
 }
 
+// One SL/TP distance tier (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR) previewed on
+// the signal card; sl_distance_mode (Settings) picks the tier that opens the order.
+export interface SLTPLevel {
+  label: string;
+  atr_multiple: number;
+  stop_loss: number;
+  take_profit: number;
+  rr: number;
+}
+
 // Health of the live-price source — backend reports failures explicitly so
 // the UI can warn "ราคาอาจไม่อัปเดต" instead of silently showing stale marks.
 export interface QuoteFeedStatus {
@@ -213,6 +223,11 @@ export interface SignalProposal {
   reason: string[];
   recommendation: FinalDecision;
   limit_levels: LimitLevel[];
+  // SL/TP preview 3 ระดับระยะ (สั้น/กลาง/ยาว) — empty on legacy rows
+  sltp_levels?: SLTPLevel[] | null;
+  // Effective sl_distance_mode from settings — the highlighted tier is the
+  // one that will actually be used when the order opens.
+  sl_distance_mode?: "short" | "medium" | "long" | null;
   // Present only for DB-backed signals (tier 1) — live/demo tiers omit them.
   // approval === "approved" renders an approval stamp instead of buttons.
   approval?: string | null;
@@ -370,6 +385,7 @@ export interface AppSettings {
   news_caution_minutes: number;
   correlation_cap: number;
   order_mode: string;
+  sl_distance_mode: "short" | "medium" | "long";
   default_equity: number;
   paper_virtual_capital: number;
   backtest_days: number;

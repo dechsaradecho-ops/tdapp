@@ -140,6 +140,13 @@ async def scan_once(db: Database) -> list[dict]:
                         lv.model_copy(update={"price": round(lv.price * shift, 5)})
                         for lv in proposal.limit_levels
                     ],
+                    "sltp_levels": [
+                        lv.model_copy(update={
+                            "stop_loss": round(lv.stop_loss * shift, 5),
+                            "take_profit": round(lv.take_profit * shift, 5),
+                        })
+                        for lv in proposal.sltp_levels
+                    ],
                 })
             inserted = db.insert("signals", {
                 "asset": asset, "direction": proposal.direction.lower(),

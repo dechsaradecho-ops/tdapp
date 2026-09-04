@@ -123,6 +123,19 @@ class LimitLevel(BaseModel):
     rr: float
 
 
+class SLTPLevel(BaseModel):
+    """One SL/TP distance preview tier (สั้น/กลาง/ยาว) on a signal card.
+
+    The card always previews 3 candidate stop distances; the user's
+    sl_distance_mode setting decides which tier actually opens the order.
+    """
+    label: str                 # สั้น / กลาง / ยาว
+    atr_multiple: float        # 1.0 / 1.5 / 2.0 × ATR
+    stop_loss: float
+    take_profit: float
+    rr: float
+
+
 class SignalProposal(BaseModel):
     asset: str
     direction: Literal["BUY", "SELL"]
@@ -136,6 +149,12 @@ class SignalProposal(BaseModel):
     recommendation: FinalDecision
     # laddered entries (แนวรับหลายระดับ) — empty for legacy rows without it
     limit_levels: list[LimitLevel] = []
+    # SL/TP distance preview at 3 tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR)
+    # — which tier opens the real order is decided by sl_distance_mode below.
+    sltp_levels: list[SLTPLevel] = []
+    # Effective sl_distance_mode from AppSettings (echoed so the card can
+    # highlight the tier that will actually be used for the order).
+    sl_distance_mode: Optional[str] = None
     # Present only for rows served from the signals table (tier 1). Live/demo
     # tiers never carry these — the UI uses approved_at to render an
     # "อนุมัติแล้ว เวลา ..." stamp instead of Approve/Reject buttons.
@@ -1135,6 +1154,10 @@ class AppSettings(BaseModel):
     news_caution_minutes: int = 120
     correlation_cap: float = 80.0
     order_mode: str = "auto"
+    # Which SL/TP distance tier opens the real order. Signal cards preview 3
+    # tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR); the stored signal row
+    # carries กลาง prices, execute_signal re-derives SL/TP for this tier.
+    sl_distance_mode: Literal["short", "medium", "long"] = "medium"
     default_equity: float = 10_000.0
     paper_virtual_capital: float = 100_000.0
 

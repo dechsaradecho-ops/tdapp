@@ -169,6 +169,11 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 reason=[r.get("explanation", "")],
                 recommendation=FinalDecision.trade,
                 limit_levels=ladder,
+                sltp_levels=StrategyEngine.sltp_preview(
+                    r["direction"].upper(), entry, sl_distance,
+                    rr_target=float(r["expected_rr"] or 2.0))
+                if entry > 0 and sl_distance > 0 else [],
+                sl_distance_mode=s.sl_distance_mode,
                 approval=r.get("approval") or "pending",
                 approved_at=r.get("approved_at"),
                 created_at=r.get("created_at"),

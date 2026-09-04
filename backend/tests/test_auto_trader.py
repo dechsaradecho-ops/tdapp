@@ -166,6 +166,57 @@ class TestGatePipeline:
         assert journal[0]["ticket"] == "PAPER-000001"
 
     @pytest.mark.asyncio
+    async def test_sl_distance_mode_short_widens_tightens_sl(self, broker, notifier):
+        """sl_distance_mode=สั้น (short, ×1.0 ATR): SL re-derived from the
+        stored กลาง (×1.5) row — distance ×(1.0/1.5), TP keeps the row's RR.
+        Sizing follows the re-derived (tighter) SL → more lots."""
+        db = FakeDatabase()
+        s = clean_settings(sl_distance_mode="short")
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,  # กลาง: 50 pips, RR 2
+            confidence=85.0, opportunity=80.0, signal_id="sig-sl", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == pytest.approx(round(1.0850 - 0.0050 * (1.0 / 1.5), 5), abs=1e-9)  # 33.3 pips
+        assert order.take_profit == pytest.approx(round(1.0850 + 0.0033 * 2, 5), abs=1e-4)          # RR kept
+        # sizing uses the re-derived SL: $100 / (0.00333 × 100k) ≈ 0.30 lots
+        assert order.volume == pytest.approx(0.3, abs=0.03)
+
+    @pytest.mark.asyncio
+    async def test_sl_distance_mode_long_widens_sl(self, broker, notifier):
+        """sl_distance_mode=ยาว (long, ×2.0 ATR): distance ×(2.0/1.5)."""
+        db = FakeDatabase()
+        s = clean_settings(sl_distance_mode="long")
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=85.0, opportunity=80.0, signal_id="sig-ll", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == pytest.approx(round(1.0850 - 0.0050 * (2.0 / 1.5), 5), abs=1e-9)  # 66.7 pips
+
+    @pytest.mark.asyncio
+    async def test_sl_distance_mode_medium_keeps_stored_prices(self, broker, notifier):
+        """Default (กลาง) → stored row prices pass through untouched."""
+        db = FakeDatabase()
+        s = clean_settings(sl_distance_mode="medium")
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=85.0, opportunity=80.0, signal_id="sig-md", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == 1.0800
+        assert order.take_profit == 1.0950
+
+    @pytest.mark.asyncio
     async def test_pause_blocks_execution(self, broker, notifier):
         db = db_with_client()
         execution.set_pause(db, True, "testing")
