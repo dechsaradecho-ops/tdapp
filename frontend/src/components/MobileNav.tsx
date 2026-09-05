@@ -60,8 +60,8 @@ export default function MobileNav() {
         className="lg-refract fixed bottom-0 inset-x-0 z-40 border-t safe-bottom"
         style={{
           background: "rgba(10, 10, 14, 0.72)",
-          WebkitBackdropFilter: "blur(24px) saturate(160%)",
-          backdropFilter: "blur(24px) saturate(160%)",
+          WebkitBackdropFilter: "blur(12px) saturate(160%)",
+          backdropFilter: "blur(12px) saturate(160%)",
           borderTopColor: "rgba(255,255,255,0.14)",
         }}
       >
@@ -92,8 +92,8 @@ export default function MobileNav() {
             className="lg-refract absolute bottom-0 inset-x-0 border-t rounded-t-3xl shadow-2xl safe-bottom animate-sheet"
             style={{
               background: "rgba(18, 18, 24, 0.82)",
-              WebkitBackdropFilter: "blur(28px) saturate(160%)",
-              backdropFilter: "blur(28px) saturate(160%)",
+              WebkitBackdropFilter: "blur(14px) saturate(160%)",
+              backdropFilter: "blur(14px) saturate(160%)",
               borderTopColor: "rgba(255,255,255,0.16)",
             }}
             onClick={(e) => e.stopPropagation()}
