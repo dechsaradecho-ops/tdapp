@@ -1029,16 +1029,34 @@ class WalkForwardResult(BaseModel):
     note: str = ""
 
 
+# Walk Forward: every segment must clear run_backtest's 25-bar indicator
+# warmup on BOTH sides of the 60/40 IS/OOS split. 70 bars → IS ≈ 42,
+# OOS ≈ 28 — both leave room for real signal flips. Below this, windows
+# produce 0 trades and the reliability formula degenerates to a constant
+# 40 (ratio 0 × 0.6 + consistency 1.0 × 0.4) identical for every asset.
+MIN_SEGMENT_BARS = 70
+
+
 def walk_forward(candles: list[Candle], config: BacktestConfig,
                  segments: int = 4) -> WalkForwardResult:
     """Split history into segments; IS = train, OOS = validation.
 
     Reliability Score: consistency between IS and OOS performance (0-100).
+
+    Segments shrink adaptively so each one clears the indicator warmup on
+    both IS and OOS sides (Bug 2026-09-05: days=120 forced 4 × ~35-bar
+    segments → IS windows shorter than the 25-bar warmup → 0 trades in
+    every window → constant fake reliability 40 for every asset).
     """
     closes = [c.c for c in candles]
-    if len(closes) < segments * 30:
-        return WalkForwardResult(segments=0, in_sample_win_rates=[],
-                                 out_sample_win_rates=[], reliability_score=0.0)
+    if len(closes) < MIN_SEGMENT_BARS:
+        return WalkForwardResult(
+            segments=0, in_sample_win_rates=[], out_sample_win_rates=[],
+            reliability_score=0.0,
+            note=f"ข้อมูลไม่พอสำหรับ Walk Forward (มี {len(closes)} แท่ง ต้อง ≥ "
+                 f"{MIN_SEGMENT_BARS}) — เพิ่มจำนวนวัน (Days) แล้วรันใหม่")
+    while segments > 1 and len(closes) // segments < MIN_SEGMENT_BARS:
+        segments -= 1
     seg_len = len(closes) // segments
     is_wr: list[float] = []
     oos_wr: list[float] = []
@@ -1055,9 +1073,21 @@ def walk_forward(candles: list[Candle], config: BacktestConfig,
     # reliability: OOS performance relative to IS, penalized by variance of OOS
     consistency = 1.0 - (max(oos_wr) - min(oos_wr)) / 100.0 if oos_wr else 0.0
     ratio = min(1.0, avg_oos / avg_is) if avg_is > 0 else 0.0
-    reliability = round(max(0.0, min(100.0, (ratio * 0.6 + consistency * 0.4) * 100)), 1)
+    if avg_is == 0:
+        # No in-sample trades at all (e.g. one-directional trend where the
+        # signal never flips) — the IS/OOS ratio is undefined; report 0
+        # with an honest note instead of a formula-derived fake number.
+        reliability = 0.0
+        note = (f"ใช้ {segments} segment(s) × {seg_len} แท่ง — ไม่มีเทรดใน In-Sample "
+                f"(สัญญาณไม่กลับทางเลยในช่วงนี้) จึงประเมิน reliability ไม่ได้")
+    else:
+        reliability = round(max(0.0, min(100.0, (ratio * 0.6 + consistency * 0.4) * 100)), 1)
+        note = f"ใช้ {segments} segment(s) × {seg_len} แท่ง (IS 60% / OOS 40%)"
+        if segments < 4:
+            note += " — ข้อมูลสั้น ลดจำนวน segments ให้แต่ละช่วงยาวพอ"
     return WalkForwardResult(segments=segments, in_sample_win_rates=is_wr,
-                             out_sample_win_rates=oos_wr, reliability_score=reliability)
+                             out_sample_win_rates=oos_wr, reliability_score=reliability,
+                             note=note)
 
 
 class PaperTradingStatus(BaseModel):

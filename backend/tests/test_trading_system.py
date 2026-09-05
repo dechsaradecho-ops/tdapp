@@ -315,12 +315,26 @@ def test_backtest_produces_metrics():
 def test_walk_forward_reliability_bounds():
     res = walk_forward(_trending_candles(160), BacktestConfig(asset="EURUSD"), segments=4)
     assert 0 <= res.reliability_score <= 100
-    assert res.segments == 4
+    assert res.segments == 2  # adaptive: 160//4=40 and 160//3=53 < 70 → 2×80
 
 
 def test_walk_forward_insufficient_data():
     res = walk_forward([], BacktestConfig(asset="EURUSD"), segments=4)
     assert res.segments == 0 and res.reliability_score == 0.0
+
+
+def test_walk_forward_adaptive_segments_no_fake_40():
+    """Regression (2026-09-05): days=120 (~140 bars) forced 4 × ~35-bar
+    segments — every IS window shorter than the 25-bar warmup → 0 trades
+    everywhere → constant reliability 40 identical for every asset."""
+    res = walk_forward(_trending_candles(140), BacktestConfig(asset="EURUSD"), segments=4)
+    assert res.segments == 2  # shrunk until each segment ≥ MIN_SEGMENT_BARS
+    assert "segment" in res.note
+    one = walk_forward(_trending_candles(100), BacktestConfig(asset="EURUSD"), segments=4)
+    assert one.segments == 1
+    tiny = walk_forward(_trending_candles(60), BacktestConfig(asset="EURUSD"), segments=4)
+    assert tiny.segments == 0 and tiny.reliability_score == 0.0
+    assert "ไม่พอ" in tiny.note
 
 
 # ------------------------------------------------------------ paper trading

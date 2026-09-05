@@ -329,8 +329,11 @@ export default function PerformancePage() {
               <span className="text-lg font-bold">{wf.reliability_score}/100</span>
               <span className="text-slate-500 text-xs">
                 {wf.segments} segments · IS {wf.in_sample_win_rates.map((v) => `${v}%`).join(", ")}
+                {wf.out_sample_win_rates.length > 0 &&
+                  ` · OOS ${wf.out_sample_win_rates.map((v) => `${v}%`).join(", ")}`}
               </span>
             </div>
+            {wf.note && <p className="text-xs text-slate-500 pt-1">{wf.note}</p>}
           </div>
         )}
         {bt?.note && <p className="text-xs text-slate-500 pt-2">{bt.note}</p>}
