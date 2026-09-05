@@ -59,6 +59,9 @@ input[type="checkbox"] {
 
 .panel {
   @apply bg-panel rounded-xl border border-slate-800 p-4;
+  /* grid item ต้องหดต่ำกว่า min-content ได้ ไม่งั้นเนื้อหายาว (nowrap/long words)
+     จะดัน panel และทั้ง grid ให้กว้างเกินจอมือถือ (grid blowout) */
+  min-width: 0;
 }
 
 .panel-title {

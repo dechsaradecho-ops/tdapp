@@ -21,11 +21,13 @@ export default function PortfolioAllocation({ allocation }: { allocation: Alloca
       </div>
       <ul className="mt-3 space-y-2 text-sm">
         {allocation.map((a, i) => (
-          <li key={a.asset} className="flex items-start justify-between gap-3">
-            <span className="flex items-center gap-2 min-w-0">
-              <span className={`inline-block w-3 h-3 rounded ${segments[i].color}`} />
-              <span className="font-semibold">{a.asset}</span>
-              <span className="text-slate-500 truncate">{a.rationale}</span>
+          <li key={a.asset} className="flex items-start justify-between gap-3 min-w-0">
+            <span className="flex items-center gap-2 min-w-0 flex-1">
+              <span className={`inline-block w-3 h-3 rounded shrink-0 ${segments[i].color}`} />
+              <span className="font-semibold shrink-0">{a.asset}</span>
+              {/* truncate (white-space:nowrap) ไม่หดใน min-content ทำให้ li ดัน panel ทั้งอัน
+                  กว้างเกินจอมือถือ — line-clamp-1 ตัดบรรทัดเดียวเหมือนกันแต่หดได้จริง */}
+              <span className="text-slate-500 line-clamp-1 min-w-0">{a.rationale}</span>
             </span>
             <span className="font-bold shrink-0">{a.weight_pct}%</span>
           </li>
