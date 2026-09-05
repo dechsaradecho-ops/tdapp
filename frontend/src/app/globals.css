@@ -306,13 +306,13 @@ button.bg-profit:hover:not(:disabled) {
 }
 
 /* ข้อความเขียว/แดง (กำไร/ขาดทุน) ในตาราง — ใส่ bg โค้งมนเป็น pill ให้เด่นอ่านง่าย
-   ป้ายสถานะที่มี px-2 py-0.5 + rounded อยู่แล้วจะถูกบีบเป็น pill กลม ๆ พอดีตัว */
+   ป้ายสถานะที่มี px-2 py-0.5 + rounded อยู่แล้วจะถูกบีบเป็น pill กลม ๆ พอดีตัว
+   สำคัญ: ห้ามเปลี่ยน display ของ td.text-profit/td.text-loss (table-cell) —
+   ถ้า inline-block cell จะหลุดจากกริดตาราง ทำให้คอลัมน์เลื่อนทับกันทั้งแถว */
 td .text-profit,
 td .text-loss,
 td .text-emerald-400,
-td .text-red-400,
-td.text-profit,
-td.text-loss {
+td .text-red-400 {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
@@ -324,25 +324,43 @@ td.text-loss {
   font-variant-numeric: tabular-nums;
 }
 
-/* tint สีตามฝั่ง — pill เขียว/แดงเด่นเข้มขึ้น แยกกำไร/ขาดทุนได้แลบตา */
+/* td ที่ใส่ class สีตรง ๆ (SL/TP/PnL ใน monitor) — pill บน table-cell โดยตรง
+   ใช้ box-shadow แทน border (border บน td จะชนกับ border แถวตาราง)
+   และ padding ต้องเป็น 0 เพื่อไม่ขยาย cell เกินคอลัมน์ */
+td.text-profit,
+td.text-loss {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04)) padding-box;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tint สีตามฝั่ง — pill เขียว/แดงเด่นเข้มขึ้น แยกกำไร/ขาดทุนได้แลบตา
+   (td.text-profit/loss ใช้ box-shadow เป็นขอบ — ตั้งค่าสีให้ตรงกันด้วย) */
 td .text-profit,
 td .text-emerald-400,
 td.text-profit {
   background: linear-gradient(180deg, rgba(48, 209, 88, 0.24), rgba(48, 209, 88, 0.12));
   border-color: rgba(48, 209, 88, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(48, 209, 88, 0.42);
 }
 td .text-loss,
 td .text-red-400,
 td.text-loss {
   background: linear-gradient(180deg, rgba(255, 69, 58, 0.24), rgba(255, 69, 58, 0.12));
   border-color: rgba(255, 69, 58, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(255, 69, 58, 0.42);
 }
 
 /* มือถือ: ตารางกว้างตามเนื้อหาจริง — คอลัมน์ไม่ถูกบีบจน pill/ตัวเลขเลื่อนทับกัน
-   (wrapper .overflow-x-auto จะกลายเป็นเลื่อนแนวนอนแทน) desktop ไม่กระทบ */
+   (wrapper .overflow-x-auto จะกลายเป็นเลื่อนแนวนอนแทน) desktop ไม่กระทบ
+   หมายเหตุ: ต้องเป็น auto layout เท่านั้น — width:max-content + table-layout:fixed
+   ทำให้ Chrome จัดกริดหัวตารางกับเนื้อหาไม่ตรงกัน (หัว SL ทาบกับช่อง TP) */
 @media (max-width: 767px) {
   .overflow-x-auto > table {
-    width: max-content;
+    width: auto;
     min-width: 100%;
   }
 }
