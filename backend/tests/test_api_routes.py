@@ -787,3 +787,246 @@ class TestStatsReset:
         assert mon["stats"]["pnl_total"] == 0.0
         assert mon["stats"]["closed_count"] == 0
         assert mon["stats"]["open_positions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# LINE webhook — commands, AI chat replies, group mention gate + targets
+# ---------------------------------------------------------------------------
+import hashlib
+import hmac
+import json as _json
+
+from app.core.config import get_settings
+
+
+class RecordingLine:
+    """FakeLine that records replies so tests can assert on them."""
+
+    def __init__(self):
+        self.replies: list[tuple[str, str]] = []
+        self.pushed: list[tuple[str, str]] = []
+
+    async def push(self, user_id: str, message: str) -> bool:
+        self.pushed.append((user_id, message))
+        return True
+
+    async def reply(self, reply_token: str, message: str) -> bool:
+        self.replies.append((reply_token, message))
+        return True
+
+
+def _sign(raw: bytes) -> str:
+    return hmac.new(get_settings().line_channel_secret.encode(),
+                    raw, hashlib.sha256).hexdigest()
+
+
+class TestLineWebhook:
+    async def _send(self, body: dict, sig: str = "GOOD") -> httpx.Response:
+        raw = _json.dumps(body).encode()
+        headers = {"X-Line-Signature": sig if sig != "GOOD" else _sign(raw)}
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as client:
+            return await client.post("/api/line/webhook", content=raw,
+                                     headers=headers)
+
+    @pytest.mark.asyncio
+    async def test_bad_signature_403(self):
+        set_state(FakeDatabase())
+        r = await self._send({"events": []}, sig="bad")
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_command_gets_canned_reply(self):
+        db = FakeDatabase()
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+        r = await self._send({"events": [{
+            "type": "message", "replyToken": "rt-1",
+            "source": {"type": "user", "userId": "U1"},
+            "message": {"type": "text", "text": "/risk"},
+        }]})
+        assert r.status_code == 200
+        assert any("Risk" in m for _, m in line.replies)
+
+    @pytest.mark.asyncio
+    async def test_free_text_gets_ai_reply(self, monkeypatch):
+        """Non-command text routes to the grounded AI provider."""
+        from app.api.routes import webhook as wh
+
+        db = FakeDatabase()
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+
+        class FakeProvider:
+            async def chat(self, messages, temperature=0.3):
+                return "AI ตอบ: วันนี้ควรรอจังหวะ"
+
+        monkeypatch.setattr(wh, "ai_reply",
+                            lambda request, text: FakeProvider().chat([]))
+        r = await self._send({"events": [{
+            "type": "message", "replyToken": "rt-2",
+            "source": {"type": "user", "userId": "U1"},
+            "message": {"type": "text", "text": "วันนี้ควรเทรดไหม"},
+        }]})
+        assert r.status_code == 200
+        assert any("AI ตอบ" in m for _, m in line.replies)
+
+    @pytest.mark.asyncio
+    async def test_group_message_without_mention_ignored(self):
+        """Group chat: no @mention → no reply (anti-spam gate)."""
+        db = FakeDatabase()
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+        r = await self._send({"events": [{
+            "type": "message", "replyToken": "rt-3",
+            "source": {"type": "group", "groupId": "C-g1", "userId": "U1"},
+            "message": {"type": "text", "text": "/risk"},
+        }]})
+        assert r.status_code == 200
+        assert line.replies == []
+
+    @pytest.mark.asyncio
+    async def test_group_mention_replies_and_registers_target(self, monkeypatch):
+        """@bot in a group → reply AND the group is stored in line_targets
+        so future alerts are pushed there."""
+        db = FakeDatabase()
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+        s = get_settings()
+        monkeypatch.setattr(s, "line_bot_user_id", "U-bot")
+        r = await self._send({"events": [{
+            "type": "message", "replyToken": "rt-4",
+            "source": {"type": "group", "groupId": "C-g2", "userId": "U1"},
+            "message": {"type": "text", "text": "/risk",
+                        "mention": {"mentionees": [
+                            {"type": "user", "userId": "U-bot"}]}},
+        }]})
+        assert r.status_code == 200
+        assert any("Risk" in m for _, m in line.replies)
+        targets = db.rows.get("line_targets", [])
+        assert any(t["target_id"] == "C-g2" for t in targets)
+
+    @pytest.mark.asyncio
+    async def test_target_registered_once(self):
+        """Second event from the same group must not duplicate the row."""
+        db = FakeDatabase()
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+        for _ in range(2):
+            await self._send({"events": [{
+                "type": "message", "replyToken": "rt-5",
+                "source": {"type": "group", "groupId": "C-g3",
+                           "userId": "U1"},
+                "message": {"type": "text", "text": "hi"},
+            }]})
+        assert len(db.rows.get("line_targets", [])) == 1
+
+    @pytest.mark.asyncio
+    async def test_targets_endpoint_lists_groups(self):
+        """GET /api/line/targets returns registered groups for the UI."""
+        db = FakeDatabase(rows={
+            "line_targets": [{"id": "lt1", "target_id": "C-g9",
+                              "target_type": "group",
+                              "notification_enabled": True,
+                              "last_seen_at": "2026-09-05T00:00:00+00:00"}],
+            "line_users": [{"id": "lu1", "user_id": "demo",
+                            "line_user_id": "U-me",
+                            "notification_enabled": True}],
+        })
+        set_state(db)
+        r = await call("GET", "/api/line/targets")
+        body = r.json()
+        assert r.status_code == 200
+        assert body["targets"][0]["target_id"] == "C-g9"
+        assert body["targets"][0]["last_seen_at"] == "2026-09-05T00:00:00+00:00"
+        assert body["users"][0]["line_user_id"] == "U-me"
+
+    @pytest.mark.asyncio
+    async def test_test_endpoint_pushes_to_all_targets(self):
+        """POST /api/line/test pushes to every enabled target and reports
+        per-target results."""
+        db = FakeDatabase(rows={
+            "line_targets": [
+                {"id": "lt1", "target_id": "C-on", "target_type": "group",
+                 "notification_enabled": True},
+                {"id": "lt2", "target_id": "C-off", "target_type": "group",
+                 "notification_enabled": False},
+            ],
+            "line_users": [{"id": "lu1", "user_id": "demo",
+                            "line_user_id": "U-me",
+                            "notification_enabled": True}],
+        })
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+        r = await call("POST", "/api/line/test", {})
+        body = r.json()
+        assert r.status_code == 200
+        assert body["ok"] is True
+        assert body["sent"] == 2 and body["failed"] == 0
+        pushed_to = {t for t, _ in line.pushed}
+        assert pushed_to == {"C-on", "U-me"}  # disabled target skipped
+        assert any("ทดสอบ" in m for _, m in line.pushed)
+
+
+class TestGroupNotificationPush:
+    """NotificationService.push_line must reach groups (line_targets) too."""
+
+    @pytest.mark.asyncio
+    async def test_push_line_hits_users_and_groups(self):
+        from app.services.notification_service import NotificationService
+
+        db = FakeDatabase(rows={
+            "line_users": [{"id": "lu1", "user_id": "demo",
+                            "line_user_id": "U-personal",
+                            "notification_enabled": True}],
+            "line_targets": [{"id": "lt1", "target_id": "C-group",
+                              "target_type": "group",
+                              "notification_enabled": True}],
+        })
+        line = RecordingLine()
+        svc = NotificationService(db, line)  # type: ignore[arg-type]
+        ok = await svc.push_line("demo", "🚨 test alert")
+        assert ok is True
+        assert ("U-personal", "🚨 test alert") in line.pushed
+        assert ("C-group", "🚨 test alert") in line.pushed
+
+    @pytest.mark.asyncio
+    async def test_push_line_disabled_target_skipped(self):
+        from app.services.notification_service import NotificationService
+
+        db = FakeDatabase(rows={
+            "line_targets": [{"id": "lt1", "target_id": "C-off",
+                              "target_type": "group",
+                              "notification_enabled": False}],
+        })
+        line = RecordingLine()
+        svc = NotificationService(db, line)  # type: ignore[arg-type]
+        ok = await svc.push_line("demo", "msg")
+        assert ok is False
+        assert line.pushed == []
+
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_reaches_group(self):
+        from app.workers import notification_worker
+        from app.services.notification_service import NotificationService
+
+        db = FakeDatabase(rows={
+            "notifications": [{"id": "n1", "user_id": "demo",
+                               "channel": "line", "type": "new_signal",
+                               "message": "📈 signal", "status": "pending"}],
+            "line_targets": [{"id": "lt1", "target_id": "C-group",
+                              "target_type": "group",
+                              "notification_enabled": True}],
+        })
+        line = RecordingLine()
+        sent = await notification_worker.dispatch_pending(
+            db, NotificationService(db, line))  # type: ignore[arg-type]
+        assert sent == 1
+        assert ("C-group", "📈 signal") in line.pushed

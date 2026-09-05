@@ -140,6 +140,9 @@ app = FastAPI(
 _PIN_EXEMPT_PATHS = {
     "/ping", "/health",
     "/api/auth/status", "/api/auth/login", "/api/auth/set-pin",
+    # LINE servers call the webhook — they have no PIN session. The webhook
+    # verifies its own HMAC signature (X-Line-Signature) instead.
+    "/api/line/webhook",
 }
 
 

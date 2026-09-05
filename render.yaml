@@ -26,6 +26,9 @@ services:
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
+      # Bot's own user ID (U...) — @mention detection in group chats
+      - key: LINE_BOT_USER_ID
+        sync: false
       # ราคาทอง XAU/USD ผ่าน Twelve Data (free key) — FX ใช้ Frankfurter ไม่ต้องมี key
       - key: TWELVEDATA_API_KEY
         sync: false
@@ -54,6 +57,8 @@ services:
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
       - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_BOT_USER_ID
         sync: false
       # scanner ต้องใช้ key เดียวกับ api — ดึงราคาทอง XAU/USD จาก Twelve Data
       - key: TWELVEDATA_API_KEY

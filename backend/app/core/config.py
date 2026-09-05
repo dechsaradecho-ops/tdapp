@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # LINE
     line_channel_access_token: str = ""
     line_channel_secret: str = ""
+    # Bot's own user ID (U... from LINE console) — used to detect @mentions in
+    # group chats so the bot only answers when explicitly addressed.
+    line_bot_user_id: str = ""
 
     # Market data — Twelve Data free key for gold (XAU/USD) OHLC.
     # FX pairs use Frankfurter (ECB) — free, no key needed.

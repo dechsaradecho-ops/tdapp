@@ -7,7 +7,8 @@ import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import {
-  AppSettings, DbCheckResult, DbCounts, PauseStatus, PortfolioRecommendation, RiskProfile,
+  AppSettings, DbCheckResult, DbCounts, LineTargetsResponse, LineTestResult,
+  PauseStatus, PortfolioRecommendation, RiskProfile,
 } from "@/lib/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -64,6 +65,32 @@ export default function SettingsPage() {
   // --- execution switch (Phase 1) ---
   const [pause, setPause] = useState<PauseStatus | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+
+  // --- LINE notification test + registered targets ---
+  const [lineTargets, setLineTargets] = useState<LineTargetsResponse | null>(null);
+  const [lineTestRes, setLineTestRes] = useState<LineTestResult | null>(null);
+  const [lineBusy, setLineBusy] = useState(false);
+  const [lineMsg, setLineMsg] = useState("");
+
+  const loadLineTargets = () =>
+    api.lineTargets().then(setLineTargets).catch(() => setLineTargets(null));
+
+  useEffect(() => { loadLineTargets(); }, []);
+
+  const runLineTest = async () => {
+    setLineBusy(true);
+    setLineMsg("");
+    try {
+      const res = await api.lineTest();
+      setLineTestRes(res);
+      setLineMsg(res.ok ? "✅ ส่งข้อความทดสอบสำเร็จ — เช็คกลุ่ม LINE" : "❌ ส่งไม่สำเร็จ — ดู hint ด้านล่าง");
+      loadLineTargets(); // refresh last_seen_at
+    } catch (e) {
+      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLineBusy(false);
+    }
+  };
 
   useEffect(() => {
     api.getTradingPause().then(setPause).catch(() => setPause(null));
@@ -476,6 +503,96 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* ---------------- LINE Notifications ---------------- */}
+      <div className="panel md:col-span-2">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="panel-title">การแจ้งเตือน LINE</h2>
+          <button onClick={runLineTest} disabled={lineBusy}
+            className="bg-accent text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
+            {lineBusy ? "กำลังส่ง..." : "🔔 ทดสอบการแจ้งเตือน"}
+          </button>
+        </div>
+        <p className="text-sm text-slate-400 mt-1">
+          กดปุ่มเพื่อส่งข้อความทดสอบไปทุกกลุ่ม/แชทที่ลงทะเบียนไว้
+          (กลุ่มจะถูกลงทะเบียนอัตโนมัติเมื่อเพิ่มบอทเข้ากลุ่มแล้ว @mention บอท 1 ครั้ง)
+        </p>
+        {lineMsg && <p className="text-sm mt-2">{lineMsg}</p>}
+
+        {lineTestRes && (
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400">ผลทดสอบ:</span>
+              <span className={lineTestRes.ok ? "text-profit font-bold" : "text-loss font-bold"}>
+                {lineTestRes.ok ? "✅ ส่งสำเร็จ" : "❌ ส่งไม่สำเร็จ"}
+              </span>
+              <span className="text-slate-500">
+                ส่งได้ {lineTestRes.sent} / ล้มเหลว {lineTestRes.failed}
+              </span>
+            </div>
+            {lineTestRes.results.length > 0 && (
+              <div className="space-y-1">
+                {lineTestRes.results.map((r) => (
+                  <div key={r.target_id} className="flex items-center gap-2 text-xs">
+                    <span>{r.ok ? "✅" : "❌"}</span>
+                    <span className="text-slate-400">{r.target_type}</span>
+                    <code className="text-slate-300 break-all">{r.target_id}</code>
+                  </div>
+                ))}
+              </div>
+            )}
+            {lineTestRes.hint && <p className="text-amber-400 text-xs">{lineTestRes.hint}</p>}
+          </div>
+        )}
+
+        <div className="mt-4">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
+            กลุ่ม/แชทที่ลงทะเบียน (event.source.groupId จาก webhook)
+          </p>
+          {!lineTargets ? (
+            <p className="text-slate-500 text-sm">กำลังโหลด... (หรือยังไม่มีข้อมูล)</p>
+          ) : lineTargets.targets.length === 0 && lineTargets.users.length === 0 ? (
+            <p className="text-slate-500 text-sm">
+              ยังไม่มี — เพิ่มบอทเข้ากลุ่ม LINE แล้วพิมพ์ @บอท 1 ครั้ง กลุ่มจะถูกลงทะเบียนอัตโนมัติ
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {lineTargets.targets.map((t) => (
+                <div key={t.target_id}
+                  className="bg-surface rounded p-3 flex items-center justify-between flex-wrap gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold">
+                        {t.target_type === "group" ? "👥 Group" : t.target_type === "room" ? "🏠 Room" : "👤 User"}
+                      </span>
+                      <span className={t.notification_enabled ? "text-profit text-xs" : "text-loss text-xs"}>
+                        {t.notification_enabled ? "เปิดรับแจ้งเตือน" : "ปิดรับแจ้งเตือน"}
+                      </span>
+                    </div>
+                    <code className="text-xs text-slate-300 break-all">{t.target_id}</code>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {t.last_seen_at
+                        ? `รับ event ล่าสุด: ${new Date(t.last_seen_at).toLocaleString("th-TH")}`
+                        : "ยังไม่เคยรับ event"}
+                    </p>
+                  </div>
+                </div>
+              ))}
+              {lineTargets.users.map((u) => (
+                <div key={u.target_id} className="bg-surface rounded p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold">👤 Personal</span>
+                    <span className={u.notification_enabled ? "text-profit text-xs" : "text-loss text-xs"}>
+                      {u.notification_enabled ? "เปิดรับแจ้งเตือน" : "ปิดรับแจ้งเตือน"}
+                    </span>
+                  </div>
+                  <code className="text-xs text-slate-300 break-all">{u.target_id}</code>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

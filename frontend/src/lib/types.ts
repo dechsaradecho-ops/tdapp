@@ -595,6 +595,39 @@ export interface PinStatus {
   lock_minutes: number;
 }
 
+// ---------- LINE: notification targets + test button ----------
+/** One registered chat from GET /api/line/targets (group/room auto-registered
+ * by the webhook, or a personal line_users row). */
+export interface LineTarget {
+  target_id: string;      // groupId / roomId / userId (C... / U...)
+  target_type: string;    // group | room | user
+  notification_enabled: boolean;
+  created_at?: string | null;
+  last_seen_at?: string | null;  // latest webhook event received from this chat
+}
+
+/** Response of GET /api/line/targets. */
+export interface LineTargetsResponse {
+  targets: LineTarget[];
+  users: LineTarget[];
+}
+
+/** Per-target result of POST /api/line/test. */
+export interface LineTestItem {
+  target_id: string;
+  target_type: string;
+  ok: boolean;
+}
+
+/** Response of POST /api/line/test (🔔 ทดสอบ button). */
+export interface LineTestResult {
+  ok: boolean;
+  sent: number;
+  failed: number;
+  results: LineTestItem[];
+  hint: string;
+}
+
 export interface PinLoginResponse {
   ok: boolean;
   token: string | null;

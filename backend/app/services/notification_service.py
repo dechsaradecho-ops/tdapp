@@ -27,7 +27,17 @@ class NotificationService:
 
         if not is_critical:
             return
+        await self.push_line(user_id, message)
+
+    async def push_line(self, user_id: str, message: str) -> bool:
+        """Push to every enabled LINE target of the user: personal chats
+        (line_users) AND registered groups/rooms (line_targets)."""
+        ok = False
         line_users = self.db.select("line_users", filters={"user_id": user_id})
         for lu in line_users:
             if lu.get("notification_enabled"):
-                await self.line.push(lu["line_user_id"], message)
+                ok = await self.line.push(lu["line_user_id"], message) or ok
+        for t in self.db.select("line_targets",
+                                filters={"notification_enabled": True}):
+            ok = await self.line.push(t["target_id"], message) or ok
+        return ok

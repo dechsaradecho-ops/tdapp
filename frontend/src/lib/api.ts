@@ -25,6 +25,8 @@ import {
   PortfolioRecommendation,
   QuoteLogsResponse,
   QuoteTestResult,
+  LineTargetsResponse,
+  LineTestResult,
   RiskStatus,
   SessionStatus,
   SettingsSaveResult,
@@ -208,6 +210,10 @@ export const api = {
   // ---------- Signal lifecycle log (7-day auto-expiry) ----------
   signalLogs: (limit = 100) =>
     get<SignalLogsResponse>(`/api/system/signal-logs?limit=${limit}`),
+
+  // ---------- LINE: notification targets + test button ----------
+  lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),
+  lineTest: () => post<LineTestResult>("/api/line/test", {}),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

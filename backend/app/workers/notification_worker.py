@@ -26,11 +26,7 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
     for n in pending:
         if not n.get("user_id"):
             continue  # broadcast rows need a recipient resolution step
-        line_users = db.select("line_users", filters={"user_id": n["user_id"]})
-        ok = False
-        for lu in line_users:
-            if lu.get("notification_enabled"):
-                ok = await notifier.line.push(lu["line_user_id"], n["message"])
+        ok = await notifier.push_line(n["user_id"], n["message"])
         db.update("notifications", n["id"], {
             "status": "sent" if ok else "failed",
             "sent_at": datetime.now(timezone.utc).isoformat(),
