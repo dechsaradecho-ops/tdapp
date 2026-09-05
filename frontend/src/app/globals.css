@@ -239,8 +239,92 @@ button:not(:disabled):active {
 
 /* panel ทุกใบโผล่ทีละนิดตอนโหลดหน้า (animate-pop ประกาศทีหลังจึงชนะใน modal) */
 .panel {
-  animation: lg-rise-in 0.35s ease-out both;
+  animation: lg-rise-in 0.35s ease-out backwards;
 }
+
+/* ---------- Site-wide entrance stagger ----------
+   header เข้าก่อน → แท็บบาร์ลอยขึ้น → การ์ดใน grid โผล่ทีละใบ ทำให้ทุกหน้ารู้สึก "ขยับ" ทั้งเว็บ */
+@keyframes lg-slide-down {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes lg-slide-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+header {
+  animation: lg-slide-down 0.4s cubic-bezier(0.32, 0.72, 0, 1) backwards;
+}
+
+/* ตัว page content และแท็บบาร์ — จับด้วย <main> และ nav ปุ่มเพิ่มเติม */
+main > * {
+  animation: lg-slide-up 0.45s cubic-bezier(0.32, 0.72, 0, 1) backwards;
+}
+
+/* การ์ด/บล็อกใน grid โผล่ทีละใบแบบ stagger (เจาะจง grid หลักของแต่ละหน้า)
+   nth-child ให้ครบ 8 ใบแรก — หลังจากนั้น delay คงที่ */
+main .grid > * {
+  animation: lg-rise-in 0.4s ease-out backwards;
+}
+main .grid > *:nth-child(1) { animation-delay: 0.05s; }
+main .grid > *:nth-child(2) { animation-delay: 0.1s; }
+main .grid > *:nth-child(3) { animation-delay: 0.15s; }
+main .grid > *:nth-child(4) { animation-delay: 0.2s; }
+main .grid > *:nth-child(5) { animation-delay: 0.25s; }
+main .grid > *:nth-child(6) { animation-delay: 0.3s; }
+main .grid > *:nth-child(7) { animation-delay: 0.35s; }
+main .grid > *:nth-child(8) { animation-delay: 0.4s; }
+main .grid > *:nth-child(n + 9) { animation-delay: 0.4s; }
+
+/* แท็บบาร์ลอยขึ้นด้านล่างตอนโหลดหน้า */
+nav[aria-label="เมนูหลัก"] > div:first-child {
+  animation: lg-slide-up 0.4s cubic-bezier(0.32, 0.72, 0, 1) 0.1s backwards;
+}
+
+/* แชท: ฟองข้อความป๊อปทีละฟอง */
+.max-w-\[85\%\] { animation: lg-pop-in 0.3s cubic-bezier(0.32, 0.72, 0, 1) both; }
+
+/* ลิงก์ nav desktop มี transition สี */
+header nav a {
+  transition: color 0.15s ease;
+}
+
+/* accordion (สัญญาณ) เปิด/ปิด นุ่ม ๆ — ขยาย grid-template-rows + opacity ของเนื้อหาใน */
+details summary + * {
+  animation: lg-rise-in 0.3s ease-out backwards;
+}
+
+/* ปุ่ม accordion กด scale เบา ๆ */
+details summary {
+  transition: background-color 0.15s ease;
+}
+details summary:active {
+  transform: scale(0.99);
+}
+
+/* ตาราง: แถวโผล่ทีละแถว (logs, signal-logs) */
+table tbody tr {
+  animation: lg-fade-in 0.3s ease-out backwards;
+}
+table tbody tr:nth-child(1) { animation-delay: 0.02s; }
+table tbody tr:nth-child(2) { animation-delay: 0.04s; }
+table tbody tr:nth-child(3) { animation-delay: 0.06s; }
+table tbody tr:nth-child(4) { animation-delay: 0.08s; }
+table tbody tr:nth-child(5) { animation-delay: 0.1s; }
+table tbody tr:nth-child(6) { animation-delay: 0.12s; }
+table tbody tr:nth-child(7) { animation-delay: 0.14s; }
+table tbody tr:nth-child(8) { animation-delay: 0.16s; }
+table tbody tr:nth-child(n+9) { animation-delay: 0.18s; }
+
+/* ---------- Micro-interactions ---------- */
+
+/* ลิงก์ใน main (chip สัญลักษณ์ ฯลฯ) มี transition */
+main a, main summary, main div[role="button"], main div[role="button"] > * {
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+/* หมายเหตุ: .animate-pulse (Tailwind) ใช้เป็น loading indicator หลายจุด — ไม่ override */
 
 /* เคารพการตั้งค่าลด motion ของ OS */
 @media (prefers-reduced-motion: reduce) {
@@ -248,7 +332,11 @@ button:not(:disabled):active {
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+  html {
+    scroll-behavior: auto;
   }
 }
