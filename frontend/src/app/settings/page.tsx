@@ -259,7 +259,7 @@ export default function SettingsPage() {
             </select>
           </label>
           <button onClick={recommend} disabled={loading}
-            className="w-full bg-accent text-surface font-semibold rounded py-2 disabled:opacity-50">
+            className="w-full bg-accent text-white font-semibold rounded py-2 disabled:opacity-50">
             {loading ? "กำลังคำนวณ..." : "ขอ Portfolio Recommendation"}
           </button>
         </div>
@@ -298,11 +298,11 @@ export default function SettingsPage() {
             {saveMsg && <span className="text-xs text-slate-400">{saveMsg}</span>}
             <button onClick={reset} disabled={saving || !cfg}
               className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[40px] active:bg-slate-800 disabled:opacity-40">
-              ↩️ ค่าเริ่มต้น
+              ค่าเริ่มต้น
             </button>
             <button onClick={save} disabled={saving || !cfg}
-              className="bg-accent text-surface font-semibold rounded px-4 min-h-[40px] disabled:opacity-50 active:brightness-90">
-              {saving ? "กำลังบันทึก..." : "💾 บันทึกการตั้งค่า"}
+              className="bg-accent text-white font-semibold rounded px-4 min-h-[40px] disabled:opacity-50 active:brightness-90">
+              {saving ? "กำลังบันทึก..." : "บันทึกการตั้งค่า"}
             </button>
           </div>
         </div>
@@ -331,9 +331,9 @@ export default function SettingsPage() {
           </div>
           <button onClick={togglePause} disabled={pauseBusy}
             className={pause?.paused
-              ? "bg-profit text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"
-              : "bg-loss text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"}>
-            {pauseBusy ? "กำลังส่ง..." : pause?.paused ? "▶️ Resume Auto Trading" : "⏸️ Pause Auto Trading"}
+              ? "bg-profit text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"
+              : "bg-loss text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"}>
+            {pauseBusy ? "กำลังส่ง..." : pause?.paused ? "Resume Auto Trading" : "Pause Auto Trading"}
           </button>
         </div>
 
@@ -514,8 +514,8 @@ export default function SettingsPage() {
           พร้อมแสดงจำนวน row จริงในตาราง worker ทั้งหมด
         </p>
         <button onClick={runDbCheck} disabled={dbTesting}
-          className="bg-accent text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
-          {dbTesting ? "กำลังทดสอบ..." : "🧪 ทดสอบ อ่าน/เขียน DB"}
+          className="bg-accent text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
+          {dbTesting ? "กำลังทดสอบ..." : "ทดสอบ อ่าน/เขียน DB"}
         </button>
 
         {dbCheck && (
@@ -577,11 +577,11 @@ export default function SettingsPage() {
           <div className="flex items-center gap-2">
             <button onClick={runDiag} disabled={lineBusy}
               className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[44px] active:bg-slate-800 disabled:opacity-40">
-              🔍 วินิจฉัย
+              วินิจฉัย
             </button>
             <button onClick={runLineTest} disabled={lineBusy}
-              className="bg-accent text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
-              {lineBusy ? "กำลังส่ง..." : "🔔 ทดสอบการแจ้งเตือน"}
+              className="bg-accent text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
+              {lineBusy ? "กำลังส่ง..." : "ทดสอบการแจ้งเตือน"}
             </button>
           </div>
         </div>
@@ -625,12 +625,12 @@ export default function SettingsPage() {
               placeholder="พิมพ์ข้อความที่จะทดสอบ เช่น /risk หรือ วันนี้ควรเทรดไหม"
               className="flex-1 min-w-[240px] bg-surface border border-slate-700 rounded px-3 py-2 text-sm" />
             <button onClick={runSimulate} disabled={lineBusy || !simText.trim()}
-              className="bg-accent text-surface font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
-              {lineBusy ? "กำลังรัน..." : "▶️ จำลอง"}
+              className="bg-accent text-white font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
+              {lineBusy ? "กำลังรัน..." : "จำลอง"}
             </button>
             <button onClick={loadEvents} disabled={lineBusy}
               className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[44px] active:bg-slate-800 disabled:opacity-40">
-              🔄 ดู event log
+              ดู event log
             </button>
           </div>
 
@@ -729,8 +729,8 @@ export default function SettingsPage() {
               placeholder="C1234… (groupId จาก LINE console / webhook log)"
               className="flex-1 min-w-[240px] bg-surface border border-slate-700 rounded px-3 py-2 text-sm" />
             <button onClick={addGroup} disabled={lineBusy || !newGroupId.trim()}
-              className="bg-accent text-surface font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
-              ➕ เพิ่มกลุ่ม
+              className="bg-accent text-white font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
+              เพิ่มกลุ่ม
             </button>
           </div>
           <p className="text-xs text-slate-500 mt-1">
@@ -771,8 +771,8 @@ export default function SettingsPage() {
                     </p>
                   </div>
                   <button onClick={() => removeGroup(t.target_id)} disabled={lineBusy}
-                    className="text-xs text-loss border border-slate-700 rounded px-3 min-h-[36px] active:bg-slate-800 disabled:opacity-40">
-                    🗑 ลบ
+                    className="bg-loss text-white text-xs font-semibold rounded px-3 min-h-[36px] disabled:opacity-40">
+                    ลบ
                   </button>
                 </div>
               ))}

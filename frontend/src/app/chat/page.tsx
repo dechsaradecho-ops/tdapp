@@ -87,7 +87,7 @@ export default function ChatPage() {
             className="flex-1 bg-surface border border-slate-700 rounded px-3 py-2 text-sm"
           />
           <button onClick={() => send(input)} disabled={loading}
-            className="bg-accent text-surface font-semibold rounded px-4 text-sm disabled:opacity-50">
+            className="bg-accent text-white font-semibold rounded px-4 text-sm disabled:opacity-50">
             ส่ง
           </button>
         </div>

@@ -87,7 +87,7 @@ export default function PinManager() {
           className="min-w-0 flex-1 sm:flex-none sm:w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
         />
         <button onClick={submit} disabled={busy}
-          className="bg-accent text-surface font-semibold rounded px-4 py-2 text-sm disabled:opacity-50">
+          className="bg-accent text-white font-semibold rounded px-4 py-2 text-sm disabled:opacity-50">
           {busy ? "..." : status?.pin_set ? "เปลี่ยน PIN" : "ตั้ง PIN"}
         </button>
         {status?.pin_set && (

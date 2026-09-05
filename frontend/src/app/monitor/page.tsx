@@ -202,14 +202,14 @@ export default function MonitorPage() {
           <h2 className="panel-title">สถิติการเทรด</h2>
           <div className="flex items-center gap-2">
             <button onClick={handleCloseAll} disabled={closingAll}
-              className="border border-loss/60 text-loss rounded px-3 py-2 text-sm min-h-[40px] active:bg-loss/10 disabled:opacity-50"
+              className="bg-loss text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
               title="ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน">
-              {closingAll ? "กำลังปิด..." : "✋ ปิดทั้งหมด"}
+              {closingAll ? "กำลังปิด..." : "ปิดทั้งหมด"}
             </button>
             <button onClick={handleResetStats} disabled={resetting}
               className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
               title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
-              {resetting ? "กำลังรีเซ็ต..." : "🗑 รีเซ็ตสถิติ"}
+              {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
             </button>
           </div>
         </div>
@@ -281,13 +281,13 @@ export default function MonitorPage() {
             </select>
             <button onClick={togglePause} disabled={busy || !snap}
               className={snap?.pause.paused
-                ? "bg-profit text-surface font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"
-                : "bg-loss text-surface font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"}>
-              {busy ? "..." : snap?.pause.paused ? "▶️ Resume" : "⏸️ Pause"}
+                ? "bg-profit text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"
+                : "bg-loss text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"}>
+              {busy ? "..." : snap?.pause.paused ? "Resume" : "Pause"}
             </button>
             <button onClick={load} disabled={loading}
               className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50">
-              {loading ? "กำลังโหลด..." : "🔄 รีเฟรช"}
+              {loading ? "กำลังโหลด..." : "รีเฟรช"}
             </button>
           </div>
         </div>
@@ -345,9 +345,9 @@ export default function MonitorPage() {
                       <button
                         onClick={() => handleClosePosition(p.ticket)}
                         disabled={!p.ticket || closingTicket === p.ticket}
-                        className="bg-loss text-surface font-semibold rounded px-3 py-2 text-xs min-h-[40px] disabled:opacity-50 active:brightness-90"
+                        className="bg-loss text-white font-semibold rounded px-3 py-2 text-xs min-h-[40px] disabled:opacity-50 active:brightness-90"
                       >
-                        {closingTicket === p.ticket ? "..." : "✋ ปิด"}
+                        {closingTicket === p.ticket ? "..." : "ปิด"}
                       </button>
                     </td>
                   </tr>

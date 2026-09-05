@@ -123,9 +123,9 @@ export default function SignalsPage() {
           <button
             onClick={refresh}
             disabled={loading}
-            className="border border-accent text-accent rounded px-3 py-2 text-xs min-h-[40px] font-semibold active:bg-accent/10 disabled:opacity-50"
+            className="border border-slate-700 bg-white/[0.05] text-slate-200 rounded px-3 py-2 text-xs min-h-[40px] font-semibold active:bg-white/10 disabled:opacity-50"
           >
-            {loading ? "กำลังโหลด..." : "↻ รีเฟรช"}
+            {loading ? "กำลังโหลด..." : "รีเฟรช"}
           </button>
         </div>
       </div>

@@ -7,12 +7,12 @@ import { SignalLog, SignalLogSummary } from "@/lib/types";
 
 /** badge สี/ข้อความของแต่ละ lifecycle event */
 const EVENT_META: Record<string, { label: string; cls: string }> = {
-  created: { label: "🆕 เกิดสัญญาณ", cls: "bg-sky-500/15 text-sky-400" },
-  order_opened: { label: "✅ เปิดออเดอร์", cls: "bg-emerald-500/15 text-emerald-400" },
-  order_blocked: { label: "⛔ ไม่เปิดออเดอร์", cls: "bg-amber-500/15 text-amber-400" },
-  rejected: { label: "🚫 ถูกปฏิเสธ", cls: "bg-red-500/15 text-red-400" },
-  expired: { label: "⌛ หมดอายุ", cls: "bg-slate-500/20 text-slate-300" },
-  closed: { label: "🔒 ปิดไม้", cls: "bg-violet-500/15 text-violet-300" },
+  created: { label: "เกิดสัญญาณ", cls: "bg-sky-500/15 text-sky-400" },
+  order_opened: { label: "เปิดออเดอร์", cls: "bg-emerald-500/15 text-emerald-400" },
+  order_blocked: { label: "ไม่เปิดออเดอร์", cls: "bg-amber-500/15 text-amber-400" },
+  rejected: { label: "ถูกปฏิเสธ", cls: "bg-red-500/15 text-red-400" },
+  expired: { label: "หมดอายุ", cls: "bg-slate-500/20 text-slate-300" },
+  closed: { label: "ปิดไม้", cls: "bg-violet-500/15 text-violet-300" },
 };
 
 function eventMeta(ev: string) {
@@ -72,7 +72,7 @@ export default function SignalLogsPage() {
         </div>
         <button onClick={load} disabled={loading}
           className="btn-secondary disabled:opacity-50">
-          {loading ? "กำลังโหลด..." : "🔄 รีเฟรช"}
+          {loading ? "กำลังโหลด..." : "รีเฟรช"}
         </button>
       </section>
 
@@ -106,7 +106,7 @@ export default function SignalLogsPage() {
         <div className="flex flex-wrap gap-2 mb-3 text-xs">
           <button
             onClick={() => setFilter("all")}
-            className={`px-3 py-1 rounded ${filter === "all" ? "bg-accent text-slate-900 font-bold" : "bg-slate-800 text-slate-400"}`}
+            className={`px-3 py-1 rounded ${filter === "all" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
           >
             ทั้งหมด
           </button>
@@ -114,7 +114,7 @@ export default function SignalLogsPage() {
             <button
               key={ev}
               onClick={() => setFilter(ev)}
-              className={`px-3 py-1 rounded ${filter === ev ? "bg-accent text-slate-900 font-bold" : "bg-slate-800 text-slate-400"}`}
+              className={`px-3 py-1 rounded ${filter === ev ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
             >
               {meta.label}
             </button>

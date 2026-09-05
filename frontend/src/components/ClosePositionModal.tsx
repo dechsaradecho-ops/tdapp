@@ -115,7 +115,7 @@ export default function ClosePositionModal({
         {/* ---------- close button ---------- */}
         <button
           onClick={onClose}
-          className="w-full bg-accent text-surface font-semibold rounded px-4 py-2.5 hover:opacity-90"
+          className="w-full bg-accent text-white font-semibold rounded px-4 py-2.5 hover:opacity-90"
         >
           ปิดหน้าต่างนี้
         </button>

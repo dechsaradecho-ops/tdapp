@@ -98,7 +98,7 @@ export default function GoalForm() {
             </select>
           </label>
           <button onClick={submit} disabled={loading}
-            className="w-full bg-accent text-surface font-semibold rounded py-2 hover:brightness-110 disabled:opacity-50">
+            className="w-full bg-accent text-white font-semibold rounded py-2 hover:brightness-110 disabled:opacity-50">
             {loading ? "กำลังประเมิน..." : "ประเมินเป้าหมาย"}
           </button>
           {error && <p className="text-loss text-sm">{error}</p>}

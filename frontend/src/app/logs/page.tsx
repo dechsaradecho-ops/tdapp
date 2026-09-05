@@ -97,10 +97,10 @@ export default function LogsPage() {
         <div className="flex gap-2">
           <button onClick={load} disabled={loading}
             className="btn-secondary disabled:opacity-50">
-            {loading ? "กำลังโหลด..." : "🔄 รีเฟรช"}
+            {loading ? "กำลังโหลด..." : "รีเฟรช"}
           </button>
           <button onClick={runTest} disabled={testing} className="btn-primary">
-            {testing ? "⏳ กำลังทดสอบ..." : "⚡ ทดสอบดึงราคา"}
+            {testing ? "กำลังทดสอบ..." : "ทดสอบดึงราคา"}
           </button>
         </div>
       </section>
@@ -170,7 +170,7 @@ export default function LogsPage() {
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`px-3 py-1 rounded ${filter === f ? "bg-accent text-slate-900 font-bold" : "bg-slate-800 text-slate-400"}`}
+              className={`px-3 py-1 rounded ${filter === f ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
             >
               {f === "all" ? "ทั้งหมด" : f === "forex" ? "Forex" : "Gold"}
             </button>
