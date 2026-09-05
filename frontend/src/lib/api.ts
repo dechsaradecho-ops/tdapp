@@ -28,6 +28,8 @@ import {
   LineTargetsResponse,
   LineTargetMutation,
   LineDiag,
+  LineEventsResponse,
+  LineSimulateResult,
   LineTestResult,
   RiskStatus,
   SessionStatus,
@@ -229,6 +231,10 @@ export const api = {
   lineRemoveTarget: (target_id: string) =>
     del<{ ok: boolean; message: string }>(`/api/line/targets/${encodeURIComponent(target_id)}`),
   lineDiag: () => get<LineDiag>("/api/line/diag"),
+  lineEvents: () => get<LineEventsResponse>("/api/line/events"),
+  lineSimulate: (input: { text: string; source_type?: string; target_id?: string;
+    bot_user_id?: string; push_reply_to?: string }) =>
+    post<LineSimulateResult>("/api/line/simulate", input),
   lineTest: () => post<LineTestResult>("/api/line/test", {}),
 
   // ---------- Auth: 6-digit PIN gate ----------

@@ -839,6 +839,74 @@ class TestLineWebhook:
         set_state(FakeDatabase())
         r = await self._send({"events": []}, sig="bad")
         assert r.status_code == 403
+        # 403 leaves evidence in the debug event log (Settings panel)
+        events = (await call("GET", "/api/line/events")).json()["events"]
+        assert any(e["kind"] == "signature_rejected" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_events_endpoint_lists_log(self):
+        set_state(FakeDatabase())
+        await self._send({"events": []}, sig="bad")
+        r = await call("GET", "/api/line/events")
+        assert r.status_code == 200
+        assert any(e["kind"] == "signature_rejected" for e in r.json()["events"])
+
+    @pytest.mark.asyncio
+    async def test_simulate_command(self):
+        set_state(FakeDatabase())
+        body = (await call("POST", "/api/line/simulate",
+                           {"text": "/risk", "source_type": "user"})).json()
+        assert body["ok"] is True
+        assert body["via"] == "command"
+        assert "Risk" in body["reply"]
+
+    @pytest.mark.asyncio
+    async def test_simulate_free_text_uses_ai(self, monkeypatch):
+        from app.api.routes import webhook as wh
+
+        set_state(FakeDatabase())
+
+        class FakeProvider:
+            async def chat(self, messages, temperature=0.3):
+                return "AI ตอบว่า: ทองน่าสนใจ"
+
+        monkeypatch.setattr(wh, "ai_reply",
+                            lambda request, text: FakeProvider().chat([]))
+        body = (await call("POST", "/api/line/simulate",
+                           {"text": "วันนี้ควรเทรดทองไหม"})).json()
+        assert body["via"] == "ai"
+        assert "ทองน่าสนใจ" in body["reply"]
+
+    @pytest.mark.asyncio
+    async def test_simulate_group_without_bot_id_skipped(self):
+        """Group simulation without bot_user_id mirrors the real mention gate."""
+        set_state(FakeDatabase())
+        body = (await call("POST", "/api/line/simulate",
+                           {"text": "hello", "source_type": "group",
+                            "target_id": "C-sim"})).json()
+        assert body["reply"] is None
+        assert any(s["step"] == "mention_gate" and not s["ok"]
+                   for s in body["steps"])
+
+    @pytest.mark.asyncio
+    async def test_simulate_group_with_bot_id_processes(self):
+        set_state(FakeDatabase())
+        body = (await call("POST", "/api/line/simulate",
+                           {"text": "/portfolio", "source_type": "group",
+                            "target_id": "C-sim",
+                            "bot_user_id": "U-bot"})).json()
+        assert body["reply"] and "Capital" in body["reply"]
+        # group simulation registers the target (same as the real webhook)
+        targets = (await call("GET", "/api/line/targets")).json()["targets"]
+        assert any(t["target_id"] == "C-sim" for t in targets)
+
+    @pytest.mark.asyncio
+    async def test_simulate_empty_text_rejected(self):
+        set_state(FakeDatabase())
+        body = (await call("POST", "/api/line/simulate",
+                           {"text": "   "})).json()
+        assert body["ok"] is False
+        assert body["reply"] is None
 
     @pytest.mark.asyncio
     async def test_command_gets_canned_reply(self):

@@ -7,8 +7,9 @@ import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import {
-  AppSettings, DbCheckResult, DbCounts, LineDiag, LineTargetsResponse,
-  LineTestResult, PauseStatus, PortfolioRecommendation, RiskProfile,
+  AppSettings, DbCheckResult, DbCounts, LineDiag, LineEventsResponse,
+  LineSimulateResult, LineTargetsResponse, LineTestResult, PauseStatus,
+  PortfolioRecommendation, RiskProfile,
 } from "@/lib/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -129,6 +130,28 @@ export default function SettingsPage() {
       const res = await api.lineRemoveTarget(id);
       setLineMsg(res.message);
       loadLineTargets();
+    } finally {
+      setLineBusy(false);
+    }
+  };
+
+  // --- webhook debug: event log + simulate ---
+  const [events, setEvents] = useState<LineEventsResponse | null>(null);
+  const [simText, setSimText] = useState("วันนี้ควรเทรดทองไหม");
+  const [simRes, setSimRes] = useState<LineSimulateResult | null>(null);
+
+  const loadEvents = () =>
+    api.lineEvents().then(setEvents).catch(() => setEvents(null));
+
+  const runSimulate = async () => {
+    setLineBusy(true);
+    setSimRes(null);
+    try {
+      const res = await api.lineSimulate({ text: simText });
+      setSimRes(res);
+      loadEvents();
+    } catch (e) {
+      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLineBusy(false);
     }
@@ -591,6 +614,80 @@ export default function SettingsPage() {
             {diag.hint && <p className="text-amber-400 text-xs">{diag.hint}</p>}
           </div>
         )}
+
+        {/* --- webhook debug: simulate + event log --- */}
+        <div className="mt-3 rounded border border-slate-700 bg-surface/40 p-3">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
+            🧪 Debug webhook — จำลองข้อความ (ไม่ต้องมี LINE)
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <input value={simText} onChange={(e) => setSimText(e.target.value)}
+              placeholder="พิมพ์ข้อความที่จะทดสอบ เช่น /risk หรือ วันนี้ควรเทรดไหม"
+              className="flex-1 min-w-[240px] bg-surface border border-slate-700 rounded px-3 py-2 text-sm" />
+            <button onClick={runSimulate} disabled={lineBusy || !simText.trim()}
+              className="bg-accent text-surface font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
+              {lineBusy ? "กำลังรัน..." : "▶️ จำลอง"}
+            </button>
+            <button onClick={loadEvents} disabled={lineBusy}
+              className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[44px] active:bg-slate-800 disabled:opacity-40">
+              🔄 ดู event log
+            </button>
+          </div>
+
+          {simRes && (
+            <div className="mt-3 space-y-1 text-sm">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ผลจำลอง (pipeline เดียวกับ webhook จริง)</p>
+              {simRes.steps.map((s, i) => (
+                <div key={i} className="flex items-start gap-2 text-xs">
+                  <span>{s.ok ? "✅" : "❌"}</span>
+                  <span className="text-slate-300">{s.step}</span>
+                  {s.note && <span className="text-slate-500 break-all">— {s.note}</span>}
+                </div>
+              ))}
+              {simRes.reply && (
+                <div className="mt-2 bg-surface rounded p-2">
+                  <p className="text-xs text-slate-500 mb-1">
+                    บอทจะตอบ ({simRes.via === "command" ? "คำสั่ง" : "AI"}):
+                  </p>
+                  <p className="text-xs text-slate-200 whitespace-pre-wrap break-all">{simRes.reply}</p>
+                </div>
+              )}
+              {simRes.note && <p className="text-amber-400 text-xs">{simRes.note}</p>}
+            </div>
+          )}
+
+          {events && events.events.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">
+                Event log ล่าสุด ({events.events.length} รายการ — 403/skipped จะโผล่ตรงนี้)
+              </p>
+              <div className="space-y-0.5 max-h-48 overflow-y-auto">
+                {events.events.slice().reverse().map((ev, i) => (
+                  <div key={i} className="text-xs flex gap-2">
+                    <span className="text-slate-500 shrink-0">
+                      {new Date(ev.at).toLocaleTimeString("th-TH")}
+                    </span>
+                    <span className={ev.kind.includes("rejected") || ev.kind.startsWith("skipped")
+                      ? "text-loss" : "text-profit"}>{ev.kind}</span>
+                    <span className="text-slate-500 break-all">
+                      {Object.entries(ev)
+                        .filter(([k]) => k !== "at" && k !== "kind")
+                        .map(([k, v]) => `${k}=${String(v).slice(0, 40)}`)
+                        .join(" · ")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {events && events.events.length === 0 && (
+            <p className="text-xs text-slate-500 mt-2">
+              ยังไม่มี event — ถ้าเพิ่งกด Verify ใน LINE console แล้ว log ว่าง แปลว่า
+              request ไม่ถึง API เลย (เช็ค webhook URL ว่าเป็น
+              https://tdapp-api.onrender.com/api/line/webhook)
+            </p>
+          )}
+        </div>
 
         {lineTestRes && (
           <div className="mt-3 space-y-2 text-sm">

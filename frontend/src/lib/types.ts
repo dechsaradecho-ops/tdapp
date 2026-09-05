@@ -653,6 +653,38 @@ export interface LineDiag {
   hint?: string;
 }
 
+/** One webhook activity record from GET /api/line/events. */
+export interface LineEvent {
+  at: string;
+  kind: string;   // received | signature_rejected | skipped_* | replied | simulated
+  [key: string]: unknown;
+}
+
+/** Response of GET /api/line/events (webhook debug log). */
+export interface LineEventsResponse {
+  events: LineEvent[];
+}
+
+/** One pipeline step of POST /api/line/simulate. */
+export interface SimStep {
+  step: string;
+  ok: boolean;
+  note?: string;
+  via?: string;
+  reply?: string;
+}
+
+/** Response of POST /api/line/simulate (debug: what would the bot reply?). */
+export interface LineSimulateResult {
+  ok: boolean;
+  reply: string | null;
+  via?: string;
+  steps: SimStep[];
+  note?: string;
+  pushed?: boolean;
+  push_error?: string;
+}
+
 export interface PinLoginResponse {
   ok: boolean;
   token: string | null;

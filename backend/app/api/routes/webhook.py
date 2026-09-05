@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from collections import deque
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, Request, Response
@@ -32,6 +33,20 @@ COMMAND_HELP = (
     "หรือพิมพ์คำถามอิสระ เช่น “วันนี้ควรเทรดทองไหม” — AI จะตอบพร้อมบริบทตลาดจริง"
 )
 
+# ---------------------------------------------------------------------------
+# Webhook event log — in-memory ring buffer (last 50 events) for the Settings
+# debug panel. Records EVERY webhook hit including signature failures, so
+# "LINE console Verify → 403" and "bot doesn't reply" both leave evidence.
+# ---------------------------------------------------------------------------
+EVENT_LOG: deque[dict] = deque(maxlen=50)
+
+
+def _log_event(kind: str, **info) -> None:
+    EVENT_LOG.append({
+        "at": datetime.now(timezone.utc).isoformat(),
+        "kind": kind, **info,
+    })
+
 
 def verify_signature(body: bytes, signature: str) -> bool:
     secret = get_settings().line_channel_secret.encode()
@@ -46,12 +61,21 @@ async def line_webhook(
 ) -> Response:
     body = await request.body()
     if not verify_signature(body, x_line_signature):
+        # The #1 setup failure: LINE console "Verify" shows 403 when
+        # LINE_CHANNEL_SECRET is missing/mismatched on the server.
+        s = get_settings()
+        _log_event("signature_rejected",
+                   secret_set=bool(s.line_channel_secret),
+                   sig_prefix=x_line_signature[:12])
+        log.warning("LINE webhook signature rejected (secret_set=%s)",
+                    bool(s.line_channel_secret))
         return Response(status_code=403)
 
     events = (await request.json()).get("events", [])
     line: LineClient = request.app.state.line
     db = request.app.state.db
     bot_user_id = get_settings().line_bot_user_id
+    _log_event("received", events=len(events))
 
     for event in events:
         source = event.get("source", {}) or {}
@@ -65,10 +89,14 @@ async def line_webhook(
             _register_target(db, target_id, source_type)
 
         if event.get("type") != "message":
+            _log_event("skipped_non_message", event_type=event.get("type", "?"),
+                       source_type=source_type)
             continue
         text = (event.get("message") or {}).get("text", "").strip()
         reply_token = event.get("replyToken", "")
         if not text or not reply_token:
+            _log_event("skipped_no_text_or_token", source_type=source_type,
+                       has_text=bool(text), has_token=bool(reply_token))
             continue
         # Group chats: only answer when mentioned or replying to the bot —
         # otherwise the bot would spam every conversation in the group.
@@ -82,12 +110,18 @@ async def line_webhook(
                 for m in mentionees
             ) or any(m.get("type") == "all" for m in mentionees)
             if not mentioned:
+                _log_event("skipped_no_mention", source_type=source_type,
+                           target_id=target_id, text=text[:40],
+                           bot_id_set=bool(bot_user_id),
+                           mentionee_types=[m.get("type") for m in mentionees])
                 continue
         reply = await handle_command(text, db)
         if reply is None:
             # not a command → grounded AI answer (same pipeline as the web chat)
             reply = await ai_reply(request, text)
-        await line.reply(reply_token, reply)
+        ok = await line.reply(reply_token, reply)
+        _log_event("replied", source_type=source_type, target_id=target_id,
+                   text=text[:40], reply_ok=ok, reply=reply[:80])
     return Response(status_code=200)
 
 
@@ -259,6 +293,87 @@ async def remove_line_target(request: Request, target_id: str) -> dict:
     ok = db.delete("line_targets", {"target_id": target_id})
     return {"ok": ok,
             "message": "ลบแล้ว" if ok else "ลบไม่สำเร็จ (อาจไม่มี row นี้)"}
+
+
+@router.get("/events")
+async def line_events(request: Request) -> dict:
+    """Recent webhook activity for the Settings debug panel.
+
+    Records every hit: signature rejections (403 — the classic 'Verify failed'
+    cause), skipped events (no mention / non-message), and replies (ok/fail).
+    In-memory only (last 50) — restarts clear it, which is fine for debugging.
+    """
+    return {"events": list(EVENT_LOG)}
+
+
+class SimulateRequest(BaseModel):
+    text: str
+    source_type: str = "user"      # user | group
+    target_id: str = ""            # optional groupId for group simulation
+    bot_user_id: str = ""          # override for @mention testing
+    push_reply_to: str = ""        # optional: also PUSH the reply to this id
+
+
+@router.post("/simulate")
+async def line_simulate(request: Request, payload: SimulateRequest) -> dict:
+    """Run a message through the EXACT webhook pipeline without LINE.
+
+    Answers 'what would the bot reply?' from the Settings page: same command
+    handling, same @mention gate, same grounded AI. The reply is returned in
+    the response (reply tokens are single-use, so a real reply is impossible
+    without LINE) — and optionally pushed to a chat id via the push API.
+    """
+    db = request.app.state.db
+    bot_user_id = payload.bot_user_id or get_settings().line_bot_user_id
+    text = (payload.text or "").strip()
+    steps: list[dict] = []
+
+    if not text:
+        return {"ok": False, "reply": None,
+                "steps": [{"step": "validate", "ok": False,
+                           "note": "ข้อความว่าง"}]}
+
+    steps.append({"step": "validate", "ok": True, "note": f"text={text[:60]!r}"})
+
+    # --- same auto-registration the webhook does for group/room events ---
+    if payload.source_type in ("group", "room") and payload.target_id:
+        _register_target(db, payload.target_id, payload.source_type)
+        steps.append({"step": "register_target", "ok": True,
+                      "note": f"{payload.target_id} → line_targets"})
+
+    # --- same @mention gate ---
+    if payload.source_type == "group":
+        mentioned = bool(payload.bot_user_id) or payload.target_id == ""
+        # simulate: an explicit bot_user_id counts as a mention; empty means
+        # the mentionee list would not match (mirrors the real gate).
+        if not mentioned:
+            steps.append({"step": "mention_gate", "ok": False,
+                          "note": ("บอทจะไม่ตอบ — LINE_BOT_USER_ID ยังไม่ได้ตั้ง "
+                                   "(env บน Render) ทำให้ @mention จับไม่เจอ")})
+            return {"ok": True, "reply": None, "steps": steps,
+                    "note": "group message ถูกข้าม (no mention)"}
+        steps.append({"step": "mention_gate", "ok": True,
+                      "note": "mentioned → ประมวลผลข้อความ"})
+
+    # --- same reply pipeline ---
+    reply = await handle_command(text, db)
+    via = "command"
+    if reply is None:
+        via = "ai"
+        reply = await ai_reply(request, text)
+    steps.append({"step": "reply", "ok": True, "via": via, "reply": reply[:200]})
+
+    pushed = False
+    push_error = ""
+    if payload.push_reply_to:
+        line: LineClient = request.app.state.line
+        pushed, push_error = await line.push_ex(payload.push_reply_to, reply)
+        steps.append({"step": "push", "ok": pushed,
+                      "note": push_error or f"pushed → {payload.push_reply_to}"})
+
+    _log_event("simulated", text=text[:40], via=via, push_ok=pushed)
+    return {"ok": True, "reply": reply, "via": via, "steps": steps,
+            "pushed": pushed, "push_error": push_error}
 
 
 @router.get("/diag")
