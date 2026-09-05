@@ -30,7 +30,13 @@ export default function TradingViewChart({ symbol = "OANDA:XAUUSD" }: { symbol?:
     ref.current.appendChild(script);
   }, [symbol]);
 
+  // TradingView's embed script writes inline `width:100%; height:100%` onto the
+  // .tradingview-widget-container element, overriding any h-* class. It must sit
+  // inside a SIZED parent, otherwise the chart collapses to the iframe default
+  // (~250px) and appears cut off / overflowing its frame.
   return (
-    <div className="tradingview-widget-container h-[400px] rounded-lg overflow-hidden" ref={ref} />
+    <div className="h-[400px] rounded-lg overflow-hidden">
+      <div className="tradingview-widget-container h-full w-full" ref={ref} />
+    </div>
   );
 }

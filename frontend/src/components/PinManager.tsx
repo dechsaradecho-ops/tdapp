@@ -71,18 +71,20 @@ export default function PinManager() {
       ) : (
         <p className="text-xs text-amber-400">ยังไม่ได้ตั้ง PIN — หน้าเว็บเปิดให้ใช้โดยไม่ต้องยืนยัน แนะนำให้ตั้งเพื่อความปลอดภัย</p>
       )}
-      <div className="flex gap-2">
+      {/* flex-wrap + fluid inputs: fixed w-36 x2 + 2 buttons forced ~478px min-content,
+          stretching every panel on this page past the 390px mobile viewport */}
+      <div className="flex flex-wrap gap-2">
         <input
           type="password" inputMode="numeric" maxLength={6} value={pin}
           onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
           placeholder="PIN ใหม่ 6 หลัก" disabled={busy}
-          className="w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
+          className="min-w-0 flex-1 sm:flex-none sm:w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
         />
         <input
           type="password" inputMode="numeric" maxLength={6} value={confirm}
           onChange={(e) => setConfirm(e.target.value.replace(/\D/g, "").slice(0, 6))}
           placeholder="ยืนยัน PIN" disabled={busy}
-          className="w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
+          className="min-w-0 flex-1 sm:flex-none sm:w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
         />
         <button onClick={submit} disabled={busy}
           className="bg-accent text-surface font-semibold rounded px-4 py-2 text-sm disabled:opacity-50">
