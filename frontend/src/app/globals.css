@@ -24,6 +24,12 @@ body {
 
 /* ---------- Mobile-first theme tweaks ---------- */
 
+/* slate-500 (#64748b) จางเกินไปบนพื้นมืด อ่านยากโดยเฉพาะตัวเล็ก (text-xs)
+   — ยกทั้งเว็บให้สว่างขึ้นเป็นโทน slate-400 (#94a3b8) แก้ที่จุดเดียว ครอบคลุมทุกหน้า */
+.text-slate-500 {
+  color: #94a3b8;
+}
+
 /* ลบ highlight สีฟ้าตอนแตะบน Android/iOS — ให้ใช้ active: แทน */
 * {
   -webkit-tap-highlight-color: transparent;
