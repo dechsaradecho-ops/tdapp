@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ให้ native controls (dropdown popup, date picker) ของ browser เป็นโทนมืด */
+:root {
+  color-scheme: dark;
+}
+
 body {
   @apply bg-surface text-slate-200;
   /* กัน iOS ซูมอัตโนมัติเมื่อแตะ input ครั้งเดียว (font-size < 16px) */
@@ -33,10 +38,6 @@ input[type="checkbox"] {
 }
 
 /* แถบเลื่อนบาง ๆ สไตล์มืด (desktop) — มือถือไม่มีผล */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -119,21 +120,39 @@ select,
 textarea {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 0.75rem;
+  /* !important: ชนะ class rounded ของ Tailwind ที่บางจุดยังเป็น 4px — โค้งมนเท่ากันทั้งแอป */
+  border-radius: 0.75rem !important;
   color: #e2e8f0;
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.2s ease;
 }
 input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):focus,
 select:focus,
 textarea:focus {
   border-color: rgba(10, 132, 255, 0.7);
   outline: none;
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.22);
 }
 input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"])::placeholder,
 textarea::placeholder {
   color: #64748b;
+}
+
+/* Dropdown (select) — ซ่อนลูกศร native วาดลูกศรแก้วเอง, popup มืดตาม color-scheme
+   (หมายเหตุ: ตัว popup ที่กางออกมาเป็น native ของ OS — iOS ใช้ wheel picker ของตัวเอง) */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.7rem;
+  padding-right: 2.2rem;
+}
+option {
+  background-color: #15151c;
+  color: #e2e8f0;
 }
 
 /* ปุ่มทุกปุ่มเป็น Liquid Glass:
@@ -167,4 +186,69 @@ button.border-slate-700:hover:not(:disabled) {
 button.border-slate-700:active:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
   border-color: rgba(255, 255, 255, 0.28);
+}
+
+/* ---------- Animations (iOS-like, เบามือ) ---------- */
+
+/* ปุ่มทุกปุ่ม: กดแล้วหดเล็กน้อยแบบ iOS + transition นุ่ม ๆ
+   (ปุ่มที่มี Tailwind transition/active:scale อยู่แล้วจะไม่ถูกแทนที่ — specificity สูงกว่า) */
+button {
+  transition: transform 0.12s ease, background-color 0.15s ease, border-color 0.15s ease,
+    box-shadow 0.2s ease, opacity 0.15s ease, filter 0.15s ease;
+}
+button:not(:disabled):active {
+  transform: scale(0.97);
+}
+/* desktop: ปุ่มเน้นลอยขึ้นนิดตอนชี้ */
+@media (hover: hover) {
+  button.bg-accent:hover:not(:disabled) {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes lg-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes lg-sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes lg-pop-in {
+  from { opacity: 0; transform: scale(0.94) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes lg-rise-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* backdrop จางเข้า */
+.animate-fade {
+  animation: lg-fade-in 0.2s ease-out both;
+}
+/* bottom sheet เลื่อนขึ้นแบบ iOS spring */
+.animate-sheet {
+  animation: lg-sheet-up 0.32s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+/* modal/กล่องลอย ป๊อปเข้า */
+.animate-pop {
+  animation: lg-pop-in 0.25s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* panel ทุกใบโผล่ทีละนิดตอนโหลดหน้า (animate-pop ประกาศทีหลังจึงชนะใน modal) */
+.panel {
+  animation: lg-rise-in 0.35s ease-out both;
+}
+
+/* เคารพการตั้งค่าลด motion ของ OS */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

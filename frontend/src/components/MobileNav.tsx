@@ -87,9 +87,9 @@ export default function MobileNav() {
       {/* Bottom sheet — remaining pages */}
       {open && (
         <div className="fixed inset-0 z-50" onClick={() => setOpen(false)}>
-          <div className="absolute inset-0 bg-black/60" style={{ WebkitBackdropFilter: "blur(6px)", backdropFilter: "blur(6px)" }} />
+          <div className="absolute inset-0 bg-black/60 animate-fade" style={{ WebkitBackdropFilter: "blur(6px)", backdropFilter: "blur(6px)" }} />
           <div
-            className="absolute bottom-0 inset-x-0 border-t rounded-t-3xl shadow-2xl safe-bottom"
+            className="absolute bottom-0 inset-x-0 border-t rounded-t-3xl shadow-2xl safe-bottom animate-sheet"
             style={{
               background: "rgba(18, 18, 24, 0.82)",
               WebkitBackdropFilter: "blur(28px) saturate(160%)",

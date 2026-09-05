@@ -91,7 +91,7 @@ export default function ChatWidget() {
     <>
       {open && (
         // มือถือ: เต็มจอ (sheet) — เดสก์ท็อป: กล่องลอยขวาล่างเหมือนเดิม
-        <div className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:z-50 sm:w-[360px] sm:max-w-[calc(100vw-3rem)] sm:h-[520px] sm:max-h-[70vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top">
+        <div className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:z-50 sm:w-[360px] sm:max-w-[calc(100vw-3rem)] sm:h-[520px] sm:max-h-[70vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop">
           <div className="flex items-center justify-between pb-2 border-b border-white/10">
             <p className="text-sm font-semibold">💬 AI Assistant</p>
             <button onClick={() => setOpen(false)}
