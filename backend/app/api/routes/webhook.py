@@ -11,6 +11,7 @@ can be pushed to the group too.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -49,8 +50,11 @@ def _log_event(kind: str, **info) -> None:
 
 
 def verify_signature(body: bytes, signature: str) -> bool:
+    """LINE signs the raw body with HMAC-SHA256 and sends it **Base64-encoded**
+    in X-Line-Signature (per the Messaging API reference — NOT hex)."""
     secret = get_settings().line_channel_secret.encode()
-    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    digest = hmac.new(secret, body, hashlib.sha256).digest()
+    expected = base64.b64encode(digest).decode()
     return hmac.compare_digest(expected, signature)
 
 

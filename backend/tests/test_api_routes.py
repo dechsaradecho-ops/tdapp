@@ -792,6 +792,7 @@ class TestStatsReset:
 # ---------------------------------------------------------------------------
 # LINE webhook — commands, AI chat replies, group mention gate + targets
 # ---------------------------------------------------------------------------
+import base64
 import hashlib
 import hmac
 import json as _json
@@ -820,8 +821,10 @@ class RecordingLine:
 
 
 def _sign(raw: bytes) -> str:
-    return hmac.new(get_settings().line_channel_secret.encode(),
-                    raw, hashlib.sha256).hexdigest()
+    """LINE sends the HMAC-SHA256 digest Base64-encoded (not hex)."""
+    digest = hmac.new(get_settings().line_channel_secret.encode(),
+                      raw, hashlib.sha256).digest()
+    return base64.b64encode(digest).decode()
 
 
 class TestLineWebhook:
