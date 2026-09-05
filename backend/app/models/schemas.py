@@ -301,6 +301,19 @@ class FrequencyDecision(BaseModel):
 
 GOLD_ASSET = "XAUUSD"
 
+# Contract value per 1.0 lot, used by position sizing (risk_to_lot).
+# XAUUSD trades 100 oz per standard lot; FX pairs trade 100,000 units.
+# Without the per-asset map, gold sizing used the FX 100k contract and
+# produced ~0.00002 lots for a normal risk budget (hidden by the min_lot
+# floor) — the position risked a fraction of what the user configured.
+CONTRACT_VALUE: dict[str, float] = {"XAUUSD": 100.0}
+DEFAULT_CONTRACT_VALUE = 100_000.0
+
+
+def contract_value_for(asset: str) -> float:
+    """Contract value (units per 1.0 lot) for an asset — FX 100k default."""
+    return CONTRACT_VALUE.get(str(asset or "").upper(), DEFAULT_CONTRACT_VALUE)
+
 
 def effective_min_confidence(settings: "AppSettings", asset: str) -> float:
     """Per-asset signal-quality threshold.
@@ -500,11 +513,27 @@ def direction_sign(direction: str) -> float:
 
 def risk_to_lot(equity: float, risk_pct: float, stop_distance: float,
                 contract_value: float = 100_000.0) -> float:
-    """Risk% → forex lot. Standard lot = 100k units; risk = lots × dist × 100k."""
+    """Risk% → lots. risk = lots × dist × contract_value.
+
+    contract_value defaults to the FX standard lot (100k units). Callers
+    sizing gold (XAUUSD) pass 100.0 (100 oz per lot) — see contract_value_for.
+    """
     if stop_distance <= 0 or equity <= 0:
         return 0.0
     risk_amount = equity * risk_pct / 100.0
     return max(0.0, round(risk_amount / (stop_distance * contract_value), 2))
+
+
+def risk_to_lot_for(equity: float, risk_pct: float, stop_distance: float,
+                    asset: str) -> float:
+    """risk_to_lot with the per-asset contract value (gold = 100 oz/lot).
+
+    XAUUSD SL 50 pts, $100 risk → 100 / (50 × 100) = 0.02 lots (correct);
+    the FX-contract version returned 0.00002 → rounded to 0.0 and silently
+    hidden by the min_lot floor.
+    """
+    return risk_to_lot(equity, risk_pct, stop_distance,
+                       contract_value=contract_value_for(asset))
 
 
 # ---------- Correlation & Exposure ----------
@@ -1239,6 +1268,24 @@ class AppSettings(BaseModel):
     # (execution.size_position). Falls back to min_lot when unset (None) so
     # old settings rows keep working.
     min_lot_gold: Optional[float] = None
+
+    # ---- Position management (position_guard) -----------------------------
+    # Breakeven: once profit ≥ breakeven_trigger_r × |entry−SL|, move the SL
+    # to entry (risk-free trade). 0 disables the feature.
+    breakeven_trigger_r: float = 1.0
+    # Trailing stop: after breakeven, trail the SL at trail_atr_mult × ATR
+    # behind the live price. 0 disables trailing (breakeven only).
+    trail_atr_mult: float = 2.0
+    # Partial close (TP1): close partial_close_pct of the volume when profit
+    # reaches partial_trigger_r × R, then trail the remainder. 0 disables.
+    partial_close_pct: float = 0.0
+    partial_trigger_r: float = 1.0
+
+    # ---- Paper execution realism ------------------------------------------
+    # Simulated spread (in price units) applied to paper fills: BUYs fill at
+    # entry + spread/2, SELLs at entry − spread/2, so paper PnL reflects the
+    # cost a real account would pay. 0 = fill exactly at the mid price.
+    paper_spread: float = 0.0
 
     max_drawdown_pct: float = 10.0
     kill_daily_loss_pct: float = 2.0

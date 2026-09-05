@@ -401,6 +401,16 @@ export interface AppSettings {
   min_lot: number;
   /** Gold (XAUUSD) override — null/undefined = use min_lot */
   min_lot_gold: number | null;
+  /** Move SL to entry once profit ≥ breakeven_trigger_r × R (0 = off) */
+  breakeven_trigger_r: number;
+  /** Trailing stop distance in ATR multiples (0 = off) */
+  trail_atr_mult: number;
+  /** Close this % of volume at partial_trigger_r × R (0 = off) */
+  partial_close_pct: number;
+  /** R-multiple that triggers the partial close */
+  partial_trigger_r: number;
+  /** Simulated spread (price units) applied to paper fills */
+  paper_spread: number;
   max_drawdown_pct: number;
   kill_daily_loss_pct: number;
   kill_weekly_loss_pct: number;
@@ -518,6 +528,61 @@ export interface StatsResetResult {
   /** Fresh stats after the reset (same shape as MonitorStats). */
   stats: MonitorStats;
   warnings: string[];
+}
+
+/** One point of the equity curve (GET /api/trading/equity-curve). */
+export interface EquityPoint {
+  date: string;
+  equity: number;
+}
+
+/** Response of GET /api/trading/equity-curve (performance page chart). */
+export interface EquityCurve {
+  points: EquityPoint[];
+  latest_equity: number;
+  peak_equity: number;
+  drawdown_pct: number;
+  capital: number;
+  /** true when no snapshots exist yet (flat line at settings capital) */
+  synthetic: boolean;
+}
+
+/** Per-ticket result inside POST /api/trading/positions/close-all. */
+export interface CloseAllItem {
+  ticket: string;
+  asset: string;
+  ok: boolean;
+  pnl?: number;
+  exit_price?: number;
+  message?: string;
+}
+
+/** Response of POST /api/trading/positions/close-all (ปิดทั้งหมด button). */
+export interface CloseAllResult {
+  ok: boolean;
+  closed: number;
+  failed: number;
+  total_pnl: number;
+  results: CloseAllItem[];
+  message: string;
+}
+
+/** One aggregated row of GET /api/trading/signal-report. */
+export interface SignalReportRow {
+  key: string;
+  trades: number;
+  win_rate_pct: number;
+  total_pnl: number;
+}
+
+/** Response of GET /api/trading/signal-report (signal quality feedback). */
+export interface SignalReport {
+  days: number;
+  signals: number;
+  matched_trades: number;
+  by_asset: SignalReportRow[];
+  by_confidence_band: SignalReportRow[];
+  by_regime: SignalReportRow[];
 }
 
 // ---------- Auth: 6-digit PIN gate ----------

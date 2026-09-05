@@ -37,6 +37,7 @@ from app.models.schemas import (
     effective_min_confidence,
     effective_min_lot,
     risk_to_lot,
+    risk_to_lot_for,
 )
 
 from app.services import signal_log
@@ -261,6 +262,37 @@ def _loss_pcts(db, capital: float) -> tuple[float, float, float]:
 
 
 # ---------------------------------------------------------------------------
+# Equity curve — daily snapshots power the REAL drawdown (kill switch)
+# ---------------------------------------------------------------------------
+def equity_drawdown_pct(db, capital: float) -> float:
+    """Peak-to-current drawdown % from equity_snapshots (0.0 without data).
+
+    The kill switch used to hardcode drawdown_pct=0.0 because there was no
+    equity history; with daily snapshots (portfolio_monitor writes one per
+    cycle) the drawdown gate finally works. Falls back to 0.0 when the table
+    is missing/empty so old DBs keep behaving as before.
+    """
+    if not db or not getattr(db, "available", False) or capital <= 0:
+        return 0.0
+    try:
+        rows = db.select("equity_snapshots", order="snapshot_date", desc=True,
+                         limit=400)
+    except Exception:
+        return 0.0
+    if not rows:
+        return 0.0
+    equities = [float(r.get("equity") or 0) for r in rows
+                if r.get("equity") is not None]
+    if not equities:
+        return 0.0
+    peak = max(equities)
+    current = equities[0]  # rows are newest-first
+    if peak <= 0:
+        return 0.0
+    return max(0.0, (peak - current) / peak * 100.0)
+
+
+# ---------------------------------------------------------------------------
 # The gate pipeline
 # ---------------------------------------------------------------------------
 def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
@@ -282,6 +314,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     ks: KillSwitchStatus
     try:
         daily, weekly, monthly = _loss_pcts(db, s.capital)
+        dd = equity_drawdown_pct(db, s.capital)
         ks = KillSwitchEngine(
             daily_loss_limit=s.kill_daily_loss_pct,
             weekly_loss_limit=s.kill_weekly_loss_pct,
@@ -289,7 +322,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
             drawdown_limit=s.max_drawdown_pct,
         ).evaluate(
             daily_loss_pct=daily, weekly_loss_pct=weekly, monthly_loss_pct=monthly,
-            drawdown_pct=0.0,
+            drawdown_pct=dd,
             broker_connected=True, market_data_ok=True,
             ai_provider_ok=True, execution_ok=True,
         )
@@ -395,12 +428,28 @@ def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
     The result is floored at the effective min_lot (Settings page, default
     0.01) so tiny accounts still open a visible size — gold (XAUUSD) can use
     its own Min Lot (gold) override, every other asset uses the base min_lot.
+    Sizing uses the per-asset contract value (gold = 100 oz/lot, FX = 100k
+    units/lot) so the risk budget converts to a realistic volume.
     """
     if not entry or not stop_loss:
         return 0.0
     stop_distance = abs(entry - stop_loss)
-    lots = risk_to_lot(s.capital, s.risk_per_trade_pct, stop_distance)
+    lots = risk_to_lot_for(s.capital, s.risk_per_trade_pct, stop_distance,
+                           asset or "")
     return max(lots, effective_min_lot(s, asset))
+
+
+def apply_spread(entry: float, direction: str, spread: float) -> float:
+    """Paper-fill price with a simulated spread (realism for paper PnL).
+
+    BUYs fill at entry + spread/2 (pay the ask), SELLs at entry − spread/2
+    (pay the bid). spread=0 → fill exactly at the mid price (old behaviour).
+    """
+    if not spread or spread <= 0:
+        return entry
+    half = spread / 2.0
+    return round(entry + half, 5) if str(direction).upper() == "BUY" \
+        else round(entry - half, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +501,15 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         return report
     report.size_lots = lots
 
+    # Paper realism: fill at entry ± spread/2 (Settings → paper_spread).
+    # SL/TP stay anchored to the mid-based levels the signal card showed;
+    # only the fill price moves, so the position starts with the spread cost
+    # baked in exactly like a real account.
+    fill_price = apply_spread(entry, direction, getattr(s, "paper_spread", 0.0))
+
     result = await broker.place_order(OrderRequest(
         user_id=user_id, asset=asset, direction=direction, volume=lots,
-        entry_price=entry, stop_loss=stop_loss, take_profit=take_profit,
+        entry_price=fill_price, stop_loss=stop_loss, take_profit=take_profit,
     ))
     if not result.ok:
         report.allowed = False
@@ -467,7 +522,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
 
     record_trade(db, {
         "user_id": user_id, "signal_id": signal_id, "asset": asset,
-        "direction": direction, "volume": lots, "entry_price": entry,
+        "direction": direction, "volume": lots, "entry_price": fill_price,
         "stop_loss": stop_loss, "take_profit": take_profit,
         "status": "open", "source": source, "ticket": result.broker_order_id,
     })
@@ -477,7 +532,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         asset=asset, direction=direction, confidence=confidence, entry=entry,
         stop_loss=stop_loss, take_profit=take_profit, source=source,
         ticket=str(result.broker_order_id or ""), volume=lots,
-        reason=f"เปิดออเดอร์ {direction} {lots:g} lots @ {entry:g} (" + (
+        reason=f"เปิดออเดอร์ {direction} {lots:g} lots @ {fill_price:g} (" + (
             "auto" if source == "auto" else "อนุมัติเอง") + ")")
     if notifier is not None:
         try:
@@ -485,7 +540,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                 user_id, "trade_opened",
                 f"🤖 {'AUTO' if source == 'auto' else 'APPROVED'} Trade Opened\n"
                 f"Asset: {asset}\nDirection: {direction}\nVolume: {lots:.2f} lots"
-                f"\nEntry: {entry:g}\nSL: {stop_loss if stop_loss is not None else '-'}"
+                f"\nEntry: {fill_price:g}\nSL: {stop_loss if stop_loss is not None else '-'}"
                 f"\nTP: {take_profit if take_profit is not None else '-'}"
                 f"\nTicket: {result.broker_order_id}",
             )
@@ -689,7 +744,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         drawdown_limit=s.max_drawdown_pct,
     ).evaluate(
         daily_loss_pct=daily, weekly_loss_pct=weekly, monthly_loss_pct=monthly,
-        drawdown_pct=0.0,
+        drawdown_pct=equity_drawdown_pct(db, s.capital),
         broker_connected=True, market_data_ok=True,
         ai_provider_ok=True, execution_ok=True,
     )

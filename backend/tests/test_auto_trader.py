@@ -444,12 +444,21 @@ class TestGatePipeline:
         """min_lot_gold is a FLOOR — a large risk-based gold size is never reduced."""
         s = clean_settings(capital=10_000.0, risk_per_trade_pct=1.0,
                            min_lot=0.01, min_lot_gold=0.05)
-        # XAUUSD SL 50 pts against the 100k FX contract ≈ 0.02 lots < 0.05 → floored
+        # XAUUSD SL 50 pts against the 100-oz gold contract: $100/(50×100) = 0.02 lots
+        # < 0.05 → floored to min_lot_gold
         assert execution.size_position(s, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.05, abs=1e-9)
-        # huge risk-based size stays untouched: $400k risk / (50 × 100k) = 0.08 lots
+        # huge risk-based size stays untouched: $400k risk / (50 pts × 100 oz) = 80 lots
         s2 = clean_settings(capital=20_000_000.0, risk_per_trade_pct=2.0,
                             min_lot=0.01, min_lot_gold=0.05)
-        assert execution.size_position(s2, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.08, abs=1e-9)
+        assert execution.size_position(s2, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(80.0, abs=1e-9)
+
+    def test_size_position_gold_contract_value_not_fx(self):
+        """XAUUSD is sized with the 100-oz contract, NOT the 100k FX contract."""
+        s = clean_settings(capital=10_000.0, risk_per_trade_pct=1.0)
+        # $100 risk / (50 pts × 100 oz) = 0.02 lots (was ~0.000002 with the FX contract)
+        assert execution.size_position(s, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.02, abs=0.005)
+        # FX pair still uses the 100k contract: $100 / (0.0050 × 100k) = 0.20 lots
+        assert execution.size_position(s, 1.0850, 1.0800, asset="EURUSD") == pytest.approx(0.2, abs=0.02)
 
 
 # ---------------------------------------------------------------------------

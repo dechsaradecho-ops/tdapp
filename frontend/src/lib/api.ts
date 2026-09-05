@@ -3,10 +3,12 @@ import {
   AppSettings,
   BacktestConfig,
   BacktestResult,
+  CloseAllResult,
   ClosePositionResult,
   CorrelationResponse,
   DbCheckResult,
   DbCounts,
+  EquityCurve,
   ExtendedAnalysis,
   FrequencyDecision,
   GoalAssessment,
@@ -27,6 +29,7 @@ import {
   SessionStatus,
   SettingsSaveResult,
   SignalLogsResponse,
+  SignalReport,
   StatsResetResult,
   SignalProposal,
   WalkForwardResult,
@@ -182,6 +185,20 @@ export const api = {
   // keeps open positions; confirm=true required)
   resetStats: () =>
     post<StatsResetResult>("/api/trading/stats/reset", { confirm: true }),
+
+  // POST /api/trading/positions/close-all — ปิดทั้งหมด (monitor page;
+  // confirm=true required)
+  closeAll: (close_reason = "close_all") =>
+    post<CloseAllResult>("/api/trading/positions/close-all",
+      { confirm: true, close_reason }),
+
+  // GET /api/trading/equity-curve — equity snapshots chart (performance page)
+  equityCurve: (days = 90) =>
+    get<EquityCurve>(`/api/trading/equity-curve?days=${days}`),
+
+  // GET /api/trading/signal-report — win rate by asset/band/regime
+  signalReport: (days = 30) =>
+    get<SignalReport>(`/api/trading/signal-report?days=${days}`),
 
   // ---------- Quote API call log (7-day auto-expiry) ----------
   quoteLogs: (limit = 100) =>

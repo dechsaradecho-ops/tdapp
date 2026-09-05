@@ -22,6 +22,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   risk_per_trade_pct: 1.0,
   min_lot: 0.01,
   min_lot_gold: null,
+  breakeven_trigger_r: 1.0,
+  trail_atr_mult: 2.0,
+  partial_close_pct: 0,
+  partial_trigger_r: 1.0,
+  paper_spread: 0,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
   kill_weekly_loss_pct: 5,
@@ -348,6 +353,33 @@ export default function SettingsPage() {
                   เฉพาะ XAUUSD — เว้นว่างเพื่อใช้ขนาด Lot ขั้นต่ำปกติ
                 </span>
               </label>
+            </div>
+
+            {/* --- Position management (breakeven / trailing / partial) --- */}
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">การจัดการไม้ (Position Management)</p>
+              <NumField label="Breakeven Trigger (×R)" value={cfg.breakeven_trigger_r}
+                onChange={(v) => set("breakeven_trigger_r", v)} step={0.1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                กำไรถึง R กี่เท่า ค่อยย้าย SL ไปที่ราคาเข้า (0 = ปิดการใช้งาน)
+              </span>
+              <NumField label="Trailing Stop (×ATR)" value={cfg.trail_atr_mult}
+                onChange={(v) => set("trail_atr_mult", v)} step={0.1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                ระยะ trailing หลัง breakeven — หน่วยเป็นเท่าของ ATR (0 = ปิด)
+              </span>
+              <NumField label="Partial Close (%)" value={cfg.partial_close_pct}
+                onChange={(v) => set("partial_close_pct", v)} step={5} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                ปิดบางส่วนกี่ % เมื่อกำไรถึง Partial Trigger (0 = ปิดการใช้งาน)
+              </span>
+              <NumField label="Partial Trigger (×R)" value={cfg.partial_trigger_r}
+                onChange={(v) => set("partial_trigger_r", v)} step={0.1} />
+              <NumField label="Paper Spread (ราคา)" value={cfg.paper_spread}
+                onChange={(v) => set("paper_spread", v)} step={0.00001} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                สเปรดจำลอง — BUY เข้าแพงขึ้น / SELL เข้าถูกลง (0 = ไม่มีสเปรด)
+              </span>
             </div>
 
             {/* --- Kill switch / drawdown --- */}

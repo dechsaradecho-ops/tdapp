@@ -36,6 +36,8 @@ export default function MonitorPage() {
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetMsg, setResetMsg] = useState("");
+  const [closingAll, setClosingAll] = useState(false);
+  const [closeAllMsg, setCloseAllMsg] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -115,6 +117,34 @@ export default function MonitorPage() {
     }
   };
 
+  // ปิดทั้งหมด — ปิดไม้เปิดค้างทุกไม้ในครั้งเดียว (confirm ก่อนยิง)
+  const handleCloseAll = async () => {
+    if (closingAll) return;
+    const openCount = snap?.stats.open_positions ?? 0;
+    if (openCount === 0) {
+      setCloseAllMsg("ไม่มีไม้ที่เปิดค้างอยู่");
+      return;
+    }
+    const ok = window.confirm(
+      `ปิดไม้ทั้งหมด ${openCount} ไม้?\n\n` +
+      "• ปิดทุกไม้ที่ราคาปัจจุบัน (mark price)\n" +
+      "• PnL แต่ละไม้ถูกบันทึกลงสมุดรายวัน\n" +
+      "• ทำแล้วย้อนกลับไม่ได้");
+    if (!ok) return;
+    setClosingAll(true);
+    setCloseAllMsg("");
+    try {
+      const res = await api.closeAll();
+      setCloseAllMsg(res.message ||
+        (res.ok ? `ปิดแล้ว ${res.closed} ไม้` : "ปิดทั้งหมดไม่สำเร็จ"));
+      await load();
+    } catch (e) {
+      setCloseAllMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setClosingAll(false);
+    }
+  };
+
   const st = snap?.stats;
   // ยอดรวม PnL ทั้งหมด = realized (ไม้ที่ปิดแล้ว) + unrealized (ไม้ที่เปิดค้าง)
   const unrealizedTotal = snap
@@ -170,12 +200,24 @@ export default function MonitorPage() {
       <section className="space-y-2">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h2 className="panel-title">สถิติการเทรด</h2>
-          <button onClick={handleResetStats} disabled={resetting}
-            className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
-            title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
-            {resetting ? "กำลังรีเซ็ต..." : "🗑 รีเซ็ตสถิติ"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={handleCloseAll} disabled={closingAll}
+              className="border border-loss/60 text-loss rounded px-3 py-2 text-sm min-h-[40px] active:bg-loss/10 disabled:opacity-50"
+              title="ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน">
+              {closingAll ? "กำลังปิด..." : "✋ ปิดทั้งหมด"}
+            </button>
+            <button onClick={handleResetStats} disabled={resetting}
+              className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
+              title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
+              {resetting ? "กำลังรีเซ็ต..." : "🗑 รีเซ็ตสถิติ"}
+            </button>
+          </div>
         </div>
+        {closeAllMsg && (
+          <p className="text-xs text-slate-400 bg-slate-800/60 border border-slate-700 rounded px-3 py-2">
+            {closeAllMsg}
+          </p>
+        )}
         {resetMsg && (
           <p className="text-xs text-slate-400 bg-slate-800/60 border border-slate-700 rounded px-3 py-2">
             {resetMsg}

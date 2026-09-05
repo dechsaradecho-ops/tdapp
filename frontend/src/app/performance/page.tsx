@@ -6,6 +6,7 @@ import {
   BacktestConfig,
   BacktestResult,
   CorrelationResponse,
+  EquityCurve,
   ExtendedAnalysis,
   FrequencyDecision,
   JournalAnalysis,
@@ -13,6 +14,7 @@ import {
   NewsRisk,
   PaperTrading,
   SessionStatus,
+  SignalReport,
   WalkForwardResult,
 } from "@/lib/types";
 
@@ -43,6 +45,8 @@ export default function PerformancePage() {
   const [journal, setJournal] = useState<JournalAnalysis | null>(null);
   const [paper, setPaper] = useState<PaperTrading | null>(null);
   const [extended, setExtended] = useState<ExtendedAnalysis | null>(null);
+  const [equity, setEquity] = useState<EquityCurve | null>(null);
+  const [sigReport, setSigReport] = useState<SignalReport | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [btAsset, setBtAsset] = useState<string>("EURUSD");
@@ -57,13 +61,15 @@ export default function PerformancePage() {
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [f, n, s, c, k, j, p, x] = await Promise.all([
+      const [f, n, s, c, k, j, p, x, eq, sr] = await Promise.all([
         api.tradingFrequency(), api.tradingCalendar(), api.tradingSession(),
         api.tradingCorrelation(), api.tradingKillSwitch(),
         api.tradingJournal(30), api.tradingPaper(), api.extendedAnalysis(),
+        api.equityCurve(90), api.signalReport(30),
       ]);
       setFreq(f); setNews(n); setSession(s); setCorr(c);
       setKill(k); setJournal(j); setPaper(p); setExtended(x);
+      setEquity(eq); setSigReport(sr);
     } catch {
       /* endpoints unreachable — badges stay null */
     } finally {
@@ -194,6 +200,85 @@ export default function PerformancePage() {
             </ul>
           )}
         </div>
+      </div>
+
+      {/* Equity curve (equity_snapshots — one point per UTC day) */}
+      <div className="panel">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="panel-title">Equity Curve</h2>
+          {equity && (
+            <div className="text-xs text-slate-400">
+              Latest <span className="text-slate-200 font-semibold">${equity.latest_equity.toLocaleString()}</span>
+              {" · "}Peak ${equity.peak_equity.toLocaleString()}
+              {" · "}DD <span className={equity.drawdown_pct > 0 ? "text-loss" : "text-profit"}>
+                {equity.drawdown_pct}%
+              </span>
+              {equity.synthetic && " · (ยังไม่มี snapshot — แสดงค่า capital)"}
+            </div>
+          )}
+        </div>
+        {equity && equity.points.length > 1 ? (
+          <svg viewBox="0 0 600 180" className="w-full h-44 mt-2" preserveAspectRatio="none">
+            {(() => {
+              const pts = equity.points;
+              const vals = pts.map((p) => p.equity);
+              const min = Math.min(...vals, equity.capital);
+              const max = Math.max(...vals, equity.capital);
+              const span = max - min || 1;
+              const x = (i: number) => (i / (pts.length - 1)) * 600;
+              const y = (v: number) => 170 - ((v - min) / span) * 150;
+              const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.equity).toFixed(1)}`).join(" ");
+              const capY = y(equity.capital);
+              const last = pts[pts.length - 1].equity;
+              const up = last >= equity.capital;
+              return (
+                <>
+                  <line x1="0" y1={capY} x2="600" y2={capY} stroke="#475569" strokeDasharray="4 4" strokeWidth="1" />
+                  <path d={path} fill="none" stroke={up ? "#22c55e" : "#ef4444"} strokeWidth="2" />
+                </>
+              );
+            })()}
+          </svg>
+        ) : (
+          <p className="text-sm text-slate-500 mt-2">
+            ยังไม่มีข้อมูล equity — ระบบจะบันทึก 1 จุด/วัน อัตโนมัติ (portfolio monitor worker)
+          </p>
+        )}
+      </div>
+
+      {/* Signal quality report (signal_logs ↔ paper_trades join) */}
+      <div className="panel">
+        <h2 className="panel-title">Signal Quality Report (30d)</h2>
+        {sigReport && sigReport.matched_trades > 0 ? (
+          <div className="grid md:grid-cols-3 gap-4 text-sm">
+            {[
+              { title: "ตามสินทรัพย์", rows: sigReport.by_asset },
+              { title: "ตามช่วง Confidence", rows: sigReport.by_confidence_band },
+              { title: "ตาม Regime", rows: sigReport.by_regime },
+            ].map((g) => (
+              <div key={g.title}>
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">{g.title}</p>
+                <ul className="space-y-1">
+                  {g.rows.map((r) => (
+                    <li key={r.key} className="flex justify-between gap-2">
+                      <span className="truncate">{r.key || "—"}</span>
+                      <span className="text-slate-400 shrink-0">
+                        {r.trades} ไม้ · <span className={r.total_pnl >= 0 ? "text-profit" : "text-loss"}>
+                          {r.total_pnl >= 0 ? "+" : ""}{r.total_pnl.toFixed(2)}
+                        </span>{" "}
+                        · win {r.win_rate_pct}%
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">
+            ยังไม่มีสัญญาณที่ปิดแล้วให้วิเคราะห์ (ต้องมีไม้ที่เปิดจากสัญญาณและปิดแล้ว)
+          </p>
+        )}
       </div>
 
       {/* Backtest center */}

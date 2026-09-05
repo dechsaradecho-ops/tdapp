@@ -9,13 +9,16 @@ Run from backend/: C:/Python314/python.exe -m pytest tests/test_workers.py -v
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
 from types import SimpleNamespace
 
 import pytest
 
-from app.workers import market_scanner, news_analysis, position_guard
+from app.workers import (calendar_sync, daily_digest, market_scanner,
+                         news_analysis, position_guard, portfolio_monitor)
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +32,7 @@ class FakeDatabase:
         self.rows = rows or {}
         self.fail_tables = fail_tables or set()
         self.inserted: list[tuple[str, dict]] = []
+        self._client = object()  # settings loader probes db._client
 
     def insert(self, table: str, row: dict) -> dict | None:
         if table in self.fail_tables:
@@ -708,3 +712,359 @@ class TestPositionGuard:
         assert pos.entry_price == 1.1615
         assert pos.current_price == 1.1615  # seeded at entry; guard ticks it
         assert broker._seq == 7  # sequence walked past restored tickets
+
+
+# ---------------------------------------------------------------------------
+# Position guard — breakeven / trailing / partial close management
+# ---------------------------------------------------------------------------
+class _AsyncModifySL:
+    """Awaitable modify_stop_loss that records the new SL (spy)."""
+
+    def __init__(self, sink: list, value: float):
+        self._sink, self._value = sink, value
+
+    def __await__(self):
+        async def _coro():
+            self._sink.append(self._value)
+            from app.integrations.brokers import OrderResult
+            return OrderResult(ok=True, message="SL moved")
+        return _coro().__await__()
+
+
+class _AsyncPartial:
+    """Awaitable partial_close that records the volume (spy)."""
+
+    def __init__(self, sink: list, value: float):
+        self._sink, self._value = sink, value
+
+    def __await__(self):
+        async def _coro():
+            self._sink.append(self._value)
+            from app.integrations.brokers import OrderResult
+            return OrderResult(ok=True, message="closed 0.01, 0.01 remain")
+        return _coro().__await__()
+
+
+class TestPositionGuardManagement:
+    """Breakeven / trailing / partial-close behavior of the guard."""
+
+    @pytest.fixture(autouse=True)
+    def _no_network_spot(self, monkeypatch):
+        async def fake_spot(assets, **_kw):
+            return {a: 1.2500 for a in assets}, {}
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+
+    def _broker(self, entry=1.1000, sl=1.0900, tp=None, volume=0.02):
+        from app.integrations.brokers import Position
+        broker = SimpleNamespace()
+        broker._positions = {"T1": Position(
+            ticket="T1", user_id="u1", asset="EURUSD", direction="BUY",
+            volume=volume, entry_price=entry, stop_loss=sl, take_profit=tp,
+            current_price=entry)}
+        broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+        broker.mark_price = lambda ticket: _AsyncFloat(broker._positions.get(
+            ticket, Position(ticket="", user_id="", asset="", direction="BUY",
+                             volume=0, entry_price=0)).current_price)
+        broker.quote = lambda asset: _AsyncFloat(0.0)
+        broker.close_position = lambda ticket: _AsyncClosed()
+        return broker
+
+    def _db(self, **overrides):
+        row = {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+               "direction": "buy", "volume": 0.02, "entry_price": 1.1000,
+               "stop_loss": 1.0900, "partial_done": False}
+        row.update(overrides)
+        return FakeDatabase(rows={"paper_trades": [row]})
+
+    def _settings(self, **overrides):
+        from app.models.schemas import AppSettings
+        s = AppSettings()
+        for k, v in overrides.items():
+            setattr(s, k, v)
+        return s
+
+    @pytest.mark.asyncio
+    async def test_breakeven_moves_sl_to_entry(self, monkeypatch):
+        """Profit ≥ breakeven_trigger_r × R → SL moves to entry."""
+        from app.workers import position_guard
+        # R distance = |1.1000-1.0900| = 0.0100; live 1.2500 → 15R profit
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = self._db()
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
+        assert summary["moved_sl"] == 1
+        assert moved == [pytest.approx(1.1000)]
+
+    @pytest.mark.asyncio
+    async def test_trailing_extends_beyond_breakeven(self, monkeypatch):
+        """With trail_atr_mult > 0 the SL trails price − mult×ATR (≥ entry)."""
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = self._db()
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0))
+        # ATR proxy = 0.2 × R distance = 0.002; trail = 1.2500 − 2×0.002 = 1.2460
+        assert moved and moved[0] == pytest.approx(1.2460, abs=1e-6)
+        assert moved[0] > 1.1000  # strictly better than breakeven
+
+    @pytest.mark.asyncio
+    async def test_partial_close_fires_once(self, monkeypatch):
+        """partial_close_pct > 0 + profit ≥ partial_trigger_r → one partial."""
+        from app.workers import position_guard
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert summary["partial_closed"] == 1
+        assert partials == [pytest.approx(0.02)]  # 50% of 0.04
+        # journal row marked so it never fires twice
+        assert db.rows["paper_trades"][0]["partial_done"] is True
+
+    @pytest.mark.asyncio
+    async def test_partial_close_not_repeated(self, monkeypatch):
+        """partial_done=True (seeded by rehydrate after a restart) → no second
+        partial close."""
+        from app.workers import position_guard
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker._positions["T1"].partial_done = True  # what rehydrate seeds
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04, partial_done=True)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert summary["partial_closed"] == 0
+        assert partials == []
+
+    @pytest.mark.asyncio
+    async def test_no_management_when_profit_below_trigger(self, monkeypatch):
+        """Profit < trigger → SL untouched, no partial."""
+        from app.workers import position_guard
+        moved: list[float] = []
+        partials: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db()
+        # live 1.2500 is 15R in profit — force a small profit instead
+        async def small_spot(assets, **_kw):
+            return {a: 1.1040 for a in assets}, {}  # 4R... still > 1R
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", small_spot)
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=5.0, trail_atr_mult=0,
+                                    partial_close_pct=50, partial_trigger_r=5.0))
+        assert moved == [] and partials == []
+
+    @pytest.mark.asyncio
+    async def test_sl_never_moves_backwards(self, monkeypatch):
+        """A second pass must not move the SL back toward the entry."""
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = self._db()
+        settings = self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0)
+        await position_guard.guard_once(db, broker, _SilentNotifier(),
+                                        settings=settings)
+        first = moved[0]
+        # second pass: SL already at first — must not move to a worse value
+        broker._positions["T1"].stop_loss = first
+        await position_guard.guard_once(db, broker, _SilentNotifier(),
+                                        settings=settings)
+        assert all(m >= first - 1e-9 for m in moved)
+
+
+# ---------------------------------------------------------------------------
+# Portfolio monitor — breach → pause + notify + equity snapshots
+# ---------------------------------------------------------------------------
+class _SilentNotifier:
+    """Mimics NotificationService.notify: queues a notifications row (the
+    daily digest's dedup marker) and records what was sent."""
+
+    def __init__(self, db=None):
+        self.db = db
+        self.sent: list[tuple[str, str, str]] = []
+
+    async def notify(self, user_id, ntype, message, **_kw):
+        self.sent.append((user_id, ntype, message))
+        if self.db is not None:
+            # created_at mimics the Supabase default now() — the digest dedup
+            # reads it back to decide "already sent today"
+            self.db.insert("notifications", {
+                "user_id": user_id, "channel": "line", "type": ntype,
+                "message": message, "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        return None
+
+
+class TestPortfolioMonitor:
+    def _db(self, closed_pnl=0.0, open_rows=0):
+        rows = []
+        if closed_pnl:
+            rows.append({"id": "c1", "status": "closed", "pnl": closed_pnl,
+                         "closed_at": datetime.now(timezone.utc).isoformat()})
+        for i in range(open_rows):
+            rows.append({"id": f"o{i}", "status": "open", "pnl": None,
+                         "asset": "EURUSD", "direction": "buy", "volume": 0.01,
+                         "entry_price": 1.1000, "stop_loss": 1.0900})
+        return FakeDatabase(rows={"paper_trades": rows})
+
+    def test_equity_includes_realized_pnl(self):
+        from app.workers import portfolio_monitor
+        db = self._db(closed_pnl=250.0)
+        assert portfolio_monitor._equity(db, 10_000.0) == pytest.approx(10_250.0)
+
+    def test_equity_snapshot_written_once_per_day(self):
+        from app.workers import portfolio_monitor
+        db = self._db()
+        assert portfolio_monitor._write_equity_snapshot(db, "demo", 10_000.0) is True
+        assert len(db.rows["equity_snapshots"]) == 1
+        # same day again → update, not a second row
+        assert portfolio_monitor._write_equity_snapshot(db, "demo", 10_100.0) is False
+        assert len(db.rows["equity_snapshots"]) == 1
+        assert db.rows["equity_snapshots"][0]["equity"] == pytest.approx(10_100.0)
+
+    @pytest.mark.asyncio
+    async def test_breach_pauses_and_notifies(self, monkeypatch):
+        """Limit breach → set_pause(True) + risk_warning notify (the dead-code
+        bug fix: previously the alert was built but never sent)."""
+        from app.workers import portfolio_monitor
+        from app.services import execution
+
+        db = self._db(closed_pnl=-950.0)  # -9.5% of 10k → breaches 8% monthly
+        called = {}
+
+        def fake_set_pause(_db, paused, reason):
+            called["paused"] = paused
+            called["reason"] = reason
+            return SimpleNamespace(paused=paused, reason=reason)
+
+        monkeypatch.setattr(execution, "set_pause", fake_set_pause)
+        notifier = _SilentNotifier()
+        # production runs monitor_once via asyncio.to_thread (sync context →
+        # the asyncio.run notify path completes before returning)
+        out = await asyncio.to_thread(
+            portfolio_monitor.monitor_once, db, None, notifier)
+        assert out["breach"] is True
+        assert called.get("paused") is True
+        assert "risk engine" in (called.get("reason") or "")
+        assert any(t == "risk_warning" for _, t, _ in notifier.sent)
+        # audit trail row written
+        assert any(t == "risk_events" for t, _ in db.inserted)
+
+    @pytest.mark.asyncio
+    async def test_no_breach_no_pause(self, monkeypatch):
+        from app.workers import portfolio_monitor
+        from app.services import execution
+
+        db = self._db(closed_pnl=150.0)
+        called = {}
+
+        def fake_set_pause(_db, paused, reason):
+            called["paused"] = paused
+            return SimpleNamespace(paused=paused, reason=reason)
+
+        monkeypatch.setattr(execution, "set_pause", fake_set_pause)
+        out = await asyncio.to_thread(
+            portfolio_monitor.monitor_once, db, None, _SilentNotifier())
+        assert out["breach"] is False
+        assert called == {}
+        # equity snapshot still written on healthy cycles
+        assert any(t == "equity_snapshots" for t, _ in db.inserted)
+
+
+# ---------------------------------------------------------------------------
+# Calendar sync — populates the economic_calendar table for the news gate
+# ---------------------------------------------------------------------------
+class TestCalendarSync:
+    def test_build_upcoming_events_deterministic(self):
+        from app.workers import calendar_sync
+        # 2026-09-05 is a Saturday → first Friday Sept = 4th (past), next NFP
+        # = Oct 2nd; CPI day_13 → Sep 13; FOMC day_18 → Sep 18
+        now = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+        events = calendar_sync.build_upcoming_events(now)
+        names = [e["event"] for e in events]
+        assert "CPI" in names and "FOMC" in names
+        assert all(e["impact"] == "high" for e in events)
+        assert all(e["event_time"] > now.isoformat() for e in events)
+
+    def test_sync_inserts_and_dedups(self):
+        from app.workers import calendar_sync
+        db = FakeDatabase()
+        out1 = calendar_sync.sync_once(db)
+        assert out1["inserted"] >= 1
+        assert any(t == "economic_calendar" for t, _ in db.inserted)
+        # second run → nothing new (dedup by event+event_time)
+        out2 = calendar_sync.sync_once(db)
+        assert out2["inserted"] == 0
+
+    def test_sync_never_raises_on_db_failure(self):
+        from app.workers import calendar_sync
+        db = FakeDatabase(fail_tables={"economic_calendar"})
+        out = calendar_sync.sync_once(db)  # must not raise
+        assert "inserted" in out
+
+
+# ---------------------------------------------------------------------------
+# Daily digest — once per UTC day, idempotent
+# ---------------------------------------------------------------------------
+class TestDailyDigest:
+    def _db(self):
+        now = datetime.now(timezone.utc)
+        return FakeDatabase(rows={"paper_trades": [
+            {"id": "c1", "status": "closed", "pnl": 120.0,
+             "closed_at": (now - timedelta(days=1)).isoformat()},
+            {"id": "c2", "status": "closed", "pnl": -50.0,
+             "closed_at": (now - timedelta(days=1)).isoformat()},
+            {"id": "o1", "status": "open", "pnl": None, "asset": "EURUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.1000},
+        ]})
+
+    def test_build_digest_contains_sections(self):
+        from app.workers import daily_digest
+        db = self._db()
+        msg = daily_digest.build_digest(db, 10_070.0, 10_000.0)
+        assert "Daily Digest" in msg
+        assert "+70.00" in msg  # yesterday PnL 120 - 50
+        assert "ไม้เปิดค้าง" in msg
+
+    @pytest.mark.asyncio
+    async def test_send_once_dedups_per_day(self):
+        from app.workers import daily_digest
+        db = self._db()
+        notifier = _SilentNotifier(db)
+        out1 = await daily_digest.send_digest_once(db, notifier)
+        assert out1["sent"] is True
+        assert any(t == "daily_digest" for _, t, _ in notifier.sent)
+        # the queued notifications row IS the dedup marker
+        assert any(t == "notifications" for t, _ in db.inserted)
+        # second call same day → skipped (dedup reads the notifications table)
+        out2 = await daily_digest.send_digest_once(db, notifier)
+        assert out2["sent"] is False
+        assert out2["reason"] == "already sent today"
+
+    @pytest.mark.asyncio
+    async def test_send_once_db_unavailable(self):
+        from app.workers import daily_digest
+
+        class NoDb:
+            available = False
+
+            def select(self, *a, **k):
+                return []
+
+        out = await daily_digest.send_digest_once(NoDb(), _SilentNotifier())
+        assert out["sent"] is False

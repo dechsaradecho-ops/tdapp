@@ -70,6 +70,20 @@ class Broker(ABC):
         """Current price for an open ticket (0.0 when unavailable)."""
         return 0.0
 
+    async def modify_stop_loss(self, ticket: str, stop_loss: float) -> OrderResult:
+        """Move the SL of an open position (breakeven / trailing stop).
+
+        Default implementation: unsupported (real adapters override).
+        """
+        return OrderResult(ok=False, message="modify_stop_loss not supported")
+
+    async def partial_close(self, ticket: str, volume: float) -> OrderResult:
+        """Close part of an open position (TP1 partial take-profit).
+
+        Default implementation: unsupported (real adapters override).
+        """
+        return OrderResult(ok=False, message="partial_close not supported")
+
 
 class PaperBroker(Broker):
     """Simulated execution for development/demo."""
@@ -122,6 +136,46 @@ class PaperBroker(Broker):
 
     async def quote(self, asset: str) -> float:
         return self._prices.get(asset.upper(), 0.0)
+
+    async def modify_stop_loss(self, ticket: str, stop_loss: float) -> OrderResult:
+        """Move the SL of an open paper position (breakeven / trailing)."""
+        pos = self._positions.get(ticket)
+        if pos is None:
+            return OrderResult(ok=False, message=f"unknown ticket {ticket}")
+        pos.stop_loss = float(stop_loss)
+        return OrderResult(ok=True, broker_order_id=ticket,
+                           message=f"SL moved to {stop_loss:g}")
+
+    async def partial_close(self, ticket: str, volume: float) -> OrderResult:
+        """Close part of a paper position; the remainder keeps its ticket.
+
+        The closed slice is journaled into closed_trades with a suffixed
+        ticket (PAPER-xxxxxx#1) so analytics can tell partial exits apart.
+        """
+        pos = self._positions.get(ticket)
+        if pos is None:
+            return OrderResult(ok=False, message=f"unknown ticket {ticket}")
+        volume = round(float(volume), 2)
+        if volume <= 0 or volume >= pos.volume:
+            return OrderResult(ok=False,
+                               message=f"invalid partial volume {volume:g} "
+                                       f"(position {pos.volume:g})")
+        closed_vol = volume
+        pos.volume = round(pos.volume - closed_vol, 2)
+        # PnL of the closed slice only: sign × (price − entry) × slice × contract
+        sign = 1 if pos.direction == "BUY" else -1
+        asset = str(getattr(pos, "asset", "") or "").upper()
+        contract = PaperBroker.CONTRACT_SIZES.get(asset, 100_000.0)
+        pnl = sign * (pos.current_price - pos.entry_price) * closed_vol * contract
+        self.closed_trades.append({
+            "ticket": f"{ticket}#partial", "asset": pos.asset,
+            "direction": pos.direction, "volume": closed_vol,
+            "entry_price": pos.entry_price, "exit_price": pos.current_price,
+            "pnl": round(pnl, 2),
+        })
+        return OrderResult(ok=True, broker_order_id=ticket,
+                           message=f"closed {closed_vol:g} lots, "
+                                   f"{pos.volume:g} lots remain")
 
     async def set_quote(self, asset: str, price: float) -> None:
         """Feed a live price into the paper book (used by tests + position guard)."""

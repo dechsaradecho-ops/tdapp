@@ -211,7 +211,9 @@ async def get_kill_switch(request: Request) -> KillSwitchStatus:
         daily_loss_pct=max(0.0, -daily / capital * 100),
         weekly_loss_pct=max(0.0, -weekly / capital * 100),
         monthly_loss_pct=max(0.0, -monthly / capital * 100),
-        drawdown_pct=0.0,  # peak equity tracking arrives with portfolio persistence
+        # REAL drawdown from equity_snapshots (peak vs newest equity) —
+        # previously hardcoded 0.0 so the DD kill switch could never fire.
+        drawdown_pct=execution.equity_drawdown_pct(db, capital),
         broker_connected=getattr(broker, "connected", True),
         market_data_ok=True,
         ai_provider_ok=True,
@@ -543,6 +545,229 @@ def _fresh_stats(db) -> dict:
         pnl_total=round(sum(float(r.get("pnl") or 0) for r in closed_rows), 2),
     )
     return stats.model_dump()
+
+
+# ------------------------------------------------------------- close all
+class CloseAllRequest(BaseModel):
+    confirm: bool = False
+    close_reason: str = "close_all"
+
+
+class CloseAllResult(BaseModel):
+    ok: bool
+    closed: int
+    failed: int
+    total_pnl: float = 0.0
+    results: list[dict] = []
+    message: str = ""
+
+
+@router.post("/positions/close-all", response_model=CloseAllResult)
+async def close_all_positions(payload: CloseAllRequest,
+                              request: Request) -> CloseAllResult:
+    """Close EVERY open paper position (monitor page ปิดทั้งหมด button).
+
+    Reuses the single-close flow per ticket: live mark → broker close →
+    PnL → journal → signal_log → notify. One LINE summary at the end
+    instead of N pushes.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    from app.services.notification_service import NotificationService
+
+    log = logging.getLogger(__name__)
+    db = request.app.state.db
+    broker = request.app.state.broker
+
+    if not payload.confirm:
+        return CloseAllResult(ok=False, closed=0, failed=0,
+                              message="ต้องยืนยัน (confirm=true) ก่อนปิดทั้งหมด")
+
+    open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+    if not open_rows:
+        return CloseAllResult(ok=True, closed=0, failed=0,
+                              message="ไม่มีไม้ที่เปิดค้างอยู่")
+
+    # one live-mark batch for all assets (single spot feed round-trip)
+    assets = sorted({str(r.get("asset") or "").upper() for r in open_rows})
+    marks: dict[str, float] = {}
+    try:
+        marks, _failures = await _spot_prices(assets)
+    except Exception as exc:
+        log.warning("close-all: live marks unavailable: %s", exc)
+
+    results: list[dict] = []
+    closed = failed = 0
+    total_pnl = 0.0
+    for row in open_rows:
+        ticket = str(row.get("ticket") or "")
+        asset = str(row.get("asset") or "").upper()
+        entry = float(row.get("entry_price") or 0)
+        exit_price = float(marks.get(asset) or 0)
+        if not exit_price:
+            try:
+                exit_price = float(await broker.mark_price(ticket))
+            except Exception:
+                exit_price = 0.0
+        if not exit_price:
+            try:
+                exit_price = float(await broker.quote(asset))
+            except Exception:
+                exit_price = 0.0
+        if not exit_price:
+            exit_price = entry  # last resort: flat PnL
+
+        result = await broker.close_position(ticket)
+        if not result.ok:
+            failed += 1
+            results.append({"ticket": ticket, "asset": asset, "ok": False,
+                            "message": result.message})
+            continue
+
+        pos = SimpleNamespace(
+            direction=str(row.get("direction") or "BUY").upper(),
+            current_price=exit_price, entry_price=entry,
+            volume=float(row.get("volume") or 0), asset=asset)
+        pnl = round(execution.PaperBrokerPnl.compute(pos), 2)
+        execution.close_trade_rows(db, ticket, exit_price, pnl,
+                                   payload.close_reason)
+        signal_log.log_event(
+            db=db, event="closed", asset=asset,
+            direction=str(row.get("direction") or ""), entry=entry,
+            exit_price=exit_price, pnl=pnl, ticket=ticket, source="user",
+            reason=f"ปิดทั้งหมด ({payload.close_reason}) @ {exit_price:g}")
+        total_pnl += pnl
+        closed += 1
+        results.append({"ticket": ticket, "asset": asset, "ok": True,
+                        "pnl": pnl, "exit_price": exit_price})
+
+    warnings: list[str] = []
+    try:
+        notifier = NotificationService(db, request.app.state.line)
+        await notifier.notify(
+            "", "trade_closed",
+            f"✋ Close All\nปิด {closed} ไม้ (ล้มเหลว {failed}) — "
+            f"PnL รวม {total_pnl:+,.2f} USD",
+        )
+        warnings.append("notify ok")
+    except Exception as exc:
+        warnings.append(f"notify failed: {exc}")
+
+    log.info("close-all: closed=%d failed=%d pnl=%.2f", closed, failed, total_pnl)
+    return CloseAllResult(
+        ok=failed == 0, closed=closed, failed=failed,
+        total_pnl=round(total_pnl, 2), results=results,
+        message=(f"ปิดทั้งหมดแล้ว {closed} ไม้ (ล้มเหลว {failed}) — "
+                 f"PnL รวม {total_pnl:+,.2f} USD")
+        if closed or failed else "ไม่มีไม้ที่เปิดค้างอยู่")
+
+
+# ------------------------------------------------------------- equity curve
+@router.get("/equity-curve")
+async def equity_curve(request: Request, days: int = 90) -> dict:
+    """Equity snapshots for the performance page chart.
+
+    One point per UTC day from equity_snapshots (written by the portfolio
+    monitor worker). Falls back to a synthetic flat line at settings
+    capital when the table is empty (fresh install / worker not yet run).
+    """
+    db = request.app.state.db
+    s = _settings(request)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        rows = db.select("equity_snapshots", order="snapshot_date", desc=False,
+                         limit=400)
+    except Exception:
+        rows = []
+    points = [
+        {"date": str(r.get("snapshot_date") or ""),
+         "equity": float(r.get("equity") or 0)}
+        for r in rows if str(r.get("snapshot_date") or "") >= cutoff
+    ]
+    if not points:
+        points = [{"date": datetime.now(timezone.utc).date().isoformat(),
+                   "equity": s.capital}]
+    peak = max((p["equity"] for p in points), default=s.capital)
+    latest = points[-1]["equity"]
+    return {
+        "points": points,
+        "latest_equity": latest,
+        "peak_equity": peak,
+        "drawdown_pct": round((peak - latest) / peak * 100, 2) if peak else 0.0,
+        "capital": s.capital,
+        "synthetic": len(points) == 1 and points[0]["equity"] == s.capital,
+    }
+
+
+# ------------------------------------------------------------- signal report
+@router.get("/signal-report")
+async def signal_report(request: Request, days: int = 30) -> dict:
+    """Signal quality report: join signal_logs (created) ↔ paper_trades.
+
+    Win rate by asset, by confidence band, and by market regime — the
+    feedback loop that tells you WHICH signals to keep or drop.
+    """
+    db = request.app.state.db
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        logs = [l for l in db.select("signal_logs", filters={"event": "created"},
+                                     limit=500)
+                if str(l.get("created_at") or "") >= cutoff]
+    except Exception:
+        logs = []
+    try:
+        trades = db.select("paper_trades", limit=1000)
+    except Exception:
+        trades = []
+    by_ticket = {str(t.get("ticket") or ""): t for t in trades if t.get("ticket")}
+
+    def band(conf: float) -> str:
+        if conf >= 90:
+            return "90+"
+        if conf >= 80:
+            return "80-89"
+        if conf >= 70:
+            return "70-79"
+        return "<70"
+
+    by_asset: dict[str, list[dict]] = {}
+    by_band: dict[str, list[dict]] = {}
+    by_regime: dict[str, list[dict]] = {}
+    matched = 0
+    for l in logs:
+        ticket = str(l.get("ticket") or "")
+        t = by_ticket.get(ticket)
+        if not t or t.get("status") != "closed":
+            continue
+        matched += 1
+        pnl = float(t.get("pnl") or 0)
+        rec = {"asset": str(l.get("asset") or ""), "pnl": pnl,
+               "confidence": float(l.get("confidence") or 0),
+               "regime": str(t.get("regime") or l.get("regime") or "")}
+        by_asset.setdefault(rec["asset"], []).append(rec)
+        by_band.setdefault(band(rec["confidence"]), []).append(rec)
+        by_regime.setdefault(rec["regime"] or "unknown", []).append(rec)
+
+    def summarize(group: dict[str, list[dict]]) -> list[dict]:
+        out = []
+        for key, recs in sorted(group.items()):
+            wins = len([r for r in recs if r["pnl"] > 0])
+            out.append({
+                "key": key, "trades": len(recs),
+                "win_rate_pct": round(wins / len(recs) * 100, 1) if recs else 0.0,
+                "total_pnl": round(sum(r["pnl"] for r in recs), 2),
+            })
+        return out
+
+    return {
+        "days": days,
+        "signals": len(logs),
+        "matched_trades": matched,
+        "by_asset": summarize(by_asset),
+        "by_confidence_band": summarize(by_band),
+        "by_regime": summarize(by_regime),
+    }
 
 
 # ----------------------------------------------------------------- journal
