@@ -54,18 +54,24 @@ export default function MobileNav() {
 
   return (
     <div className="md:hidden">
-      {/* Bottom tab bar */}
+      {/* Bottom tab bar — floating rounded glass dock */}
       <nav
         aria-label="เมนูหลัก"
-        className="lg-refract fixed bottom-0 inset-x-0 z-40 border-t safe-bottom"
+        className="lg-refract fixed z-40 border"
         style={{
-          background: "rgba(10, 10, 14, 0.28)",
-          WebkitBackdropFilter: "blur(5px) saturate(140%)",
-          backdropFilter: "blur(5px) saturate(140%)",
-          borderTopColor: "rgba(255,255,255,0.14)",
+          left: "0.75rem",
+          right: "0.75rem",
+          bottom: "calc(env(safe-area-inset-bottom, 0px) + 0.65rem)",
+          background: "rgba(255, 255, 255, 0.06)",
+          WebkitBackdropFilter: "blur(8px) saturate(160%)",
+          backdropFilter: "blur(8px) saturate(160%)",
+          borderColor: "rgba(255,255,255,0.16)",
+          borderRadius: "1.4rem",
+          boxShadow:
+            "0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14)",
         }}
       >
-        <div className="grid grid-cols-5 px-1">
+        <div className="grid grid-cols-5 px-1 py-0.5">
           {PRIMARY.map((l) => (
             <a key={l.href} href={l.href} className={tabClass(l.href)}>
               <span className="text-xl">{l.icon}</span>

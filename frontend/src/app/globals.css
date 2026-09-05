@@ -313,12 +313,12 @@ td .text-profit,
 td .text-loss,
 td .text-emerald-400,
 td .text-red-400 {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
-  padding: 0.1rem 0.45rem;
+  padding: 0.05rem 0.4rem;
   display: inline-block;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -329,10 +329,10 @@ td .text-red-400 {
    และ padding ต้องเป็น 0 เพื่อไม่ขยาย cell เกินคอลัมน์ */
 td.text-profit,
 td.text-loss {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04)) padding-box;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)) padding-box;
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
   border-radius: 999px;
   font-variant-numeric: tabular-nums;
 }
@@ -342,16 +342,16 @@ td.text-loss {
 td .text-profit,
 td .text-emerald-400,
 td.text-profit {
-  background: linear-gradient(180deg, rgba(48, 209, 88, 0.24), rgba(48, 209, 88, 0.12));
-  border-color: rgba(48, 209, 88, 0.42);
-  box-shadow: inset 0 0 0 1px rgba(48, 209, 88, 0.42);
+  background: linear-gradient(180deg, rgba(48, 209, 88, 0.16), rgba(48, 209, 88, 0.07));
+  border-color: rgba(48, 209, 88, 0.3);
+  box-shadow: inset 0 0 0 1px rgba(48, 209, 88, 0.3);
 }
 td .text-loss,
 td .text-red-400,
 td.text-loss {
-  background: linear-gradient(180deg, rgba(255, 69, 58, 0.24), rgba(255, 69, 58, 0.12));
-  border-color: rgba(255, 69, 58, 0.42);
-  box-shadow: inset 0 0 0 1px rgba(255, 69, 58, 0.42);
+  background: linear-gradient(180deg, rgba(255, 69, 58, 0.16), rgba(255, 69, 58, 0.07));
+  border-color: rgba(255, 69, 58, 0.3);
+  box-shadow: inset 0 0 0 1px rgba(255, 69, 58, 0.3);
 }
 
 /* มือถือ: ตารางกว้างตามเนื้อหาจริง — คอลัมน์ไม่ถูกบีบจน pill/ตัวเลขเลื่อนทับกัน
