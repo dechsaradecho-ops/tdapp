@@ -56,7 +56,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/settings" className="hover:text-accent">Settings</a>
           </nav>
         </header>
-        <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto safe-bottom pb-24 md:pb-5">
+        {/* pb-24 clears the fixed mobile tab bar (57px) + iOS safe area (≤34px).
+            Do NOT add safe-bottom here — .safe-bottom (env(safe-area-inset-bottom))
+            appears after Tailwind utilities in globals.css and overrides pb-* to 0,
+            which let the bottom nav cover the last content block on every page. */}
+        <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto pb-24 md:pb-5">
           <AuthGate>{children}</AuthGate>
         </main>
         <MobileNav />
