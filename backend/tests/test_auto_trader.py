@@ -193,6 +193,34 @@ class TestGatePipeline:
         assert any("confidence" in r for r in report2.rejects)
 
     @pytest.mark.asyncio
+    async def test_gold_min_lot_override_reaches_order(self, broker, notifier):
+        """min_lot_gold (ขนาด Lot ขั้นต่ำ gold) floors the REAL XAUUSD order
+        volume; an FX order in the same settings keeps the base min_lot."""
+        db = FakeDatabase()
+        s = clean_settings(capital=100.0, risk_per_trade_pct=0.1,
+                           min_lot=0.01, min_lot_gold=0.05)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2450.0,
+            confidence=85.0, opportunity=80.0, signal_id="sig-goldlot", source="auto",
+        )
+        assert report.allowed, report.rejects
+        assert len(broker.orders) == 1
+        # risk_to_lot gives ~0.0002 lots → floored to the gold override 0.05
+        assert broker.orders[0].volume == pytest.approx(0.05, abs=1e-9)
+        # FX order under the same settings keeps the base floor 0.01
+        db2 = FakeDatabase()
+        report2 = await execution.execute_signal(
+            db2, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=85.0, opportunity=80.0, signal_id="sig-fxlot", source="auto",
+        )
+        assert report2.allowed, report2.rejects
+        assert broker.orders[1].volume == pytest.approx(0.01, abs=1e-9)
+
+    @pytest.mark.asyncio
     async def test_sl_distance_mode_short_widens_tightens_sl(self, broker, notifier):
         """sl_distance_mode=สั้น (short, ×1.0 ATR): SL re-derived from the
         stored กลาง (×1.5) row — distance ×(1.0/1.5), TP keeps the row's RR.
@@ -398,6 +426,30 @@ class TestGatePipeline:
         s = clean_settings(capital=10_000.0, risk_per_trade_pct=1.0, min_lot=0.02)
         # $100 risk / (0.0050 × 100k) = 0.20 lots > 0.02 → sizing unchanged
         assert execution.size_position(s, 1.0850, 1.0800) == pytest.approx(0.2, abs=0.02)
+
+    def test_size_position_gold_override_applies_to_gold_only(self):
+        """min_lot_gold raises the floor for XAUUSD; FX keeps the base min_lot."""
+        s = clean_settings(capital=100.0, risk_per_trade_pct=0.1,
+                           min_lot=0.01, min_lot_gold=0.05)
+        # risk_to_lot gives ~0.0002 lots → gold floored to 0.05, FX to 0.01
+        assert execution.size_position(s, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.05, abs=1e-9)
+        assert execution.size_position(s, 1.0850, 1.0800, asset="EURUSD") == pytest.approx(0.01, abs=1e-9)
+
+    def test_size_position_gold_override_unset_uses_base(self):
+        """No min_lot_gold → gold uses the base min_lot (backwards compatible)."""
+        s = clean_settings(capital=100.0, risk_per_trade_pct=0.1, min_lot=0.02)
+        assert execution.size_position(s, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.02, abs=1e-9)
+
+    def test_size_position_gold_override_does_not_shrink_risk_lots(self):
+        """min_lot_gold is a FLOOR — a large risk-based gold size is never reduced."""
+        s = clean_settings(capital=10_000.0, risk_per_trade_pct=1.0,
+                           min_lot=0.01, min_lot_gold=0.05)
+        # XAUUSD SL 50 pts against the 100k FX contract ≈ 0.02 lots < 0.05 → floored
+        assert execution.size_position(s, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.05, abs=1e-9)
+        # huge risk-based size stays untouched: $400k risk / (50 × 100k) = 0.08 lots
+        s2 = clean_settings(capital=20_000_000.0, risk_per_trade_pct=2.0,
+                            min_lot=0.01, min_lot_gold=0.05)
+        assert execution.size_position(s2, 2400.0, 2350.0, asset="XAUUSD") == pytest.approx(0.08, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------

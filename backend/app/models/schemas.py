@@ -317,6 +317,21 @@ def effective_min_confidence(settings: "AppSettings", asset: str) -> float:
     return base if gold is None else float(gold)
 
 
+def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
+    """Per-asset minimum lot floor.
+
+    Gold (XAUUSD) uses its own Min Lot (gold) when the user set one; every
+    other asset (and gold without an override) uses the base min_lot. Used
+    by position sizing (execution.size_position) so the floor matches the
+    asset actually being ordered.
+    """
+    base = float(getattr(settings, "min_lot", 0.01) or 0.01)
+    if str(asset or "").upper() != GOLD_ASSET:
+        return base
+    gold = getattr(settings, "min_lot_gold", None)
+    return base if gold is None else float(gold)
+
+
 class FrequencyEngine:
     """Guards against overtrading — evaluates every order against profile limits."""
 
@@ -1220,6 +1235,10 @@ class AppSettings(BaseModel):
     # risk_to_lot result is raised to this value so tiny accounts still trade
     # a visible size — user-configurable (e.g. 0.02) from the Settings page.
     min_lot: float = 0.01
+    # Per-asset override for gold (XAUUSD) — applied to position sizing
+    # (execution.size_position). Falls back to min_lot when unset (None) so
+    # old settings rows keep working.
+    min_lot_gold: Optional[float] = None
 
     max_drawdown_pct: float = 10.0
     kill_daily_loss_pct: float = 2.0

@@ -35,6 +35,7 @@ from app.models.schemas import (
     RiskProfile,
     TradeLimits,
     effective_min_confidence,
+    effective_min_lot,
     risk_to_lot,
 )
 
@@ -387,17 +388,19 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                       pause=pause)
 
 
-def size_position(s: AppSettings, entry: float, stop_loss: Optional[float]) -> float:
+def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
+                  asset: Optional[str] = None) -> float:
     """risk_per_trade_pct of settings.capital → lots (risk_to_lot).
 
-    The result is floored at s.min_lot (Settings page, default 0.01) so tiny
-    accounts still open a visible size — the user can raise it (e.g. 0.02).
+    The result is floored at the effective min_lot (Settings page, default
+    0.01) so tiny accounts still open a visible size — gold (XAUUSD) can use
+    its own Min Lot (gold) override, every other asset uses the base min_lot.
     """
     if not entry or not stop_loss:
         return 0.0
     stop_distance = abs(entry - stop_loss)
     lots = risk_to_lot(s.capital, s.risk_per_trade_pct, stop_distance)
-    return max(lots, float(getattr(s, "min_lot", 0.01) or 0.01))
+    return max(lots, effective_min_lot(s, asset))
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +441,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             source=source, reason="; ".join(report.rejects[:2]) or "gate blocked")
         return report
 
-    lots = size_position(s, entry, stop_loss)
+    lots = size_position(s, entry, stop_loss, asset=asset)
     if lots <= 0:
         report.allowed = False
         report.rejects.append("Position sizing returned 0 lots (bad entry/SL)")

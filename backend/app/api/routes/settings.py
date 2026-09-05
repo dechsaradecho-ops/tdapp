@@ -65,7 +65,7 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     # Optional per-asset overrides: an explicit null CLEARS the override so the
     # engine falls back to the base field (the Settings page "ล้าง" button).
     # Absent keys keep the stored value (merge semantics).
-    for opt in ("min_confidence_gold",):
+    for opt in ("min_confidence_gold", "min_lot_gold"):
         if opt in (payload or {}) and (payload or {})[opt] is None:
             patch[opt] = None
     # model_validate (NOT model_copy) so client values are coerced to field types —

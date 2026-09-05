@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   max_open_positions: 4,
   risk_per_trade_pct: 1.0,
   min_lot: 0.01,
+  min_lot_gold: null,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
   kill_weekly_loss_pct: 5,
@@ -324,6 +325,29 @@ export default function SettingsPage() {
               <span className="block text-xs text-slate-500 -mt-2">
                 ขนาด lot ต่ำสุดของทุกออเดอร์ — ระบบคำนวณจาก Risk ต่อไม้ก่อน แล้วปัดขึ้นเป็นค่านี้ (เช่น 0.02)
               </span>
+              <label className="block text-sm">
+                ขนาด Lot ขั้นต่ำ (gold) (min_lot_gold)
+                <div className="flex items-center gap-2 mt-1">
+                  <input type="number"
+                    value={cfg.min_lot_gold ?? ""}
+                    placeholder={`ใช้ค่าเดิม ${cfg.min_lot}`}
+                    step={0.01}
+                    onChange={(e) =>
+                      set("min_lot_gold",
+                        e.target.value === "" ? null : Number(e.target.value))}
+                    className="w-full bg-surface border border-slate-700 rounded px-3 py-2" />
+                  {cfg.min_lot_gold != null && (
+                    <button type="button" onClick={() => set("min_lot_gold", null)}
+                      title="ล้างค่า — ใช้ขนาด Lot ขั้นต่ำปกติ"
+                      className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded px-2 py-2">
+                      ล้าง
+                    </button>
+                  )}
+                </div>
+                <span className="block text-xs text-slate-500 mt-1">
+                  เฉพาะ XAUUSD — เว้นว่างเพื่อใช้ขนาด Lot ขั้นต่ำปกติ
+                </span>
+              </label>
             </div>
 
             {/* --- Kill switch / drawdown --- */}

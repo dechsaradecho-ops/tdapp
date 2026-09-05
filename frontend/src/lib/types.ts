@@ -399,6 +399,8 @@ export interface AppSettings {
   risk_per_trade_pct: number;
   /** Minimum lot size for opened orders (floor of risk_to_lot sizing) */
   min_lot: number;
+  /** Gold (XAUUSD) override — null/undefined = use min_lot */
+  min_lot_gold: number | null;
   max_drawdown_pct: number;
   kill_daily_loss_pct: number;
   kill_weekly_loss_pct: number;

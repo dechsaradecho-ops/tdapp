@@ -24,6 +24,7 @@ from app.models.schemas import (
     RiskProfile,
     TradeLimits,
     effective_min_confidence,
+    effective_min_lot,
 )
 from tests.test_workers import FakeDatabase
 
@@ -161,6 +162,30 @@ def test_effective_min_confidence_gold_falls_back_to_base():
     assert effective_min_confidence(AppSettings(), "XAUUSD") == 70.0
 
 
+# ---------------------------------------------------------------------------
+# 2c) Per-asset Min Lot (gold)
+# ---------------------------------------------------------------------------
+def test_effective_min_lot_gold_uses_override():
+    s = AppSettings(min_lot=0.01, min_lot_gold=0.05)
+    assert effective_min_lot(s, "XAUUSD") == 0.05
+    assert effective_min_lot(s, "xauusd") == 0.05   # case-insensitive
+    # other assets keep the base floor
+    assert effective_min_lot(s, "EURUSD") == 0.01
+    assert effective_min_lot(s, "GBPUSD") == 0.01
+    assert effective_min_lot(s, "AUDUSD") == 0.01
+    assert effective_min_lot(s, "USDJPY") == 0.01
+
+
+def test_effective_min_lot_gold_falls_back_to_base():
+    # No override (None) → gold behaves exactly like before the feature
+    s = AppSettings(min_lot=0.02, min_lot_gold=None)
+    assert effective_min_lot(s, "XAUUSD") == 0.02
+    # Default settings (no gold field set) → base floor everywhere
+    assert effective_min_lot(AppSettings(), "XAUUSD") == 0.01
+    # missing asset → base floor
+    assert effective_min_lot(AppSettings(min_lot=0.03), "") == 0.03
+
+
 def test_kill_switch_threshold_overrides():
     loose = KillSwitchEngine(daily_loss_limit=10.0, weekly_loss_limit=20.0,
                              monthly_loss_limit=30.0, drawdown_limit=40.0)
@@ -242,6 +267,42 @@ async def test_put_settings_persists_gold_confidence():
     assert db._client.row["min_confidence_gold"] == 85
     # base threshold untouched
     assert body["settings"]["min_confidence"] == 70
+
+
+@pytest.mark.asyncio
+async def test_put_settings_persists_min_lot_gold():
+    """min_lot_gold (ขนาด Lot ขั้นต่ำ gold) round-trips through the settings API."""
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"min_lot_gold": 0.05})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["min_lot_gold"] == 0.05
+    assert db._client.row["min_lot_gold"] == 0.05
+    # base floor untouched
+    assert body["settings"]["min_lot"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_put_settings_min_lot_gold_none_clears_override():
+    """Sending null clears the gold lot override → falls back to base min_lot."""
+    db = SettingsDatabase(AppSettings(min_lot_gold=0.05).model_dump(mode="json"))
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"min_lot_gold": None})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["settings"]["min_lot_gold"] is None
+    assert effective_min_lot(AppSettings(**body["settings"]), "XAUUSD") == 0.01
+
+
+@pytest.mark.asyncio
+async def test_get_settings_returns_min_lot_gold_from_row():
+    row = AppSettings(min_lot=0.01, min_lot_gold=0.1).model_dump(mode="json")
+    set_state(SettingsDatabase(row))
+    res = await call("GET", "/api/settings")
+    assert res.status_code == 200
+    assert res.json()["min_lot_gold"] == 0.1
 
 
 @pytest.mark.asyncio
