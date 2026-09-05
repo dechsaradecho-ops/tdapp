@@ -128,8 +128,9 @@ def summary(db: Any) -> dict:
     try:
         if db is None or not getattr(db, "available", False):
             return out
-        rows = db.select(TABLE, filters={}, order="created_at", desc=True,
-                         limit=1000)
+        # paging read — a single select(limit=1000) silently truncates once
+        # the table grows past 1000 rows and the cards undercount
+        rows = db.select_paged(TABLE, filters={}, order="created_at", desc=True)
         cutoff = (datetime.now(timezone.utc)
                   - timedelta(days=SIGNAL_LOG_TTL_DAYS)).isoformat()
         rows = [r for r in rows

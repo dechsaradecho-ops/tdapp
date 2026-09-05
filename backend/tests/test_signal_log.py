@@ -197,6 +197,18 @@ class TestSummary:
         s = signal_log.summary(FakeDatabase())
         assert s["total"] == 0 and s["opened"] == 0
 
+    def test_summary_counts_past_1000_rows(self):
+        """Regression: one select(limit=1000) truncated the count — paging
+        must keep counting rows beyond the first 1000."""
+        events = ["created", "order_opened", "order_blocked",
+                  "rejected", "expired", "closed"]
+        db = FakeDatabase(rows={"signal_logs": [
+            _row(0.1, event=events[i % len(events)])
+            for i in range(1200)]})
+        s = signal_log.summary(db)
+        assert s["total"] == 1200
+        assert s["opened"] == 200 and s["blocked"] == 200
+
 
 # ---------------------------------------------------------------------------
 # GET /api/system/signal-logs

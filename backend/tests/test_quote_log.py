@@ -113,6 +113,16 @@ class TestSummary:
         s = quote_log.summary(FakeDatabase())
         assert s["total"] == 0
 
+    def test_summary_counts_past_1000_rows(self):
+        """Regression: one select(limit=1000) truncated the count — paging
+        must keep counting rows beyond the first 1000."""
+        db = FakeDatabase(rows={"quote_api_logs": [
+            _row(0.1, status="success" if i % 10 else "error")
+            for i in range(1250)]})
+        s = quote_log.summary(db)
+        assert s["total"] == 1250
+        assert s["success"] == 1125 and s["error"] == 125
+
 
 # ---------------------------------------------------------------------------
 # log_call — never raises, skips when DB down

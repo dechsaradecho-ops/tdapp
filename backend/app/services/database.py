@@ -64,18 +64,46 @@ class Database:
             return None, str(exc)
 
     def select(self, table: str, filters: Optional[dict] = None,
-               order: str = "created_at", desc: bool = True, limit: int = 50) -> list[dict]:
+               order: str = "created_at", desc: bool = True, limit: int = 50,
+               offset: int = 0) -> list[dict]:
         if not self._client:
             return []
         try:
             q = self._client.table(table).select("*")
             for col, val in (filters or {}).items():
                 q = q.eq(col, val)
-            q = q.order(order, desc=desc).limit(limit)
+            q = q.order(order, desc=desc).limit(limit).offset(offset)
             return list(q.execute().data or [])
         except Exception as exc:
             log.error("select %s failed: %s", table, exc)
             return []
+
+    def select_paged(self, table: str, filters: Optional[dict] = None,
+                     order: str = "created_at", desc: bool = True,
+                     page_size: int = 1000,
+                     max_rows: int = 20000) -> list[dict]:
+        """Read ALL matching rows by paging through them (offset pagination).
+
+        WHY: PostgREST caps a single request at 1000 rows, so a plain
+        select(limit=1000) silently truncates — summary cards then undercount
+        once a table grows past 1000 rows. This walks pages of `page_size`
+        until a short page arrives (or max_rows safety cap is hit).
+
+        FakeDatabase in tests ignores offset and returns everything at once,
+        which still terminates correctly (first page shorter than page_size).
+        """
+        out: list[dict] = []
+        offset = 0
+        while offset < max_rows:
+            page = self.select(table, filters=filters, order=order,
+                               desc=desc, limit=page_size, offset=offset)
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return out
 
     def update(self, table: str, row_id: str, changes: dict[str, Any]) -> bool:
         if not self._client:

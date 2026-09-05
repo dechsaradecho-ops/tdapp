@@ -42,11 +42,21 @@ class FakeDatabase:
         return row
 
     def select(self, table: str, filters: dict | None = None,
-               order: str = "created_at", desc: bool = True, limit: int = 50) -> list[dict]:
+               order: str = "created_at", desc: bool = True, limit: int = 50,
+               offset: int = 0) -> list[dict]:
         rows = list(self.rows.get(table, []))
         for col, val in (filters or {}).items():
             rows = [r for r in rows if r.get(col) == val]
         return rows[:limit]
+
+    def select_paged(self, table: str, filters: dict | None = None,
+                     order: str = "created_at", desc: bool = True,
+                     page_size: int = 1000, max_rows: int = 20000) -> list[dict]:
+        """Same contract as Database.select_paged — in-memory: return all."""
+        rows = list(self.rows.get(table, []))
+        for col, val in (filters or {}).items():
+            rows = [r for r in rows if r.get(col) == val]
+        return rows
 
     def update(self, table: str, row_id: str, changes: dict) -> bool:
         for r in self.rows.get(table, []):

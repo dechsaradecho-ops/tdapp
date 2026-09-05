@@ -150,7 +150,9 @@ def summary(db: Any) -> dict[str, Any]:
             return out
         cutoff = (datetime.now(timezone.utc)
                   - timedelta(days=QUOTE_LOG_TTL_DAYS))
-        rows = db.select(TABLE, order="created_at", desc=True, limit=1000)
+        # paging read — a single select(limit=1000) silently truncates once
+        # the table grows past 1000 rows and the cards undercount
+        rows = db.select_paged(TABLE, order="created_at", desc=True)
         for r in rows:
             created = str(r.get("created_at") or "")
             try:

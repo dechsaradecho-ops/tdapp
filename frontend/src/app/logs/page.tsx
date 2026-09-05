@@ -41,16 +41,20 @@ export default function LogsPage() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<QuoteTestResult | null>(null);
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.quoteLogs(200);
+      // API caps limit at 500 — มากสุดที่ดึงได้ต่อครั้ง
+      const res = await api.quoteLogs(500);
       setLogs(res.logs ?? []);
       setSummary(res.summary ?? null);
       setTtlDays(res.ttl_days ?? 7);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+      setPage(1);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -82,6 +86,9 @@ export default function LogsPage() {
   };
 
   const shown = filter === "all" ? logs : logs.filter((l) => l.category === filter);
+  const totalPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = shown.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <div className="space-y-4">
@@ -169,7 +176,7 @@ export default function LogsPage() {
           {(["all", "forex", "gold"] as const).map((f) => (
             <button
               key={f}
-              onClick={() => setFilter(f)}
+              onClick={() => { setFilter(f); setPage(1); }}
               className={`px-3 py-1 rounded ${filter === f ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
             >
               {f === "all" ? "ทั้งหมด" : f === "forex" ? "Forex" : "Gold"}
@@ -198,7 +205,7 @@ export default function LogsPage() {
                 ยังไม่มี log — กด &quot;⚡ ทดสอบดึงราคา&quot; เพื่อสร้างรายการแรก
               </td></tr>
             )}
-            {shown.map((l) => (
+            {pageRows.map((l) => (
               <tr key={l.id} className="border-b border-slate-800/50 hover:bg-white/[0.04]">
                 <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
                   {new Date(l.created_at).toLocaleString("th-TH", { hour12: false })}
@@ -224,9 +231,27 @@ export default function LogsPage() {
           </tbody>
         </table>
         {logs.length > 0 && (
-          <p className="text-xs text-slate-500 mt-2">
-            แสดง {shown.length} รายการล่าสุด (จาก {logs.length}) · เก็บสูงสุด {ttlDays} วัน
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {safePage}/{totalPages} · แสดง {pageRows.length} จาก {shown.length} รายการ
+              {filter !== "all" && ` (กรองจาก ${logs.length})`} · เก็บสูงสุด {ttlDays} วัน
+            </p>
+            {totalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={safePage <= 1}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{safePage} / {totalPages}</span>
+                <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={safePage >= totalPages}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </section>
     </div>

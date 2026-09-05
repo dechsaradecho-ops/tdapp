@@ -465,8 +465,8 @@ async def reset_stats(payload: StatsResetRequest,
             ok=False, deleted=0,
             message="ต้องยืนยัน (confirm=true) ก่อนรีเซ็ตสถิติ")
 
-    closed_rows = db.select("paper_trades", filters={"status": "closed"},
-                            limit=1000)
+    closed_rows = db.select_paged("paper_trades",
+                                  filters={"status": "closed"})
     if not closed_rows:
         return StatsResetResult(
             ok=True, deleted=0,
@@ -717,7 +717,7 @@ async def signal_report(request: Request, days: int = 30) -> dict:
     except Exception:
         logs = []
     try:
-        trades = db.select("paper_trades", limit=1000)
+        trades = db.select_paged("paper_trades")
     except Exception:
         trades = []
     by_ticket = {str(t.get("ticket") or ""): t for t in trades if t.get("ticket")}
