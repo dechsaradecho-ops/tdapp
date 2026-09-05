@@ -8,13 +8,21 @@ import { PinStatus } from "@/lib/types";
 /** Settings panel: first-time PIN setup + change PIN (requires session). */
 export default function PinManager() {
   const [status, setStatus] = useState<PinStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [statusErr, setStatusErr] = useState(false);
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
   const [msg, setMsg] = useState("");
   const [ok, setOk] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = () => api.authStatus().then(setStatus).catch(() => setStatus(null));
+  const load = () => {
+    setStatusLoading(true);
+    return api.authStatus()
+      .then((s) => { setStatus(s); setStatusErr(false); })
+      .catch(() => { setStatus(null); setStatusErr(true); })
+      .finally(() => setStatusLoading(false));
+  };
   useEffect(() => { load(); }, []);
 
   const submit = async () => {
@@ -54,8 +62,12 @@ export default function PinManager() {
   return (
     <div className="border border-slate-800 rounded p-3 space-y-2">
       <p className="text-sm font-semibold">🔐 รหัส PIN (ใช้ปลดล็อกหน้าเว็บ)</p>
-      {status?.pin_set ? (
+      {statusLoading ? (
+        <p className="text-xs text-slate-500 animate-pulse">กำลังเช็คสถานะ PIN...</p>
+      ) : status?.pin_set ? (
         <p className="text-xs text-profit">ตั้ง PIN ไว้แล้ว — ทุกครั้งที่เปิดเว็บจะขอ PIN ก่อน (ผิด {status.max_failed} ครั้งติด → ล็อก {status.lock_minutes} นาที)</p>
+      ) : statusErr ? (
+        <p className="text-xs text-amber-400">เช็คสถานะ PIN ไม่สำเร็จ (API อาจกำลังเริ่มต้น) — รีเฟรชหน้าเพื่อลองอีกครั้ง</p>
       ) : (
         <p className="text-xs text-amber-400">ยังไม่ได้ตั้ง PIN — หน้าเว็บเปิดให้ใช้โดยไม่ต้องยืนยัน แนะนำให้ตั้งเพื่อความปลอดภัย</p>
       )}

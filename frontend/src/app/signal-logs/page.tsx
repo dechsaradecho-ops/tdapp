@@ -19,11 +19,11 @@ function eventMeta(ev: string) {
   return EVENT_META[ev] ?? { label: ev, cls: "bg-slate-500/20 text-slate-300" };
 }
 
-function StatCard({ label, value, cls = "" }: { label: string; value: number; cls?: string }) {
+function StatCard({ label, value, cls = "" }: { label: string; value: number | null; cls?: string }) {
   return (
     <div className="panel">
       <p className="text-xs text-slate-500">{label}</p>
-      <p className={`text-2xl font-bold ${cls}`}>{value.toLocaleString()}</p>
+      <p className={`text-2xl font-bold ${cls}`}>{value == null ? "—" : value.toLocaleString()}</p>
     </div>
   );
 }
@@ -80,11 +80,11 @@ export default function SignalLogsPage() {
 
       {/* ---------- Summary cards ---------- */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <StatCard label="เหตุการณ์ทั้งหมด (7 วัน)" value={summary?.total ?? 0} />
-        <StatCard label="✅ เปิดออเดอร์" value={summary?.opened ?? 0} cls="text-emerald-400" />
-        <StatCard label="⛔ ไม่เปิดออเดอร์" value={summary?.blocked ?? 0} cls="text-amber-400" />
-        <StatCard label="⌛ หมดอายุ" value={summary?.expired ?? 0} />
-        <StatCard label="🔒 ปิดไม้" value={summary?.closed ?? 0} cls="text-violet-300" />
+        <StatCard label="เหตุการณ์ทั้งหมด (7 วัน)" value={summary?.total ?? null} />
+        <StatCard label="✅ เปิดออเดอร์" value={summary?.opened ?? null} cls="text-emerald-400" />
+        <StatCard label="⛔ ไม่เปิดออเดอร์" value={summary?.blocked ?? null} cls="text-amber-400" />
+        <StatCard label="⌛ หมดอายุ" value={summary?.expired ?? null} />
+        <StatCard label="🔒 ปิดไม้" value={summary?.closed ?? null} cls="text-violet-300" />
       </section>
 
       {/* ---------- Asset breakdown ---------- */}
@@ -140,9 +140,16 @@ export default function SignalLogsPage() {
             </tr>
           </thead>
           <tbody>
-            {shown.length === 0 && (
+            {loading && logs.length === 0 && (
+              <tr><td colSpan={14} className="py-6 text-center text-slate-500 animate-pulse">
+                ⏳ กำลังโหลดข้อมูล... (API บน Render อาจใช้เวลาเริ่มต้นสักครู่)
+              </td></tr>
+            )}
+            {!loading && shown.length === 0 && (
               <tr><td colSpan={14} className="py-6 text-center text-slate-500">
-                ยังไม่มีบันทึก — สัญญาณใหม่จะถูกบันทึกอัตโนมัติเมื่อ scanner เจอโอกาส
+                {filter === "all"
+                  ? "ยังไม่มีบันทึก — สัญญาณใหม่จะถูกบันทึกอัตโนมัติเมื่อ scanner เจอโอกาส"
+                  : `ไม่มีรายการ "${EVENT_META[filter]?.label ?? filter}" ในช่วง 7 วันที่เก็บข้อมูล`}
               </td></tr>
             )}
             {shown.map((l) => {

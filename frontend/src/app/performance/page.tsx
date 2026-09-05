@@ -137,10 +137,12 @@ export default function PerformancePage() {
           text={kill ? (kill.engaged ? "ENGAGED" : "CLEAR") : "—"} />
         <StatusBadge label="Frequency" status={freqBadge}
           text={freq ? `${freq.trades_today}/${freq.limits?.max_trades_daily ?? "—"}` : "—"} />
-        <StatusBadge label="Win Rate (30d)" status="ok"
-          text={journal ? `${journal.win_rate_pct}%` : "—"} />
-        <StatusBadge label="Profit Factor" status="ok"
-          text={journal ? `${journal.profit_factor}` : "—"} />
+        <StatusBadge label="Win Rate (30d)"
+          status={journal && journal.total_trades >= 30 ? "ok" : "warn"}
+          text={journal ? `${journal.win_rate_pct}% (n=${journal.total_trades})` : "—"} />
+        <StatusBadge label="Profit Factor"
+          status={journal && journal.total_trades >= 30 ? "ok" : "warn"}
+          text={journal ? `${journal.profit_factor} (n=${journal.total_trades})` : "—"} />
         <StatusBadge label="Live Readiness" status={paper && paper.live_readiness_score >= 70 ? "ok" : "warn"}
           text={paper ? `${paper.live_readiness_score}/100` : "—"} />
       </div>

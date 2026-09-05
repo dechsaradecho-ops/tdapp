@@ -292,6 +292,11 @@ export default function MonitorPage() {
           </div>
         </div>
         {err && <p className="text-loss text-sm mt-2">โหลดไม่สำเร็จ: {err}</p>}
+        {!snap && !err && (
+          <p className="text-slate-400 text-sm mt-3 animate-pulse">
+            ⏳ กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ
+          </p>
+        )}
         {closeError && (
           <p className="text-loss text-sm mt-2 bg-loss/10 border border-loss/40 rounded px-3 py-2">
             ปิดไม้ไม่สำเร็จ: {closeError}

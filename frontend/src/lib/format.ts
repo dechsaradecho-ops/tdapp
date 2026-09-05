@@ -1,5 +1,9 @@
-export const fmtMoney = (v: number, currency = "THB") =>
-  new Intl.NumberFormat("th-TH", { style: "currency", currency, maximumFractionDigits: 2 }).format(v);
+/** เงินทั้งระบบเป็น USD — ใช้ en-US ตรงๆ กัน hydration mismatch จาก ICU ต่างกันระหว่าง Node/เบราว์เซอร์ */
+export const fmtMoney = (v: number) =>
+  `${v < 0 ? "-" : ""}$${new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(v))}`;
 
 export const fmtPct = (v: number, digits = 1) => `${v >= 0 ? "" : ""}${v.toFixed(digits)}%`;
 

@@ -193,7 +193,10 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
             setPin(v);
             if (v.length === 6) submitPin(v);
           }}
-          onKeyDown={(e) => e.key === "Escape" && erase()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && pin.length === 6) submitPin(pin);
+            else if (e.key === "Escape") erase();
+          }}
           className="mt-4 w-full text-center text-3xl tracking-[0.6em] bg-surface border border-slate-700 rounded py-3 focus:border-accent outline-none"
           placeholder="••••••"
         />

@@ -10,9 +10,18 @@ const BAND_LABEL: Record<string, string> = {
   low: "Low",
 };
 
-export default function OpportunityScore({ opportunities }: { opportunities: AssetOpportunity[] }) {
+export default function OpportunityScore({ opportunities, loading, error }: {
+  opportunities: AssetOpportunity[];
+  loading?: boolean;
+  error?: boolean;
+}) {
+  if (loading) {
+    return <p className="text-slate-500 text-sm animate-pulse">⏳ กำลังโหลดข้อมูลตลาด... (Render cold start อาจใช้เวลาสักครู่)</p>;
+  }
   if (!opportunities.length) {
-    return <p className="text-slate-500 text-sm">ยังไม่มีข้อมูล — รอ Market Scanner ทำงานก่อน</p>;
+    return error
+      ? <p className="text-amber-400 text-sm">โหลดข้อมูลไม่สำเร็จ — รีเฟรชหน้าเพื่อลองอีกครั้ง</p>
+      : <p className="text-slate-500 text-sm">ยังไม่มีข้อมูล — รอ Market Scanner ทำงานก่อน</p>;
   }
   return (
     <div className="space-y-3">

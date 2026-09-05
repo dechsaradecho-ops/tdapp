@@ -11,10 +11,14 @@ import { MarketSummary } from "@/lib/types";
 
 export default function DashboardPage() {
   const [summary, setSummary] = useState<MarketSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryErr, setSummaryErr] = useState(false);
   const { capital, equity, pnl } = usePortfolio();
 
   useEffect(() => {
-    api.marketSummary().then(setSummary).catch(() => setSummary(null));
+    api.marketSummary()
+      .then((s) => { setSummary(s); setSummaryLoading(false); })
+      .catch(() => { setSummaryErr(true); setSummaryLoading(false); });
   }, []);
 
   return (
@@ -35,7 +39,11 @@ export default function DashboardPage() {
         </div>
         <div className="panel">
           <h2 className="panel-title">Opportunity Score</h2>
-          <OpportunityScore opportunities={summary?.opportunities ?? []} />
+          <OpportunityScore
+            opportunities={summary?.opportunities ?? []}
+            loading={summaryLoading}
+            error={summaryErr}
+          />
         </div>
       </section>
     </div>
