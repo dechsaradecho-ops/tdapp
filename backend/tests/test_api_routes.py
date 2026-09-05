@@ -796,12 +796,17 @@ import base64
 import hashlib
 import hmac
 import json as _json
+import sys
+import types
 
 from app.core.config import get_settings
 
 
 class RecordingLine:
     """FakeLine that records replies so tests can assert on them."""
+
+    enabled = True
+    token = "test-token"
 
     def __init__(self):
         self.replies: list[tuple[str, str]] = []
@@ -910,6 +915,55 @@ class TestLineWebhook:
                            {"text": "   "})).json()
         assert body["ok"] is False
         assert body["reply"] is None
+
+    @pytest.mark.asyncio
+    async def test_wrong_bot_id_env_still_matches_mention(self, monkeypatch):
+        """Regression: a stale/wrong LINE_BOT_USER_ID env must not break
+        @mention matching — the webhook falls back to the real bot id from
+        the LINE API (GET /bot/info)."""
+        from app.api.routes import webhook as wh
+
+        db = FakeDatabase()
+        set_state(db)
+        line = RecordingLine()
+        app.state.line = line
+        s = get_settings()
+        monkeypatch.setattr(s, "line_bot_user_id", "U-wrong-env-id")
+
+        class FakeLineInfo:
+            async def get(self, url, headers=None):
+                class R:
+                    status_code = 200
+                    def json(self):
+                        return {"userId": "U-real-bot-id",
+                                "displayName": "AITrade"}
+                return R()
+
+        def fake_client(*a, **kw):
+            class Ctx:
+                async def __aenter__(self):
+                    return FakeLineInfo()
+                async def __aexit__(self, *exc):
+                    return False
+            return Ctx()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=fake_client)
+        monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+        monkeypatch.setattr(wh, "_BOT_ID_CACHE", "", raising=False)
+
+        r = await self._send({"events": [{
+            "type": "message", "replyToken": "rt-9",
+            "source": {"type": "group", "groupId": "C-fix", "userId": "U1"},
+            "message": {"type": "text", "text": "/risk",
+                        "mention": {"mentionees": [
+                            {"type": "user", "userId": "U-real-bot-id"}]}},
+        }]})
+        assert r.status_code == 200
+        assert any("Risk" in m for _, m in line.replies)
+        assert wh._BOT_ID_CACHE == "U-real-bot-id"
+        # mismatch between env and API value is logged as evidence
+        events = (await call("GET", "/api/line/events")).json()["events"]
+        assert any(e["kind"] == "bot_id_mismatch" for e in events)
 
     @pytest.mark.asyncio
     async def test_command_gets_canned_reply(self):

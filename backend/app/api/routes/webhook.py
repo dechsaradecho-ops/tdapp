@@ -58,6 +58,43 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+_BOT_ID_CACHE = ""
+
+
+async def _resolve_bot_id(line: LineClient) -> str:
+    """The bot's own userId for @mention matching.
+
+    LINE_BOT_USER_ID env is easy to get wrong (stale channel, typo) — when it
+    is empty or doesn't match reality, mentions silently never match. So fall
+    back to the authoritative value from the LINE API (GET /bot/info returns
+    the bot's own userId) and cache it for the process lifetime.
+    """
+    global _BOT_ID_CACHE
+    if _BOT_ID_CACHE:
+        return _BOT_ID_CACHE
+    env_id = get_settings().line_bot_user_id
+    if not getattr(line, "enabled", False):
+        return env_id
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.line.me/v2/bot/info",
+                headers={"Authorization": f"Bearer {line.token}"})
+        if resp.status_code == 200:
+            api_id = resp.json().get("userId", "")
+            if api_id:
+                if env_id and env_id != api_id:
+                    _log_event("bot_id_mismatch", env=env_id[:8], api=api_id[:8])
+                    log.warning("LINE_BOT_USER_ID env (%s…) != real bot id (%s…) "
+                                "— using the API value", env_id[:8], api_id[:8])
+                _BOT_ID_CACHE = api_id
+                return api_id
+    except Exception as exc:
+        log.debug("bot/info probe failed: %s", exc)
+    return env_id
+
+
 @router.post("/webhook")
 async def line_webhook(
     request: Request,
@@ -78,7 +115,7 @@ async def line_webhook(
     events = (await request.json()).get("events", [])
     line: LineClient = request.app.state.line
     db = request.app.state.db
-    bot_user_id = get_settings().line_bot_user_id
+    bot_user_id = await _resolve_bot_id(line)
     _log_event("received", events=len(events))
 
     for event in events:
