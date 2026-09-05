@@ -57,9 +57,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <header
           className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
           style={{
-            background: "rgba(5, 5, 8, 0.65)",
-            WebkitBackdropFilter: "blur(24px) saturate(160%)",
-            backdropFilter: "blur(24px) saturate(160%)",
+            background: "rgba(5, 5, 8, 0.32)",
+            WebkitBackdropFilter: "blur(6px) saturate(140%)",
+            backdropFilter: "blur(6px) saturate(140%)",
             borderBottomColor: "rgba(255,255,255,0.10)",
           }}
         >

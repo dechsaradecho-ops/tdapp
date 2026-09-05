@@ -345,7 +345,7 @@ export default function MonitorPage() {
                       <button
                         onClick={() => handleClosePosition(p.ticket)}
                         disabled={!p.ticket || closingTicket === p.ticket}
-                        className="bg-loss text-white font-semibold rounded px-3 py-2 text-xs min-h-[40px] disabled:opacity-50 active:brightness-90"
+                        className="bg-loss text-white font-semibold rounded px-2.5 py-1.5 text-xs min-h-[32px] disabled:opacity-50 active:brightness-90"
                       >
                         {closingTicket === p.ticket ? "..." : "ปิด"}
                       </button>

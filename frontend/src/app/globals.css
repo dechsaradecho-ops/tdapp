@@ -30,6 +30,12 @@ body {
   color: #cbd5e1;
 }
 
+/* slate-400 (#94a3b8) ยังหม่นอยู่บนพื้นมืด — ยกเป็น #b6c2d3 สว่างขึ้นอีกขั้น
+   (ครอบคลุมทุกที่ที่ใช้ class text-slate-400 แบบสแตนด์อโลน) */
+.text-slate-400 {
+  color: #b6c2d3;
+}
+
 /* ลบ highlight สีฟ้าตอนแตะบน Android/iOS — ให้ใช้ active: แทน */
 * {
   -webkit-tap-highlight-color: transparent;
@@ -297,6 +303,25 @@ button.bg-loss:hover:not(:disabled) {
 }
 button.bg-profit:hover:not(:disabled) {
   background: rgba(48, 209, 88, 0.42);
+}
+
+/* ข้อความเขียว/แดง (กำไร/ขาดทุน) ในตาราง — ใส่ bg โค้งมนเป็น pill ให้เด่นอ่านง่าย
+   ป้ายสถานะที่มี px-2 py-0.5 + rounded อยู่แล้วจะถูกบีบเป็น pill กลม ๆ พอดีตัว */
+td .text-profit,
+td .text-loss,
+td .text-emerald-400,
+td .text-red-400,
+td.text-profit,
+td.text-loss {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  display: inline-block;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Animations (iOS-like, เบามือ) ---------- */
