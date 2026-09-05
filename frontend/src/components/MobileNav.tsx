@@ -59,9 +59,9 @@ export default function MobileNav() {
         aria-label="เมนูหลัก"
         className="lg-refract fixed bottom-0 inset-x-0 z-40 border-t safe-bottom"
         style={{
-          background: "rgba(10, 10, 14, 0.42)",
-          WebkitBackdropFilter: "blur(6px) saturate(140%)",
-          backdropFilter: "blur(6px) saturate(140%)",
+          background: "rgba(10, 10, 14, 0.28)",
+          WebkitBackdropFilter: "blur(5px) saturate(140%)",
+          backdropFilter: "blur(5px) saturate(140%)",
           borderTopColor: "rgba(255,255,255,0.14)",
         }}
       >
