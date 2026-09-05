@@ -102,6 +102,14 @@ class TestMarketScanner:
             return {a: 101.0 for a in assets}, {}
         monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", fake_spot)
 
+    @pytest.fixture(autouse=True)
+    def _market_open(self, monkeypatch):
+        """Tests run on any weekday — force the market OPEN so the weekend
+        close guard doesn't suppress the emit block (the closed-market
+        behaviour has its own dedicated tests below)."""
+        monkeypatch.setattr(market_scanner, "_market_closed",
+                            lambda now=None: False)
+
     @pytest.mark.asyncio
     async def test_scan_persists_market_analysis_for_all_assets(self, monkeypatch):
         db = FakeDatabase()
@@ -335,20 +343,25 @@ class TestMarketScanner:
         assert [row for table, row in db.inserted if table == "market_analysis"]
 
     def test_market_closed_boundaries(self):
-        """Unit-check the weekend window: Fri 21:00 UTC → Sun 21:00 UTC."""
+        """Unit-check the weekend window: Fri 21:00 UTC → Sun 21:00 UTC.
+
+        Calls the SHARED helper directly — the scanner's _market_closed is
+        monkeypatched to False by the autouse _market_open fixture.
+        """
+        from app.models.schemas import is_market_closed
         from datetime import datetime, timezone
         # Fri 2026-09-04 20:59 UTC → open; 21:00 UTC → closed
-        assert market_scanner._market_closed(
+        assert is_market_closed(
             datetime(2026, 9, 4, 20, 59, tzinfo=timezone.utc)) is False
-        assert market_scanner._market_closed(
+        assert is_market_closed(
             datetime(2026, 9, 4, 21, 0, tzinfo=timezone.utc)) is True
         # Sat any hour → closed
-        assert market_scanner._market_closed(
+        assert is_market_closed(
             datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)) is True
         # Sun 20:59 UTC → closed; 21:00 UTC → open again
-        assert market_scanner._market_closed(
+        assert is_market_closed(
             datetime(2026, 9, 6, 20, 59, tzinfo=timezone.utc)) is True
-        assert market_scanner._market_closed(
+        assert is_market_closed(
             datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc)) is False
 
     @pytest.mark.asyncio

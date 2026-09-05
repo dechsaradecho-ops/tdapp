@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import SignalCard from "@/components/SignalCard";
 import { api } from "@/lib/api";
-import { AppSettings, SignalProposal } from "@/lib/types";
+import { AppSettings, SessionStatus, SignalProposal } from "@/lib/types";
 
 const REFRESH_OPTIONS = [
   { label: "ปิด", value: 0 },
@@ -19,6 +19,7 @@ const LS_KEY = "tdapp_signals_autorefresh";
 export default function SignalsPage() {
   const [signals, setSignals] = useState<SignalProposal[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [session, setSession] = useState<SessionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -36,12 +37,14 @@ export default function SignalsPage() {
     setLoading(true);
     try {
       // settings อาจล้มเหลวได้ (auth/expiry) — หน้ายังแสดง signals ได้ปกติ
-      const [data, st] = await Promise.all([
+      const [data, st, sess] = await Promise.all([
         api.latestSignals(),
         api.getSettings().catch(() => null),
+        api.tradingSession().catch(() => null),
       ]);
       setSignals(data);
       if (st) setSettings(st);
+      if (sess) setSession(sess);
       setError(null);
       setLastUpdated(new Date());
     } catch (e) {
@@ -128,10 +131,23 @@ export default function SignalsPage() {
       </div>
 
       {error && <p className="text-loss text-sm">{error}</p>}
+      {/* ตลาดปิด (สุดสัปดาห์) — สแกนเนอร์หยุดสร้างสัญญาณ ราคาบนการ์ดเก่าคือราคาปิดวันศุกร์ */}
+      {session?.market_closed && (
+        <div className="border border-amber-500/40 bg-amber-500/10 rounded p-3 text-sm text-amber-300">
+          🔒 <b>ตลาดปิดอยู่</b> — ตลาด FX/ทองคำปิดสุดสัปดาห์ (ศุกร์ 21:00 UTC → อาทิตย์ 21:00 UTC)
+          ระบบงดสร้างสัญญาณใหม่จนกว่าตลาดจะเปิด
+          {session.next_open_utc &&
+            ` — เปิดอีกครั้ง ${new Date(session.next_open_utc).toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} (เวลาไทย)`}
+        </div>
+      )}
       {/* สถานะฟีดราคา — ทุกการ์ดแชร์ probe เดียวกันต่อ request */}
       <FeedStatusBanner feed={signals[0]?.feed_status} />
       {!signals.length && !error && !loading && (
-        <p className="text-slate-500 text-sm">ยังไม่มีสัญญาณ — รอ Market Scanner</p>
+        <p className="text-slate-500 text-sm">
+          {session?.market_closed
+            ? "ตลาดปิด — ไม่มีสัญญาณใหม่ในช่วงนี้"
+            : "ยังไม่มีสัญญาณ — รอ Market Scanner"}
+        </p>
       )}
       {/* รอดำเนินการ — action queue ด้านบน (auto = ระบบยิงเอง, semi/manual = รอกด)
           กลุ่มพับ/กางได้ (ค่าเริ่มต้น: กาง) — defaultExpanded กัน hydration mismatch */}

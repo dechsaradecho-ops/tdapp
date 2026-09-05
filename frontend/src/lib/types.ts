@@ -314,6 +314,10 @@ export interface SessionStatus {
   overlapping: boolean;
   volatility_hint: "low" | "medium" | "high";
   current_utc_time: string;
+  /** True during the weekend close (Fri 21:00 UTC → Sun 21:00 UTC). */
+  market_closed?: boolean;
+  /** ISO timestamp of the next reopen (present only when market_closed). */
+  next_open_utc?: string | null;
 }
 
 export interface KillSwitch {

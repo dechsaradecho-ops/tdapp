@@ -202,6 +202,9 @@ class TestSignalsLatestTiers:
         from app.api.routes import signals as signals_route
         from app.engine.strategy_engine import IndicatorSnapshot
         set_state(FakeDatabase())
+        # The closed-market guard sits before the live-quote tier too.
+        monkeypatch.setattr(signals_route, "is_market_closed",
+                            lambda now=None: False)
         snap = IndicatorSnapshot(
             asset="EURUSD", price=1.10, ema_fast=1.105, ema_slow=1.09,
             adx=40.0, supertrend_dir=1, rsi=60.0, macd_hist=1.0,
@@ -219,7 +222,11 @@ class TestSignalsLatestTiers:
     @pytest.mark.asyncio
     async def test_tier3_demo_when_offline(self, monkeypatch):
         from app.api.routes import signals as signals_route
+        from app.models.schemas import is_market_closed
         set_state(FakeDatabase())
+        # The demo fallback is skipped during the weekend close — force open.
+        monkeypatch.setattr(signals_route, "is_market_closed",
+                            lambda now=None: False)
         async def boom(assets):
             raise RuntimeError("offline")
         monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots", boom)

@@ -250,6 +250,8 @@ async def test_scanner_logs_created_event(monkeypatch):
         return strong_snapshot(asset, news_sentiment)
 
     monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+    # Tests may run on a weekend — force the market open so the emit block runs.
+    monkeypatch.setattr(market_scanner, "_market_closed", lambda now=None: False)
     await market_scanner.scan_once(db)
     created = [row for table, row in db.inserted
                if table == "signal_logs" and row.get("event") == "created"]

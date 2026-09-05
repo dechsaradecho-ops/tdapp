@@ -8,7 +8,8 @@ from pydantic import BaseModel
 
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.integrations import quotes
-from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal)
+from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal,
+                                is_market_closed)
 from app.services import execution
 from app.services import signal_log
 from app.services.execution import (
@@ -193,7 +194,12 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     proposals[-1].expires_min_left = round(max(left, 0.0), 1)
         return proposals
 
-    # No stored signals → analyze live quotes right now (demo only as last resort)
+    # No stored signals → analyze live quotes right now (demo only as last
+    # resort). During the weekend close the fallback is SKIPPED: demo/live
+    # cards built from Friday's close would look like fresh advice — the UI
+    # shows the "ตลาดปิด" banner instead (empty list + market_closed flag).
+    if is_market_closed():
+        return proposals
     try:
         snaps = await quotes.fetch_all_snapshots(list(DEMO.keys()))
     except Exception:

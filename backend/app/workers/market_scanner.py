@@ -20,6 +20,7 @@ from app.models.schemas import (
     FrequencyEngine,
     TradeLimits,
     effective_min_confidence,
+    is_market_closed,
 )
 from app.services import signal_log
 from app.services.database import Database
@@ -173,20 +174,10 @@ async def scan_once(db: Database) -> list[dict]:
 def _market_closed(now: datetime | None = None) -> bool:
     """True when the FX/gold market is closed (weekend).
 
-    FX & gold trade continuously from Sunday 21:00 UTC to Friday 21:00 UTC
-    (Friday close rolls into Saturday 00:00 UTC). Signals emitted during the
-    weekend would carry Friday's close price all weekend — the "ราคาเก่า"
-    complaint — so the scanner simply stops generating until reopen.
+    Thin wrapper over the shared helper in schemas (same rules power the
+    /api/trading/session endpoint and the UI's "ตลาดปิด" banner).
     """
-    now = now or datetime.now(timezone.utc)
-    wd, h = now.weekday(), now.hour
-    if wd == 5:                      # Saturday
-        return True
-    if wd == 6 and h < 21:           # Sunday before 21:00 UTC reopen
-        return True
-    if wd == 4 and h >= 21:          # Friday after 21:00 UTC close
-        return True
-    return False
+    return is_market_closed(now)
 
 
 async def _snapshot_for(asset: str, news_sentiment: float) -> IndicatorSnapshot:

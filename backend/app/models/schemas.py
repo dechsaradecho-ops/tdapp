@@ -1,7 +1,7 @@
 """Pydantic schemas for API requests/responses (mirrors DB design)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from itertools import combinations
 from typing import Literal, Optional
@@ -646,11 +646,49 @@ class EconomicCalendarEngine:
 
 
 # ---------- Market Session Engine ----------
+def is_market_closed(now: Optional[datetime] = None) -> bool:
+    """True when the FX/gold market is closed (weekend).
+
+    FX & gold trade continuously from Sunday 21:00 UTC to Friday 21:00 UTC
+    (Friday close rolls into Saturday 00:00 UTC). Shared by the scanner
+    (stops generating signals) and the API (so the UI can show a
+    "ตลาดปิด" banner instead of stale/demo cards).
+    """
+    now = now or datetime.now(timezone.utc)
+    wd, h = now.weekday(), now.hour
+    if wd == 5:                      # Saturday
+        return True
+    if wd == 6 and h < 21:           # Sunday before 21:00 UTC reopen
+        return True
+    if wd == 4 and h >= 21:          # Friday after 21:00 UTC close
+        return True
+    return False
+
+
+def next_market_open(now: Optional[datetime] = None) -> datetime:
+    """Next reopen time (Sunday 21:00 UTC) when the market is closed."""
+    now = now or datetime.now(timezone.utc)
+    if not is_market_closed(now):
+        return now
+    # Walk forward to the next Sunday 21:00 UTC.
+    candidate = now.replace(hour=21, minute=0, second=0, microsecond=0)
+    if now.weekday() == 4 and now.hour >= 21:      # Friday after close
+        candidate += timedelta(days=3)             # → Monday 21:00, then walk
+    while not (candidate.weekday() == 6 and candidate.hour >= 21):
+        candidate += timedelta(days=1)
+    return candidate
+
+
 class MarketSessionStatus(BaseModel):
     active_sessions: list[str]
     overlapping: bool
     volatility_hint: Literal["low", "medium", "high"]
     current_utc_time: str
+    # True during the weekend close (Fri 21:00 UTC → Sun 21:00 UTC) — the UI
+    # shows a "ตลาดปิด" banner and the scanner stops emitting signals.
+    market_closed: bool = False
+    # ISO timestamp of the next reopen (present only when market_closed).
+    next_open_utc: Optional[datetime] = None
 
 
 SESSIONS = [
@@ -680,9 +718,12 @@ class SessionEngine:
             hint = "medium"
         else:
             hint = "low"
+        closed = is_market_closed(now)
         return MarketSessionStatus(
             active_sessions=active, overlapping=overlap, volatility_hint=hint,
-            current_utc_time=now.strftime("%H:%M UTC"))
+            current_utc_time=now.strftime("%H:%M UTC"),
+            market_closed=closed,
+            next_open_utc=next_market_open(now) if closed else None)
 
 
 # ---------- Kill Switch Engine ----------
