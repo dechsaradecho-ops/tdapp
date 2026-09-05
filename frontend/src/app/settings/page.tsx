@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import BackgroundPicker from "@/components/BackgroundPicker";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import PinManager from "@/components/PinManager";
 import { api } from "@/lib/api";
@@ -288,6 +289,15 @@ export default function SettingsPage() {
         ) : (
           <p className="text-slate-500 text-sm">กำลังโหลด...</p>
         )}
+      </div>
+
+      {/* ---------------- Background image picker ---------------- */}
+      <div className="panel md:col-span-2">
+        <h2 className="panel-title">ภาพพื้นหลัง (Background)</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          อัปโหลดรูปจากเครื่องเพื่อใช้เป็นพื้นหลังของแอปทุกหน้า — เก็บในเครื่องนี้ (localStorage) ไม่เกี่ยวกับบัญชี
+        </p>
+        <BackgroundPicker />
       </div>
 
       {/* ---------------- Trading Configuration ---------------- */}

@@ -136,7 +136,7 @@ export default function SignalLogsPage() {
               <th className="py-2 pr-3">PnL</th>
               <th className="py-2 pr-3">Ticket</th>
               <th className="py-2 pr-3">ที่มา</th>
-              <th className="py-2">เหตุผล</th>
+              <th className="py-2 max-w-[280px]">เหตุผล</th>
             </tr>
           </thead>
           <tbody>
@@ -181,7 +181,11 @@ export default function SignalLogsPage() {
                   </td>
                   <td className="py-2 pr-3 font-mono text-slate-500">{l.ticket || "—"}</td>
                   <td className="py-2 pr-3 text-slate-400">{l.source || "—"}</td>
-                  <td className="py-2 max-w-[280px] text-slate-300" title={l.reason}>{l.reason || "—"}</td>
+                  <td className="py-2 max-w-[280px] text-slate-300" title={l.reason}>
+                    <span className="block whitespace-nowrap overflow-hidden text-ellipsis">
+                      {l.reason || "—"}
+                    </span>
+                  </td>
                 </tr>
               );
             })}

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import AuthGate from "@/components/AuthGate";
+import BackgroundLayer from "@/components/BackgroundLayer";
 import CapitalSync from "@/components/CapitalSync";
 import ChatWidget from "@/components/ChatWidget";
 import MobileNav from "@/components/MobileNav";
@@ -36,6 +37,7 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+
   return (
     <html lang="th">
       <body>
@@ -51,6 +53,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </filter>
           </defs>
         </svg>
+        <BackgroundLayer />
         <header
           className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
           style={{
