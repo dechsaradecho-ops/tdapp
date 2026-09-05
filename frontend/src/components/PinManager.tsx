@@ -60,7 +60,7 @@ export default function PinManager() {
   };
 
   return (
-    <div className="border border-slate-800 rounded p-3 space-y-2">
+    <div className="border border-white/10 bg-white/[0.03] rounded-xl p-3 space-y-2">
       <p className="text-sm font-semibold">🔐 รหัส PIN (ใช้ปลดล็อกหน้าเว็บ)</p>
       {statusLoading ? (
         <p className="text-xs text-slate-500 animate-pulse">กำลังเช็คสถานะ PIN...</p>

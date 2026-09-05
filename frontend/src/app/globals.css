@@ -9,6 +9,12 @@ body {
   text-size-adjust: 100%;
   /* กันแถบสีขาว/ดำเมื่อ pull-to-refresh บนมือถือ */
   overscroll-behavior-y: none;
+  /* iOS Liquid Glass: aurora glow เบื้องหลัง — fixed ไม่ขยับตาม scroll */
+  background-image:
+    radial-gradient(60rem 40rem at 85% -10%, rgba(10, 132, 255, 0.16), transparent 60%),
+    radial-gradient(50rem 36rem at -15% 30%, rgba(94, 92, 230, 0.13), transparent 60%),
+    radial-gradient(55rem 40rem at 50% 115%, rgba(48, 209, 88, 0.07), transparent 60%);
+  background-attachment: fixed;
 }
 
 /* ---------- Mobile-first theme tweaks ---------- */
@@ -31,9 +37,13 @@ input[type="checkbox"] {
   width: 8px;
   height: 8px;
 }
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
 ::-webkit-scrollbar-thumb {
-  background: #1a1a1e;
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -57,8 +67,19 @@ input[type="checkbox"] {
   }
 }
 
+/* iOS Liquid Glass panel: แก้วฝ้าโปร่งแสง — blur เนื้อหา/aurora ด้านหลัง
+   ขอบขาวจางด้านบน (แสงสะท้อน), เงาลอง, และไฮไลต์ด้านบนแบบ lens */
 .panel {
-  @apply bg-panel rounded-xl border border-slate-800 p-4;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03) 45%, rgba(255, 255, 255, 0.055));
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top-color: rgba(255, 255, 255, 0.22);
+  border-radius: 1rem;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  padding: 1rem;
   /* grid item ต้องหดต่ำกว่า min-content ได้ ไม่งั้นเนื้อหายาว (nowrap/long words)
      จะดัน panel และทั้ง grid ให้กว้างเกินจอมือถือ (grid blowout) */
   min-width: 0;
@@ -71,15 +92,46 @@ input[type="checkbox"] {
 /* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */
 /* ปุ่มหลัก — สูง >= 44px บนมือถือเพื่อให้แตะง่าย */
 .btn-primary {
-  @apply inline-flex items-center justify-center gap-1 bg-accent text-surface font-semibold rounded-lg px-4 py-2.5 text-sm min-h-[44px] active:brightness-90 disabled:opacity-50 transition;
+  @apply inline-flex items-center justify-center gap-1 bg-accent text-white font-semibold rounded-xl px-4 py-2.5 text-sm min-h-[44px] active:brightness-90 disabled:opacity-50 transition;
+  box-shadow: 0 4px 20px rgba(10, 132, 255, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
-/* ปุ่มรอง — ขอบเท่านั้น */
+/* ปุ่มรอง — แก้วฝ้า */
 .btn-secondary {
-  @apply inline-flex items-center justify-center gap-1 border border-slate-700 text-slate-300 rounded-lg px-4 py-2.5 text-sm min-h-[44px] active:bg-slate-800 disabled:opacity-50 transition;
+  @apply inline-flex items-center justify-center gap-1 text-slate-200 rounded-xl px-4 py-2.5 text-sm min-h-[44px] active:bg-white/10 disabled:opacity-50 transition;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
 }
 
 /* ปุ่มเล็ก (ใช้ในแถวที่มีที่จำกัด) — ยังคง >= 40px */
 .btn-sm {
   @apply inline-flex items-center justify-center gap-1 rounded-lg px-3 min-h-[40px] text-sm active:opacity-80 disabled:opacity-50 transition;
+}
+
+/* ฟอร์มทุกชนิดทั้งแอป — แก้วฝ้าโปร่งแสง (Liquid Glass)
+   ใช้ CSS ตรงเพราะ input กระจายหลายสิบจุด ให้ครบในที่เดียว
+   ยกเว้น checkbox/radio/range (native control — ปล่อยให้ browser วาด)
+   specificity ต่ำกว่า class ของ Tailwind ที่ใช้อยู่ เดิมบางจุดจึงยังชนะได้ */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+select,
+textarea {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.75rem;
+  color: #e2e8f0;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: border-color 0.15s ease;
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):focus,
+select:focus,
+textarea:focus {
+  border-color: rgba(10, 132, 255, 0.7);
+  outline: none;
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"])::placeholder,
+textarea::placeholder {
+  color: #64748b;
 }

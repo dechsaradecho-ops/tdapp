@@ -17,11 +17,12 @@ export default function ClosePositionModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.7)", WebkitBackdropFilter: "blur(16px) saturate(140%)", backdropFilter: "blur(16px) saturate(140%)" }}
       onClick={onClose}
     >
       <div
-        className="panel w-full max-w-md space-y-4 border border-slate-700"
+        className="panel w-full max-w-md space-y-4"
         onClick={(e) => e.stopPropagation()}
       >
         {/* ---------- header ---------- */}

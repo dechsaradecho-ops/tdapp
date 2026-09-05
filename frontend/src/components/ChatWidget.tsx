@@ -92,10 +92,10 @@ export default function ChatWidget() {
       {open && (
         // มือถือ: เต็มจอ (sheet) — เดสก์ท็อป: กล่องลอยขวาล่างเหมือนเดิม
         <div className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:z-50 sm:w-[360px] sm:max-w-[calc(100vw-3rem)] sm:h-[520px] sm:max-h-[70vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+          <div className="flex items-center justify-between pb-2 border-b border-white/10">
             <p className="text-sm font-semibold">💬 AI Assistant</p>
             <button onClick={() => setOpen(false)}
-              className="w-11 h-11 -mr-2 flex items-center justify-center text-slate-500 hover:text-slate-300 text-lg leading-none active:bg-slate-800 rounded-lg"
+              className="w-11 h-11 -mr-2 flex items-center justify-center text-slate-500 hover:text-slate-300 text-lg leading-none active:bg-white/10 rounded-lg"
               aria-label="ปิดแชท">✕</button>
           </div>
 
@@ -108,8 +108,8 @@ export default function ChatWidget() {
             )}
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div className={`max-w-[85%] rounded-lg px-3 py-2 text-xs whitespace-pre-wrap ${
-                  m.role === "user" ? "bg-accent text-surface" : "bg-surface border border-slate-800"
+                <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-xs whitespace-pre-wrap ${
+                  m.role === "user" ? "bg-accent text-white" : "bg-white/[0.06] border border-white/10"
                 }`}>
                   {m.content}
                 </div>
@@ -127,7 +127,7 @@ export default function ChatWidget() {
             <div className="flex flex-wrap gap-1 pb-2">
               {SUGGESTIONS.map((s) => (
                 <button key={s} onClick={() => send(s)}
-                  className="text-[11px] border border-slate-700 rounded-full px-2 py-0.5 text-slate-400 hover:border-accent hover:text-accent">
+                  className="text-[11px] border border-white/15 bg-white/[0.04] rounded-full px-2 py-0.5 text-slate-400 hover:border-accent hover:text-accent">
                   {s}
                 </button>
               ))}
@@ -140,10 +140,10 @@ export default function ChatWidget() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send(input)}
               placeholder="พิมพ์คำถาม..."
-              className="flex-1 bg-surface border border-slate-700 rounded px-3 py-2.5 text-sm min-h-[44px]"
+              className="flex-1 bg-white/5 border border-white/15 rounded-xl px-3 py-2.5 text-sm min-h-[44px] focus:border-accent outline-none"
             />
             <button onClick={() => send(input)} disabled={loading}
-              className="bg-accent text-surface font-semibold rounded px-4 min-h-[44px] text-sm disabled:opacity-50 active:brightness-90">
+              className="bg-accent text-white font-semibold rounded-xl px-4 min-h-[44px] text-sm disabled:opacity-50 active:brightness-90">
               ส่ง
             </button>
           </div>
@@ -153,8 +153,11 @@ export default function ChatWidget() {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label="เปิดแชท AI"
-        className="fixed bottom-6 right-4 sm:right-6 z-40 w-14 h-14 rounded-full bg-accent text-surface text-2xl shadow-lg active:scale-95 sm:hover:scale-105 transition-transform flex items-center justify-center"
-        style={{ bottom: "calc(4.75rem + env(safe-area-inset-bottom, 0px))" }}
+        className="fixed bottom-6 right-4 sm:right-6 z-40 w-14 h-14 rounded-full bg-accent text-white text-2xl active:scale-95 sm:hover:scale-105 transition-transform flex items-center justify-center"
+        style={{
+          bottom: "calc(4.75rem + env(safe-area-inset-bottom, 0px))",
+          boxShadow: "0 8px 28px rgba(10, 132, 255, 0.45), inset 0 1px 0 rgba(255,255,255,0.25)",
+        }}
       >
         {open ? "✕" : "💬"}
       </button>

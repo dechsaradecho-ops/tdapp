@@ -196,7 +196,7 @@ function SignalGroup({ title, count, defaultExpanded, children }: {
     <div>
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between rounded-lg bg-surface border border-slate-800 px-3 py-2.5 min-h-[44px] active:brightness-90 transition"
+        className="w-full flex items-center justify-between rounded-xl bg-white/[0.05] border border-white/10 px-3 py-2.5 min-h-[44px] active:bg-white/10 transition"
         aria-expanded={open}
       >
         <span className={`text-sm font-semibold ${title.includes("ยิง") || title.includes("อนุมัติ") ? "text-profit" : "text-slate-300"}`}>

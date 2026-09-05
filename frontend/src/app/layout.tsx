@@ -39,7 +39,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="th">
       <body>
-        <header className="border-b border-slate-800 px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30 bg-surface/95 backdrop-blur">
+        <header
+          className="border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
+          style={{
+            background: "rgba(5, 5, 8, 0.65)",
+            WebkitBackdropFilter: "blur(24px) saturate(160%)",
+            backdropFilter: "blur(24px) saturate(160%)",
+            borderBottomColor: "rgba(255,255,255,0.10)",
+          }}
+        >
           <h1 className="font-bold text-base sm:text-lg truncate">
             <span className="sm:hidden">📈 AI Trading</span>
             <span className="hidden sm:inline">📈 AI Wealth &amp; Trading Advisor</span>

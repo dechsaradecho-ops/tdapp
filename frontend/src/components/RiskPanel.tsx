@@ -44,7 +44,7 @@ export default function RiskPanel({ risk }: { risk: RiskStatus | null }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-surface rounded p-2 border border-slate-800">
+    <div className="bg-white/[0.05] rounded-xl p-2 border border-white/10">
       <p className="text-xs text-slate-500">{label}</p>
       <p className="font-semibold">{value}</p>
     </div>

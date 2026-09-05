@@ -54,10 +54,10 @@ export default function ReasonList({ reasons }: { reasons: string[] }) {
   return (
     <div className="mt-2 space-y-1">
       {groups.map(({ cat, items }) => (
-        <div key={cat} className="rounded border border-slate-800 bg-surface">
+        <div key={cat} className="rounded-xl border border-white/10 bg-white/[0.04]">
           <button
             onClick={() => toggle(cat)}
-            className="flex w-full items-center justify-between px-2 py-1.5 text-xs hover:bg-slate-800/40"
+            className="flex w-full items-center justify-between px-2 py-1.5 text-xs hover:bg-white/10 rounded-xl"
             aria-expanded={open[cat]}
           >
             <span className={`flex items-center gap-1.5 font-semibold ${CATEGORY_META[cat].color}`}>

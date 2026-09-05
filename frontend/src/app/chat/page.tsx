@@ -69,9 +69,9 @@ export default function ChatPage() {
           )}
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
-                m.role === "user" ? "bg-accent text-surface" : "bg-surface border border-slate-800"
-              }`}>
+              <div className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${
+                m.role === "user" ? "bg-accent text-white" : "bg-white/[0.06] border border-white/10"
+              }`} >
                 {m.content}
               </div>
             </div>

@@ -54,7 +54,7 @@ export default function MarketPage() {
           <div className="flex flex-wrap gap-2 mb-3">
             {Object.keys(SYMBOLS).map((a) => (
               <button key={a} onClick={() => setSelected(a)}
-                className={`px-3 py-2 min-h-[40px] rounded text-sm border ${selected === a ? "border-accent text-accent" : "border-slate-700 text-slate-400 active:bg-slate-800"}`}>
+                className={`px-3 py-2 min-h-[40px] rounded-xl text-sm border ${selected === a ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}>
                 {a}
               </button>
             ))}

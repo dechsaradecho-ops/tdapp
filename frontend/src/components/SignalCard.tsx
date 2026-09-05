@@ -82,7 +82,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         <div className={`mb-2 flex items-center gap-2 rounded border px-2 py-1 text-xs ${
           signal.expires_min_left < 10
             ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
-            : "border-slate-700 bg-surface text-slate-400"
+            : "border-white/10 bg-white/[0.04] text-slate-400"
         }`}>
           <span>⏳</span>
           <span>
@@ -134,7 +134,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
 
 function Field({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-surface rounded p-2 border border-slate-800">
+    <div className="bg-white/[0.05] rounded-xl p-2 border border-white/10">
       <p className="text-xs text-slate-500">{label}</p>
       <p className="font-semibold">{value}</p>
     </div>

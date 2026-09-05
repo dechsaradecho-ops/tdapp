@@ -5,13 +5,14 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // โทนดำ (user request 2026-09-04): พื้นหลังหน้า = ดำสนิท,
-        // การ์ด/แผง = ดำอมเทาเข้ม ให้ยังแยกชั้นกับพื้นหลังได้
+        // โทน iOS Liquid Glass dark (user request 2026-09-05):
+        // พื้นหลังดำสนิท + aurora glow, การ์ด = แก้วฝ้าโปร่งแสง blur เบื้องหลัง
         surface: "#000000",
         panel: "#0a0a0c",
-        accent: "#38bdf8",
-        profit: "#22c55e",
-        loss: "#ef4444",
+        glass: "rgba(255,255,255,0.10)",
+        accent: "#0a84ff",
+        profit: "#30d158",
+        loss: "#ff453a",
       },
     },
   },

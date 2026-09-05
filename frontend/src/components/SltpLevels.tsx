@@ -28,7 +28,7 @@ export default function SltpLevels({ signal }: { signal: SignalProposal }) {
               className={`rounded p-2 border ${
                 active
                   ? "border-accent bg-accent/10"
-                  : "border-slate-700 bg-surface"
+                  : "border-white/10 bg-white/[0.04]"
               }`}
             >
               <div className="flex items-center justify-between mb-1">

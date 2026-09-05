@@ -214,12 +214,12 @@ export default function MonitorPage() {
           </div>
         </div>
         {closeAllMsg && (
-          <p className="text-xs text-slate-400 bg-slate-800/60 border border-slate-700 rounded px-3 py-2">
+          <p className="text-xs text-slate-400 bg-white/[0.05] border border-white/10 rounded-xl px-3 py-2">
             {closeAllMsg}
           </p>
         )}
         {resetMsg && (
-          <p className="text-xs text-slate-400 bg-slate-800/60 border border-slate-700 rounded px-3 py-2">
+          <p className="text-xs text-slate-400 bg-white/[0.05] border border-white/10 rounded-xl px-3 py-2">
             {resetMsg}
           </p>
         )}

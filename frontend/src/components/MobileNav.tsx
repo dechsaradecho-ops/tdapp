@@ -48,7 +48,7 @@ export default function MobileNav() {
     href === "/" ? path === "/" : path.startsWith(href);
 
   const tabClass = (href: string) =>
-    `flex flex-col items-center justify-center gap-0.5 min-h-[56px] text-[11px] leading-tight active:bg-slate-800/60 rounded-lg ${
+    `flex flex-col items-center justify-center gap-0.5 min-h-[56px] text-[11px] leading-tight active:bg-white/10 rounded-xl ${
       isActive(href) ? "text-accent font-semibold" : "text-slate-400"
     }`;
 
@@ -57,7 +57,13 @@ export default function MobileNav() {
       {/* Bottom tab bar */}
       <nav
         aria-label="เมนูหลัก"
-        className="fixed bottom-0 inset-x-0 z-40 bg-surface/95 backdrop-blur border-t border-slate-800 safe-bottom"
+        className="fixed bottom-0 inset-x-0 z-40 border-t safe-bottom"
+        style={{
+          background: "rgba(10, 10, 14, 0.72)",
+          WebkitBackdropFilter: "blur(24px) saturate(160%)",
+          backdropFilter: "blur(24px) saturate(160%)",
+          borderTopColor: "rgba(255,255,255,0.14)",
+        }}
       >
         <div className="grid grid-cols-5 px-1">
           {PRIMARY.map((l) => (
@@ -81,9 +87,15 @@ export default function MobileNav() {
       {/* Bottom sheet — remaining pages */}
       {open && (
         <div className="fixed inset-0 z-50" onClick={() => setOpen(false)}>
-          <div className="absolute inset-0 bg-slate-950/70" />
+          <div className="absolute inset-0 bg-black/60" style={{ WebkitBackdropFilter: "blur(6px)", backdropFilter: "blur(6px)" }} />
           <div
-            className="absolute bottom-0 inset-x-0 bg-panel border-t border-slate-800 rounded-t-2xl shadow-2xl safe-bottom"
+            className="absolute bottom-0 inset-x-0 border-t rounded-t-3xl shadow-2xl safe-bottom"
+            style={{
+              background: "rgba(18, 18, 24, 0.82)",
+              WebkitBackdropFilter: "blur(28px) saturate(160%)",
+              backdropFilter: "blur(28px) saturate(160%)",
+              borderTopColor: "rgba(255,255,255,0.16)",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 pt-3 pb-2">
@@ -102,10 +114,10 @@ export default function MobileNav() {
                   key={l.href}
                   href={l.href}
                   onClick={() => setOpen(false)}
-                  className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-3 text-xs text-center min-h-[64px] justify-center active:bg-slate-800 ${
+                  className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-3 text-xs text-center min-h-[64px] justify-center active:bg-white/10 ${
                     isActive(l.href)
-                      ? "border-accent/60 bg-accent/10 text-accent font-semibold"
-                      : "border-slate-800 text-slate-300"
+                      ? "border-accent/60 bg-accent/15 text-accent font-semibold"
+                      : "border-white/10 bg-white/[0.04] text-slate-300"}
                   }`}
                 >
                   <span className="text-xl">{l.icon}</span>

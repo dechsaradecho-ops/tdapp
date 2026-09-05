@@ -148,7 +148,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (checking) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95">
+      <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)", WebkitBackdropFilter: "blur(12px)", backdropFilter: "blur(12px)" }}>
         <p className="text-slate-400 animate-pulse">กำลังตรวจสอบเซสชัน...</p>
       </div>
     );
@@ -162,7 +162,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (remaining > 0) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95">
+      <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)", WebkitBackdropFilter: "blur(12px)", backdropFilter: "blur(12px)" }}>
         <div className="panel p-8 text-center max-w-sm">
           <p className="text-4xl mb-2">🔒</p>
           <h2 className="panel-title">บัญชีถูกล็อกชั่วคราว</h2>
@@ -176,7 +176,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.75)", WebkitBackdropFilter: "blur(20px) saturate(140%)", backdropFilter: "blur(20px) saturate(140%)" }}>
       <div className="panel p-8 w-full max-w-xs text-center">
         <p className="text-3xl mb-1">🔐</p>
         <h2 className="panel-title">กรอก PIN เข้าใช้งาน</h2>
@@ -197,23 +197,23 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
             if (e.key === "Enter" && pin.length === 6) submitPin(pin);
             else if (e.key === "Escape") erase();
           }}
-          className="mt-4 w-full text-center text-3xl tracking-[0.6em] bg-surface border border-slate-700 rounded py-3 focus:border-accent outline-none"
+          className="mt-4 w-full text-center text-3xl tracking-[0.6em] bg-white/5 border border-white/15 rounded-xl py-3 focus:border-accent outline-none"
           placeholder="••••••"
         />
 
         <div className="grid grid-cols-3 gap-2 mt-4">
           {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
             <button key={d} onClick={() => press(d)} disabled={busy}
-              className="bg-surface border border-slate-700 rounded py-3 text-lg hover:border-accent disabled:opacity-40">
+              className="bg-white/[0.06] border border-white/15 rounded-xl py-3 text-lg active:bg-white/15 hover:border-accent disabled:opacity-40 transition">
               {d}
             </button>
           ))}
           <button onClick={erase} disabled={busy}
-            className="bg-surface border border-slate-700 rounded py-3 hover:border-loss disabled:opacity-40">⌫</button>
+            className="bg-white/[0.06] border border-white/15 rounded-xl py-3 active:bg-white/15 hover:border-loss disabled:opacity-40 transition">⌫</button>
           <button onClick={() => press("0")} disabled={busy}
-            className="bg-surface border border-slate-700 rounded py-3 text-lg hover:border-accent disabled:opacity-40">0</button>
+            className="bg-white/[0.06] border border-white/15 rounded-xl py-3 text-lg active:bg-white/15 hover:border-accent disabled:opacity-40 transition">0</button>
           <button onClick={() => setPin("")} disabled={busy}
-            className="bg-surface border border-slate-700 rounded py-3 text-slate-400 hover:border-accent disabled:opacity-40">C</button>
+            className="bg-white/[0.06] border border-white/15 rounded-xl py-3 text-slate-400 active:bg-white/15 hover:border-accent disabled:opacity-40 transition">C</button>
         </div>
 
         {msg && (

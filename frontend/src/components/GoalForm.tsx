@@ -151,7 +151,7 @@ export default function GoalForm() {
 function RealityPanel({ reality }: { reality: GoalRealityContext }) {
   if (!reality.data_available) {
     return (
-      <div className="border border-slate-700 bg-slate-900/40 rounded p-3 text-sm text-slate-400">
+      <div className="border border-white/10 bg-white/[0.03] rounded-xl p-3 text-sm text-slate-400">
         📭 ยังไม่มีข้อมูลการเทรดจริง — ผลนี้คำนวณจากสูตรทฤษฎีล้วน
         (เริ่มเทรดแล้วระบบจะปรับผลตาม PnL / Win Rate / ตลาดจริงให้อัตโนมัติ)
       </div>
