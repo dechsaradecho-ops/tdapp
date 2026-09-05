@@ -57,7 +57,7 @@ export default function MobileNav() {
       {/* Bottom tab bar */}
       <nav
         aria-label="เมนูหลัก"
-        className="fixed bottom-0 inset-x-0 z-40 border-t safe-bottom"
+        className="lg-refract fixed bottom-0 inset-x-0 z-40 border-t safe-bottom"
         style={{
           background: "rgba(10, 10, 14, 0.72)",
           WebkitBackdropFilter: "blur(24px) saturate(160%)",
@@ -89,7 +89,7 @@ export default function MobileNav() {
         <div className="fixed inset-0 z-50" onClick={() => setOpen(false)}>
           <div className="absolute inset-0 bg-black/60 animate-fade" style={{ WebkitBackdropFilter: "blur(6px)", backdropFilter: "blur(6px)" }} />
           <div
-            className="absolute bottom-0 inset-x-0 border-t rounded-t-3xl shadow-2xl safe-bottom animate-sheet"
+            className="lg-refract absolute bottom-0 inset-x-0 border-t rounded-t-3xl shadow-2xl safe-bottom animate-sheet"
             style={{
               background: "rgba(18, 18, 24, 0.82)",
               WebkitBackdropFilter: "blur(28px) saturate(160%)",

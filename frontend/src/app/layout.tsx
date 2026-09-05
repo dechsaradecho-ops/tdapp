@@ -39,8 +39,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="th">
       <body>
+        {/* SVG filter defs สำหรับ Liquid Glass refraction — ใช้โดย .lg-refract::before ใน globals.css
+            (backdrop-filter: url(#lg-refract) ทำให้เนื้อหาด้านหลังแก้ว "หักเห" แบบเลนส์ ไม่ใช่แค่เบลอ)
+            ต้องอยู่ใน DOM ทุกหน้า — ซ่อนด้วยขนาด 0 (ห้าม display:none เพราะบาง browser จะไม่ resolve filter) */}
+        <svg aria-hidden="true" focusable="false" width="0" height="0" style={{ position: "absolute" }}>
+          <defs>
+            <filter id="lg-refract" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
+              <feTurbulence type="fractalNoise" baseFrequency="0.008 0.012" numOctaves="2" seed="11" result="noise" />
+              <feGaussianBlur in="noise" stdDeviation="1.5" result="soft" />
+              <feDisplacementMap in="SourceGraphic" in2="soft" scale="20" xChannelSelector="R" yChannelSelector="G" />
+            </filter>
+          </defs>
+        </svg>
         <header
-          className="border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
+          className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
           style={{
             background: "rgba(5, 5, 8, 0.65)",
             WebkitBackdropFilter: "blur(24px) saturate(160%)",

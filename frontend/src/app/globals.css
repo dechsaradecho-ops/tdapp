@@ -86,8 +86,70 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+/* anchor ให้ ::after (glare) — guard ไม่ให้ override .fixed/.sticky/.absolute
+   (chat panel มือถือ = fixed + panel, custom CSS มาหลัง Tailwind จะชนะถ้าไม่ guard) */
+.panel:not(.fixed):not(.sticky):not(.absolute) {
+  position: relative;
+}
+
+/* lens sheen บนขอบบนแก้ว — แสงวาบบาง ๆ เหมือนแก้วโค้ง (ทุก browser) */
+.panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02) 28%, transparent 55%);
+  mix-blend-mode: screen;
+  opacity: 0.35;
+}
+
 .panel-title {
   @apply text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3;
+}
+
+/* ---------- Liquid Glass refraction (SVG feDisplacementMap) ----------
+   เทคนิคจาก freefrontend.com/css-liquid-glass — ใช้ SVG filter ทำให้เนื้อหาด้านหลังแก้ว
+   "หักเห" แบบเลนส์ (ไม่ใช่แค่เบลอ) ใช้ pseudo-element แยกเพื่อ:
+   1) ไม่กระทบ children ของ element จริง (filter อยู่บน layer ของตัวเอง)
+   2) Safari ที่รองรับ url() ใน backdrop-filter ไม่ดี จะ fallback เป็น blur เดิมอัตโนมัติ
+   3) Firefox ไม่รองรับ distortion → ได้แค่ blur เดิม (graceful degradation)
+   ใช้เฉพาะ surface ใหญ่ที่เห็นชัด (header, tab bar) — ไม่ใส่ทุก .panel เพราะ SVG
+   backdrop-filter หนักมากบนมือถือ (INP) */
+/* หมายเหตุ: ห้ามใส่ position: relative ที่นี่ — จะ override .sticky ของ header
+   (specificity เท่ากัน, CSS นี้มาทีหลัง) target ทุกตัวเป็น positioned อยู่แล้ว
+   (sticky/fixed/absolute) pseudo-element จึง anchor ถูกต้อง */
+.lg-refract {
+  isolation: isolate;
+}
+/* ชั้น refraction แยก — ปกติโปร่งใส (ไม่เปลี่ยนอะไร)
+   blur ยังอยู่ที่ inline style ของ header/tab bar เดิม (ทุก browser ไม่เปลี่ยนพฤติกรรม) */
+.lg-refract::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+/* เฉพาะ browser ที่รองรับ SVG filter ใน backdrop-filter (Chromium/Safari ใหม่) — หักเหแสงจริง
+   Firefox และ browser เก่า parse ไม่ผ่าน → ได้ rule ด้านบน (โปร่งใส) = blur เดิม ไม่พัง */
+@supports (backdrop-filter: url("#lg-refract")) {
+  .lg-refract::before {
+    -webkit-backdrop-filter: url("#lg-refract");
+    backdrop-filter: url("#lg-refract");
+  }
+}
+/* ขอบ specular ด้านบน (แสงสะท้อนขอบแก้ว) — ทำงานทุก browser */
+.lg-refract::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.02) 30%, transparent 60%);
+  mix-blend-mode: screen;
+  opacity: 0.5;
 }
 
 /* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */

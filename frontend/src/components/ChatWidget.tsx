@@ -153,7 +153,7 @@ export default function ChatWidget() {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label="เปิดแชท AI"
-        className="fixed bottom-6 right-4 sm:right-6 z-40 w-14 h-14 rounded-full bg-accent text-white text-2xl active:scale-95 sm:hover:scale-105 transition-transform flex items-center justify-center"
+        className="lg-refract fixed bottom-6 right-4 sm:right-6 z-40 w-14 h-14 rounded-full bg-accent text-white text-2xl active:scale-95 sm:hover:scale-105 transition-transform flex items-center justify-center"
         style={{
           bottom: "calc(4.75rem + env(safe-area-inset-bottom, 0px))",
           boxShadow: "0 8px 28px rgba(10, 132, 255, 0.45), inset 0 1px 0 rgba(255,255,255,0.25)",
