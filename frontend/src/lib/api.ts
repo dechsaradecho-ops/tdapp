@@ -26,6 +26,8 @@ import {
   QuoteLogsResponse,
   QuoteTestResult,
   LineTargetsResponse,
+  LineTargetMutation,
+  LineDiag,
   LineTestResult,
   RiskStatus,
   SessionStatus,
@@ -80,6 +82,15 @@ async function put<T>(path: string, body: unknown): Promise<T> {
     method: "PUT",
     headers: headers(),
     body: JSON.stringify(body),
+  });
+  if (!res.ok) handle401(res, path);
+  return res.json();
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: headers(),
   });
   if (!res.ok) handle401(res, path);
   return res.json();
@@ -213,6 +224,11 @@ export const api = {
 
   // ---------- LINE: notification targets + test button ----------
   lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),
+  lineAddTarget: (target_id: string, target_type = "group") =>
+    post<LineTargetMutation>("/api/line/targets", { target_id, target_type }),
+  lineRemoveTarget: (target_id: string) =>
+    del<{ ok: boolean; message: string }>(`/api/line/targets/${encodeURIComponent(target_id)}`),
+  lineDiag: () => get<LineDiag>("/api/line/diag"),
   lineTest: () => post<LineTestResult>("/api/line/test", {}),
 
   // ---------- Auth: 6-digit PIN gate ----------

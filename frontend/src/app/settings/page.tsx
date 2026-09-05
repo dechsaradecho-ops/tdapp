@@ -7,8 +7,8 @@ import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import {
-  AppSettings, DbCheckResult, DbCounts, LineTargetsResponse, LineTestResult,
-  PauseStatus, PortfolioRecommendation, RiskProfile,
+  AppSettings, DbCheckResult, DbCounts, LineDiag, LineTargetsResponse,
+  LineTestResult, PauseStatus, PortfolioRecommendation, RiskProfile,
 } from "@/lib/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -71,6 +71,8 @@ export default function SettingsPage() {
   const [lineTestRes, setLineTestRes] = useState<LineTestResult | null>(null);
   const [lineBusy, setLineBusy] = useState(false);
   const [lineMsg, setLineMsg] = useState("");
+  const [newGroupId, setNewGroupId] = useState("");
+  const [diag, setDiag] = useState<LineDiag | null>(null);
 
   const loadLineTargets = () =>
     api.lineTargets().then(setLineTargets).catch(() => setLineTargets(null));
@@ -83,10 +85,50 @@ export default function SettingsPage() {
     try {
       const res = await api.lineTest();
       setLineTestRes(res);
-      setLineMsg(res.ok ? "✅ ส่งข้อความทดสอบสำเร็จ — เช็คกลุ่ม LINE" : "❌ ส่งไม่สำเร็จ — ดู hint ด้านล่าง");
+      setLineMsg(res.ok ? "✅ ส่งข้อความทดสอบสำเร็จ — เช็คกลุ่ม LINE" : "❌ ส่งไม่สำเร็จ — ดู error รายกลุ่มด้านล่าง");
       loadLineTargets(); // refresh last_seen_at
     } catch (e) {
       setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLineBusy(false);
+    }
+  };
+
+  const runDiag = async () => {
+    setLineBusy(true);
+    setLineMsg("");
+    try {
+      setDiag(await api.lineDiag());
+    } catch (e) {
+      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLineBusy(false);
+    }
+  };
+
+  const addGroup = async () => {
+    const id = newGroupId.trim();
+    if (!id) return;
+    setLineBusy(true);
+    setLineMsg("");
+    try {
+      const res = await api.lineAddTarget(id);
+      setLineMsg(res.message);
+      if (res.ok) setNewGroupId("");
+      loadLineTargets();
+    } catch (e) {
+      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLineBusy(false);
+    }
+  };
+
+  const removeGroup = async (id: string) => {
+    setLineBusy(true);
+    try {
+      const res = await api.lineRemoveTarget(id);
+      setLineMsg(res.message);
+      loadLineTargets();
     } finally {
       setLineBusy(false);
     }
@@ -509,16 +551,46 @@ export default function SettingsPage() {
       <div className="panel md:col-span-2">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h2 className="panel-title">การแจ้งเตือน LINE</h2>
-          <button onClick={runLineTest} disabled={lineBusy}
-            className="bg-accent text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
-            {lineBusy ? "กำลังส่ง..." : "🔔 ทดสอบการแจ้งเตือน"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={runDiag} disabled={lineBusy}
+              className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[44px] active:bg-slate-800 disabled:opacity-40">
+              🔍 วินิจฉัย
+            </button>
+            <button onClick={runLineTest} disabled={lineBusy}
+              className="bg-accent text-surface font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
+              {lineBusy ? "กำลังส่ง..." : "🔔 ทดสอบการแจ้งเตือน"}
+            </button>
+          </div>
         </div>
         <p className="text-sm text-slate-400 mt-1">
-          กดปุ่มเพื่อส่งข้อความทดสอบไปทุกกลุ่ม/แชทที่ลงทะเบียนไว้
-          (กลุ่มจะถูกลงทะเบียนอัตโนมัติเมื่อเพิ่มบอทเข้ากลุ่มแล้ว @mention บอท 1 ครั้ง)
+          กลุ่มจะถูกลงทะเบียนอัตโนมัติเมื่อบอทได้รับ event จากกลุ่ม (@mention บอท 1 ครั้ง)
+          หรือวาง Group ID ด้วยมือด้านล่าง
         </p>
         {lineMsg && <p className="text-sm mt-2">{lineMsg}</p>}
+
+        {diag && (
+          <div className="mt-3 rounded border border-slate-700 bg-surface/40 p-3 text-sm space-y-1">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">ผลวินิจฉัย</p>
+            <DiagRow label="LINE_CHANNEL_ACCESS_TOKEN" ok={diag.token_set} />
+            <DiagRow label="LINE_CHANNEL_SECRET" ok={diag.secret_set} />
+            <DiagRow label="LINE_BOT_USER_ID" ok={diag.bot_user_id_set}
+              note={diag.bot_user_id || "ไม่จำเป็นถ้าไม่ใช้ @mention"} />
+            <DiagRow label="token ใช้ได้จริง (LINE API)" ok={diag.token_valid}
+              note={diag.display_name ? `บอท: ${diag.display_name}` : undefined} />
+            <DiagRow label="ตาราง line_targets" ok={diag.targets_table_ok}
+              note={diag.table_error ? diag.table_error.slice(0, 120) : undefined} />
+            <p className="text-xs text-slate-400">
+              กลุ่มที่ลงทะเบียน: {diag.targets_count} · personal: {diag.users_count}
+            </p>
+            {diag.bot_user_id_from_api && !diag.bot_user_id_set && (
+              <p className="text-amber-400 text-xs">
+                💡 LINE API บอกว่า Bot user ID ของคุณคือ <code>{diag.bot_user_id_from_api}</code> —
+                คัดลอกไปใส่ env LINE_BOT_USER_ID บน Render เพื่อเปิด @mention detection
+              </p>
+            )}
+            {diag.hint && <p className="text-amber-400 text-xs">{diag.hint}</p>}
+          </div>
+        )}
 
         {lineTestRes && (
           <div className="mt-3 space-y-2 text-sm">
@@ -534,10 +606,13 @@ export default function SettingsPage() {
             {lineTestRes.results.length > 0 && (
               <div className="space-y-1">
                 {lineTestRes.results.map((r) => (
-                  <div key={r.target_id} className="flex items-center gap-2 text-xs">
-                    <span>{r.ok ? "✅" : "❌"}</span>
-                    <span className="text-slate-400">{r.target_type}</span>
-                    <code className="text-slate-300 break-all">{r.target_id}</code>
+                  <div key={r.target_id} className="text-xs">
+                    <div className="flex items-center gap-2">
+                      <span>{r.ok ? "✅" : "❌"}</span>
+                      <span className="text-slate-400">{r.target_type}</span>
+                      <code className="text-slate-300 break-all">{r.target_id}</code>
+                    </div>
+                    {r.error && <p className="text-loss ml-6 break-all">{r.error}</p>}
                   </div>
                 ))}
               </div>
@@ -545,6 +620,27 @@ export default function SettingsPage() {
             {lineTestRes.hint && <p className="text-amber-400 text-xs">{lineTestRes.hint}</p>}
           </div>
         )}
+
+        {/* --- manual groupId registration --- */}
+        <div className="mt-4 rounded border border-slate-700 bg-surface/40 p-3">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
+            เพิ่ม Group ID ด้วยมือ (ถ้า auto-registration ยังไม่ทำงาน)
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <input value={newGroupId}
+              onChange={(e) => setNewGroupId(e.target.value)}
+              placeholder="C1234… (groupId จาก LINE console / webhook log)"
+              className="flex-1 min-w-[240px] bg-surface border border-slate-700 rounded px-3 py-2 text-sm" />
+            <button onClick={addGroup} disabled={lineBusy || !newGroupId.trim()}
+              className="bg-accent text-surface font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
+              ➕ เพิ่มกลุ่ม
+            </button>
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            groupId หาได้จาก LINE Developers Console (Webhook event log → source.groupId)
+            หรือดูใน log ของ API หลัง @mention บอท
+          </p>
+        </div>
 
         <div className="mt-4">
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
@@ -554,13 +650,13 @@ export default function SettingsPage() {
             <p className="text-slate-500 text-sm">กำลังโหลด... (หรือยังไม่มีข้อมูล)</p>
           ) : lineTargets.targets.length === 0 && lineTargets.users.length === 0 ? (
             <p className="text-slate-500 text-sm">
-              ยังไม่มี — เพิ่มบอทเข้ากลุ่ม LINE แล้วพิมพ์ @บอท 1 ครั้ง กลุ่มจะถูกลงทะเบียนอัตโนมัติ
+              ยังไม่มี — เพิ่มบอทเข้ากลุ่ม LINE แล้วพิมพ์ @บอท 1 ครั้ง หรือวาง Group ID ด้วยมือด้านบน
             </p>
           ) : (
             <div className="space-y-2">
               {lineTargets.targets.map((t) => (
                 <div key={t.target_id}
-                  className="bg-surface rounded p-3 flex items-center justify-between flex-wrap gap-2">
+                  className="bg-surface rounded p-3 flex items-start justify-between flex-wrap gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold">
@@ -577,6 +673,10 @@ export default function SettingsPage() {
                         : "ยังไม่เคยรับ event"}
                     </p>
                   </div>
+                  <button onClick={() => removeGroup(t.target_id)} disabled={lineBusy}
+                    className="text-xs text-loss border border-slate-700 rounded px-3 min-h-[36px] active:bg-slate-800 disabled:opacity-40">
+                    🗑 ลบ
+                  </button>
                 </div>
               ))}
               {lineTargets.users.map((u) => (
@@ -594,6 +694,17 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function DiagRow({ label, ok, note }:
+  { label: string; ok?: boolean; note?: string }) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span>{ok === undefined ? "❔" : ok ? "✅" : "❌"}</span>
+      <span className="text-slate-300">{label}</span>
+      {note && <span className="text-slate-500 truncate">— {note}</span>}
     </div>
   );
 }

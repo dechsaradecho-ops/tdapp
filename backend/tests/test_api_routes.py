@@ -810,6 +810,10 @@ class RecordingLine:
         self.pushed.append((user_id, message))
         return True
 
+    async def push_ex(self, user_id: str, message: str) -> tuple[bool, str]:
+        self.pushed.append((user_id, message))
+        return True, ""
+
     async def reply(self, reply_token: str, message: str) -> bool:
         self.replies.append((reply_token, message))
         return True
@@ -973,6 +977,51 @@ class TestLineWebhook:
         pushed_to = {t for t, _ in line.pushed}
         assert pushed_to == {"C-on", "U-me"}  # disabled target skipped
         assert any("ทดสอบ" in m for _, m in line.pushed)
+
+    @pytest.mark.asyncio
+    async def test_add_target_manually(self):
+        """POST /api/line/targets registers a groupId without a webhook event."""
+        db = FakeDatabase()
+        set_state(db)
+        r = await call("POST", "/api/line/targets",
+                       {"target_id": "C-manual", "target_type": "group"})
+        body = r.json()
+        assert r.status_code == 200
+        assert body["ok"] is True
+        assert any(t["target_id"] == "C-manual"
+                   for t in db.rows.get("line_targets", []))
+
+    @pytest.mark.asyncio
+    async def test_add_target_rejects_bad_format(self):
+        """A groupId must start with C (or R for rooms) — reject junk early."""
+        db = FakeDatabase()
+        set_state(db)
+        r = await call("POST", "/api/line/targets", {"target_id": "hello"})
+        body = r.json()
+        assert body["ok"] is False
+        assert db.rows.get("line_targets", []) == []
+
+    @pytest.mark.asyncio
+    async def test_add_target_idempotent(self):
+        db = FakeDatabase(rows={"line_targets": [
+            {"id": "lt1", "target_id": "C-dup", "target_type": "group",
+             "notification_enabled": True}]})
+        set_state(db)
+        body = (await call("POST", "/api/line/targets",
+                           {"target_id": "C-dup"})).json()
+        assert body["ok"] is True
+        assert "อยู่แล้ว" in body["message"]
+        assert len(db.rows["line_targets"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_remove_target(self):
+        db = FakeDatabase(rows={"line_targets": [
+            {"id": "lt1", "target_id": "C-gone", "target_type": "group",
+             "notification_enabled": True}]})
+        set_state(db)
+        body = (await call("DELETE", "/api/line/targets/C-gone")).json()
+        assert body["ok"] is True
+        assert db.rows.get("line_targets", []) == []
 
 
 class TestGroupNotificationPush:

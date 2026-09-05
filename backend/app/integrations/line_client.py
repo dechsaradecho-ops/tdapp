@@ -27,21 +27,32 @@ class LineClient:
 
     # ------------------------------------------------------------------
     async def push(self, line_user_id: str, text: str) -> bool:
+        ok, _ = await self.push_ex(line_user_id, text)
+        return ok
+
+    async def push_ex(self, line_user_id: str, text: str) -> tuple[bool, str]:
+        """Push returning (ok, raw_error) — the Settings test button surfaces
+        the LINE API error so a wrong token / bot-not-in-group is visible in
+        the UI instead of a silent False."""
         if not self.enabled:
             log.info("LINE disabled — would push to %s: %s", line_user_id, text[:80])
-            return False
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{API}/push",
-                headers={"Authorization": f"Bearer {self.token}",
-                         "Content-Type": "application/json"},
-                json={"to": line_user_id,
-                      "messages": [{"type": "text", "text": text}]},
-            )
-            ok = resp.status_code == 200
-            if not ok:
-                log.warning("LINE push failed %s: %s", resp.status_code, resp.text[:200])
-            return ok
+            return False, "LINE_CHANNEL_ACCESS_TOKEN ยังไม่ได้ตั้ง (env บน Render)"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{API}/push",
+                    headers={"Authorization": f"Bearer {self.token}",
+                             "Content-Type": "application/json"},
+                    json={"to": line_user_id,
+                          "messages": [{"type": "text", "text": text}]},
+                )
+                if resp.status_code == 200:
+                    return True, ""
+                detail = resp.text[:200]
+                log.warning("LINE push failed %s: %s", resp.status_code, detail)
+                return False, f"HTTP {resp.status_code}: {detail}"
+        except Exception as exc:
+            return False, f"{exc.__class__.__name__}: {exc}"
 
     async def reply(self, reply_token: str, text: str) -> bool:
         if not self.enabled:

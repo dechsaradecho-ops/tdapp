@@ -617,6 +617,7 @@ export interface LineTestItem {
   target_id: string;
   target_type: string;
   ok: boolean;
+  error?: string;   // raw LINE API error when ok=false
 }
 
 /** Response of POST /api/line/test (🔔 ทดสอบ button). */
@@ -626,6 +627,30 @@ export interface LineTestResult {
   failed: number;
   results: LineTestItem[];
   hint: string;
+}
+
+/** Response of POST /api/line/targets (manual groupId add). */
+export interface LineTargetMutation {
+  ok: boolean;
+  message: string;
+  target?: LineTarget;
+}
+
+/** Response of GET /api/line/diag (one-shot setup diagnosis). */
+export interface LineDiag {
+  token_set: boolean;
+  secret_set: boolean;
+  bot_user_id_set: boolean;
+  bot_user_id: string;
+  db_available: boolean;
+  targets_table_ok: boolean;
+  targets_count: number;
+  users_count: number;
+  table_error?: string;
+  token_valid?: boolean;
+  bot_user_id_from_api?: string;
+  display_name?: string;
+  hint?: string;
 }
 
 export interface PinLoginResponse {

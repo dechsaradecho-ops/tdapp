@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, Request, Response
+from pydantic import BaseModel
 
 from app.api.routes.settings import get_app_settings
 from app.core.config import get_settings
@@ -209,6 +210,116 @@ async def line_targets(request: Request) -> dict:
     }
 
 
+class TargetAddRequest(BaseModel):
+    target_id: str
+    target_type: str = "group"
+
+
+@router.post("/targets")
+async def add_line_target(request: Request, payload: TargetAddRequest) -> dict:
+    """Manually register a groupId/roomId (Settings page input).
+
+    Auto-registration needs the bot to receive a webhook event from the
+    group first; this endpoint lets the owner paste the groupId directly
+    (from the LINE console or a webhook log) without that step.
+    """
+    db = request.app.state.db
+    target_id = (payload.target_id or "").strip()
+    if not target_id:
+        return {"ok": False, "message": "target_id ว่าง — ใส่ groupId ที่ขึ้นต้นด้วย C"}
+    if not target_id.startswith(("C", "R", "U")):
+        return {"ok": False,
+                "message": f"รูปแบบไม่ถูกต้อง: {target_id[:12]}… — groupId ต้องขึ้นต้นด้วย C (room = R)"}
+    try:
+        existing = db.select("line_targets", filters={"target_id": target_id},
+                             limit=1)
+        if existing:
+            return {"ok": True, "message": "มีกลุ่มนี้อยู่แล้ว (ไม่ซ้ำ)",
+                    "target": existing[0]}
+        row = db.insert("line_targets", {
+            "target_id": target_id,
+            "target_type": payload.target_type or "group",
+            "notification_enabled": True,
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if not row:
+            return {"ok": False,
+                    "message": ("insert ไม่สำเร็จ — ตาราง line_targets ยังไม่มี "
+                                "(รัน database/018_line_targets.sql ใน Supabase SQL Editor ก่อน)")}
+        return {"ok": True, "message": "✅ เพิ่มกลุ่มเรียบร้อย — กด 🔔 ทดสอบได้เลย",
+                "target": row}
+    except Exception as exc:
+        return {"ok": False, "message": f"{exc.__class__.__name__}: {exc}"}
+
+
+@router.delete("/targets/{target_id}")
+async def remove_line_target(request: Request, target_id: str) -> dict:
+    """Remove a registered target (Settings page 🗑 button)."""
+    db = request.app.state.db
+    ok = db.delete("line_targets", {"target_id": target_id})
+    return {"ok": ok,
+            "message": "ลบแล้ว" if ok else "ลบไม่สำเร็จ (อาจไม่มี row นี้)"}
+
+
+@router.get("/diag")
+async def line_diag(request: Request) -> dict:
+    """One-shot diagnosis for the Settings page: which env vars are set,
+    whether the line_targets table exists, and a live LINE API probe."""
+    db = request.app.state.db
+    s = get_settings()
+    line: LineClient = request.app.state.line
+
+    table_ok = True
+    table_error = ""
+    try:
+        db._client.table("line_targets").select("id").limit(1).execute()
+    except Exception as exc:
+        table_ok = False
+        table_error = str(exc)[:200]
+
+    out: dict = {
+        "token_set": bool(s.line_channel_access_token),
+        "secret_set": bool(s.line_channel_secret),
+        "bot_user_id_set": bool(s.line_bot_user_id),
+        "bot_user_id": (s.line_bot_user_id[:6] + "…") if s.line_bot_user_id else "",
+        "db_available": db.available,
+        "targets_table_ok": table_ok,
+        "targets_count": len(db.select("line_targets", limit=100)),
+        "users_count": len(db.select("line_users", limit=100)),
+    }
+    if not table_ok:
+        out["table_error"] = table_error
+        out["hint"] = ("ตาราง line_targets ยังไม่มี — รัน database/018_line_targets.sql "
+                       "ใน Supabase SQL Editor ก่อน")
+        return out
+
+    # Live probe: ask LINE for the bot's own profile (validates the token).
+    if line.enabled:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.line.me/v2/bot/info",
+                    headers={"Authorization": f"Bearer {line.token}"})
+            out["token_valid"] = resp.status_code == 200
+            if resp.status_code == 200:
+                info = resp.json()
+                out["bot_user_id_from_api"] = info.get("userId", "")
+                out["display_name"] = info.get("displayName", "")
+                out["hint"] = ("token ใช้ได้ — ถ้ายังไม่มี groupId ให้เพิ่มบอทเข้ากลุ่ม "
+                               "แล้ว @mention 1 ครั้ง หรือวาง groupId ด้วยมือด้านบน")
+            else:
+                out["hint"] = (f"token ปฏิเสธ (HTTP {resp.status_code}) — "
+                               "เช็คว่าคัดลอก Channel access token ยาวเต็มและยังไม่หมดอายุ")
+        except Exception as exc:
+            out["token_valid"] = False
+            out["hint"] = f"เรียก LINE API ไม่ได้: {exc.__class__.__name__}"
+    else:
+        out["token_valid"] = False
+        out["hint"] = "LINE_CHANNEL_ACCESS_TOKEN ยังไม่ได้ตั้งบน Render"
+    return out
+
+
 @router.post("/test")
 async def line_test(request: Request) -> dict:
     """Push a test message to every enabled target — the Settings page's
@@ -221,14 +332,14 @@ async def line_test(request: Request) -> dict:
 
     results: list[dict] = []
     for t in db.select("line_targets", filters={"notification_enabled": True}):
-        ok = await line.push(t["target_id"], message)
+        ok, err = await line.push_ex(t["target_id"], message)
         results.append({"target_id": t["target_id"],
                         "target_type": t.get("target_type", "group"),
-                        "ok": ok})
+                        "ok": ok, "error": err})
     for u in db.select("line_users", filters={"notification_enabled": True}):
-        ok = await line.push(u["line_user_id"], message)
+        ok, err = await line.push_ex(u["line_user_id"], message)
         results.append({"target_id": u["line_user_id"],
-                        "target_type": "user", "ok": ok})
+                        "target_type": "user", "ok": ok, "error": err})
 
     sent = sum(1 for r in results if r["ok"])
     return {
@@ -239,5 +350,5 @@ async def line_test(request: Request) -> dict:
         "hint": ("ตรวจกลุ่ม LINE — ควรได้รับข้อความทดสอบแล้ว"
                  if sent else
                  "ยังไม่มีปลายทางที่ส่งได้ — เพิ่มบอทเข้ากลุ่มแล้ว @mention บอท 1 ครั้ง "
-                 "หรือตั้ง LINE_CHANNEL_ACCESS_TOKEN บน Render"),
+                 "หรือวาง groupId ด้วยมือ / กดวินิจฉัยเพื่อดูสาเหตุ"),
     }
