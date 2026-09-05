@@ -103,7 +103,7 @@ export default function MobileNav() {
               <button
                 onClick={() => setOpen(false)}
                 aria-label="ปิดเมนู"
-                className="w-11 h-11 -mr-2 flex items-center justify-center rounded-lg text-xl text-slate-400 active:bg-slate-800"
+                className="w-11 h-11 -mr-2 flex items-center justify-center rounded-lg text-xl text-slate-400 active:bg-white/10"
               >
                 ✕
               </button>

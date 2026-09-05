@@ -155,7 +155,7 @@ export default function SignalLogsPage() {
             {shown.map((l) => {
               const meta = eventMeta(l.event);
               return (
-                <tr key={l.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                <tr key={l.id} className="border-b border-slate-800/50 hover:bg-white/[0.04]">
                   <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
                     {l.created_at ? new Date(l.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
                   </td>
