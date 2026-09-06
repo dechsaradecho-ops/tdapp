@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 /** Desktop navigation (md+) — floating "Liquid Glass" pill navbar.
  * อ้างอิงสไตล์ codefronts "Tailwind Liquid Glass Navbar":
  * backdrop-blur 20px + bg-white/10 + ring white/20 + rounded-full
- * brand ซ้าย · ลิงก์กึ่งกลาง · spacer ขวา (grid 1fr auto 1fr ให้ลิงก์ center จริง)
+ * ชิดขวาจอ · brand ซ้ายใน pill · ลิงก์ถัดไป · icon monotone SVG (ไม่ใช้ emoji)
  * มือถือ (< md) ไม่แสดง — ใช้ MobileNav dock แทน
  */
 const LINKS = [
@@ -32,14 +32,13 @@ export default function DesktopNav() {
 
   return (
     <header
-      className="hidden md:block sticky z-30 px-4"
+      className="hidden md:flex sticky z-30 justify-end px-4 mb-6"
       style={{ top: "calc(env(safe-area-inset-top, 0px) + 0.9rem)" }}
     >
       <nav
         aria-label="Primary"
-        className="lg-refract mx-auto grid grid-cols-[1fr_auto_1fr] items-center gap-2 rounded-full border px-2.5 py-1.5"
+        className="lg-refract flex items-center gap-2 rounded-full border px-2.5 py-1.5"
         style={{
-          maxWidth: "46rem",
           background: "rgba(255, 255, 255, 0.08)",
           WebkitBackdropFilter: "blur(20px) saturate(160%)",
           backdropFilter: "blur(20px) saturate(160%)",
@@ -50,9 +49,23 @@ export default function DesktopNav() {
       >
         <a
           href="/"
-          className="justify-self-start flex items-center gap-1.5 pl-2 text-sm font-semibold text-slate-200"
+          className="flex items-center gap-1.5 pl-2 pr-1 text-sm font-semibold text-slate-200"
         >
-          📈 AI Trading
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+            <polyline points="16 7 22 7 22 13" />
+          </svg>
+          AI Trading
         </a>
         <div className="flex items-center gap-0.5">
           {LINKS.map((l) => {
@@ -73,8 +86,7 @@ export default function DesktopNav() {
             );
           })}
         </div>
-        {/* spacer ขวา — สมดุลกับ brand ซ้าย ให้กลุ่มลิงก์กึ่งกลางจริง */}
-        <span aria-hidden="true" className="justify-self-end pr-2" />
+        {/* ชิดขวา — ไม่ต้องมี spacer สมดุลซ้าย */}
       </nav>
     </header>
   );
