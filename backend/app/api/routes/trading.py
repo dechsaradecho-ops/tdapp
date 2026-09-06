@@ -439,6 +439,30 @@ class StatsResetRequest(BaseModel):
     confirm: bool = False
 
 
+def _reset_equity_history(db, request: Request) -> None:
+    """Wipe equity_snapshots and reseed one row at the starting capital.
+
+    The home page's Current Equity / Current PnL are computed from
+    paper_trades + this history, so a stats reset must clear it too or the
+    old drawdown curve keeps the kill switch throttled after a reset.
+    Fail-safe: any DB error is swallowed (the reset itself still succeeds).
+    """
+    try:
+        for r in db.select("equity_snapshots", limit=500):
+            db.delete("equity_snapshots", {"id": r.get("id")})
+    except Exception:
+        pass
+    try:
+        capital = _settings(request).capital
+        db.insert("equity_snapshots", {
+            "user_id": execution.DEFAULT_USER,
+            "snapshot_date": datetime.now(timezone.utc).date().isoformat(),
+            "equity": round(capital, 2),
+        })
+    except Exception:
+        pass
+
+
 @router.post("/stats/reset", response_model=StatsResetResult)
 async def reset_stats(payload: StatsResetRequest,
                       request: Request) -> StatsResetResult:
@@ -464,6 +488,10 @@ async def reset_stats(payload: StatsResetRequest,
         return StatsResetResult(
             ok=False, deleted=0,
             message="ต้องยืนยัน (confirm=true) ก่อนรีเซ็ตสถิติ")
+
+    # Equity history เป็นส่วนหนึ่งของสถิติ — เคลียร์ทุก path แล้วเขียน snapshot
+    # ใหม่ที่ทุนเริ่มต้น เพื่อให้ Current Equity/PnL (หน้าแรก) กลับจุดเริ่มต้นจริง
+    _reset_equity_history(db, request)
 
     closed_rows = db.select_paged("paper_trades",
                                   filters={"status": "closed"})
@@ -499,7 +527,7 @@ async def reset_stats(payload: StatsResetRequest,
     return StatsResetResult(
         ok=True, deleted=deleted,
         message=f"รีเซ็ตสถิติแล้ว — ลบไม้ที่ปิดแล้ว {deleted} ไม้ "
-                f"(ไม้ที่เปิดค้างยังอยู่)",
+                f"+ เคลียร์ equity history (ไม้ที่เปิดค้างยังอยู่)",
         stats=_fresh_stats(db), warnings=warnings)
 
 

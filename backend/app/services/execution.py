@@ -735,6 +735,13 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         pnl_total=round(sum(float(r.get("pnl") or 0) for r in closed_rows), 2),
     )
 
+    # ---- live portfolio value (home page Current Equity / Current PnL) ----
+    # PnL = realized (closed rows) + unrealized (live marks) — computed from
+    # the DB so every page shares one truth and stats-reset zeroes it.
+    unrealized_total = round(sum(p.unrealized_pnl for p in open_positions), 2)
+    live_pnl = round(stats.pnl_total + unrealized_total, 2)
+    live_equity = round(s.capital + live_pnl, 2)
+
     # ---- kill switch (same math the gate uses) ---------------------------
     daily, weekly, monthly = _loss_pcts(db, s.capital)
     kill = KillSwitchEngine(
@@ -754,4 +761,5 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         kill=kill, stats=stats, open_positions=open_positions, recent=recent,
         generated_at=now,
         feed_status=feed_status,
+        equity=live_equity, pnl=live_pnl,
     )

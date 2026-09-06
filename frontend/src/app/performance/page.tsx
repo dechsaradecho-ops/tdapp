@@ -290,14 +290,14 @@ export default function PerformancePage() {
           <label className="text-sm">
             Asset
             <select value={btAsset} onChange={(e) => setBtAsset(e.target.value)}
-              className="mt-1 block bg-surface border border-slate-700 rounded px-3 py-2">
+              className="mt-1 block border border-slate-700 rounded px-3 py-2">
               {ASSETS.map((a) => <option key={a} value={a}>{a}</option>)}
             </select>
           </label>
           <label className="text-sm">
             Indicator
             <select value={btIndicator} onChange={(e) => setBtIndicator(e.target.value as typeof btIndicator)}
-              className="mt-1 block bg-surface border border-slate-700 rounded px-3 py-2">
+              className="mt-1 block border border-slate-700 rounded px-3 py-2">
               {INDICATORS.map((i) => <option key={i} value={i}>{i}</option>)}
             </select>
           </label>

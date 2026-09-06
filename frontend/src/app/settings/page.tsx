@@ -45,6 +45,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   backtest_days: 120,
   backtest_indicator: "EMA",
   backtest_asset: "EURUSD",
+  monitor_refresh_sec: 10,
+  signals_refresh_sec: 0,
 };
 
 export default function SettingsPage() {
@@ -253,7 +255,7 @@ export default function SettingsPage() {
           <label className="block text-sm">
             Risk Profile
             <select value={profile} onChange={(e) => setProfile(e.target.value)}
-              className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+              className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
               <option value="conservative">Conservative</option>
               <option value="moderate">Moderate</option>
               <option value="aggressive">Aggressive</option>
@@ -356,7 +358,7 @@ export default function SettingsPage() {
                 โหมดเทรด (order_mode)
                 <select value={cfg.order_mode}
                   onChange={(e) => set("order_mode", e.target.value)}
-                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+                  className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
                   <option value="auto">🤖 Auto — ระบบเทรดเอง</option>
                   <option value="semi_auto">👤 Semi-Auto — รอยืนยันก่อน</option>
                   <option value="manual">✋ Manual — ระบบไม่ยิง order</option>
@@ -366,7 +368,7 @@ export default function SettingsPage() {
                 ระยะ SL/TP ที่ใช้เปิด order (sl_distance_mode)
                 <select value={cfg.sl_distance_mode}
                   onChange={(e) => set("sl_distance_mode", e.target.value as AppSettings["sl_distance_mode"])}
-                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+                  className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
                   <option value="short">สั้น ×1.0 ATR — SL เข้ม ปิดไว</option>
                   <option value="medium">กลาง ×1.5 ATR — ตามสัญญาณ (ค่าเริ่มต้น)</option>
                   <option value="long">ยาว ×2.0 ATR — SL กว้าง ทนผันผวน</option>
@@ -379,7 +381,7 @@ export default function SettingsPage() {
                 Risk Profile
                 <select value={cfg.risk_profile}
                   onChange={(e) => set("risk_profile", e.target.value as RiskProfile)}
-                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+                  className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
                   <option value="conservative">Conservative</option>
                   <option value="moderate">Moderate</option>
                   <option value="aggressive">Aggressive</option>

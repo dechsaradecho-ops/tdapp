@@ -1226,6 +1226,11 @@ class MonitorSnapshot(BaseModel):
     # Live-price feed health, surfaced to the user on the monitor page.
     feed_status: Optional[QuoteFeedStatus] = None
     generated_at: Optional[datetime] = None
+    # Live portfolio value for the home page — computed from DB rows
+    # (capital + realized closed PnL + unrealized open PnL), replacing the
+    # old manual localStorage numbers so รีเซ็ตสถิติ resets them for real.
+    equity: float = 0.0
+    pnl: float = 0.0
 
 
 # ---------- Auth: 6-digit PIN gate ----------
@@ -1338,6 +1343,13 @@ class AppSettings(BaseModel):
     backtest_days: int = 120
     backtest_indicator: str = "EMA"
     backtest_asset: str = "EURUSD"
+
+    # ---- UI preferences (moved out of localStorage 2026-09-06) -------------
+    # Auto-refresh intervals (seconds) for the monitor / signals pages.
+    # 0 = auto-refresh off. Stored in trading_settings so the choice follows
+    # the account across devices instead of living in one browser.
+    monitor_refresh_sec: int = 10
+    signals_refresh_sec: int = 0
 
 
 class SettingsSaveResult(BaseModel):

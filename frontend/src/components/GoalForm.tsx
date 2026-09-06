@@ -76,7 +76,7 @@ export default function GoalForm() {
           <label className="block text-sm">
             Risk Profile
             <select value={profile} onChange={(e) => setProfile(e.target.value)}
-              className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
+              className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
               <option value="conservative">Conservative</option>
               <option value="moderate">Moderate</option>
               <option value="aggressive">Aggressive</option>

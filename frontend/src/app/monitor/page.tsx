@@ -7,8 +7,9 @@ import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { ClosePositionResult, MonitorSnapshot } from "@/lib/types";
 
-// ความถี่รีเฟรชเลือกได้จาก UI (จำค่าใน localStorage) — backend cache spot
-// quotes 30s ดังนั้นยิงถี่กว่า 10s ก็ไม่เพิ่มโหลด feed
+// ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.monitor_refresh_sec)
+// ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (backend cache spot quotes 30s ดังนั้น
+// ยิงถี่กว่า 10s ก็ไม่เพิ่มโหลด feed)
 const REFRESH_OPTIONS = [
   { label: "ปิด", value: 0 },
   { label: "10 วิ", value: 10 },
@@ -17,20 +18,14 @@ const REFRESH_OPTIONS = [
   { label: "5 นาที", value: 300 },
 ];
 
-const LS_KEY = "tdapp_monitor_autorefresh";
-
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string>("");
-  // อ่านค่าตั้งต้นจาก localStorage (จำค่าที่เลือกไว้) — init function กัน SSR mismatch
-  const [intervalSec, setIntervalSec] = useState<number>(() => {
-    if (typeof window === "undefined") return 10;
-    const saved = Number(window.localStorage.getItem(LS_KEY));
-    return REFRESH_OPTIONS.some((o) => o.value === saved) ? saved : 10;
-  });
+  // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
+  const [intervalSec, setIntervalSec] = useState<number>(10);
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
   const [closeError, setCloseError] = useState("");
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
@@ -60,9 +55,23 @@ export default function MonitorPage() {
     return () => clearInterval(t);
   }, [load, intervalSec]);
 
-  const changeInterval = (v: number) => {
+  // sync ค่า interval จาก settings (DB) ครั้งแรกที่โหลดหน้า
+  useEffect(() => {
+    api.getSettings()
+      .then((s) => {
+        const saved = Number(s.monitor_refresh_sec);
+        if (REFRESH_OPTIONS.some((o) => o.value === saved)) setIntervalSec(saved);
+      })
+      .catch(() => { /* settings ล้มเหลว — ใช้ค่าเริ่มต้น */ });
+  }, []);
+
+  const changeInterval = async (v: number) => {
     setIntervalSec(v);
-    if (typeof window !== "undefined") window.localStorage.setItem(LS_KEY, String(v));
+    try {
+      await api.saveSettings({ monitor_refresh_sec: v }); // จำลง DB — ตามทุกเครื่อง
+    } catch {
+      /* save ล้มเหลว — ค่ายังใช้ได้ในหน้านี้จนกว่าจะปิด */
+    }
   };
 
   const togglePause = async () => {
@@ -270,7 +279,7 @@ export default function MonitorPage() {
             <select
               value={intervalSec}
               onChange={(e) => changeInterval(Number(e.target.value))}
-              className="bg-surface border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
+              className="border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
               aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
             >
               {REFRESH_OPTIONS.map((o) => (

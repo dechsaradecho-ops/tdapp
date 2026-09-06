@@ -6,6 +6,8 @@ import SignalCard from "@/components/SignalCard";
 import { api } from "@/lib/api";
 import { AppSettings, SessionStatus, SignalProposal } from "@/lib/types";
 
+// ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.signals_refresh_sec)
+// ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้
 const REFRESH_OPTIONS = [
   { label: "ปิด", value: 0 },
   { label: "10 วิ", value: 10 },
@@ -14,8 +16,6 @@ const REFRESH_OPTIONS = [
   { label: "5 นาที", value: 300 },
 ];
 
-const LS_KEY = "tdapp_signals_autorefresh";
-
 export default function SignalsPage() {
   const [signals, setSignals] = useState<SignalProposal[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -23,12 +23,8 @@ export default function SignalsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  // อ่านค่าตั้งต้นจาก localStorage (จำค่าที่เลือกไว้) — init function กัน SSR mismatch
-  const [intervalSec, setIntervalSec] = useState<number>(() => {
-    if (typeof window === "undefined") return 0;
-    const saved = Number(window.localStorage.getItem(LS_KEY));
-    return REFRESH_OPTIONS.some((o) => o.value === saved) ? saved : 0;
-  });
+  // ค่าเริ่มต้นปิด (0) — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
+  const [intervalSec, setIntervalSec] = useState<number>(0);
   const inFlight = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -55,9 +51,15 @@ export default function SignalsPage() {
     }
   }, []);
 
-  // โหลดครั้งแรกเมื่อเข้าหน้า
+  // โหลดครั้งแรกเมื่อเข้าหน้า + sync ค่า interval จาก settings (DB)
   useEffect(() => {
     refresh();
+    api.getSettings()
+      .then((s) => {
+        const saved = Number(s.signals_refresh_sec);
+        if (REFRESH_OPTIONS.some((o) => o.value === saved)) setIntervalSec(saved);
+      })
+      .catch(() => { /* settings ล้มเหลว — ใช้ค่าเริ่มต้น */ });
   }, [refresh]);
 
   // รีเฟรชอัตโนมัติตามช่วงที่เลือก (0 = ปิด)
@@ -67,12 +69,12 @@ export default function SignalsPage() {
     return () => clearInterval(id);
   }, [intervalSec, refresh]);
 
-  const changeInterval = (v: number) => {
+  const changeInterval = async (v: number) => {
     setIntervalSec(v);
     try {
-      window.localStorage.setItem(LS_KEY, String(v));
+      await api.saveSettings({ signals_refresh_sec: v }); // จำลง DB — ตามทุกเครื่อง
     } catch {
-      /* localStorage ใช้ไม่ได้ — ข้าม */
+      /* save ล้มเหลว — ค่ายังใช้ได้ในหน้านี้จนกว่าจะปิด */
     }
   };
 
@@ -110,7 +112,7 @@ export default function SignalsPage() {
           <select
             value={intervalSec}
             onChange={(e) => changeInterval(Number(e.target.value))}
-            className="bg-surface border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
+            className="border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
             aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
           >
             {REFRESH_OPTIONS.map((o) => (

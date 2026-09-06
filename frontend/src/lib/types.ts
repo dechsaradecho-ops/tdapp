@@ -426,6 +426,10 @@ export interface AppSettings {
   backtest_days: number;
   backtest_indicator: string;
   backtest_asset: string;
+  /** Auto-refresh interval (seconds) for the monitor page — 0 = off (DB-stored) */
+  monitor_refresh_sec: number;
+  /** Auto-refresh interval (seconds) for the signals page — 0 = off (DB-stored) */
+  signals_refresh_sec: number;
 }
 
 export interface SettingsSaveResult {
@@ -495,6 +499,9 @@ export interface MonitorSnapshot {
   recent: MonitorTrade[];
   generated_at: string | null;
   feed_status?: QuoteFeedStatus | null;
+  /** Live portfolio value from DB — capital + realized + unrealized PnL */
+  equity: number;
+  pnl: number;
 }
 
 /** Response of POST /api/trading/positions/close (manual close popup). */

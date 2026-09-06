@@ -723,6 +723,10 @@ class TestStatsReset:
         resets = [row for table, row in db.inserted
                   if table == "signal_logs" and "รีเซ็ตสถิติ" in row.get("reason", "")]
         assert len(resets) == 1
+        # equity history wiped + reseeded at starting capital (default 10000)
+        eq = [row for table, row in db.inserted if table == "equity_snapshots"]
+        assert len(eq) == 1
+        assert eq[0]["equity"] == 10000.0
 
     @pytest.mark.asyncio
     async def test_reset_requires_confirm(self):
@@ -735,6 +739,9 @@ class TestStatsReset:
         assert body["ok"] is False
         assert body["deleted"] == 0
         assert len(db.rows["paper_trades"]) == 1  # untouched
+        # no confirm → equity history must NOT be touched either
+        assert not [row for table, row in db.inserted
+                    if table == "equity_snapshots"]
 
     @pytest.mark.asyncio
     async def test_reset_with_no_closed_rows_is_ok(self):
@@ -761,6 +768,9 @@ class TestStatsReset:
                            {"confirm": True})).json()
         assert body["ok"] is True and body["deleted"] == 0
         assert body["stats"]["closed_count"] == 0
+        # equity history reseeded even on an empty DB
+        eq = [row for table, row in db.inserted if table == "equity_snapshots"]
+        assert len(eq) == 1 and eq[0]["equity"] == 10000.0
 
     @pytest.mark.asyncio
     async def test_reset_recomputes_stats_matching_monitor(self):
@@ -787,6 +797,12 @@ class TestStatsReset:
         assert mon["stats"]["pnl_total"] == 0.0
         assert mon["stats"]["closed_count"] == 0
         assert mon["stats"]["open_positions"] == 1
+        # live portfolio value: pnl = realized(0 after reset) + unrealized marks,
+        # equity = capital + pnl (unrealized comes from the fake quote marks)
+        unrealized = round(sum(float(p["unrealized_pnl"])
+                               for p in mon["open_positions"]), 2)
+        assert mon["pnl"] == unrealized
+        assert mon["equity"] == round(10000.0 + unrealized, 2)
 
 
 # ---------------------------------------------------------------------------
