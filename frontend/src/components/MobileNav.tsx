@@ -10,12 +10,49 @@ import { useEffect, useRef, useState } from "react";
  * "iOS 26 inspired tab menu" ด้วย CSS ล้วน (ไม่โหลด lottie-web ~250KB
  * และ pill ใช้ธีมแก้วเดิมของแอป) — สไตล์ pill อยู่ที่ .dock-pill ใน globals.css
  */
-const MENU = [
-  { href: "/", label: "หน้าหลัก", icon: "🏠" },
-  { href: "/signals", label: "สัญญาณ", icon: "⚡" },
-  { href: "/monitor", label: "มอนิเตอร์", icon: "📊" },
-  { href: "/logs", label: "Logs", icon: "📜" },
-  { href: "/settings", label: "ตั้งค่า", icon: "⚙️" },
+// Monotone stroke icons — สีจาก currentColor ของแท็บ (active = accent, ปกติ = slate)
+const ICON = {
+  home: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5.5 9.5V20a.5.5 0 0 0 .5.5h12a.5.5 0 0 0 .5-.5V9.5" />
+      <path d="M9.5 20.5v-6h5v6" />
+    </svg>
+  ),
+  signal: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z" />
+    </svg>
+  ),
+  monitor: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3.5 20.5h17" />
+      <path d="M6.5 20.5V14" />
+      <path d="M12 20.5V8.5" />
+      <path d="M17.5 20.5V4.5" />
+    </svg>
+  ),
+  logs: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 2.5H6.5A1.5 1.5 0 0 0 5 4v16a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 20V7.5L14 2.5Z" />
+      <path d="M14 2.5V8h5" />
+      <path d="M9 13h6M9 17h6" />
+    </svg>
+  ),
+  setting: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+    </svg>
+  ),
+};
+
+const MENU: { href: string; label: string; icon: keyof typeof ICON }[] = [
+  { href: "/", label: "Home", icon: "home" },
+  { href: "/signals", label: "Signal", icon: "signal" },
+  { href: "/monitor", label: "Monitor", icon: "monitor" },
+  { href: "/logs", label: "Logs", icon: "logs" },
+  { href: "/settings", label: "Setting", icon: "setting" },
 ];
 
 export default function MobileNav() {
@@ -102,11 +139,11 @@ export default function MobileNav() {
                 }`}
               >
                 <span
-                  className={`text-xl transition-transform duration-300 ${
+                  className={`transition-transform duration-300 ${
                     active ? "scale-110 -translate-y-px" : ""
                   }`}
                 >
-                  {l.icon}
+                  {ICON[l.icon]}
                 </span>
                 {l.label}
               </a>
