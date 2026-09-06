@@ -60,7 +60,9 @@ body {
 }
 ```
 
-**ภาพพื้นหลังผู้ใช้ (BackgroundLayer):** client component วาด 2 div fixed — รูป z-[-2] + scrim ดำ rgba(0,0,0,0.55) z-[-1] เหนือรูป (ใต้ aurora) · เก็บใน localStorage key `tdapp_bg_image` (data URL, resize canvas ยาวสุด 1600px, JPEG q0.72, cap ~2.8MB) · อัปเดตทันทีด้วย event `tdapp:bg-changed`
+**ภาพพื้นหลังผู้ใ้ตอง (BackgroundLayer):** client component วาด 2 div fixed — รูป z-[-2] + scrim ดำ rgba(0,0,0,0.55) z-[-1] เหนือรูป (ใต้ aurora) · เก็บใน localStorage key `tdapp_bg_image` (data URL, resize canvas ยาวสุด 1600px, JPEG q0.72, cap ~2.8MB) · อัปเดตทันทีด้วย event `tdapp:bg-changed`
+
+⚠️ **ห้ามเบลอรูปพื้นหลังทั้งใบ** — เดิมเคยใส่ `filter: blur(14px)` บนตัวรูปเพื่อชดเชย backdrop-filter ที่ดับบน Android แต่ user ต้องการเห็นรูปชัด → ลดเหลือ `blur(2px)` + `scale(1.03)` (กันขอบรูปขาวเพราะเบลอ) เท่านั้น ความฝ้าของแก้วให้มาจาก backdrop-filter ของ `.panel`/dock เอง + scrim ดำ
 
 ---
 
@@ -100,9 +102,17 @@ body {
 
 ---
 
-## 5. Liquid Glass Refraction (SVG feDisplacementMap)
+## 5. Liquid Glass Refraction (SVG feDisplacementMap) — ⛔ DISABLED
 
-ทำให้เนื้อหาหลังแก้ว "หักเห" แบบเลนส์ (ไม่ใช่แค่เบลอ) — ใช้เฉพาะ header + tab bar (หนักบนมือถือ ห้ามใส่ทุก panel)
+ทำให้เนื้อหาหลังแก้ว "หักเห" แบบเลนส์ (ไม่ใช่แค่เบลอ) — เคยใช้เฉพาะ header + tab bar
+
+**⛔ ปิดใช้งานถาวร (commit 9c355bd):** Samsung Internet **parse `@supports (backdrop-filter: url(...))` ผ่าน แต่ render พัง** → dock เมนูล่างบน Samsung วาดเป็น "กรอบซ้อน" เพี้ยน ๆ (อาการเดียวกับที่ Samsung ไม่ render backdrop-filter บน pseudo-element)
+
+บทเรียน: **`@supports` ผ่าน ≠ render ถูก** บน Samsung Internet — ฟีเจอร์ CSS ทดลองบน pseudo-element/backdrop ต้องทดสอบเครื่องจริงก่อนขึ้น prod เสมอ
+
+สถานะโค้ดปัจจุบัน: `.lg-refract` เหลือแค่ `isolation: isolate` + `::after` specular gradient (ทำงานปกติทุก browser) — `::before` โปร่งใส ไม่มี filter; rule `@supports (backdrop-filter: url(...))` ถูก comment out ไว้ใน `globals.css` (ห้ามเปิดกลับจนกว่าจะทดสอบ Samsung เครื่องจริง)
+
+เอกสารอ้างอิงเดิม (เผื่อนำกลับมา desktop-only):
 
 **SVG defs (ใส่ใน body ทุกหน้า, ซ่อนด้วยขนาด 0 — ห้าม display:none):**
 
@@ -123,13 +133,14 @@ body {
 ```css
 .lg-refract { isolation: isolate; }
 .lg-refract::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; }
-/* เฉพาะ browser ที่รองรับ (Chromium/Safari ใหม่) — Firefox parse ไม่ผ่าน → fallback blur เดิม */
+/* ⛔ DISABLED — Samsung Internet parse @supports ผ่านแต่ render พัง (กรอบซ้อนบน dock)
 @supports (backdrop-filter: url("#lg-refract")) {
   .lg-refract::before {
     -webkit-backdrop-filter: url("#lg-refract");
     backdrop-filter: url("#lg-refract");
   }
 }
+*/
 /* ขอบ specular ด้านบน — ทำงานทุก browser */
 .lg-refract::after {
   content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
@@ -147,7 +158,7 @@ body {
 
 ```tsx
 <header
-  className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
+  className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30 hidden md:flex"
   style={{
     background: "rgba(5, 5, 8, 0.32)",           // แก้วใสมาก
     WebkitBackdropFilter: "blur(6px) saturate(140%)",
@@ -157,9 +168,8 @@ body {
 >
 ```
 
-- ซ้าย: `h1` ชื่อเว็บ (มือถือตัวสั้น / desktop ตัวยาว ด้วย `sm:hidden` / `hidden sm:inline`)
-- ขวา: nav desktop `hidden md:flex gap-4 text-sm text-slate-400` ลิงก์ `hover:text-accent`
-- มือถือ (<md) ซ่อน nav นี้ → ใช้ MobileNav dock ด้านล่างแทน
+- **ไม่มี `h1` ชื่อเว็บ** — เอาออกตาม request (commit ef6e244) เหลือแค่ nav ลิงก์
+- **มือถือซ่อน header ทั้งแถบ** (`hidden md:flex`) — มือถือใช้ MobileNav dock อย่างเดียว
 
 ---
 
@@ -207,6 +217,8 @@ style={{
 ```
 
 **Layout ต้องเว้นที่ให้ dock:** `<main className="... pb-24 md:pb-5">` — ⚠️ ห้ามใช้ `.safe-bottom` บน main (env() มาทีหลัง Tailwind จะ override pb-* เป็น 0 ทำให้ dock ทับเนื้อหา)
+
+⚠️ **ห้ามใส่ `.lg-refract` กลับบน dock โดยไม่ทดสอบ Samsung เครื่องจริง** — เดิม dock ใช้ `.lg-refract` (SVG displacement บน ::before) แล้วบน Samsung Internet วาดเป็น "กรอบซ้อน" เพี้ยน ๆ (commit 9c355bd เอาออก) — dock ปัจจุบันใช้ inline blur บนตัว nav เอง ซึ่ง Samsung รองรับปกติ
 
 ---
 
@@ -407,7 +419,7 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 1. ☐ Tailwind config: palette 6 สี (§2) + override `.text-slate-400/500`
 2. ☐ Body: ดำ + aurora 3 radial-gradient + `color-scheme: dark` (§3)
 3. ☐ คัดลอก `.panel` + `::after` sheen (§4) — ใช้เป็นการ์ดหลักทุกหน้า
-4. ☐ SVG filter `#lg-refract` ใน body + `.lg-refract` CSS (§5) — ใส่เฉพาะ header/tab bar
+4. ☐ `.lg-refract` CSS (§5) — ⛔ refraction filter ปิดอยู่ (Samsung พัง) เหลือ isolation + specular ::after เท่านั้น — ห้ามเปิดกลับโดยไม่ทดสอบ Samsung เครื่องจริง
 5. ☐ Header sticky แก้วใส rgba(5,5,8,0.32) (§6)
 6. ☐ MobileNav floating dock แก้วขาว + bottom sheet (§7) + `main pb-24`
 7. ☐ ปุ่ม 4 บทบาท tinted + radius 12px + scale(0.97) (§8)
