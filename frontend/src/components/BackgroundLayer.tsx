@@ -29,12 +29,12 @@ export default function BackgroundLayer() {
         className="fixed inset-0 z-[-2] bg-cover bg-center"
         style={{
           backgroundImage: `url(${bg})`,
-          /* เบลอรูปพื้นหลังไว้ล่วงหน้า — บน Android (Chrome/Samsung Internet) backdrop-filter
-             ของ .panel บางจังหวะจะดับตัวเมื่อ content repaint (ตารางโหลด/เลื่อน scroll)
-             พื้นหลังที่เบลอไว้แล้วทำให้แก้วยังดูฝ้าเสมอ ไม่ใสโปร่งทะลุรูป */
-          filter: "blur(14px) saturate(120%)",
-          /* ขยายเกินจอเล็กน้อยกันขอบรูปเป็นเงาฟุ้งตอนเบลอ */
-          transform: "scale(1.08)",
+          /* เบลอเบา ๆ เฉพาะพอให้ขอบรูปนุ่ม — ไม่เบลอทั้งรูป (user ต้องการเห็นรูปชัด)
+             ส่วนความฝ้าของแก้วมาจาก backdrop-filter ของ .panel เอง (ซึ่ง Samsung รองรับ
+             บน element จริง) + scrim ดำด้านล่าง ช่วยคุม contrast */
+          filter: "blur(2px)",
+          /* ขยายเกินจอเล็กน้อยกันขอบรูปขาวเพราะเบลอ */
+          transform: "scale(1.03)",
         }}
       />
       <div

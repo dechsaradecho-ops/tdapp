@@ -149,14 +149,18 @@ input[type="checkbox"] {
   z-index: -1;
   pointer-events: none;
 }
-/* เฉพาะ browser ที่รองรับ SVG filter ใน backdrop-filter (Chromium/Safari ใหม่) — หักเหแสงจริง
-   Firefox และ browser เก่า parse ไม่ผ่าน → ได้ rule ด้านบน (โปร่งใส) = blur เดิม ไม่พัง */
+/* เฉพาะ browser ที่รองรับ SVG filter ใน backdrop-filter — เดิมเปิดให้ Chromium/Safari
+   แต่ Samsung Internet parse @supports ผ่านทั้งที่ render พัง → เมนูล่างเป็นกรอบซ้อนเพี้ยน ๆ
+   (อาการเดียวกับที่ pseudo-element backdrop-filter ใช้ไม่ได้บน Samsung)
+   จึงปิด refraction ถาวรทุก browser — เหลือ blur+specular ซึ่งเพียงพอและนิ่งกว่า */
+/*
 @supports (backdrop-filter: url("#lg-refract")) {
   .lg-refract::before {
     -webkit-backdrop-filter: url("#lg-refract");
     backdrop-filter: url("#lg-refract");
   }
 }
+*/
 /* ขอบ specular ด้านบน (แสงสะท้อนขอบแก้ว) — ทำงานทุก browser */
 .lg-refract::after {
   content: "";
