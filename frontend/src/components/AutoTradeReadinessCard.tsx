@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import Icon from "@/components/Icon";
 import type {
   AppSettings,
   CorrelationResponse,
@@ -88,7 +89,7 @@ export default function AutoTradeReadinessCard() {
   return (
     <section className="panel">
       <div className="flex items-center justify-between gap-3 mb-3">
-        <h2 className="panel-title">🤖 สถานะการเทรดอัตโนมัติ</h2>
+        <h2 className="panel-title flex items-center gap-1.5"><Icon n="bot" size={17} /> สถานะการเทรดอัตโนมัติ</h2>
         <div className="flex items-center gap-2">
           {checkedAt && (
             <span className="text-xs text-slate-500">ตรวจเมื่อ {checkedAt}</span>

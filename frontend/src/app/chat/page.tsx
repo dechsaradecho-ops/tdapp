@@ -70,7 +70,7 @@ export default function ChatPage() {
       setMessages(finalMsgs);
       saveChatHistory(finalMsgs);
     } catch (e) {
-      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content: `⚠️ เชื่อมต่อ AI ไม่ได้: ${e}` }];
+      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content: `เชื่อมต่อ AI ไม่ได้: ${e}` }];
       setMessages(errMsgs);
       saveChatHistory(errMsgs);
     } finally {

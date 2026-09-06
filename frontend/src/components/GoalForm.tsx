@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import Icon from "@/components/Icon";
 import { fmtMoney, probabilityLabel } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import { GoalAssessment, GoalRealityContext } from "@/lib/types";
@@ -13,13 +14,13 @@ const SCENARIO_LABELS: Record<string, string> = {
 };
 
 const REGIME_LABELS: Record<string, string> = {
-  strong_bull_trend: "🐂 Bull แรง",
-  bull_trend: "📈 Bull Trend",
-  sideway: "↔️ Sideway",
-  high_volatility: "⚡ ผันผวนสูง",
-  bear_trend: "📉 Bear Trend",
-  strong_bear_trend: "🐻 Bear แรง",
-  news_driven_market: "📰 ขับเคลื่อนด้วยข่าว",
+  strong_bull_trend: "Bull แรง",
+  bull_trend: "Bull Trend",
+  sideway: "Sideway",
+  high_volatility: "ผันผวนสูง",
+  bear_trend: "Bear Trend",
+  strong_bear_trend: "Bear แรง",
+  news_driven_market: "ขับเคลื่อนด้วยข่าว",
 };
 
 export default function GoalForm() {
@@ -120,8 +121,9 @@ export default function GoalForm() {
               <p className={`text-xl font-bold ${probColor}`}>{probabilityLabel(result.probability)}</p>
             </div>
             {result.risk_warning && (
-              <div className="border border-loss/40 bg-loss/10 rounded p-3 text-sm">
-                ⚠️ {result.risk_warning}
+              <div className="border border-loss/40 bg-loss/10 rounded p-3 text-sm flex items-start gap-1.5">
+                <Icon n="warning" size={14} className="mt-0.5 text-loss" />
+                <span>{result.risk_warning}</span>
               </div>
             )}
             <div className="space-y-2">
@@ -152,7 +154,7 @@ function RealityPanel({ reality }: { reality: GoalRealityContext }) {
   if (!reality.data_available) {
     return (
       <div className="border border-white/10 bg-white/[0.03] rounded-xl p-3 text-sm text-slate-400">
-        📭 ยังไม่มีข้อมูลการเทรดจริง — ผลนี้คำนวณจากสูตรทฤษฎีล้วน
+        ยังไม่มีข้อมูลการเทรดจริง — ผลนี้คำนวณจากสูตรทฤษฎีล้วน
         (เริ่มเทรดแล้วระบบจะปรับผลตาม PnL / Win Rate / ตลาดจริงให้อัตโนมัติ)
       </div>
     );
@@ -162,7 +164,7 @@ function RealityPanel({ reality }: { reality: GoalRealityContext }) {
   const blocked = reality.kill_switch_engaged || reality.trading_paused;
   return (
     <div className={`border rounded p-3 text-sm space-y-2 ${blocked ? "border-loss/40 bg-loss/10" : "border-accent/30 bg-accent/5"}`}>
-      <p className="font-semibold text-slate-200">🎯 ประเมินจากสถานะจริงของคุณ</p>
+      <p className="font-semibold text-slate-200 flex items-center gap-1.5"><Icon n="target" size={14} /> ประเมินจากสถานะจริงของคุณ</p>
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-slate-300">
         <span>PnL รวม (ปิดแล้ว)</span>
         <span className={`text-right font-semibold ${pnlColor}`}>
@@ -176,10 +178,10 @@ function RealityPanel({ reality }: { reality: GoalRealityContext }) {
         <span className="text-right font-semibold">{regime}</span>
       </div>
       {reality.kill_switch_engaged && (
-        <p className="text-loss">🛑 Kill Switch: {reality.kill_triggers.join("; ")}</p>
+        <p className="text-loss flex items-start gap-1.5"><Icon n="octagon" size={14} className="mt-0.5" /><span>Kill Switch: {reality.kill_triggers.join("; ")}</span></p>
       )}
       {reality.trading_paused && (
-        <p className="text-amber-400">⏸️ หยุดเทรดด้วยตนเอง{reality.pause_reason ? ` — ${reality.pause_reason}` : ""}</p>
+        <p className="text-amber-400 flex items-start gap-1.5"><Icon n="pause" size={14} className="mt-0.5" /><span>หยุดเทรดด้วยตนเอง{reality.pause_reason ? ` — ${reality.pause_reason}` : ""}</span></p>
       )}
     </div>
   );

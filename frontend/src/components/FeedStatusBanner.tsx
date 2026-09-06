@@ -1,6 +1,7 @@
 "use client";
 
 import { QuoteFeedStatus } from "@/lib/types";
+import Icon from "@/components/Icon";
 
 /** Warning banner for live-price feed failures (timeout / HTTP error).
  *
@@ -22,7 +23,7 @@ export default function FeedStatusBanner({
       role="alert"
       className="mb-4 rounded-lg border border-amber-400/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
     >
-      <div className="font-semibold">⚠️ ดึงราคาจากตลาดไม่สำเร็จ — ราคาบางส่วนอาจไม่อัปเดต</div>
+      <div className="font-semibold flex items-center gap-1.5"><Icon n="warning" size={15} /> ดึงราคาจากตลาดไม่สำเร็จ — ราคาบางส่วนอาจไม่อัปเดต</div>
       <div className="mt-1 text-amber-200/80">
         ล้มเหลว: {failed}
         {feed.message ? ` (${feed.message})` : ""}

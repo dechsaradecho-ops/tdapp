@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import BackgroundPicker from "@/components/BackgroundPicker";
+import Icon from "@/components/Icon";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import PinManager from "@/components/PinManager";
 import { api } from "@/lib/api";
@@ -89,10 +90,10 @@ export default function SettingsPage() {
     try {
       const res = await api.lineTest();
       setLineTestRes(res);
-      setLineMsg(res.ok ? "✅ ส่งข้อความทดสอบสำเร็จ — เช็คกลุ่ม LINE" : "❌ ส่งไม่สำเร็จ — ดู error รายกลุ่มด้านล่าง");
+      setLineMsg(res.ok ? "ส่งข้อความทดสอบสำเร็จ — เช็คกลุ่ม LINE" : "ส่งไม่สำเร็จ — ดู error รายกลุ่มด้านล่าง");
       loadLineTargets(); // refresh last_seen_at
     } catch (e) {
-      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setLineMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLineBusy(false);
     }
@@ -104,7 +105,7 @@ export default function SettingsPage() {
     try {
       setDiag(await api.lineDiag());
     } catch (e) {
-      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setLineMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLineBusy(false);
     }
@@ -121,7 +122,7 @@ export default function SettingsPage() {
       if (res.ok) setNewGroupId("");
       loadLineTargets();
     } catch (e) {
-      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setLineMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLineBusy(false);
     }
@@ -154,7 +155,7 @@ export default function SettingsPage() {
       setSimRes(res);
       loadEvents();
     } catch (e) {
-      setLineMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setLineMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLineBusy(false);
     }
@@ -189,9 +190,9 @@ export default function SettingsPage() {
       const res = await api.saveSettings(cfg);
       setCfg(res.settings);
       setCapital(res.settings.capital); // global store follows saved settings
-      setSaveMsg(res.ok ? "✅ บันทึกลง Supabase แล้ว" : `❌ ${res.message}`);
+      setSaveMsg(res.ok ? "บันทึกลง Supabase แล้ว" : res.message);
     } catch (e) {
-      setSaveMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setSaveMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -203,9 +204,9 @@ export default function SettingsPage() {
     try {
       const res = await api.resetSettings();
       setCfg(res.settings);
-      setSaveMsg("↩️ รีเซ็ตเป็นค่าเริ่มต้นแล้ว");
+      setSaveMsg("รีเซ็ตเป็นค่าเริ่มต้นแล้ว");
     } catch (e) {
-      setSaveMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setSaveMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -332,8 +333,8 @@ export default function SettingsPage() {
           <div>
             <p className="text-sm font-semibold">
               {pause?.paused
-                ? "🛑 Auto Trading หยุดชั่วคราว — บล็อกทั้ง auto + approve"
-                : "✅ Auto Trading ทำงานปกติ"}
+                ? "Auto Trading หยุดชั่วคราว — บล็อกทั้ง auto + approve"
+                : "Auto Trading ทำงานปกติ"}
             </p>
             <p className="text-xs text-slate-400 mt-0.5">
               {pause?.paused
@@ -359,9 +360,9 @@ export default function SettingsPage() {
                 <select value={cfg.order_mode}
                   onChange={(e) => set("order_mode", e.target.value)}
                   className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
-                  <option value="auto">🤖 Auto — ระบบเทรดเอง</option>
-                  <option value="semi_auto">👤 Semi-Auto — รอยืนยันก่อน</option>
-                  <option value="manual">✋ Manual — ระบบไม่ยิง order</option>
+                  <option value="auto">Auto — ระบบเทรดเอง</option>
+                  <option value="semi_auto">Semi-Auto — รอยืนยันก่อน</option>
+                  <option value="manual">Manual — ระบบไม่ยิง order</option>
                 </select>
               </label>
               <label className="block text-sm">
@@ -536,7 +537,7 @@ export default function SettingsPage() {
               <span className="text-slate-400">ผลทดสอบ:</span>
               <span className={dbCheck.verdict === "pass"
                 ? "text-profit font-bold" : "text-loss font-bold"}>
-                {dbCheck.verdict === "pass" ? "✅ ผ่านทั้งหมด" : `❌ ${dbCheck.verdict}`}
+                {dbCheck.verdict === "pass" ? "ผ่านทั้งหมด" : dbCheck.verdict}
               </span>
               <span className="text-slate-500">
                 (client: {dbCheck.client})
@@ -618,9 +619,10 @@ export default function SettingsPage() {
               กลุ่มที่ลงทะเบียน: {diag.targets_count} · personal: {diag.users_count}
             </p>
             {diag.bot_user_id_from_api && !diag.bot_user_id_set && (
-              <p className="text-amber-400 text-xs">
-                💡 LINE API บอกว่า Bot user ID ของคุณคือ <code>{diag.bot_user_id_from_api}</code> —
-                คัดลอกไปใส่ env LINE_BOT_USER_ID บน Render เพื่อเปิด @mention detection
+              <p className="text-amber-400 text-xs flex items-start gap-1.5">
+                <Icon n="bulb" size={13} className="mt-0.5 shrink-0" />
+                <span>LINE API บอกว่า Bot user ID ของคุณคือ <code>{diag.bot_user_id_from_api}</code> —
+                คัดลอกไปใส่ env LINE_BOT_USER_ID บน Render เพื่อเปิด @mention detection</span>
               </p>
             )}
             {diag.hint && <p className="text-amber-400 text-xs">{diag.hint}</p>}
@@ -629,8 +631,8 @@ export default function SettingsPage() {
 
         {/* --- webhook debug: simulate + event log --- */}
         <div className="mt-3 rounded border border-slate-700 bg-surface/40 p-3">
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">
-            🧪 Debug webhook — จำลองข้อความ (ไม่ต้องมี LINE)
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+            <Icon n="flask" size={13} /> Debug webhook — จำลองข้อความ (ไม่ต้องมี LINE)
           </p>
           <div className="flex flex-wrap gap-2">
             <input value={simText} onChange={(e) => setSimText(e.target.value)}
@@ -651,7 +653,7 @@ export default function SettingsPage() {
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ผลจำลอง (pipeline เดียวกับ webhook จริง)</p>
               {simRes.steps.map((s, i) => (
                 <div key={i} className="flex items-start gap-2 text-xs">
-                  <span>{s.ok ? "✅" : "❌"}</span>
+                  <span className={s.ok ? "text-profit" : "text-loss"}><Icon n={s.ok ? "checkCircle" : "xCircle"} size={13} /></span>
                   <span className="text-slate-300">{s.step}</span>
                   {s.note && <span className="text-slate-500 break-all">— {s.note}</span>}
                 </div>
@@ -706,7 +708,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2">
               <span className="text-slate-400">ผลทดสอบ:</span>
               <span className={lineTestRes.ok ? "text-profit font-bold" : "text-loss font-bold"}>
-                {lineTestRes.ok ? "✅ ส่งสำเร็จ" : "❌ ส่งไม่สำเร็จ"}
+                {lineTestRes.ok ? "ส่งสำเร็จ" : "ส่งไม่สำเร็จ"}
               </span>
               <span className="text-slate-500">
                 ส่งได้ {lineTestRes.sent} / ล้มเหลว {lineTestRes.failed}
@@ -717,7 +719,7 @@ export default function SettingsPage() {
                 {lineTestRes.results.map((r) => (
                   <div key={r.target_id} className="text-xs">
                     <div className="flex items-center gap-2">
-                      <span>{r.ok ? "✅" : "❌"}</span>
+                      <span className={r.ok ? "text-profit" : "text-loss"}><Icon n={r.ok ? "checkCircle" : "xCircle"} size={13} /></span>
                       <span className="text-slate-400">{r.target_type}</span>
                       <code className="text-slate-300 break-all">{r.target_id}</code>
                     </div>
@@ -768,8 +770,9 @@ export default function SettingsPage() {
                   className="bg-surface rounded p-3 flex items-start justify-between flex-wrap gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold">
-                        {t.target_type === "group" ? "👥 Group" : t.target_type === "room" ? "🏠 Room" : "👤 User"}
+                      <span className="text-sm font-semibold flex items-center gap-1.5">
+                        <Icon n={t.target_type === "group" ? "users" : t.target_type === "room" ? "home" : "user"} size={14} />
+                        {t.target_type === "group" ? "Group" : t.target_type === "room" ? "Room" : "User"}
                       </span>
                       <span className={t.notification_enabled ? "text-profit text-xs" : "text-loss text-xs"}>
                         {t.notification_enabled ? "เปิดรับแจ้งเตือน" : "ปิดรับแจ้งเตือน"}
@@ -791,7 +794,7 @@ export default function SettingsPage() {
               {lineTargets.users.map((u) => (
                 <div key={u.target_id} className="bg-surface rounded p-3">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold">👤 Personal</span>
+                    <span className="text-sm font-semibold flex items-center gap-1.5"><Icon n="user" size={14} /> Personal</span>
                     <span className={u.notification_enabled ? "text-profit text-xs" : "text-loss text-xs"}>
                       {u.notification_enabled ? "เปิดรับแจ้งเตือน" : "ปิดรับแจ้งเตือน"}
                     </span>
@@ -811,7 +814,9 @@ function DiagRow({ label, ok, note }:
   { label: string; ok?: boolean; note?: string }) {
   return (
     <div className="flex items-center gap-2 text-xs">
-      <span>{ok === undefined ? "❔" : ok ? "✅" : "❌"}</span>
+      <span className={ok === undefined ? "text-slate-500" : ok ? "text-profit" : "text-loss"}>
+        <Icon n={ok === undefined ? "help" : ok ? "checkCircle" : "xCircle"} size={13} />
+      </span>
       <span className="text-slate-300">{label}</span>
       {note && <span className="text-slate-500 truncate">— {note}</span>}
     </div>
@@ -823,7 +828,7 @@ function StepBadge({ label, status }:
   if (!status) return <div className="bg-surface rounded p-2 text-center text-slate-500">{label}: —</div>;
   return (
     <div className={`bg-surface rounded p-2 text-center ${status === "ok" ? "text-profit" : "text-loss font-bold"}`}>
-      {label}: {status === "ok" ? "✅" : "❌"}
+      {label}: {status === "ok" ? "ผ่าน" : "ล้มเหลว"}
     </div>
   );
 }

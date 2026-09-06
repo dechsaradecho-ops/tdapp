@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Icon from "@/components/Icon";
 import { API_BASE } from "@/lib/types";
 import { getToken } from "@/lib/auth";
 import { CHAT_HISTORY_MAX, ChatMsg, loadChatHistory, saveChatHistory } from "@/lib/chat_history";
@@ -90,7 +91,7 @@ export default function ChatWidget() {
         saveChatHistory(finalMsgs);
       }
     } catch (e) {
-      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content: `⚠️ เชื่อมต่อ AI ไม่ได้: ${e}` }];
+      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content: `เชื่อมต่อ AI ไม่ได้: ${e}` }];
       setMessages(errMsgs);
       saveChatHistory(errMsgs);
     } finally {
@@ -104,7 +105,7 @@ export default function ChatWidget() {
         // มือถือ: เต็มจอ (sheet) — เดสก์ท็อป: กล่องลอยขวาล่างเหมือนเดิม
         <div className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:z-50 sm:w-[360px] sm:max-w-[calc(100vw-3rem)] sm:h-[520px] sm:max-h-[70vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop">
           <div className="flex items-center justify-between pb-2 border-b border-white/10">
-            <p className="text-sm font-semibold">💬 AI Assistant</p>
+            <p className="text-sm font-semibold flex items-center gap-1.5"><Icon n="message" size={15} /> AI Assistant</p>
             <button onClick={() => setOpen(false)}
               className="w-11 h-11 -mr-2 flex items-center justify-center text-slate-500 hover:text-slate-300 text-lg leading-none active:bg-white/10 rounded-lg"
               aria-label="ปิดแชท">✕</button>
@@ -133,7 +134,7 @@ export default function ChatWidget() {
                   <span className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce [animation-delay:150ms]" />
                   <span className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce [animation-delay:300ms]" />
                 </span>
-                💭 AI กำลังคิด... ({thinkSecs}s)
+                AI กำลังคิด... ({thinkSecs}s)
               </div>
             )}
             <div ref={endRef} />

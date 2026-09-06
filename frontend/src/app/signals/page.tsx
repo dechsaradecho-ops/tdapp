@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
+import Icon from "@/components/Icon";
 import SignalCard from "@/components/SignalCard";
 import SignalLogsPanel from "@/components/SignalLogsPanel";
 import { api } from "@/lib/api";
@@ -92,9 +93,9 @@ export default function SignalsPage() {
   const mode = settings?.order_mode ?? "semi_auto";
   const isAuto = mode === "auto";
   const heading = isAuto
-    ? "🤖 AUTO — ระบบยิงออเดอร์เองเมื่อสัญญาณผ่านทุก gate"
+    ? "AUTO — ระบบยิงออเดอร์เองเมื่อสัญญาณผ่านทุก gate"
     : mode === "manual"
-      ? "✋ MANUAL — ทุกไม้ต้องกดอนุมัติเองก่อนยิง"
+      ? "MANUAL — ทุกไม้ต้องกดอนุมัติเองก่อนยิง"
       : "SEMI-AUTO — ข้อเสนอการเทรด (รอการอนุมัติ)";
   const pending = signals.filter((s) => s.approval !== "approved");
   const approved = signals.filter((s) => s.approval === "approved");
@@ -114,13 +115,13 @@ export default function SignalsPage() {
           onClick={() => setTab("signals")}
           className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "signals" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
         >
-          ⚡ สัญญาณ
+          <span className="inline-flex items-center gap-1.5"><Icon n="bolt" size={15} /> สัญญาณ</span>
         </button>
         <button
           onClick={() => setTab("logs")}
           className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "logs" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
         >
-          🗂️ บันทึกสัญญาณ
+          <span className="inline-flex items-center gap-1.5"><Icon n="archive" size={15} /> บันทึกสัญญาณ</span>
         </button>
       </div>
 
@@ -165,7 +166,7 @@ export default function SignalsPage() {
       {/* ตลาดปิด (สุดสัปดาห์) — สแกนเนอร์หยุดสร้างสัญญาณ ราคาบนการ์ดเก่าคือราคาปิดวันศุกร์ */}
       {session?.market_closed && (
         <div className="border border-amber-500/40 bg-amber-500/10 rounded p-3 text-sm text-amber-300">
-          🔒 <b>ตลาดปิดอยู่</b> — ตลาด FX/ทองคำปิดสุดสัปดาห์ (ศุกร์ 21:00 UTC → อาทิตย์ 21:00 UTC)
+          <b className="inline-flex items-center gap-1.5"><Icon n="lock" size={14} /> ตลาดปิดอยู่</b> — ตลาด FX/ทองคำปิดสุดสัปดาห์ (ศุกร์ 21:00 UTC → อาทิตย์ 21:00 UTC)
           ระบบงดสร้างสัญญาณใหม่จนกว่าตลาดจะเปิด
           {session.next_open_utc &&
             ` — เปิดอีกครั้ง ${new Date(session.next_open_utc).toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} (เวลาไทย)`}
@@ -185,7 +186,7 @@ export default function SignalsPage() {
       {pending.length > 0 && (
         <SignalGroup
           title={isAuto
-            ? `🤖 ระบบกำลังดำเนินการ (${pending.length}) — การ์ดไหนพร้อมยิง ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที`
+            ? `ระบบกำลังดำเนินการ (${pending.length}) — การ์ดไหนพร้อมยิง ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที`
             : `รอการอนุมัติ (${pending.length})`}
           count={pending.length}
           defaultExpanded
@@ -200,7 +201,7 @@ export default function SignalsPage() {
       {/* อนุมัติ/ยิงแล้ว — แสดงด้านล่างพร้อมสแตมป์เวลา */}
       {approved.length > 0 && (
         <SignalGroup
-          title={isAuto ? `🤖 ยิงออเดอร์แล้ว (${approved.length})` : `อนุมัติแล้ว (${approved.length})`}
+          title={isAuto ? `ยิงออเดอร์แล้ว (${approved.length})` : `อนุมัติแล้ว (${approved.length})`}
           count={approved.length}
           defaultExpanded={false}
         >

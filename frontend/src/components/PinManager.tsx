@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import Icon from "@/components/Icon";
 import { clearToken, setToken } from "@/lib/auth";
 import { PinStatus } from "@/lib/types";
 
@@ -61,7 +62,7 @@ export default function PinManager() {
 
   return (
     <div className="border border-white/10 bg-white/[0.03] rounded-xl p-3 space-y-2">
-      <p className="text-sm font-semibold">🔐 รหัส PIN (ใช้ปลดล็อกหน้าเว็บ)</p>
+      <p className="text-sm font-semibold flex items-center gap-1.5"><Icon n="lock" size={15} /> รหัส PIN (ใช้ปลดล็อกหน้าเว็บ)</p>
       {statusLoading ? (
         <p className="text-xs text-slate-500 animate-pulse">กำลังเช็คสถานะ PIN...</p>
       ) : status?.pin_set ? (

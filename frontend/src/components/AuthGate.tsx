@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import Icon from "@/components/Icon";
 import { AUTH_EXPIRED_EVENT, clearToken, getToken, setToken } from "@/lib/auth";
 import { PinStatus } from "@/lib/types";
 
@@ -164,7 +165,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)", WebkitBackdropFilter: "blur(12px)", backdropFilter: "blur(12px)" }}>
         <div className="panel p-8 text-center max-w-sm">
-          <p className="text-4xl mb-2">🔒</p>
+          <p className="text-loss mb-2 flex justify-center"><Icon n="lock" size={40} /></p>
           <h2 className="panel-title">บัญชีถูกล็อกชั่วคราว</h2>
           <p className="text-loss font-bold text-xl mt-2">{mm}:{ss}</p>
           <p className="text-xs text-slate-500 mt-2">
@@ -178,7 +179,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.75)", WebkitBackdropFilter: "blur(20px) saturate(140%)", backdropFilter: "blur(20px) saturate(140%)" }}>
       <div className="panel p-8 w-full max-w-xs text-center">
-        <p className="text-3xl mb-1">🔐</p>
+        <p className="text-slate-300 mb-1 flex justify-center"><Icon n="lock" size={32} /></p>
         <h2 className="panel-title">กรอก PIN เข้าใช้งาน</h2>
 
         <input

@@ -1,6 +1,7 @@
 "use client";
 
 import { RiskStatus } from "@/lib/types";
+import Icon from "@/components/Icon";
 
 export default function RiskPanel({ risk }: { risk: RiskStatus | null }) {
   if (!risk) return <p className="text-slate-500 text-sm">ยังไม่มีข้อมูลความเสี่ยง</p>;
@@ -10,8 +11,9 @@ export default function RiskPanel({ risk }: { risk: RiskStatus | null }) {
   return (
     <div className="space-y-3 text-sm">
       {risk.trading_paused && (
-        <div className="border border-loss bg-loss/10 rounded p-3 font-semibold">
-          ⛔ {risk.message}
+        <div className="border border-loss bg-loss/10 rounded p-3 font-semibold flex items-start gap-1.5">
+          <Icon n="ban" size={15} className="mt-0.5" />
+          <span>{risk.message}</span>
         </div>
       )}
       <div className="flex justify-between">

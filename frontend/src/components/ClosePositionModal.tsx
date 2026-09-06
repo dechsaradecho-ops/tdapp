@@ -2,6 +2,7 @@
 
 import { ClosePositionResult } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
+import Icon from "@/components/Icon";
 
 /** Confirmation popup after a manual close — full trade summary + portfolio
  * stats returned by POST /api/trading/positions/close (no second round-trip). */
@@ -27,8 +28,9 @@ export default function ClosePositionModal({
       >
         {/* ---------- header ---------- */}
         <div className="flex items-center justify-between">
-          <h3 className="panel-title">
-            {win ? "✅ ปิดไม้สำเร็จ (กำไร)" : "🔻 ปิดไม้สำเร็จ (ขาดทุน)"}
+          <h3 className="panel-title flex items-center gap-1.5">
+            {win ? <><Icon n="checkCircle" size={16} className="text-profit" /> ปิดไม้สำเร็จ (กำไร)</>
+              : <><Icon n="trendDown" size={16} className="text-loss" /> ปิดไม้สำเร็จ (ขาดทุน)</>}
           </h3>
           <button
             onClick={onClose}
@@ -76,7 +78,7 @@ export default function ClosePositionModal({
                 : "-"
             }
           />
-          <Detail label="เหตุผลปิด" value="✋ ปิดเอง (Manual)" />
+          <Detail label="เหตุผลปิด" value="ปิดเอง (Manual)" />
         </div>
 
         {/* ---------- portfolio summary ---------- */}
@@ -107,8 +109,9 @@ export default function ClosePositionModal({
         </div>
 
         {result.warnings.length > 0 && (
-          <p className="text-xs text-amber-400">
-            ⚠️ {result.warnings.join("; ")}
+          <p className="text-xs text-amber-400 flex items-start gap-1.5">
+            <Icon n="warning" size={14} className="mt-0.5" />
+            <span>{result.warnings.join("; ")}</span>
           </p>
         )}
 

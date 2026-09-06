@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Icon, { IconName } from "@/components/Icon";
 
 /**
  * จัดหมวดหมู่เหตุผล (reason) ของ signal card — แต่ละหมวด toggle พับ/กางได้
@@ -14,13 +15,13 @@ import { useState } from "react";
  */
 type Category = "score" | "trend" | "momentum" | "volatility" | "news" | "other";
 
-const CATEGORY_META: Record<Category, { label: string; icon: string; color: string }> = {
-  score: { label: "คะแนนโอกาส", icon: "🎯", color: "text-accent" },
-  trend: { label: "เทรนด์", icon: "📈", color: "text-profit" },
-  momentum: { label: "โมเมนตัม", icon: "⚡", color: "text-amber-400" },
-  volatility: { label: "ความผันผวน", icon: "🌊", color: "text-sky-400" },
-  news: { label: "ข่าว/เซนติเมนต์", icon: "📰", color: "text-purple-400" },
-  other: { label: "อื่นๆ", icon: "•", color: "text-slate-400" },
+const CATEGORY_META: Record<Category, { label: string; icon: IconName; color: string }> = {
+  score: { label: "คะแนนโอกาส", icon: "target", color: "text-accent" },
+  trend: { label: "เทรนด์", icon: "trendUp", color: "text-profit" },
+  momentum: { label: "โมเมนตัม", icon: "bolt", color: "text-amber-400" },
+  volatility: { label: "ความผันผวน", icon: "waves", color: "text-sky-400" },
+  news: { label: "ข่าว/เซนติเมนต์", icon: "news", color: "text-purple-400" },
+  other: { label: "อื่นๆ", icon: "help", color: "text-slate-400" },
 };
 
 const CATEGORY_ORDER: Category[] = ["score", "trend", "momentum", "volatility", "news", "other"];
@@ -61,7 +62,7 @@ export default function ReasonList({ reasons }: { reasons: string[] }) {
             aria-expanded={open[cat]}
           >
             <span className={`flex items-center gap-1.5 font-semibold ${CATEGORY_META[cat].color}`}>
-              <span>{CATEGORY_META[cat].icon}</span>
+              <Icon n={CATEGORY_META[cat].icon} size={13} />
               {CATEGORY_META[cat].label}
               <span className="text-slate-500">({items.length})</span>
             </span>

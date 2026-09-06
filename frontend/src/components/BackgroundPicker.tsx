@@ -40,7 +40,7 @@ export default function BackgroundPicker() {
       if (dataUrl) window.localStorage.setItem(BG_KEY, dataUrl);
       else window.localStorage.removeItem(BG_KEY);
     } catch {
-      setMsg("❌ พื้นที่จัดเก็บไม่พอ — ลองใช้รูปที่เล็กกว่านี้");
+      setMsg("พื้นที่จัดเก็บไม่พอ — ลองใช้รูปที่เล็กกว่านี้");
       return;
     }
     setPreview(dataUrl);
@@ -81,7 +81,7 @@ export default function BackgroundPicker() {
     e.target.value = ""; // อนุญาตเลือกไฟล์เดิมซ้ำ
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setMsg("❌ กรุณาเลือกไฟล์รูปภาพ (JPG/PNG/WebP)");
+      setMsg("กรุณาเลือกไฟล์รูปภาพ (JPG/PNG/WebP)");
       return;
     }
     setBusy(true);
@@ -89,13 +89,13 @@ export default function BackgroundPicker() {
     try {
       const dataUrl = await processFile(file);
       if (dataUrl.length > MAX_STORED_BYTES) {
-        setMsg("❌ รูปใหญ่เกินไปแม้ย่อแล้ว — ลองใช้รูปขนาดเล็กกว่านี้");
+        setMsg("รูปใหญ่เกินไปแม้ย่อแล้ว — ลองใช้รูปขนาดเล็กกว่านี้");
         return;
       }
       apply(dataUrl);
-      setMsg("✅ ตั้งรูปพื้นหลังเรียบร้อย");
+      setMsg("ตั้งรูปพื้นหลังเรียบร้อย");
     } catch (err) {
-      setMsg(`❌ ${err instanceof Error ? err.message : String(err)}`);
+      setMsg(`${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
     }

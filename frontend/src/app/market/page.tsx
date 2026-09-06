@@ -10,7 +10,7 @@ export default function MarketRedirect() {
   }, []);
   return (
     <div className="panel p-6 text-center space-y-2">
-      <p className="text-sm text-slate-400">📈 หน้า &quot;ตลาด&quot; ถูกรวมเข้าหน้าหลักแล้ว</p>
+      <p className="text-sm text-slate-400">หน้า &quot;ตลาด&quot; ถูกรวมเข้าหน้าหลักแล้ว</p>
       <a href="/" className="text-accent underline text-sm">ไปที่หน้าหลัก</a>
     </div>
   );

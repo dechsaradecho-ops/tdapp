@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import Icon from "@/components/Icon";
 import {
   BacktestConfig,
   BacktestResult,
@@ -188,7 +189,7 @@ export default function PerformancePanel() {
                 <span className={paper.virtual_pnl >= 0 ? "text-profit" : "text-loss"}>${paper.virtual_pnl}</span>
               </div>
               <div className="flex justify-between"><span>Open Orders</span><span>{paper.open_virtual_orders}</span></div>
-              <p className="text-slate-400 pt-2">🤖 {paper.ai_coaching}</p>
+              <p className="text-slate-400 pt-2 flex items-start gap-1.5"><Icon n="bot" size={14} className="mt-0.5" /><span>{paper.ai_coaching}</span></p>
             </div>
           ) : <p className="text-sm text-slate-500">—</p>}
         </div>

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { API_BASE, SignalProposal } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
+import Icon from "@/components/Icon";
 import LimitLevels from "@/components/LimitLevels";
 import SltpLevels from "@/components/SltpLevels";
 import ReasonList from "@/components/ReasonList";
@@ -98,7 +99,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       {signal.approval === "approved" ? (
         // อนุมัติแล้ว/ยิงแล้ว — แสดงสแตมป์เวลาแทนปุ่ม
         <div className="mt-3 flex items-center gap-2 rounded border border-profit/40 bg-profit/10 px-2 py-1.5 text-xs text-profit">
-          <span>{isAuto ? "🤖 ยิงออเดอร์แล้ว" : "✓ อนุมัติแล้ว"}</span>
+          <span className="inline-flex items-center gap-1.5">{isAuto ? <>ยิงออเดอร์แล้ว</> : <>อนุมัติแล้ว</>}</span>
           <span className="text-slate-400">
             {new Date(
               signal.approved_at ?? signal.created_at ?? ""
@@ -113,7 +114,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       ) : isAuto ? (
         // โหมด auto — ไม่มีปุ่มให้กด: auto trader จะยิงเองผ่าน gate ทั้งหมด
         <div className="mt-3 flex items-center gap-2 rounded border border-accent/40 bg-accent/10 px-2 py-1.5 text-xs text-accent">
-          <span>🤖 พร้อมยิง — ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที</span>
+          <span className="inline-flex items-center gap-1.5"><Icon n="bot" size={13} /> พร้อมยิง — ระบบจะเปิดออเดอร์ให้ภายใน ~1 นาที</span>
         </div>
       ) : (
         <div className="mt-3 flex gap-2">

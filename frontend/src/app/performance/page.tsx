@@ -12,7 +12,7 @@ export default function PerformanceRedirect() {
   }, []);
   return (
     <div className="panel p-6 text-center space-y-2">
-      <p className="text-sm text-slate-400">🎯 หน้า &quot;Performance&quot; ถูกรวมเป็นแท็บในหน้ามอนิเตอร์แล้ว</p>
+      <p className="text-sm text-slate-400">หน้า &quot;Performance&quot; ถูกรวมเป็นแท็บในหน้ามอนิเตอร์แล้ว</p>
       <a href="/monitor.html?tab=performance" className="text-accent underline text-sm">ไปที่หน้ามอนิเตอร์ (แท็บ Performance)</a>
     </div>
   );

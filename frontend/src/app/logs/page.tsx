@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
+import Icon from "@/components/Icon";
 import {
   QuoteApiLog,
   QuoteLogSummary,
@@ -95,7 +96,7 @@ export default function LogsPage() {
       {/* ---------- Header + test button ---------- */}
       <section className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold">📜 Quote API Logs</h2>
+          <h2 className="text-xl font-bold flex items-center gap-2"><Icon n="scroll" size={19} /> Quote API Logs</h2>
           <p className="text-xs text-slate-500">
             บันทึกการดึงราคาทุกครั้งจาก API ภายนอก — เก็บ {ttlDays} วัน ลบเกินอายุอัตโนมัติ
             {updatedAt && ` · อัปเดต ${updatedAt}`}
@@ -112,13 +113,15 @@ export default function LogsPage() {
         </div>
       </section>
 
-      {err && <p className="text-loss text-sm">⚠️ {err}</p>}
+      {err && <p className="text-loss text-sm">{err}</p>}
 
       {/* ---------- Test result ---------- */}
       {testResult && (
         <section className={`panel ${testResult.verdict === "ok" ? "border-profit" : "border-loss"}`}>
-          <p className="text-sm font-bold mb-2">
-            {testResult.verdict === "ok" ? "✅ ทดสอบสำเร็จ" : "❌ ทดสอบล้มเหลว"}
+          <p className="text-sm font-bold mb-2 flex items-center gap-1.5">
+            {testResult.verdict === "ok"
+              ? <><Icon n="checkCircle" size={15} className="text-profit" /> ทดสอบสำเร็จ</>
+              : <><Icon n="xCircle" size={15} className="text-loss" /> ทดสอบล้มเหลว</>}
             {testResult.hint && <span className="text-xs font-normal text-slate-400"> — {testResult.hint}</span>}
           </p>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
@@ -205,7 +208,7 @@ export default function LogsPage() {
           <tbody>
             {shown.length === 0 && (
               <tr><td colSpan={11} className="py-6 text-center text-slate-500">
-                ยังไม่มี log — กด &quot;⚡ ทดสอบดึงราคา&quot; เพื่อสร้างรายการแรก
+                ยังไม่มี log — กด &quot;ทดสอบดึงราคา&quot; เพื่อสร้างรายการแรก
               </td></tr>
             )}
             {pageRows.map((l) => (

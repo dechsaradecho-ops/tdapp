@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
+import Icon from "@/components/Icon";
 import { SignalLog, SignalLogSummary } from "@/lib/types";
 
 /** badge สี/ข้อความของแต่ละ lifecycle event */
@@ -66,7 +67,7 @@ export default function SignalLogsPanel() {
       {/* ---------- Header ---------- */}
       <section className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold">🗂️ Signal Logs — บันทึกชีวิตสัญญาณ</h2>
+          <h2 className="text-xl font-bold flex items-center gap-2"><Icon n="archive" size={19} /> Signal Logs — บันทึกชีวิตสัญญาณ</h2>
           <p className="text-xs text-slate-500">
             ตั้งแต่เกิดสัญญาณ → เปิด/ไม่เปิดออเดอร์ → ปิดไม้ พร้อมเหตุผล — เก็บ {ttlDays} วัน ลบเกินอายุอัตโนมัติ
             {updatedAt && ` · อัปเดต ${updatedAt}`}
@@ -78,15 +79,15 @@ export default function SignalLogsPanel() {
         </button>
       </section>
 
-      {err && <p className="text-loss text-sm">⚠️ {err}</p>}
+      {err && <p className="text-loss text-sm">{err}</p>}
 
       {/* ---------- Summary cards ---------- */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <StatCard label="เหตุการณ์ทั้งหมด (7 วัน)" value={summary?.total ?? null} />
-        <StatCard label="✅ เปิดออเดอร์" value={summary?.opened ?? null} cls="text-emerald-400" />
-        <StatCard label="⛔ ไม่เปิดออเดอร์" value={summary?.blocked ?? null} cls="text-amber-400" />
-        <StatCard label="⌛ หมดอายุ" value={summary?.expired ?? null} />
-        <StatCard label="🔒 ปิดไม้" value={summary?.closed ?? null} cls="text-violet-300" />
+        <StatCard label="เปิดออเดอร์" value={summary?.opened ?? null} cls="text-emerald-400" />
+        <StatCard label="ไม่เปิดออเดอร์" value={summary?.blocked ?? null} cls="text-amber-400" />
+        <StatCard label="หมดอายุ" value={summary?.expired ?? null} />
+        <StatCard label="ปิดไม้" value={summary?.closed ?? null} cls="text-violet-300" />
       </section>
 
       {/* ---------- Asset breakdown ---------- */}

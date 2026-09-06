@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
+import Icon from "@/components/Icon";
 import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
@@ -197,13 +198,13 @@ export default function MonitorPage() {
           onClick={() => setTab("monitor")}
           className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "monitor" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
         >
-          📊 มอนิเตอร์
+          <span className="inline-flex items-center gap-1.5"><Icon n="chart" size={15} /> มอนิเตอร์</span>
         </button>
         <button
           onClick={() => setTab("performance")}
           className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "performance" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
         >
-          🎯 Performance
+          <span className="inline-flex items-center gap-1.5"><Icon n="target" size={15} /> Performance</span>
         </button>
       </div>
 
@@ -219,18 +220,18 @@ export default function MonitorPage() {
           <p className="text-xs text-slate-500">Execution Switch</p>
           {snap?.pause.paused ? (
             <>
-              <p className="text-lg font-bold text-loss">🛑 PAUSED</p>
+              <p className="text-lg font-bold text-loss">PAUSED</p>
               <p className="text-xs text-slate-400 truncate">{snap.pause.reason || "manual"}</p>
             </>
           ) : (
-            <p className="text-lg font-bold text-profit">▶️ Active</p>
+            <p className="text-lg font-bold text-profit">Active</p>
           )}
         </div>
         <div className="panel">
           <p className="text-xs text-slate-500">โหมดเทรด</p>
           <p className="text-lg font-bold">
-            {snap?.order_mode === "auto" ? "🤖 Auto"
-              : snap?.order_mode === "semi_auto" ? "👤 Semi-Auto" : "✋ Manual"}
+            {snap?.order_mode === "auto" ? "Auto"
+              : snap?.order_mode === "semi_auto" ? "Semi-Auto" : "Manual"}
           </p>
         </div>
         <div className={`panel ${snap?.kill.engaged ? "border-loss" : ""}`}>
@@ -303,7 +304,7 @@ export default function MonitorPage() {
             <PnlText v={snap ? unrealizedTotal : undefined} />
           </div>
           <div className={`panel ${snap ? (totalPnl >= 0 ? "border-profit/50" : "border-loss/50") : ""}`}>
-            <p className="text-xs text-slate-500">💰 ยอดรวม PnL สุทธิ</p>
+            <p className="text-xs text-slate-500">ยอดรวม PnL สุทธิ</p>
             <PnlText v={snap ? totalPnl : undefined} />
             <p className="text-xs text-slate-500">
               ปิดแล้ว {st ? `${st.pnl_total >= 0 ? "+" : ""}$${fmtNum(st.pnl_total, 2)}` : "-"} + ค้าง {snap ? `${unrealizedTotal >= 0 ? "+" : ""}$${fmtNum(unrealizedTotal, 2)}` : "-"}
@@ -352,7 +353,7 @@ export default function MonitorPage() {
         {err && <p className="text-loss text-sm mt-2">โหลดไม่สำเร็จ: {err}</p>}
         {!snap && !err && (
           <p className="text-slate-400 text-sm mt-3 animate-pulse">
-            ⏳ กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ
+            กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ
           </p>
         )}
         {closeError && (
@@ -401,7 +402,7 @@ export default function MonitorPage() {
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
                       </span>
                     </td>
-                    <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "🤖 Auto" : "👤 Approve"}</td>
+                    <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
                     <td className="py-2 text-xs text-slate-500">{p.ticket || "-"}</td>
                     <td className="py-2">
                       <button
@@ -478,12 +479,12 @@ export default function MonitorPage() {
                       <StatusBadge status={t.status} />
                     </td>
                     <td className="py-2 pr-4 text-xs">
-                      {t.close_reason === "sl" ? "🛑 ตัดขาดทุน (SL)"
-                        : t.close_reason === "tp" ? "🎯 ถึงเป้า (TP)"
-                        : t.close_reason === "manual" ? "✋ ปิดเอง"
+                      {t.close_reason === "sl" ? "ตัดขาดทุน (SL)"
+                        : t.close_reason === "tp" ? "ถึงเป้า (TP)"
+                        : t.close_reason === "manual" ? "ปิดเอง"
                         : "-"}
                     </td>
-                    <td className="py-2 text-xs">{t.source === "auto" ? "🤖 Auto" : "👤 Approve"}</td>
+                    <td className="py-2 text-xs">{t.source === "auto" ? "Auto" : "Approve"}</td>
                   </tr>
                 ))}
               </tbody>
