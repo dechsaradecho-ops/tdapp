@@ -292,6 +292,8 @@ option { background-color: #15151c; color: #e2e8f0; }
 
 **กัน iOS zoom:** `@media (max-width: 639px) { input, select, textarea { font-size: 16px !important; } }` + body `-webkit-text-size-adjust: 100%`
 
+**Select = liquid glass เต็มรูปแบบ (อัปเดต 2026-09-06):** ห้ามใส่ `bg-surface` หรือ bg ทึบทับ select อีกต่อไป — ทุก dropdown ในแอป (10 จุด: monitor/signals refresh, settings ×4, performance, GoalForm, ฯลฯ) ใช้พื้นหลังโปร่ง `rgba(255,255,255,0.05)` + `backdrop-filter: blur(5px)` จาก rule กลางด้านบน ถ้าเผลอใส่ `bg-surface` (สีพื้นทึบ) ทับ จะทำให้ select เป็นก้อนทึบตัดกับ card แก้วรอบ ๆ ทันที ตรวจง่าย ๆ: เปิด dropdown แล้วต้องมองทะลุเห็น aurora เบลอ ๆ ด้านหลัง
+
 ---
 
 ## 10. Pill ตัวเลขเขียว/แดงในตาราง ⚠️ (จุดพังง่ายที่สุด)
