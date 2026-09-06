@@ -54,8 +54,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </defs>
         </svg>
         <BackgroundLayer />
+        {/* header แสดงเฉพาะจอใหญ่ (desktop nav) — มือถือไม่มี header bar ให้สับสนกับ title
+            (เดิมแสดง "📈 AI Trading" บนมือถือ, ถูกเอาออกตามคำขอ) */}
         <header
-          className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between safe-top sticky top-0 z-30"
+          className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 hidden md:flex items-center justify-between safe-top sticky top-0 z-30"
           style={{
             background: "rgba(5, 5, 8, 0.32)",
             WebkitBackdropFilter: "blur(6px) saturate(140%)",
@@ -63,11 +65,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             borderBottomColor: "rgba(255,255,255,0.10)",
           }}
         >
-          <h1 className="font-bold text-base sm:text-lg truncate">
-            <span className="sm:hidden">📈 AI Trading</span>
-            <span className="hidden sm:inline">📈 AI Wealth &amp; Trading Advisor</span>
-          </h1>
-          <nav className="hidden md:flex gap-4 text-sm text-slate-400">
+          <nav className="flex gap-4 text-sm text-slate-400">
             <a href="/" className="hover:text-accent">Dashboard</a>
             <a href="/market" className="hover:text-accent">Market</a>
             <a href="/signals" className="hover:text-accent">Signals</a>
