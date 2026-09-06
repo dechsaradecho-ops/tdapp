@@ -25,8 +25,9 @@ AI-driven market analysis, goal feasibility assessment, risk management, and LIN
 tdapp/
 ├── frontend/                 # Next.js static-export dashboard → tdappstatic.onrender.com
 │   └── src/
-│       ├── app/              # Pages: dashboard, market, signals, signal-logs, monitor,
-│       │                     #         logs, risk, performance, settings, chat
+│       ├── app/              # Pages: dashboard (หน้าหลัก, รวม market), signals (แท็บ
+│       │                     #         signal-logs), monitor (รวม risk), performance,
+│       │                     #         logs, settings, chat + redirect stubs (market/risk/signal-logs)
 │       ├── components/       # ChatWidget, CapitalSync, GoalForm, PinManager, MobileNav, ...
 │       └── lib/              # api.ts (REST client), portfolio.ts (DB-backed store),
 │                             # chat_history.ts, auth.ts (PIN token), types.ts
@@ -151,8 +152,9 @@ Single-user dashboard — no Supabase Auth:
 
 - Portfolio numbers come from `/api/trading/monitor` (unrealized PnL computed from open positions).
 - รีเซ็ตสถิติ (stats reset) deletes closed trades and wipes + reseeds `equity_snapshots` to capital.
-- The Risk page waits until the portfolio store has loaded before calling `/api/risk/check`
-  (the endpoint requires capital > 0 — calling early returns 422).
+- The Risk card (on the Monitor page) waits until the portfolio store has loaded
+  before calling `/api/risk/check` (the endpoint requires capital > 0 — calling
+  early returns 422).
 
 ## AI Chat
 

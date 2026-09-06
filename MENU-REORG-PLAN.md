@@ -1,7 +1,16 @@
-# 📋 แผนจัดกลุ่มเมนูใหม่ (รออนุมัติ — ยังไม่ได้เขียนโค้ด)
+# 📋 แผนจัดกลุ่มเมนูใหม่
 
-> วันที่: 2026-09-06 · สถานะ: **ข้อเสนอ** — รอ user เลือกแบบก่อนลงมือ
+> วันที่: 2026-09-06 · สถานะ: **✅ นำไปใช้แล้ว (commit 89f2a51)** — ใช้ **แบบ B ปรับปรุง**: รวมหน้าเล็กเข้าหน้าใหญ่ แต่ **Quote Logs คงเป็นเมนูแยก** (ไม่ยุบเข้า Settings) เหลือ 6 เมนู
 > ที่มา: บางเมนูมี content น้อย/ซ้ำกัน และ nav แบน 9 เมนูไม่สะท้อน workflow การใช้งาน
+>
+> **โครงสร้างสุดท้าย (6 เมนู):** 🏠 หน้าหลัก · ⚡ สัญญาณ · 📊 มอนิเตอร์ · 🎯 Performance · 📜 Logs · ⚙️ ตั้งค่า
+>
+> **สิ่งที่ทำจริง:**
+> - หน้าหลัก: + Market Regime Analysis + ตัวเลือกสัญลักษณ์ (XAUUSD/EURUSD/USDJPY/GBPUSD/AUDUSD) + TradingView chart — คง Opportunity Score ไว้ต่อท้าย
+> - มอนิเตอร์: + การ์ด Risk Engine Status บนสุด (guard `capital > 0` กัน 422 — รอ usePortfolio loaded)
+> - สัญญาณ: แท็บ `⚡ สัญญาณ | 🗂️ บันทึกสัญญาณ` — state แท็บ sync กับ query param `?tab=logs` (อ่าน `window.location.search` ใน useEffect — static export ใช้ useSearchParams ต้องครอบ Suspense) · ตัว panel แยกเป็น `components/SignalLogsPanel.tsx`
+> - route เก่า `/market` `/risk` `/signal-logs` = client redirect stubs (`window.location.replace` ชี้ `*.html` เพื่อรองรับ static hosting ทั้ง Render และ preview server) + fallback panel บอกผู้ใช้
+> - `MobileNav.tsx` + `layout.tsx`: nav เหลือ 6 เมนู
 
 ---
 
@@ -70,4 +79,4 @@
 
 ## 4. สรุปคำแนะนำ
 
-**แบบ B** — ตอบโจทย์ "บางเมนู content น้อย" ตรงที่สุด (ลบ 3 หน้าบาง, ขจัดความซ้ำ) และ dock สะอาดสุดบนมือถือ ถ้ากลัว Settings บวม ให้ลดขั้นเป็นแบบ C
+**แบบ B ปรับปรุง (ที่นำไปใช้จริง)** — รวม 3 หน้าบางเข้าหน้าใหญ่ตามแบบ B แต่ Quote Logs คงเป็นเมนูแยกก่อนตั้งค่า (ตามแนวคิดแบบ C เรื่อง "ไม่อยากให้ Settings บวม") — จบด้วย 6 เมนู · dock 6 ปุ่มพอดีจอ
