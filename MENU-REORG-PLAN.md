@@ -1,16 +1,17 @@
 # 📋 แผนจัดกลุ่มเมนูใหม่
 
-> วันที่: 2026-09-06 · สถานะ: **✅ นำไปใช้แล้ว (commit 89f2a51)** — ใช้ **แบบ B ปรับปรุง**: รวมหน้าเล็กเข้าหน้าใหญ่ แต่ **Quote Logs คงเป็นเมนูแยก** (ไม่ยุบเข้า Settings) เหลือ 6 เมนู
-> ที่มา: บางเมนูมี content น้อย/ซ้ำกัน และ nav แบน 9 เมนูไม่สะท้อน workflow การใช้งาน
+> วันที่: 2026-09-06 · สถานะ: **✅ นำไปใช้แล้ว 2 รอบ (commit 89f2a51 → 78ba310)** —
+> **รอบ 1** (89f2a51): แบบ B ปรับปรุง — รวมหน้าเล็ก แต่ Quote Logs คงเป็นเมนูแยก → 6 เมนู
+> **รอบ 2** (78ba310): monitor + performance **รวมเมนูเดียว แยกแท็บภายใน** + ย้ายการ์ด Risk Engine จากบนลง **ล่างสุด** → **5 เมนู**
 >
-> **โครงสร้างสุดท้าย (6 เมนู):** 🏠 หน้าหลัก · ⚡ สัญญาณ · 📊 มอนิเตอร์ · 🎯 Performance · 📜 Logs · ⚙️ ตั้งค่า
+> **โครงสร้างสุดท้าย (5 เมนู):** 🏠 หน้าหลัก · ⚡ สัญญาณ · 📊 มอนิเตอร์ (แท็บ: 📊 มอนิเตอร์ | 🎯 Performance) · 📜 Logs · ⚙️ ตั้งค่า
 >
 > **สิ่งที่ทำจริง:**
 > - หน้าหลัก: + Market Regime Analysis + ตัวเลือกสัญลักษณ์ (XAUUSD/EURUSD/USDJPY/GBPUSD/AUDUSD) + TradingView chart — คง Opportunity Score ไว้ต่อท้าย
-> - มอนิเตอร์: + การ์ด Risk Engine Status บนสุด (guard `capital > 0` กัน 422 — รอ usePortfolio loaded)
-> - สัญญาณ: แท็บ `⚡ สัญญาณ | 🗂️ บันทึกสัญญาณ` — state แท็บ sync กับ query param `?tab=logs` (อ่าน `window.location.search` ใน useEffect — static export ใช้ useSearchParams ต้องครอบ Suspense) · ตัว panel แยกเป็น `components/SignalLogsPanel.tsx`
-> - route เก่า `/market` `/risk` `/signal-logs` = client redirect stubs (`window.location.replace` ชี้ `*.html` เพื่อรองรับ static hosting ทั้ง Render และ preview server) + fallback panel บอกผู้ใช้
-> - `MobileNav.tsx` + `layout.tsx`: nav เหลือ 6 เมนู
+> - มอนิเตอร์: แท็บบนหน้า `📊 มอนิเตอร์ | 🎯 Performance` (state แท็บอ่าน `?tab=performance` จาก `window.location.search` ใน useEffect) · เนื้อหา performance ทั้งหมดย้ายเป็น `components/PerformancePanel.tsx` · การ์ด Risk Engine Status ย้ายไป**ล่างสุด**ของแท็บมอนิเตอร์ (หลัง ประวัติ order) ตาม request — guard `capital > 0` กัน 422 ยังอยู่
+> - สัญญาณ: แท็บ `⚡ สัญญาณ | 🗂️ บันทึกสัญญาณ` — state แท็บ sync กับ query param `?tab=logs` · ตัว panel แยกเป็น `components/SignalLogsPanel.tsx`
+> - route เก่า `/market` `/risk` `/signal-logs` `/performance` = client redirect stubs (`window.location.replace` ชี้ `*.html` เพื่อรองรับ static hosting ทั้ง Render และ preview server) + fallback panel บอกผู้ใช้
+> - `MobileNav.tsx` + `layout.tsx`: nav เหลือ **5** เมนู
 
 ---
 
@@ -80,3 +81,9 @@
 ## 4. สรุปคำแนะนำ
 
 **แบบ B ปรับปรุง (ที่นำไปใช้จริง)** — รวม 3 หน้าบางเข้าหน้าใหญ่ตามแบบ B แต่ Quote Logs คงเป็นเมนูแยกก่อนตั้งค่า (ตามแนวคิดแบบ C เรื่อง "ไม่อยากให้ Settings บวม") — จบด้วย 6 เมนู · dock 6 ปุ่มพอดีจอ
+
+**รอบ 2 (2026-09-06, commit 78ba310)** — ผู้ใช้ขอรวมต่อ: monitor + performance **เมนูเดียวแยกแท็บภายใน** (`📊 มอนิเตอร์ | 🎯 Performance`) และย้ายการ์ด Risk Engine จากบนสุดลง **ล่างสุด** (หลังประวัติ order) — จบด้วย **5 เมนู** · dock 5 ปุ่ม:
+- `PerformancePanel.tsx` = สกัดเนื้อหา performance ทั้งหมดเป็น component (state + loadAll 10 API + Backtest Center + Equity Curve SVG)
+- `monitor/page.tsx` = แท็บ 2 ปุ่มด้านบน + `{tab === "performance" && <PerformancePanel />}` + เนื้อหาเดิมครอบ `{tab === "monitor" && (<>...</>)}`
+- `/performance` = redirect stub ชี้ `/monitor.html?tab=performance`
+- ตรวจ prod แล้ว: monitor chunk มี "Performance Dashboard" + "Risk Engine Status" + logic `?tab=performance` · performance chunk (876B) มี redirect string · nav ทุกหน้าไม่มีลิงก์ `/performance`

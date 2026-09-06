@@ -26,8 +26,9 @@ tdapp/
 ├── frontend/                 # Next.js static-export dashboard → tdappstatic.onrender.com
 │   └── src/
 │       ├── app/              # Pages: dashboard (หน้าหลัก, รวม market), signals (แท็บ
-│       │                     #         signal-logs), monitor (รวม risk), performance,
-│       │                     #         logs, settings, chat + redirect stubs (market/risk/signal-logs)
+│       │                     #         signal-logs), monitor (แท็บ performance, รวม risk
+│       │                     #         เป็นการ์ดล่างสุด), logs, settings, chat +
+│       │                     #         redirect stubs (market/risk/signal-logs/performance)
 │       ├── components/       # ChatWidget, CapitalSync, GoalForm, PinManager, MobileNav, ...
 │       └── lib/              # api.ts (REST client), portfolio.ts (DB-backed store),
 │                             # chat_history.ts, auth.ts (PIN token), types.ts
