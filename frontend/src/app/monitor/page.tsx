@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
+import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
@@ -39,6 +40,12 @@ export default function MonitorPage() {
   const [risk, setRisk] = useState<RiskStatus | null>(null);
   const [riskErr, setRiskErr] = useState("");
   const { capital, equity, pnl, loaded } = usePortfolio();
+  // แท็บย่อย: มอนิเตอร์ | Performance (รวมหน้า /performance เดิม — รอบ 2)
+  // static export ไม่มี server — อ่าน ?tab=performance จาก window.location.search ใน effect
+  const [tab, setTab] = useState<"monitor" | "performance">("monitor");
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "performance") setTab("performance");
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -184,17 +191,27 @@ export default function MonitorPage() {
 
   return (
     <div className="space-y-4">
-      <FeedStatusBanner feed={snap?.feed_status} />
-
-      {/* ---------- Risk Engine Status (จากหน้า /risk เดิม) ---------- */}
-      <div className="panel">
-        <h2 className="panel-title">Risk Engine Status</h2>
-        {riskErr && <p className="text-loss text-sm">{riskErr}</p>}
-        <RiskPanel risk={risk} />
-        <p className="text-xs text-slate-500 mt-3">
-          ลิมิต: ขาทุนรายวัน/สัปดาห์/เดือน + Max Drawdown — ตั้งค่าได้ที่หน้าตั้งค่า (Kill Switch &amp; Risk)
-        </p>
+      {/* ---------- แท็บ: มอนิเตอร์ | Performance ---------- */}
+      <div className="flex gap-2">
+        <button
+          onClick={() => setTab("monitor")}
+          className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "monitor" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
+        >
+          📊 มอนิเตอร์
+        </button>
+        <button
+          onClick={() => setTab("performance")}
+          className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "performance" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
+        >
+          🎯 Performance
+        </button>
       </div>
+
+      {tab === "performance" && <PerformancePanel />}
+
+      {tab === "monitor" && (
+      <>
+      <FeedStatusBanner feed={snap?.feed_status} />
 
       {/* ---------- Status strip ---------- */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -475,8 +492,20 @@ export default function MonitorPage() {
         )}
       </div>
 
+      {/* ---------- Risk Engine Status (จากหน้า /risk เดิม — ย้ายมาด้านล่างตาม request) ---------- */}
+      <div className="panel">
+        <h2 className="panel-title">Risk Engine Status</h2>
+        {riskErr && <p className="text-loss text-sm">{riskErr}</p>}
+        <RiskPanel risk={risk} />
+        <p className="text-xs text-slate-500 mt-3">
+          ลิมิต: ขาทุนรายวัน/สัปดาห์/เดือน + Max Drawdown — ตั้งค่าได้ที่หน้าตั้งค่า (Kill Switch &amp; Risk)
+        </p>
+      </div>
+
       {/* ---------- Popup สรุปผลการปิดไม้ ---------- */}
       <ClosePositionModal result={closeResult} onClose={() => setCloseResult(null)} />
+      </>
+      )}
     </div>
   );
 }

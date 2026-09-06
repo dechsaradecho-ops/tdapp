@@ -13,7 +13,6 @@ const MENU = [
   { href: "/", label: "หน้าหลัก", icon: "🏠" },
   { href: "/signals", label: "สัญญาณ", icon: "⚡" },
   { href: "/monitor", label: "มอนิเตอร์", icon: "📊" },
-  { href: "/performance", label: "Performance", icon: "🎯" },
   { href: "/logs", label: "Logs", icon: "📜" },
   { href: "/settings", label: "ตั้งค่า", icon: "⚙️" },
 ];

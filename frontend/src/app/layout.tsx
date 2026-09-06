@@ -69,7 +69,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/" className="hover:text-accent">Dashboard</a>
             <a href="/signals" className="hover:text-accent">Signals</a>
             <a href="/monitor" className="hover:text-accent">Monitor</a>
-            <a href="/performance" className="hover:text-accent">Performance</a>
             <a href="/logs" className="hover:text-accent">Logs</a>
             <a href="/settings" className="hover:text-accent">Settings</a>
           </nav>
