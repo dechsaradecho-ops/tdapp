@@ -3,7 +3,7 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `a83fb9a` (prod hash `AEAD173D54`, verified 2026-09-06)
+> สถานะล่าสุด: commit `79b4645` (prod hash `DFB879C8F6`, verified 2026-09-06)
 
 ---
 
@@ -286,45 +286,45 @@ option { background-color: #15151c; color: #e2e8f0; }
 
 ## 10. Pill ตัวเลขเขียว/แดงในตาราง ⚠️ (จุดพังง่ายที่สุด)
 
-**2 แบบ — ห้ามสลับ:**
+**กฎเดียว: pill ต้องเป็น `<span>` ครอบค่าข้างใน td เสมอ — ห้ามใส่ pill บน td โดยตรง**
+(span เป็น inline-block จะหดขนาดพอดีตัวหนังสือ; ถ้าใส่บน td พื้นจะกินทั้ง cell และถ้าเผลอใส่ display จะทำคอลัมน์เลื่อนทับกัน)
+
+```tsx
+{/* ✅ ถูก */}
+<td className="py-2 pr-4"><span className="text-loss">2390.00</span></td>
+<td className="py-2 pr-4 font-bold">
+  <span className={pnl >= 0 ? "text-profit" : "text-loss"}>+55.00</span>
+</td>
+
+{/* ❌ ผิด — bg กินทั้ง cell, เสี่ยงคอลัมน์เลื่อน */}
+<td className="py-2 pr-4 text-loss">2390.00</td>
+```
 
 ```css
-/* แบบ A: span ใน td (ป้ายสถานะ) — inline-block ได้ */
+/* pill span ใน td — inline-block หดพอดีตัวหนังสือ */
 td .text-profit, td .text-loss, td .text-emerald-400, td .text-red-400 {
   background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
   backdrop-filter: blur(4px);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 999px;
-  padding: 0.05rem 0.4rem;
+  padding: 0.05rem 0.3rem;
   display: inline-block;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-/* แบบ B: td ใส่ class สีตรง ๆ (SL/TP/PnL) — ต้องเป็น table-cell เท่านั้น!
-   ใช้ box-shadow inset แทน border, ห้าม set display/padding */
-td.text-profit, td.text-loss {
-  background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03)) padding-box;
-  backdrop-filter: blur(4px);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14);
-  border-radius: 999px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* tint ฝั่ง (ทั้ง A และ B) — เขียว/แดงจาง ๆ อ่านง่ายไม่ฉูดฉาด */
-td .text-profit, td .text-emerald-400, td.text-profit {
+/* tint ฝั่ง — เขียว/แดงจาง ๆ อ่านง่ายไม่ฉูดฉาด */
+td .text-profit, td .text-emerald-400 {
   background: linear-gradient(180deg, rgba(48,209,88,0.16), rgba(48,209,88,0.07));
   border-color: rgba(48,209,88,0.3);
-  box-shadow: inset 0 0 0 1px rgba(48,209,88,0.3);
 }
-td .text-loss, td .text-red-400, td.text-loss {
+td .text-loss, td .text-red-400 {
   background: linear-gradient(180deg, rgba(255,69,58,0.16), rgba(255,69,58,0.07));
   border-color: rgba(255,69,58,0.3);
-  box-shadow: inset 0 0 0 1px rgba(255,69,58,0.3);
 }
 ```
 
-> 🚨 **บทเรียน (bug จริง):** ถ้าใส่ `display: inline-block` บน `td.text-profit/td.text-loss` cell จะหลุดจากกริดตาราง → คอลัมน์ SL/TP เลื่อนทับกันทั้งแถว ตรวจเสมอด้วยการเทียบ `getBoundingClientRect().x` ของ thead vs tbody ทุกคอลัมน์
+> 🚨 **บทเรียน (bug จริง 2 ครั้ง):** (1) ใส่ `display: inline-block` บน td โดยตรง → cell หลุดจากกริดตาราง คอลัมน์ SL/TP เลื่อนทับกันทั้งแถว (2) ใส่ pill bg บน td → พื้นกินทั้ง cell ไม่พอดีตัวหนังสือ ทางแก้สุดท้ายคือ span wrapper เท่านั้น ตรวจเสมอด้วยการเทียบ `getBoundingClientRect().x` ของ thead vs tbody ทุกคอลัมน์ + span width < td width
 
 ---
 
@@ -337,6 +337,8 @@ td .text-loss, td .text-red-400, td.text-loss {
 ```
 
 > 🚨 **บทเรียน (bug จริง):** ห้าม `width: max-content` + `table-layout: fixed` — Chrome จัดกริดหัวตารางกับเนื้อหาไม่ตรงกัน (หัว SL ทาบช่อง TP) ใช้ auto layout เท่านั้น ให้ wrapper `.overflow-x-auto` เลื่อนแนวนอนแทน
+
+> 🚨 **บทเรียน (bug จริง):** ห้ามใส่ `overflow-x-auto` บน `.panel` เดียวกัน (`className="panel overflow-x-auto"`) — เมื่อตารางโหลดแล้วกว้างขึ้น panel กลายเป็น scroll container เอง ทำให้ `backdrop-filter` พังใน Chromium (blur หาย) ต้องแยกเป็น `.panel` นอก + `<div className="overflow-x-auto">` ใน
 
 ---
 
@@ -410,7 +412,7 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 6. ☐ MobileNav floating dock แก้วขาว + bottom sheet (§7) + `main pb-24`
 7. ☐ ปุ่ม 4 บทบาท tinted + radius 12px + scale(0.97) (§8)
 8. ☐ ฟอร์มแก้วฝ้า + focus ring ฟ้า + กัน iOS zoom 16px (§9)
-9. ☐ Pill ตาราง: แยก span vs td เคร่งครัด (§10)
-10. ☐ ตารางมือถือ `width: auto` + wrapper เลื่อนแนวนอน (§11)
+9. ☐ Pill ตาราง: ครอบค่าด้วย `<span>` ใน td เสมอ — ห้าม pill บน td โดยตรง (§10)
+10. ☐ ตารางมือถือ `width: auto` + wrapper เลื่อนแนวนอน — `overflow-x-auto` ต้องอยู่ div ลูก ไม่ใช่บน `.panel` (§11)
 11. ☐ Animations + stagger + reduced-motion (§12)
 12. ☐ Safe-area, tap-highlight, scrollbar, viewport (§13)
