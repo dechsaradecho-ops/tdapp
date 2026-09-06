@@ -3,6 +3,7 @@ import AuthGate from "@/components/AuthGate";
 import BackgroundLayer from "@/components/BackgroundLayer";
 import CapitalSync from "@/components/CapitalSync";
 import ChatWidget from "@/components/ChatWidget";
+import DesktopNav from "@/components/DesktopNav";
 import MobileNav from "@/components/MobileNav";
 import PwaRegister from "@/components/PwaRegister";
 import "./globals.css";
@@ -54,25 +55,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </defs>
         </svg>
         <BackgroundLayer />
-        {/* header แสดงเฉพาะจอใหญ่ (desktop nav) — มือถือไม่มี header bar ให้สับสนกับ title
-            (เดิมแสดง "📈 AI Trading" บนมือถือ, ถูกเอาออกตามคำขอ) */}
-        <header
-          className="lg-refract border-b px-3 sm:px-6 py-2 sm:py-3 hidden md:flex items-center justify-between safe-top sticky top-0 z-30"
-          style={{
-            background: "rgba(5, 5, 8, 0.32)",
-            WebkitBackdropFilter: "blur(6px) saturate(140%)",
-            backdropFilter: "blur(6px) saturate(140%)",
-            borderBottomColor: "rgba(255,255,255,0.10)",
-          }}
-        >
-          <nav className="flex gap-4 text-sm text-slate-400">
-            <a href="/" className="hover:text-accent">Dashboard</a>
-            <a href="/signals" className="hover:text-accent">Signals</a>
-            <a href="/monitor" className="hover:text-accent">Monitor</a>
-            <a href="/logs" className="hover:text-accent">Logs</a>
-            <a href="/settings" className="hover:text-accent">Settings</a>
-          </nav>
-        </header>
+        {/* Desktop (md+): floating liquid glass pill navbar (codefronts style —
+            blur 20px + bg-white/10 + ring white/20 + rounded-full) — sticky ลอยเหนือเนื้อหา
+            มือถือ (< md) ไม่แสดง — ใช้ MobileNav dock ล่างแทน */}
+        <DesktopNav />
         {/* pb-24 clears the fixed mobile tab bar (57px) + iOS safe area (≤34px).
             Do NOT add safe-bottom here — .safe-bottom (env(safe-area-inset-bottom))
             appears after Tailwind utilities in globals.css and overrides pb-* to 0,
