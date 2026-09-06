@@ -34,17 +34,18 @@ export default function MobileNav() {
   }, []);
 
   // สไลด์แถวให้แท็บ active อยู่กึ่งกลาง
-  // ใช้ scrollLeft ตรง ๆ (ไม่ใช่ scrollIntoView/scrollTo smooth) — เชื่อถือได้ทุก browser
-  // (smooth ถูก disable เมื่อ prefers-reduced-motion ทำให้ไม่เลื่อนเลยบางเครื่อง)
-  // และ clamp เอง (จบแถวซ้าย/ขวา ให้ยึดขอบ ไม่พยายามกลางเกิน max)
+  // คำนวณ synchronous ใน effect (ไม่ใช้ RAF — บน prod font/hydration ช้ากว่า
+  // ทำให้ค่าที่จับไว้เปลี่ยนก่อน RAF callback รัน → เลื่อนเป็น 0)
+  // และ center ซ้ำตอน font โหลดเสร็จ (ความกว้างแท็บเปลี่ยนหลัง font swap)
   useEffect(() => {
-    const sc = scrollRef.current;
-    const el = sc?.querySelector<HTMLElement>('[data-active="true"]');
-    if (!sc || !el) return;
-    const raf = requestAnimationFrame(() => {
+    const center = () => {
+      const sc = scrollRef.current;
+      const el = sc?.querySelector<HTMLElement>('[data-active="true"]');
+      if (!sc || !el) return;
       sc.scrollLeft = Math.max(0, el.offsetLeft + el.offsetWidth / 2 - sc.clientWidth / 2);
-    });
-    return () => cancelAnimationFrame(raf);
+    };
+    center();
+    document.fonts?.ready?.then(center).catch(() => {});
   }, [path]);
 
   const isActive = (href: string) =>
