@@ -6,6 +6,7 @@ a project), calls degrade gracefully instead of crashing workers/API.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.core.config import get_settings
@@ -158,4 +159,8 @@ def queue_notification(db: Database, user_id: str, ntype: str, message: str,
     db.insert("notifications", {
         "user_id": user_id, "channel": channel, "type": ntype,
         "message": message, "status": "pending",
+        # Explicit stamp — the risk_warning cooldown and the daily-digest
+        # dedup read created_at back; don't depend on the DB default (fakes
+        # in tests never fill it).
+        "created_at": datetime.now(timezone.utc).isoformat(),
     })

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.engine.risk_engine import PortfolioSnapshot, RiskEngine
+from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
 from app.integrations.line_client import build_risk_alert
 from app.services import execution
 from app.services.database import Database
@@ -117,7 +117,9 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         realized_pnl_month=realized_month,
         open_risk=open_risk,
     )
-    status = RiskEngine().check(snap)
+    # Limits follow the user's Settings row — RiskEngine() alone reads ENV
+    # defaults and kept alerting 2% after the user set daily loss to 5%.
+    status = risk_engine_for_settings(s).check(snap)
 
     if status.trading_paused:
         db.insert("risk_events", {

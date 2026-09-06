@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from app.integrations.ai_provider import build_context_block, get_ai_provider
 from app.models.schemas import ChatRequest, ChatResponse
 from app.engine.goal_engine import GoalEngine
-from app.engine.risk_engine import PortfolioSnapshot, RiskEngine
+from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
 from app.api.routes.settings import get_app_settings
@@ -154,7 +154,7 @@ async def _build_context(db, broker=None) -> str:
     unrealized_total = round(sum(p.unrealized_pnl for p in open_pos), 2)
     equity = round(cap + pnl_total + unrealized_total, 2)
 
-    risk = RiskEngine().check(PortfolioSnapshot(
+    risk = risk_engine_for_settings(s).check(PortfolioSnapshot(
         starting_capital=cap, peak_equity=max(cap, equity), current_equity=equity,
         realized_pnl_today=pnl_today, realized_pnl_week=pnl_week,
         realized_pnl_month=pnl_total, open_risk=cap * 0.005,

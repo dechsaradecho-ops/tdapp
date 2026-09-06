@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from app.core.config import get_settings
-from app.models.schemas import RiskStatus
+from app.models.schemas import AppSettings, RiskStatus
 
 
 @dataclass
@@ -35,6 +35,38 @@ class RiskConfig:
             max_monthly_loss_pct=s.default_max_monthly_loss,
             max_drawdown_pct=s.default_max_drawdown,
         )
+
+    @classmethod
+    def from_app_settings(cls, s: AppSettings) -> "RiskConfig":
+        """Limits from the user's Settings row (trading_settings).
+
+        WHY NOT from_settings(): that reads ENV defaults and ignores the DB
+        row, so the monitor/alerts kept reporting "limit 2%" after the user
+        set daily loss to 5% on the Settings page (2026-09-07). AppSettings
+        carries the same defaults, so a missing row behaves identically.
+        """
+
+        def num(field: str, default: float) -> float:
+            v = getattr(s, field, None)
+            return default if v is None else float(v)
+
+        return cls(
+            risk_per_trade_pct=num("risk_per_trade_pct", 0.5),
+            max_daily_loss_pct=num("kill_daily_loss_pct", 2.0),
+            max_weekly_loss_pct=num("kill_weekly_loss_pct", 5.0),
+            max_monthly_loss_pct=num("kill_monthly_loss_pct", 8.0),
+            max_drawdown_pct=num("max_drawdown_pct", 10.0),
+        )
+
+
+def risk_engine_for_settings(s: AppSettings) -> "RiskEngine":
+    """RiskEngine wired to the user's Settings-page limits (DB row).
+
+    Plain `RiskEngine()` silently falls back to ENV defaults — any
+    worker/route that already holds AppSettings must use this so alerts and
+    pauses match the numbers the user actually configured.
+    """
+    return RiskEngine(RiskConfig.from_app_settings(s))
 
 
 @dataclass

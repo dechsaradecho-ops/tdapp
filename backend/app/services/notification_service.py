@@ -6,6 +6,8 @@ Notification Service worker to batch/deliver on schedule.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from app.integrations.line_client import LineClient
 from app.services.database import Database, queue_notification
@@ -13,6 +15,22 @@ from app.services.database import Database, queue_notification
 log = logging.getLogger(__name__)
 
 CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news"}
+
+# Cooldown for risk_warning: the portfolio monitor re-evaluates every minute,
+# so a standing breach would push an identical LINE alert once a minute.
+# One alert per window is enough — the pause stays engaged the whole time.
+RISK_WARNING_COOLDOWN_MIN = 30.0
+
+
+def _parse_utc(raw: str) -> Optional[datetime]:
+    """ISO string → tz-aware datetime (None when unparseable)."""
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 # User-facing categories (Settings page) → ntype strings they cover.
 # Keep in sync with the frontend category list (settings page + types.ts).
@@ -56,11 +74,36 @@ class NotificationService:
         if not category_enabled(settings, ntype):
             log.info("notify skipped (category off): %s", ntype)
             return
+        if ntype == "risk_warning" and self._risk_warning_on_cooldown():
+            log.info("notify skipped (risk_warning cooldown %.0f min)",
+                     RISK_WARNING_COOLDOWN_MIN)
+            return
         queue_notification(self.db, user_id, ntype, message)
 
         if not is_critical:
             return
         await self.push_line(user_id, message)
+
+    def _risk_warning_on_cooldown(self) -> bool:
+        """True when a risk_warning row was already queued inside the window.
+
+        Reads the newest notifications row of the type (created_at is stamped
+        by queue_notification). Fail-open: when the lookup breaks we send —
+        a repeated risk alert beats a silently swallowed one.
+        """
+        try:
+            rows = self.db.select("notifications",
+                                  filters={"type": "risk_warning"},
+                                  order="created_at", desc=True, limit=1)
+        except Exception:
+            return False
+        if not rows:
+            return False
+        dt = _parse_utc(str(rows[0].get("created_at") or ""))
+        if dt is None:
+            return False
+        age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+        return age_min < RISK_WARNING_COOLDOWN_MIN
 
     async def push_line(self, user_id: str, message: str) -> bool:
         """Push to every enabled LINE target of the user: personal chats

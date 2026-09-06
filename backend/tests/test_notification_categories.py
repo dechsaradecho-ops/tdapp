@@ -11,6 +11,7 @@ Run from backend/: C:/Python314/python.exe -m pytest tests/test_notification_cat
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -110,6 +111,74 @@ def test_notify_critical_type_respects_category_switch():
     asyncio.run(svc.notify("u1", "stop_loss", "SL hit", critical=True))
     assert line.pushed == []
     assert db.inserted == []
+
+
+# ---------------------------------------------------------------------------
+# 2b. risk_warning cooldown — monitor runs every 1 min; a standing breach
+# used to push an identical LINE alert every minute.
+# ---------------------------------------------------------------------------
+def test_risk_warning_cooldown_blocks_second_alert_within_30min():
+    from app.services.notification_service import RISK_WARNING_COOLDOWN_MIN
+    assert RISK_WARNING_COOLDOWN_MIN == 30.0
+
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify("u1", "risk_warning", "breach #1", critical=True))
+    assert len(line.pushed) == 1                    # first alert goes out
+
+    asyncio.run(svc.notify("u1", "risk_warning", "breach #2", critical=True))
+    assert len(line.pushed) == 1                    # second within 30 min → held
+    # only ONE queue row: the suppressed notify never inserts
+    assert len([r for t, r in db.inserted
+                if t == "notifications"]) == 1
+
+
+def test_risk_warning_resumes_after_cooldown_window():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    # seed an old risk_warning row (31 min ago) → outside the cooldown
+    old = (datetime.now(timezone.utc)
+           - timedelta(minutes=31)).isoformat()
+    db.rows["notifications"] = [{
+        "id": "old-1", "user_id": "u1", "channel": "line",
+        "type": "risk_warning", "message": "earlier",
+        "status": "sent", "created_at": old,
+    }]
+
+    asyncio.run(svc.notify("u1", "risk_warning", "breach now", critical=True))
+    assert len(line.pushed) == 1                    # window passed → delivered
+
+
+def test_risk_warning_cooldown_fail_open_on_db_error():
+    """Cooldown lookup breaks → send anyway (a repeated risk alert beats a
+    swallowed one). The failure is scoped to the notifications table so the
+    rest of the notify path still works, mirroring a partial DB issue."""
+
+    class BoomDB(SettingsDatabase):
+        def select(self, table, *a, **k):
+            if table == "notifications":
+                raise RuntimeError("db down")
+            return super().select(table, *a, **k)
+
+    db = BoomDB()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify("u1", "risk_warning", "breach", critical=True))
+    assert len(line.pushed) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -480,6 +480,51 @@ class TestRiskEngine:
         assert RiskEngine.week_start(d).weekday() == 0
 
 
+class TestRiskConfigFromAppSettings:
+    """The monitor/alerts must read the Settings-page row, not env defaults —
+    the 2026-09-07 bug: user set daily loss 5% but alerts kept saying 2%."""
+
+    def test_uses_settings_row_values(self):
+        from app.models.schemas import AppSettings
+        from app.engine.risk_engine import RiskConfig
+        s = AppSettings(kill_daily_loss_pct=5.0, kill_weekly_loss_pct=9.0,
+                        kill_monthly_loss_pct=12.0, max_drawdown_pct=15.0,
+                        risk_per_trade_pct=2.0)
+        cfg = RiskConfig.from_app_settings(s)
+        assert cfg.max_daily_loss_pct == 5.0
+        assert cfg.max_weekly_loss_pct == 9.0
+        assert cfg.max_monthly_loss_pct == 12.0
+        assert cfg.max_drawdown_pct == 15.0
+        assert cfg.risk_per_trade_pct == 2.0
+
+    def test_defaults_match_when_row_empty(self):
+        from app.models.schemas import AppSettings
+        from app.engine.risk_engine import RiskConfig
+        cfg = RiskConfig.from_app_settings(AppSettings())
+        assert cfg.max_daily_loss_pct == 2.0
+        assert cfg.max_weekly_loss_pct == 5.0
+        assert cfg.max_monthly_loss_pct == 8.0
+        assert cfg.max_drawdown_pct == 10.0
+
+    def test_engine_wired_via_helper_respects_settings(self):
+        """risk_engine_for_settings(s).check() pauses at the USER's 5% limit,
+        not at the env default 2% (old behaviour paused 2x too early)."""
+        from app.models.schemas import AppSettings
+        from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
+
+        def snap(daily_loss: float) -> PortfolioSnapshot:
+            return PortfolioSnapshot(
+                starting_capital=10_000, peak_equity=10_000,
+                current_equity=10_000 - daily_loss,
+                realized_pnl_today=-daily_loss, realized_pnl_week=0.0,
+                realized_pnl_month=0.0, open_risk=0.0)
+
+        s = AppSettings(kill_daily_loss_pct=5.0)
+        engine = risk_engine_for_settings(s)
+        assert engine.check(snap(daily_loss=250)).trading_paused is False  # 2.5% < 5
+        assert engine.check(snap(daily_loss=550)).trading_paused is True   # 5.5% > 5
+
+
 # ---------------------------------------------------------------------------
 # Portfolio Engine
 # ---------------------------------------------------------------------------
