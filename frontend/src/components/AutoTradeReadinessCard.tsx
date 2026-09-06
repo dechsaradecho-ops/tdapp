@@ -27,7 +27,12 @@ interface Factor {
   detail: string;
 }
 
-const ICON: Record<FactorState, string> = { pass: "✅", fail: "⛔", warn: "⚠️" };
+// ใช้สีแทนเครื่องหมายถูก/ผิด: เขียว = ผ่าน, แดง = ติด, เหลือง = เตือน
+const DOT: Record<FactorState, string> = {
+  pass: "bg-profit shadow-[0_0_8px_rgba(48,209,88,0.8)]",
+  fail: "bg-loss shadow-[0_0_8px_rgba(255,69,58,0.8)]",
+  warn: "bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.8)]",
+};
 const COLOR: Record<FactorState, string> = {
   pass: "text-profit",
   fail: "text-loss",
@@ -112,8 +117,8 @@ export default function AutoTradeReadinessCard() {
           >
             <p className={`text-lg font-bold ${canTrade ? "text-profit" : "text-loss"}`}>
               {canTrade
-                ? "✅ เปิดเทรดอัตโนมัติได้ตอนนี้"
-                : "⛔ ยังเปิดเทรดอัตโนมัติไม่ได้ตอนนี้"}
+                ? "เปิดเทรดอัตโนมัติได้ตอนนี้"
+                : "ยังเปิดเทรดอัตโนมัติไม่ได้ตอนนี้"}
             </p>
             <p className="text-sm text-slate-300 mt-1">
               {canTrade
@@ -129,7 +134,9 @@ export default function AutoTradeReadinessCard() {
                 key={f.label}
                 className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 flex items-start gap-2"
               >
-                <span className="text-base leading-6">{ICON[f.state]}</span>
+                <span
+                  className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${DOT[f.state]}`}
+                />
                 <div className="min-w-0">
                   <p className={`text-sm font-semibold ${COLOR[f.state]}`}>
                     {f.label}
