@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import SignalCard from "@/components/SignalCard";
+import SignalLogsPanel from "@/components/SignalLogsPanel";
 import { api } from "@/lib/api";
 import { AppSettings, SessionStatus, SignalProposal } from "@/lib/types";
 
@@ -26,6 +27,14 @@ export default function SignalsPage() {
   // ค่าเริ่มต้นปิด (0) — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(0);
   const inFlight = useRef(false);
+  // แท็บ: "signals" (ค่าเริ่มต้น) | "logs" (บันทึกสัญญาณ — เดิมหน้า /signal-logs)
+  // static export ไม่มี server — อ่าน ?tab=logs จาก window.location.search ใน effect
+  // (useSearchParams ต้องมี Suspense boundary ทั้งหน้า)
+  const [tab, setTab] = useState<"signals" | "logs">("signals");
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "logs") setTab("logs");
+  }, []);
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return; // กันยิงซ้อนระหว่าง request เก่ายังค้าง
@@ -99,6 +108,26 @@ export default function SignalsPage() {
 
   return (
     <div className="space-y-4">
+      {/* ---------- แท็บ: สัญญาณ | บันทึกสัญญาณ ---------- */}
+      <div className="flex gap-2">
+        <button
+          onClick={() => setTab("signals")}
+          className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "signals" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
+        >
+          ⚡ สัญญาณ
+        </button>
+        <button
+          onClick={() => setTab("logs")}
+          className={`px-4 py-2 min-h-[40px] rounded-xl text-sm border font-semibold ${tab === "logs" ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}
+        >
+          🗂️ บันทึกสัญญาณ
+        </button>
+      </div>
+
+      {tab === "logs" && <SignalLogsPanel />}
+
+      {tab === "signals" && (
+      <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="panel-title">{heading}</h2>
 
@@ -181,6 +210,8 @@ export default function SignalsPage() {
             ))}
           </div>
         </SignalGroup>
+      )}
+      </>
       )}
     </div>
   );

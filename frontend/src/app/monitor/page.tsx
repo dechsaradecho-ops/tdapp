@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
+import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
-import { ClosePositionResult, MonitorSnapshot } from "@/lib/types";
+import { usePortfolio } from "@/lib/portfolio";
+import { ClosePositionResult, MonitorSnapshot, RiskStatus } from "@/lib/types";
 
 // ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.monitor_refresh_sec)
 // ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (backend cache spot quotes 30s ดังนั้น
@@ -33,6 +35,10 @@ export default function MonitorPage() {
   const [resetMsg, setResetMsg] = useState("");
   const [closingAll, setClosingAll] = useState(false);
   const [closeAllMsg, setCloseAllMsg] = useState("");
+  // Risk Engine Status (จากหน้า /risk เดิม — รวมเข้ามอนิเตอร์ตามแผนจัดเมนูใหม่)
+  const [risk, setRisk] = useState<RiskStatus | null>(null);
+  const [riskErr, setRiskErr] = useState("");
+  const { capital, equity, pnl, loaded } = usePortfolio();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -64,6 +70,21 @@ export default function MonitorPage() {
       })
       .catch(() => { /* settings ล้มเหลว — ใช้ค่าเริ่มต้น */ });
   }, []);
+
+  // Risk check — รอให้ store โหลดค่าจริงจาก backend ก่อน (store เริ่มต้นที่ 0)
+  // endpoint บังคับ starting_capital/peak_equity > 0 (422 ถ้ายิง 0)
+  useEffect(() => {
+    if (!loaded || capital <= 0) return;
+    api.checkRisk({
+      starting_capital: capital,
+      peak_equity: capital * 1.02,
+      current_equity: equity,
+      realized_pnl_today: Math.min(pnl, 0),
+      realized_pnl_week: pnl,
+      realized_pnl_month: pnl,
+      open_risk: capital * 0.005,
+    }).then(setRisk).catch((e) => setRiskErr(String(e)));
+  }, [capital, equity, pnl, loaded]);
 
   const changeInterval = async (v: number) => {
     setIntervalSec(v);
@@ -164,6 +185,17 @@ export default function MonitorPage() {
   return (
     <div className="space-y-4">
       <FeedStatusBanner feed={snap?.feed_status} />
+
+      {/* ---------- Risk Engine Status (จากหน้า /risk เดิม) ---------- */}
+      <div className="panel">
+        <h2 className="panel-title">Risk Engine Status</h2>
+        {riskErr && <p className="text-loss text-sm">{riskErr}</p>}
+        <RiskPanel risk={risk} />
+        <p className="text-xs text-slate-500 mt-3">
+          ลิมิต: ขาทุนรายวัน/สัปดาห์/เดือน + Max Drawdown — ตั้งค่าได้ที่หน้าตั้งค่า (Kill Switch &amp; Risk)
+        </p>
+      </div>
+
       {/* ---------- Status strip ---------- */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <div className={`panel ${snap?.pause.paused ? "border-loss" : ""}`}>

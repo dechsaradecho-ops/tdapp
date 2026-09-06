@@ -11,14 +11,11 @@ import { useEffect, useRef, useState } from "react";
  */
 const MENU = [
   { href: "/", label: "หน้าหลัก", icon: "🏠" },
-  { href: "/market", label: "ตลาด", icon: "📈" },
   { href: "/signals", label: "สัญญาณ", icon: "⚡" },
   { href: "/monitor", label: "มอนิเตอร์", icon: "📊" },
-  { href: "/logs", label: "Logs", icon: "📜" },
-  { href: "/signal-logs", label: "Signal Logs", icon: "🗂️" },
-  { href: "/risk", label: "Risk", icon: "🛡️" },
   { href: "/performance", label: "Performance", icon: "🎯" },
-  { href: "/settings", label: "Settings", icon: "⚙️" },
+  { href: "/logs", label: "Logs", icon: "📜" },
+  { href: "/settings", label: "ตั้งค่า", icon: "⚙️" },
 ];
 
 export default function MobileNav() {

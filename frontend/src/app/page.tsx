@@ -9,10 +9,20 @@ import { fmtMoney } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import { MarketSummary } from "@/lib/types";
 
+// เดิมอยู่หน้า /market (รวมเข้าหน้าหลักตามแผนจัดเมนูใหม่ Plan B)
+const SYMBOLS: Record<string, string> = {
+  XAUUSD: "OANDA:XAUUSD",
+  EURUSD: "OANDA:EURUSD",
+  USDJPY: "OANDA:USDJPY",
+  GBPUSD: "OANDA:GBPUSD",
+  AUDUSD: "OANDA:AUDUSD",
+};
+
 export default function DashboardPage() {
   const [summary, setSummary] = useState<MarketSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryErr, setSummaryErr] = useState(false);
+  const [selected, setSelected] = useState("XAUUSD");
   const { capital, equity, pnl } = usePortfolio();
 
   useEffect(() => {
@@ -32,10 +42,46 @@ export default function DashboardPage() {
 
       <GoalForm />
 
+      {/* ---------- Market Regime Analysis (จาก /market เดิม) ---------- */}
+      <section className="panel">
+        <h2 className="panel-title">Market Regime Analysis</h2>
+        {summary ? (
+          <div className="grid md:grid-cols-3 gap-4">
+            <div>
+              <p className="text-xs text-slate-500">Regime</p>
+              <p className="text-xl font-bold">{summary.regime.replace(/_/g, " ").toUpperCase()}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Confidence</p>
+              <p className="text-xl font-bold text-accent">{summary.confidence}%</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Sentiment</p>
+              <p className={`text-xl font-bold ${summary.sentiment === "bullish" ? "text-profit" : summary.sentiment === "bearish" ? "text-loss" : ""}`}>
+                {summary.sentiment.toUpperCase()}
+              </p>
+            </div>
+            <p className="md:col-span-3 text-sm text-slate-400">{summary.explanation}</p>
+          </div>
+        ) : (
+          <p className="text-slate-500 text-sm">
+            {summaryLoading ? "กำลังโหลด..." : "ไม่มีข้อมูล — ตรวจสอบว่า backend รันอยู่"}
+          </p>
+        )}
+      </section>
+
       <section className="grid md:grid-cols-3 gap-4">
         <div className="panel md:col-span-2">
-          <h2 className="panel-title">XAUUSD — TradingView</h2>
-          <TradingViewChart symbol="OANDA:XAUUSD" />
+          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น */}
+          <div className="flex flex-wrap gap-2 mb-3">
+            {Object.keys(SYMBOLS).map((a) => (
+              <button key={a} onClick={() => setSelected(a)}
+                className={`px-3 py-2 min-h-[40px] rounded-xl text-sm border ${selected === a ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}>
+                {a}
+              </button>
+            ))}
+          </div>
+          <TradingViewChart symbol={SYMBOLS[selected]} />
         </div>
         <div className="panel">
           <h2 className="panel-title">Opportunity Score</h2>
