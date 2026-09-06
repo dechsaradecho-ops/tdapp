@@ -3,12 +3,15 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `fc753ce`, verified 2026-09-06 — เพิ่ม §15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด
+> สถานะล่าสุด: commit `a13eb36`, verified 2026-09-06 (deploy ถึง prod แล้ว + ทดสอบ toggle จริงบน prod ผ่าน) — §15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด (6 หมวด, migration 012 รันแล้ว)
 >
-> ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html** — Next.js สร้าง buildId ใหม่ทุกครั้งที่ build
-> ทำให้ hash local ≠ prod เสมอ (แม้โค้ดเดียวกัน) — วิธีตรวจ deploy ถึงจริง: เทียบ **file size**
-> ของ index.html + สแกน **JS chunks** (`/_next/static/chunks/app/<page>/page-*.js`) หา string
-> ใหม่ที่รอดจาก minification (เช่น `tdapp_chat_history`, `capital<=0`)
+> ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html หรือชื่อไฟล์ chunk** — Next.js สร้าง buildId/chunk-hash
+> ใหม่ทุกครั้งที่ build และ build บน Render ให้ hash ต่างจาก local เสมอ (แม้โค้ดเดียวกัน — ยืนยันแล้ว
+> 2026-09-06: prod `page-2c076a551f57135c` vs local `page-061af32ba75f47ea`) — วิธีตรวจ deploy ถึงจริง:
+> ดึง **JS chunk ของหน้านั้นจาก prod** (`/_next/static/chunks/app/<page>/page-*.js` ตามที่ HTML อ้าง)
+> แล้วสแกนหา **ASCII marker ที่รอดจาก minification** (เช่น `aria-checked`, `notify_trade_opened`,
+> `left-[21px]`, `tdapp_chat_history`) — 🚨 ข้อความไทยใน chunk โดน \u-escape หา string ตรงตัวไม่เจอ
+> และ prod /settings มี PIN lock หน้าจอ (ยิง API ตรงได้ 401 = ปกติ) → verify ด้วย JS chunk แทนการเข้าหน้า
 
 ---
 
@@ -503,3 +506,5 @@ import Icon from "@/components/Icon";
 - `role="switch"` + `aria-checked` + `aria-label` — screen reader อ่านเป็นสวิตช์
 - **บันทึกทันทีเมื่อกด** (instant save ผ่าน `api.saveSettings({key: value})`) — ไม่ต้องกดปุ่ม Save รวม; แสดง feedback ใน `lineMsg`
 - ตัวอย่างการใช้จริง: หมวดหมู่การแจ้งเตือน LINE ในหน้า Settings — แถวละ 1 หมวด (icon วงกลม tint + ชื่อหมวด + คำอธิบาย + สวิตช์), ค่าเก็บใน `trading_settings` (`notify_*` booleans) ตามหมวด
+- ✅ **Verified บน prod 2026-09-06 (a13eb36)**: 6 สวิตช์แสดงครบ โหลดค่าจาก API ถูกต้อง (เริ่มต้น ON ทุกหมวด), toggle ปิด/เปิด "ไม้เปิด" บันทึกสำเร็จทั้งสองครั้ง (feedback "บันทึกการแจ้งเตือนแล้ว"), migration 012 รันแล้ว — PUT `notify_*` ผ่าน (ถ้ายังไม่รัน PostgREST จะ error หาคอลัมน์)
+- 🚨 บทเรียน Playwright: กดสวิตช์แล้ว re-render ขณะ feedback หาย ทำให้ click ปกติ timeout ("waiting for element to be visible, enabled and stable") — ใช้ `click({ force: true })` แก้ได้ และอ่านสถานะจาก `aria-checked` เสมอ
