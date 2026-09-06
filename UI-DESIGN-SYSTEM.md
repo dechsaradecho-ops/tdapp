@@ -173,9 +173,9 @@ body {
 
 ---
 
-## 7. MobileNav — Floating Glass Dock (เมนูล่าง)
+## 7. MobileNav — Floating Glass Dock (เมนูล่าง, สไลด์ซ้ายขวา)
 
-**โครงสร้าง:** 4 แท็บหลัก (หน้าหลัก/ตลาด/สัญญาณ/มอนิเตอร์) + ปุ่ม "เพิ่มเติม" เปิด bottom sheet (Logs, Signal Logs, Risk, Performance, Settings) · แสดงเฉพาะ `md:hidden` · active tab = `text-accent font-semibold`
+**โครงสร้าง (0b9274c):** ทุกหน้า 9 แท็บใน **แถวเดียวปัดซ้าย-ขวา** (ไม่มีปุ่ม "เพิ่มเติม"/bottom sheet แล้ว) · แสดงเฉพาะ `md:hidden` · active tab = `text-accent font-semibold` · แท็บ active ถูกเลื่อนมากึ่งกลางอัตโนมัติ
 
 **Tab bar = dock ลอยโค้งมน แก้วขาวใส (ไม่ใช้พื้นเข้ม):**
 
@@ -195,26 +195,24 @@ body {
     boxShadow: "0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14)",
   }}
 >
-  <div className="grid grid-cols-5 px-1 py-0.5">
-    {/* แท็บ: flex flex-col items-center gap-0.5 min-h-[56px] text-[11px]
-        active:bg-white/10 rounded-xl, icon text-xl */}
+  {/* สไลด์ซ้ายขวา — no-scrollbar util (globals.css) */}
+  <div ref={scrollRef} className="no-scrollbar flex overflow-x-auto px-1 py-0.5"
+       style={{ overscrollBehaviorX: "contain" }}>
+    {/* แท็บ: flex flex-col items-center gap-0.5 min-h-[56px] min-w-[64px] px-1
+        shrink-0 text-[11px] active:bg-white/10 rounded-xl, icon text-xl
+        data-active={isActive(href) || undefined} */}
 ```
 
-**Bottom sheet (เมนูเพิ่มเติม):**
+**Auto-center แท็บ active (สำคัญ — timing บน prod):**
 
 ```tsx
-// backdrop: fixed inset-0 bg-black/60 + blur(6px) + animate-fade
-// sheet: absolute bottom-0 inset-x-0 rounded-t-3xl animate-sheet
-style={{
-  background: "rgba(18, 18, 24, 0.82)",           // ตัว sheet ทึบกว่า dock (อ่านง่าย)
-  WebkitBackdropFilter: "blur(14px) saturate(160%)",
-  backdropFilter: "blur(14px) saturate(160%)",
-  borderTopColor: "rgba(255,255,255,0.16)",
-}}
-// รายการใน sheet: grid grid-cols-3 gap-2, การ์ดย่อย rounded-xl border
-//   active: border-accent/60 bg-accent/15 text-accent
-//   ปกติ:   border-white/10 bg-white/[0.04] text-slate-300
+// คำนวณ synchronous ใน effect — ห้ามใช้ requestAnimationFrame หรือ scrollIntoView smooth
+// เพราะบน prod hydration/font ช้ากว่า local → RAF callback รันเมื่อค่าเปลี่ยนแล้ว = ไม่เลื่อน
+effect: sc.scrollLeft = Math.max(0, el.offsetLeft + el.offsetWidth/2 - sc.clientWidth/2)
+document.fonts?.ready?.then(center)  // center ซ้ำหลัง font swap (ความกว้างแท็บเปลี่ยน)
 ```
+
+แท็บแรก/สุดท้าย (หน้าหลัก/Settings) เลื่อนชนขอบเพราะ clamp ที่ maxScroll — พฤติกรรมปกติของ scroll container
 
 **Layout ต้องเว้นที่ให้ dock:** `<main className="... pb-24 md:pb-5">` — ⚠️ ห้ามใช้ `.safe-bottom` บน main (env() มาทีหลัง Tailwind จะ override pb-* เป็น 0 ทำให้ dock ทับเนื้อหา)
 
@@ -421,7 +419,7 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 3. ☐ คัดลอก `.panel` + `::after` sheen (§4) — ใช้เป็นการ์ดหลักทุกหน้า
 4. ☐ `.lg-refract` CSS (§5) — ⛔ refraction filter ปิดอยู่ (Samsung พัง) เหลือ isolation + specular ::after เท่านั้น — ห้ามเปิดกลับโดยไม่ทดสอบ Samsung เครื่องจริง
 5. ☐ Header sticky แก้วใส rgba(5,5,8,0.32) (§6)
-6. ☐ MobileNav floating dock แก้วขาว + bottom sheet (§7) + `main pb-24`
+6. ☐ MobileNav floating dock สไลด์ซ้ายขวา + auto-center active tab (§7) + `main pb-24`
 7. ☐ ปุ่ม 4 บทบาท tinted + radius 12px + scale(0.97) (§8)
 8. ☐ ฟอร์มแก้วฝ้า + focus ring ฟ้า + กัน iOS zoom 16px (§9)
 9. ☐ Pill ตาราง: ครอบค่าด้วย `<span>` ใน td เสมอ — ห้าม pill บน td โดยตรง (§10)
