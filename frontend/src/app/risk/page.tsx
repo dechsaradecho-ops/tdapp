@@ -7,11 +7,14 @@ import { usePortfolio } from "@/lib/portfolio";
 import { RiskStatus } from "@/lib/types";
 
 export default function RiskPage() {
-  const { capital, equity, pnl } = usePortfolio();
+  const { capital, equity, pnl, loaded } = usePortfolio();
   const [risk, setRisk] = useState<RiskStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // รอให้ store โหลดค่าจริงจาก backend ก่อน — store เริ่มต้นที่ 0
+    // และ endpoint บังคับ starting_capital/peak_equity > 0 (422 ถ้ายิง 0)
+    if (!loaded || capital <= 0) return;
     api.checkRisk({
       starting_capital: capital,
       peak_equity: capital * 1.02,
@@ -21,7 +24,7 @@ export default function RiskPage() {
       realized_pnl_month: pnl,
       open_risk: capital * 0.005,
     }).then(setRisk).catch((e) => setError(String(e)));
-  }, [capital, equity, pnl]);
+  }, [capital, equity, pnl, loaded]);
 
   return (
     <div className="max-w-xl space-y-4">

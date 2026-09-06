@@ -1,10 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { API_BASE } from "@/lib/types";
 import { getToken } from "@/lib/auth";
-
-interface Msg { role: "user" | "assistant"; content: string }
+import { CHAT_HISTORY_MAX, ChatMsg, loadChatHistory, saveChatHistory } from "@/lib/chat_history";
 
 const SUGGESTIONS = [
   "วันนี้ควรเทรดไหม",
@@ -16,14 +15,34 @@ const SUGGESTIONS = [
 ];
 
 export default function ChatPage() {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  // ประวัติคงอยู่ข้ามการปิด/เปิดหน้า — โหลดจาก localStorage (เครื่องนี้) ตอน mount
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [thinkSecs, setThinkSecs] = useState(0);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMessages(loadChatHistory());
+  }, []);
+
+  // live "thinking" counter + เลื่อนลงล่างเมื่อข้อความใหม่มา
+  useEffect(() => {
+    if (!loading) { setThinkSecs(0); return; }
+    const t = setInterval(() => setThinkSecs((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [loading]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
 
   const send = async (text: string) => {
     if (!text.trim() || loading) return;
-    const next: Msg[] = [...messages, { role: "user", content: text }];
+    const next: ChatMsg[] = [...messages, { role: "user" as const, content: text }]
+      .slice(-CHAT_HISTORY_MAX); // เก็บไม้ล่าสุด 20 ข้อความ
     setMessages(next);
+    saveChatHistory(next);
     setInput("");
     setLoading(true);
     try {
@@ -34,10 +53,10 @@ export default function ChatPage() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ messages: next }),
+        // context ที่ส่งให้ AI ก็จำกัด 20 ข้อความล่าสุดเท่ากัน
+        body: JSON.stringify({ messages: next.slice(-CHAT_HISTORY_MAX) }),
       });
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-      setMessages([...next, { role: "assistant", content: "" }]);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let acc = "";
@@ -47,11 +66,13 @@ export default function ChatPage() {
         acc += decoder.decode(value, { stream: true });
         setMessages([...next, { role: "assistant", content: acc }]);
       }
-      if (!acc.trim()) {
-        setMessages([...next, { role: "assistant", content: "(no reply)" }]);
-      }
+      const finalMsgs: ChatMsg[] = [...next, { role: "assistant", content: acc || "(no reply)" }];
+      setMessages(finalMsgs);
+      saveChatHistory(finalMsgs);
     } catch (e) {
-      setMessages([...next, { role: "assistant", content: `⚠️ เชื่อมต่อ AI ไม่ได้: ${e}` }]);
+      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content: `⚠️ เชื่อมต่อ AI ไม่ได้: ${e}` }];
+      setMessages(errMsgs);
+      saveChatHistory(errMsgs);
     } finally {
       setLoading(false);
     }
@@ -76,7 +97,17 @@ export default function ChatPage() {
               </div>
             </div>
           ))}
-          {loading && <p className="text-slate-500 text-sm">AI กำลังคิด...</p>}
+          {loading && (
+            <div className="flex items-center gap-2 text-slate-400 text-sm animate-pulse">
+              <span className="inline-flex gap-1" aria-hidden="true">
+                <span className="w-2 h-2 rounded-full bg-accent animate-bounce [animation-delay:0ms]" />
+                <span className="w-2 h-2 rounded-full bg-accent animate-bounce [animation-delay:150ms]" />
+                <span className="w-2 h-2 rounded-full bg-accent animate-bounce [animation-delay:300ms]" />
+              </span>
+              AI กำลังคิด... ({thinkSecs}s)
+            </div>
+          )}
+          <div ref={endRef} />
         </div>
         <div className="mt-3 flex gap-2">
           <input
