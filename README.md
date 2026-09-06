@@ -25,7 +25,8 @@ AI-driven market analysis, goal feasibility assessment, risk management, and LIN
 tdapp/
 ├── frontend/                 # Next.js static-export dashboard → tdappstatic.onrender.com
 │   └── src/
-│       ├── app/              # Pages: dashboard (หน้าหลัก, รวม market), signals (แท็บ
+│       ├── app/              # Pages: dashboard (หน้าหลัก, รวม market + การ์ดสถานะ
+│       │                     #         auto-trade readiness), signals (แท็บ
 │       │                     #         signal-logs), monitor (แท็บ performance, รวม risk
 │       │                     #         เป็นการ์ดล่างสุด), logs, settings, chat +
 │       │                     #         redirect stubs (market/risk/signal-logs/performance)
