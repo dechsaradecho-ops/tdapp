@@ -85,9 +85,13 @@ input[type="checkbox"] {
    blur ต่ำ (10px) เพื่อให้แก้ว "ใส" เห็นพื้นหลังชัดขึ้น */
 .panel {
   background: linear-gradient(160deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03) 45%, rgba(255, 255, 255, 0.055));
-  /* ⚠️ ห้ามใส่ backdrop-filter บนตัว panel เอง — บนมือถือ (Chrome Android/Samsung Internet)
-     blur จะหายเมื่อ content ข้างใน repaint (ตารางโหลดข้อมูลเสร็จ/เลื่อน scroll แนวนอน)
-     บน PC ไม่พังทำให้ทดสอบบนเดสก์ท็อปไม่เจอ — blur ต้องอยู่ที่ .panel::before เท่านั้น */
+  /* blur ต้องอยู่บนตัว panel เท่านั้น — Samsung Internet ไม่ render backdrop-filter
+     ที่อยู่บน ::before/::after (ทดลองย้ายแล้ว: หน้าต่างแชทใสโปร่งทั้งหน้า)
+     ส่วนอาการ "blur หายหลังตารางโหลด" เฉพาะ Android แก้ที่ต้นทางแทน:
+     BackgroundLayer เบลอรูปพื้นหลังไว้ล่วงหน้า (blur 14px) แก้วจึงดูฝ้าเสมอ
+     แม้ backdrop-filter จะดับบางจังหวะบนมือถือ */
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  backdrop-filter: blur(10px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-top-color: rgba(255, 255, 255, 0.22);
   border-radius: 1rem;
@@ -98,20 +102,6 @@ input[type="checkbox"] {
   /* grid item ต้องหดต่ำกว่า min-content ได้ ไม่งั้นเนื้อหายาว (nowrap/long words)
      จะดัน panel และทั้ง grid ให้กว้างเกินจอมือถือ (grid blowout) */
   min-width: 0;
-}
-
-/* ชั้น blur แยก (backdrop layer) — อยู่คนละ compositor layer กับ content
-   การ repaint ของ children (ตารางโหลด/แถว animate/scroll) จะไม่ฆ่า blur บนมือถือ
-   z-index:-1 ให้ layer นี้อยู่ใต้เนื้อหา — background โปร่งของ panel มองทะลุเห็น blur */
-.panel::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  pointer-events: none;
-  -webkit-backdrop-filter: blur(10px) saturate(150%);
-  backdrop-filter: blur(10px) saturate(150%);
 }
 
 /* anchor ให้ ::after (glare) — guard ไม่ให้ override .fixed/.sticky/.absolute

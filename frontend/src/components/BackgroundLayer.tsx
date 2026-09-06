@@ -27,7 +27,15 @@ export default function BackgroundLayer() {
       <div
         aria-hidden="true"
         className="fixed inset-0 z-[-2] bg-cover bg-center"
-        style={{ backgroundImage: `url(${bg})` }}
+        style={{
+          backgroundImage: `url(${bg})`,
+          /* เบลอรูปพื้นหลังไว้ล่วงหน้า — บน Android (Chrome/Samsung Internet) backdrop-filter
+             ของ .panel บางจังหวะจะดับตัวเมื่อ content repaint (ตารางโหลด/เลื่อน scroll)
+             พื้นหลังที่เบลอไว้แล้วทำให้แก้วยังดูฝ้าเสมอ ไม่ใสโปร่งทะลุรูป */
+          filter: "blur(14px) saturate(120%)",
+          /* ขยายเกินจอเล็กน้อยกันขอบรูปเป็นเงาฟุ้งตอนเบลอ */
+          transform: "scale(1.08)",
+        }}
       />
       <div
         aria-hidden="true"
