@@ -328,16 +328,20 @@ export default function MonitorPage() {
                 {snap.open_positions.map((p) => (
                   <tr key={p.id} className="border-t border-slate-800">
                     <td className="py-2 pr-4 font-semibold">{p.asset}</td>
-                    <td className={`py-2 pr-4 font-bold ${p.direction === "BUY" ? "text-profit" : "text-loss"}`}>
-                      {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"}
+                    <td className="py-2 pr-4 font-bold">
+                      <span className={p.direction === "BUY" ? "text-profit" : "text-loss"}>
+                        {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"}
+                      </span>
                     </td>
                     <td className="py-2 pr-4">{fmtNum(p.volume, 2)}</td>
                     <td className="py-2 pr-4">{fmtNum(p.entry_price, 5)}</td>
                     <td className="py-2 pr-4">{fmtNum(p.current_price, 5)}</td>
-                    <td className="py-2 pr-4 text-loss">{p.stop_loss != null ? fmtNum(p.stop_loss, 5) : "-"}</td>
-                    <td className="py-2 pr-4 text-profit">{p.take_profit != null ? fmtNum(p.take_profit, 5) : "-"}</td>
-                    <td className={`py-2 pr-4 font-bold ${p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}`}>
-                      {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
+                    <td className="py-2 pr-4"><span className="text-loss">{p.stop_loss != null ? fmtNum(p.stop_loss, 5) : "-"}</span></td>
+                    <td className="py-2 pr-4"><span className="text-profit">{p.take_profit != null ? fmtNum(p.take_profit, 5) : "-"}</span></td>
+                    <td className="py-2 pr-4 font-bold">
+                      <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
+                        {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
+                      </span>
                     </td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "🤖 Auto" : "👤 Approve"}</td>
                     <td className="py-2 text-xs text-slate-500">{p.ticket || "-"}</td>
@@ -354,8 +358,10 @@ export default function MonitorPage() {
                 ))}
                 <tr className="border-t-2 border-slate-700 font-bold">
                   <td className="py-2 pr-4" colSpan={7}>รวม uPnL ({snap.open_positions.length} ไม้)</td>
-                  <td className={`py-2 pr-4 ${unrealizedTotal >= 0 ? "text-profit" : "text-loss"}`}>
-                    {unrealizedTotal >= 0 ? "+" : ""}${fmtNum(unrealizedTotal, 2)}
+                  <td className="py-2 pr-4">
+                    <span className={unrealizedTotal >= 0 ? "text-profit" : "text-loss"}>
+                      {unrealizedTotal >= 0 ? "+" : ""}${fmtNum(unrealizedTotal, 2)}
+                    </span>
                   </td>
                   <td colSpan={3} />
                 </tr>
@@ -395,8 +401,10 @@ export default function MonitorPage() {
                       {t.created_at ? new Date(t.created_at).toLocaleString("th-TH") : "-"}
                     </td>
                     <td className="py-2 pr-4 font-semibold">{t.asset}</td>
-                    <td className={`py-2 pr-4 font-bold ${t.direction === "BUY" ? "text-profit" : "text-loss"}`}>
-                      {t.direction === "BUY" ? "▲" : "▼"} {t.direction}
+                    <td className="py-2 pr-4 font-bold">
+                      <span className={t.direction === "BUY" ? "text-profit" : "text-loss"}>
+                        {t.direction === "BUY" ? "▲" : "▼"} {t.direction}
+                      </span>
                     </td>
                     <td className="py-2 pr-4">{fmtNum(t.volume, 2)}</td>
                     <td className="py-2 pr-4">{fmtNum(t.entry_price, 5)}</td>

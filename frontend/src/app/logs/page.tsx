@@ -171,7 +171,10 @@ export default function LogsPage() {
       )}
 
       {/* ---------- Filter + log table ---------- */}
-      <section className="panel overflow-x-auto">
+      {/* หมายเหตุ: overflow-x-auto ต้องอยู่ div ลูก ไม่ใช่บน .panel — backdrop-filter
+          บนตัว scroll container เองจะพังใน Chromium (blur หายเมื่อตารางโหลด/เลื่อน) */}
+      <section className="panel">
+        <div className="overflow-x-auto">
         <div className="flex gap-2 mb-3 text-xs">
           {(["all", "forex", "gold"] as const).map((f) => (
             <button
@@ -225,11 +228,12 @@ export default function LogsPage() {
                 <td className="py-2 pr-3">{l.http_status ?? "—"}</td>
                 <td className="py-2 pr-3 font-mono">{l.price != null ? fmtNum(l.price, 4) : "—"}</td>
                 <td className="py-2 pr-3 text-slate-400">{l.duration_ms ?? "—"}</td>
-                <td className="py-2 max-w-[200px] truncate text-loss" title={l.error ?? ""}>{l.error || "—"}</td>
+                <td className="py-2 max-w-[200px] truncate" title={l.error ?? ""}><span className="text-loss">{l.error || "—"}</span></td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
         {logs.length > 0 && (
           <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
             <p className="text-xs text-slate-500">

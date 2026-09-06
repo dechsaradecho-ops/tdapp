@@ -102,7 +102,10 @@ export default function SignalLogsPage() {
       )}
 
       {/* ---------- Filter + log table ---------- */}
-      <section className="panel overflow-x-auto">
+      {/* หมายเหตุ: overflow-x-auto ต้องอยู่ div ลูก ไม่ใช่บน .panel — backdrop-filter
+          บนตัว scroll container เองจะพังใน Chromium (blur หายเมื่อตารางโหลด/เลื่อน) */}
+      <section className="panel">
+        <div className="overflow-x-auto">
         <div className="flex flex-wrap gap-2 mb-3 text-xs">
           <button
             onClick={() => setFilter("all")}
@@ -172,12 +175,14 @@ export default function SignalLogsPage() {
                   </td>
                   <td className="py-2 pr-3">{l.confidence != null ? `${l.confidence}%` : "—"}</td>
                   <td className="py-2 pr-3 font-mono">{l.entry != null ? fmtNum(l.entry, 4) : "—"}</td>
-                  <td className="py-2 pr-3 font-mono text-loss">{l.stop_loss != null ? fmtNum(l.stop_loss, 4) : "—"}</td>
-                  <td className="py-2 pr-3 font-mono text-emerald-400">{l.take_profit != null ? fmtNum(l.take_profit, 4) : "—"}</td>
+                  <td className="py-2 pr-3 font-mono"><span className="text-loss">{l.stop_loss != null ? fmtNum(l.stop_loss, 4) : "—"}</span></td>
+                  <td className="py-2 pr-3 font-mono"><span className="text-emerald-400">{l.take_profit != null ? fmtNum(l.take_profit, 4) : "—"}</span></td>
                   <td className="py-2 pr-3 font-mono">{l.exit_price != null ? fmtNum(l.exit_price, 4) : "—"}</td>
                   <td className="py-2 pr-3">{l.volume != null ? l.volume : "—"}</td>
-                  <td className={`py-2 pr-3 font-mono ${(l.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {l.pnl != null ? l.pnl.toFixed(2) : "—"}
+                  <td className="py-2 pr-3 font-mono">
+                    <span className={(l.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}>
+                      {l.pnl != null ? l.pnl.toFixed(2) : "—"}
+                    </span>
                   </td>
                   <td className="py-2 pr-3 font-mono text-slate-500">{l.ticket || "—"}</td>
                   <td className="py-2 pr-3 text-slate-400">{l.source || "—"}</td>
@@ -191,6 +196,7 @@ export default function SignalLogsPage() {
             })}
           </tbody>
         </table>
+        </div>
         {logs.length > 0 && (
           <p className="text-xs text-slate-500 mt-2">
             แสดง {shown.length} รายการล่าสุด (จาก {logs.length}) · เก็บสูงสุด {ttlDays} วัน

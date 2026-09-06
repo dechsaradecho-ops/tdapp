@@ -318,40 +318,25 @@ td .text-red-400 {
   backdrop-filter: blur(4px);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
-  padding: 0.05rem 0.4rem;
+  padding: 0.05rem 0.3rem;
   display: inline-block;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-/* td ที่ใส่ class สีตรง ๆ (SL/TP/PnL ใน monitor) — pill บน table-cell โดยตรง
-   ใช้ box-shadow แทน border (border บน td จะชนกับ border แถวตาราง)
-   และ padding ต้องเป็น 0 เพื่อไม่ขยาย cell เกินคอลัมน์ */
-td.text-profit,
-td.text-loss {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)) padding-box;
-  -webkit-backdrop-filter: blur(4px);
-  backdrop-filter: blur(4px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* tint สีตามฝั่ง — pill เขียว/แดงเด่นเข้มขึ้น แยกกำไร/ขาดทุนได้แลบตา
-   (td.text-profit/loss ใช้ box-shadow เป็นขอบ — ตั้งค่าสีให้ตรงกันด้วย) */
+/* tint สีตามฝั่ง — pill เขียว/แดงเด่นขึ้น แยกกำไร/ขาดทุนได้แลบตา
+   (pill ทุกตัวเป็น span inline-block ครอบค่าข้างใน td — หดขนาดพอดีตัวหนังสือ
+   ห้ามใส่ pill บน td โดยตรง: bg จะกินทั้ง cell และถ้าเผลอใส่ display จะทำ
+   คอลัมน์เลื่อนทับกัน — บทเรียน c59c450) */
 td .text-profit,
-td .text-emerald-400,
-td.text-profit {
+td .text-emerald-400 {
   background: linear-gradient(180deg, rgba(48, 209, 88, 0.16), rgba(48, 209, 88, 0.07));
   border-color: rgba(48, 209, 88, 0.3);
-  box-shadow: inset 0 0 0 1px rgba(48, 209, 88, 0.3);
 }
 td .text-loss,
-td .text-red-400,
-td.text-loss {
+td .text-red-400 {
   background: linear-gradient(180deg, rgba(255, 69, 58, 0.16), rgba(255, 69, 58, 0.07));
   border-color: rgba(255, 69, 58, 0.3);
-  box-shadow: inset 0 0 0 1px rgba(255, 69, 58, 0.3);
 }
 
 /* มือถือ: ตารางกว้างตามเนื้อหาจริง — คอลัมน์ไม่ถูกบีบจน pill/ตัวเลขเลื่อนทับกัน
