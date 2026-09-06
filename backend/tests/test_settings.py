@@ -113,6 +113,15 @@ def test_app_settings_defaults_match_engine_defaults():
     assert s.max_trades_daily == 6 and s.risk_per_trade_pct == 1.0
 
 
+def test_settings_fields_accepted_by_put_endpoint():
+    """UI prefs (monitor_refresh_sec / signals_refresh_sec) are part of
+    AppSettings → _FIELDS auto-includes them → PUT /api/settings persists
+    them. 0 values must survive the `v is not None` filter (ปิด = 0)."""
+    s = AppSettings()
+    assert s.monitor_refresh_sec == 10
+    assert s.signals_refresh_sec == 0
+
+
 # ---------------------------------------------------------------------------
 # 2) Engines honor overrides
 # ---------------------------------------------------------------------------

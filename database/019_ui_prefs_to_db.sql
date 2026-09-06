@@ -1,6 +1,6 @@
 -- ============================================================
--- Migration 012 — UI preferences moved out of localStorage
--- Run in Supabase SQL Editor (supplements 001-011)
+-- Migration 019 — UI preferences moved out of localStorage
+-- Run in Supabase SQL Editor (supplements 001-018)
 -- ============================================================
 -- The monitor / signals auto-refresh intervals used to live in the browser's
 -- localStorage (tdapp_monitor_autorefresh / tdapp_signals_autorefresh) so the
