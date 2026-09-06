@@ -17,7 +17,7 @@ AI-driven market analysis, goal feasibility assessment, risk management, and LIN
 | AI Provider | DeepSeek or GLM (pluggable via `ai.config.json`) |
 | Trading | Paper-trading engine; broker adapters (MT5 / OANDA / IB) behind an adapter interface |
 | Notifications | LINE Messaging API |
-| Deployment | Render.com — `tdapp-api` (web) + `tdapp-workers` (worker) + `tdapp-web` (static) |
+| Deployment | Render.com — `tdapp-api` (web, workers embedded) + `tdapp-web` (static) |
 
 ## Project Structure
 
@@ -43,8 +43,8 @@ tdapp/
 │   │   ├── services/         # DB access, execution (paper trades), PIN auth, quote log
 │   │   └── workers/          # Market Scanner, News Analysis, Auto Trader, Notifier, ...
 │   ├── scripts/              # Ops probes: check_*.py, poll_*.py, smoke_stream.py, ...
-│   └── tests/                # Pytest suite (406 tests)
-├── database/                 # Supabase migrations 001–019 (run manually in SQL Editor)
+│   └── tests/                # Pytest suite (415 tests)
+├── database/                 # Supabase migrations 001–020 (run manually in SQL Editor)
 ├── UI-DESIGN-SYSTEM.md       # iOS Liquid Glass Dark — hard rules for UI work
 ├── docker-compose.yml        # Local infra (redis)
 └── render.yaml               # Render.com blueprint (api + workers + static web)
@@ -65,7 +65,7 @@ uvicorn app.main:app --reload --port 8000
 
 API docs: http://localhost:8000/docs
 
-Run the test suite (406 tests):
+Run the test suite (415 tests):
 
 ```bash
 cd backend
@@ -168,18 +168,19 @@ Single-user dashboard — no Supabase Auth:
 
 ## Deployment (Render.com)
 
-`render.yaml` blueprint — 3 services:
+`render.yaml` blueprint — 2 services:
 
 - `tdapp-api` (web) → FastAPI `uvicorn app.main:app` + workers embedded (`ENABLE_WORKERS=1`)
   → https://tdapp-api.onrender.com
-- `tdapp-workers` (worker) → `python -m app.workers.run_all`
 - `tdapp-web` (static) → Next.js static export `out/` → https://tdappstatic.onrender.com
   (SPA rewrite fallback to `index.html`)
 - Redis is commented out in the blueprint (unused in code — enable when a real cache/queue lands)
+- แยก worker service (tdapp-workers) ถูกตัดออกแล้ว — ถ้ารันคู่กับ ENABLE_WORKERS=1 จะยิง
+  order/แจ้งเตือนซ้ำสองเท่า (ดู comment ใน render.yaml หากต้องการเปิดกลับ)
 
-Database migrations (`database/001–019`) are run manually in the Supabase SQL Editor.
-Latest: `019_ui_prefs_to_db.sql` — monitor/signals refresh intervals moved from
-localStorage into `trading_settings`.
+Database migrations (`database/001–020`) are run manually in the Supabase SQL Editor.
+Latest: `020_notification_categories.sql` — per-category LINE notification toggles
+(`notify_*` booleans on `trading_settings` + `skipped` enum value + `notifications.error`).
 
 ## Development Rules (AI safety contract)
 

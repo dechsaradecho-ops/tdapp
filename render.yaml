@@ -35,36 +35,11 @@ services:
     # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret, ใส่ใน repo ได้)
     # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment
 
-  # Background workers (scanner, news, monitor, notifier)
-  - type: worker
-    name: tdapp-workers
-    runtime: python
-    rootDir: backend
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.workers.run_all
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SECRET_KEY
-        sync: false
-      - key: REDIS_URL
-        sync: false
-      - key: AI_API_KEY
-        sync: false
-      - key: LINE_CHANNEL_ACCESS_TOKEN
-        sync: false
-      - key: LINE_CHANNEL_SECRET
-        sync: false
-      - key: LINE_BOT_USER_ID
-        sync: false
-      # scanner ต้องใช้ key เดียวกับ api — ดึงราคาทอง XAU/USD จาก Twelve Data
-      - key: TWELVEDATA_API_KEY
-        sync: false
-    # AI provider/url อยู่ในไฟล์ ai.config.json (non-secret)
-    # AI_API_KEY เป็น env var — ใส่ใน Dashboard → Environment
+  # ⚠️ Background worker service (tdapp-workers / run_all.py) ถูกตัดออกแล้ว —
+  # workers ทั้ง 8 ตัวรันในตัว tdapp-api ผ่าน ENABLE_WORKERS=1 แล้ว
+  # ถ้าเปิดทั้งสองที่ จะยิง order / แจ้งเตือน / scanner ซ้ำสองเท่า
+  # หากต้องการแยก worker กลับมาในอนาคต: ปิด ENABLE_WORKERS บน tdapp-api ก่อน
+  # แล้วค่อยเพิ่ม service นี้กลับ (startCommand: python -m app.workers.run_all)
 
   # Next.js frontend — Static Site (npm run build → publish out/)
   # คง static site เดิมไว้ (tdappstatic.onrender.com) — user ไม่ต้องการ Web Service ใหม่

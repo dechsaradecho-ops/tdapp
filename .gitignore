@@ -26,6 +26,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Local assets (wallpapers ทดสอบพื้นหลัง — ไม่ใช่ส่วนของโปรเจค)
+/iPadOS-27-wallpaper-*.png
+
 # Build
 dist/
 build/
