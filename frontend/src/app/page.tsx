@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import AutoTradeReadinessCard from "@/components/AutoTradeReadinessCard";
 import GoalForm from "@/components/GoalForm";
 import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
@@ -39,6 +40,9 @@ export default function DashboardPage() {
         <Stat label="Current PnL" value={fmtMoney(pnl)} positive={pnl >= 0} />
         <Stat label="Monthly Goal" value="3%" />
       </section>
+
+      {/* ---------- สถานะการเทรดอัตโนมัติ: เปิดได้/ไม่ได้ เพราะปัจจัยอะไร ---------- */}
+      <AutoTradeReadinessCard />
 
       <GoalForm />
 
