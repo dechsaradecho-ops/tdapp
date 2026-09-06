@@ -1351,6 +1351,18 @@ class AppSettings(BaseModel):
     monitor_refresh_sec: int = 10
     signals_refresh_sec: int = 0
 
+    # ---- LINE notification categories (per-category on/off) ----------------
+    # Each boolean gates one category of LINE push. NotificationService.notify
+    # and notification_worker.dispatch_pending both check these before queueing
+    # or sending, so a disabled category produces no queue row and no push.
+    # All default True — existing rows keep current behaviour.
+    notify_trade_opened: bool = True
+    notify_trade_closed: bool = True
+    notify_stop_loss: bool = True
+    notify_risk_warning: bool = True
+    notify_daily_digest: bool = True
+    notify_daily_summary: bool = True
+
 
 class SettingsSaveResult(BaseModel):
     ok: bool

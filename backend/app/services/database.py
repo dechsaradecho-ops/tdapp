@@ -150,7 +150,11 @@ class Database:
 
 def queue_notification(db: Database, user_id: str, ntype: str, message: str,
                        channel: str = "line") -> None:
-    """Persist a notification row (worker #4 picks up pending rows)."""
+    """Persist a notification row (worker #4 picks up pending rows).
+
+    Disabled categories are skipped upstream in NotificationService.notify —
+    so rows here always represent deliverable messages.
+    """
     db.insert("notifications", {
         "user_id": user_id, "channel": channel, "type": ntype,
         "message": message, "status": "pending",

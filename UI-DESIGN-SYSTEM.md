@@ -3,7 +3,7 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `b2a2bae`, verified 2026-09-06
+> สถานะล่าสุด: commit `fc753ce`, verified 2026-09-06 — เพิ่ม §15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด
 >
 > ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html** — Next.js สร้าง buildId ใหม่ทุกครั้งที่ build
 > ทำให้ hash local ≠ prod เสมอ (แม้โค้ดเดียวกัน) — วิธีตรวจ deploy ถึงจริง: เทียบ **file size**
@@ -17,6 +17,7 @@
 - **iOS Liquid Glass บนพื้นดำ**: พื้นหลังดำสนิท + aurora glow จาง ๆ, การ์ด/ปุ่ม/ฟอร์มทุกชิ้นเป็น "แก้วฝ้าโปร่งแสง" (blur เบื้องหลังผ่านได้)
 - **แก้วใส ไม่ใช่แก้วขุ่น**: blur ต่ำ (5–10px) เพื่อให้เห็นพื้นหลังชัด — ไม่ใช้พื้นทึบเข้ม
 - **สื่อสารด้วยสี ไม่ใช้ emoji ในปุ่ม**: ฟ้า=ทำ, แดง=อันตราย, เขียว=ยอมรับ, ขาวใส=ทั่วไป
+- **ไอคอน SVG monotone ทั้งแอป (fc753ce)**: ห้ามใช้ emoji ใน UI — ใช้ `Icon.tsx` (36 ไอคอน stroke currentColor) ทุกจุด; glyph ขาวธรรมดา ✓ ✗ ✕ • ยังใช้ได้ในข้อความ
 - **มือถือเป็นหลัก**: ปุ่มสูง ≥44px, กัน iOS zoom, safe-area notch, ตารางเลื่อนแนวนอน
 - **เคารพ OS**: `prefers-reduced-motion`, `color-scheme: dark`, native popup มืด
 
@@ -453,3 +454,52 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 10. ☐ ตารางมือถือ `width: auto` + wrapper เลื่อนแนวนอน — `overflow-x-auto` ต้องอยู่ div ลูก ไม่ใช่บน `.panel` (§11)
 11. ☐ Animations + stagger + reduced-motion (§12)
 12. ☐ Safe-area, tap-highlight, scrollbar, viewport (§13)
+13. ☐ ไอคอนทุกจุดใช้ `Icon.tsx` — ห้าม emoji ใน UI (§15)
+14. ☐ สวิตช์ on/off ใช้ pattern iOS toggle (§16)
+
+---
+
+## 15. ระบบไอคอน SVG monotone — `frontend/src/components/Icon.tsx` (fc753ce)
+
+**กฎ: ห้ามใช้ emoji ใน UI ทุกจุด** — ไอคอนทั้งแอปมาจาก component เดียว สีตาม `currentColor` (สืบทอดจาก text-* ของ parent) จึง tint ตามบริบทได้ (accent/profit/loss/slate)
+
+```tsx
+// Icon.tsx — 36 ไอคอน: bot, user, users, home, hand, check, checkCircle, x, xCircle,
+// warning, ban, help, target, trendUp, trendDown, bolt, chart, waves, archive, scroll,
+// news, inbox, lock, bulb, flask, coins, clock, hourglass, octagon, pause, play,
+// arrowsH, message, arrowDown, undo, shield
+import Icon from "@/components/Icon";
+<Icon n="checkCircle" size={16} className="text-profit" />
+```
+
+- viewBox `0 0 24 24`, `stroke="currentColor"`, `strokeWidth 1.8`, fill none — เส้นบางสไตล์ iOS
+- className เริ่มต้น `inline-block shrink-0 align-[-0.15em]` — วางใน flow ข้อความได้โดยไม่เบย baseline
+- export `IconName` type — ใช้ type-safe ใน metadata arrays (เช่น `NOTIFY_CATEGORIES` ใน settings page)
+- glyph ขาวธรรมดา ✓ ✗ ✕ • ในข้อความยังใช้ได้ (ไม่ใช่ emoji) — แต่ปุ่ม/หัวข้อ/แถวสถานะใช้ Icon เสมอ
+- select `<option>` วาด JSX ไม่ได้ → ตัด emoji ออกเหลือข้อความล้วน
+- ตรวจ emoji หลุดเหลือ: grep `[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{FE0F}]` (JS: `/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu`)
+
+**DesktopNav (desktop pill navbar):** แถวเดียว justify-end ลอยเหนือเนื้อหา (mb-6) — แบรนด์ SVG + ลิงก์ 5 หน้า, active = `text-accent font-semibold`, ทุกไอคอนใช้ Icon.tsx
+
+---
+
+## 16. iOS Toggle Switch (สวิตช์ on/off — ใช้ใน Settings หมวดแจ้งเตือน)
+
+สวิตช์มาตรฐานของแอป — ปุ่ม `<button role="switch">` + ลูกดอกขาวเลื่อนซ้าย/ขวา ไม่ใช้ checkbox native
+
+```tsx
+<button role="switch" aria-checked={on} aria-label={label}
+  disabled={busy}
+  onClick={() => toggle(!on)}
+  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+    on ? "bg-profit" : "bg-slate-700"}`}>
+  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+    on ? "left-[21px]" : "left-[3px]"}`} />
+</button>
+```
+
+- **on = `bg-profit` (เขียว iOS), off = `bg-slate-700`** — สีสื่อสถานะตาม palette §2
+- ขนาด 46×28 ลูกดอก 22px — แตะง่ายบนมือถือ, `disabled:opacity-40` ระหว่างบันทึก
+- `role="switch"` + `aria-checked` + `aria-label` — screen reader อ่านเป็นสวิตช์
+- **บันทึกทันทีเมื่อกด** (instant save ผ่าน `api.saveSettings({key: value})`) — ไม่ต้องกดปุ่ม Save รวม; แสดง feedback ใน `lineMsg`
+- ตัวอย่างการใช้จริง: หมวดหมู่การแจ้งเตือน LINE ในหน้า Settings — แถวละ 1 หมวด (icon วงกลม tint + ชื่อหมวด + คำอธิบาย + สวิตช์), ค่าเก็บใน `trading_settings` (`notify_*` booleans) ตามหมวด

@@ -13,6 +13,7 @@ import {
   LineSimulateResult, LineTargetsResponse, LineTestResult, PauseStatus,
   PortfolioRecommendation, RiskProfile,
 } from "@/lib/types";
+import type { IconName } from "@/components/Icon";
 
 const DEFAULT_SETTINGS: AppSettings = {
   risk_profile: "moderate",
@@ -48,7 +49,36 @@ const DEFAULT_SETTINGS: AppSettings = {
   backtest_asset: "EURUSD",
   monitor_refresh_sec: 10,
   signals_refresh_sec: 0,
+  notify_trade_opened: true,
+  notify_trade_closed: true,
+  notify_stop_loss: true,
+  notify_risk_warning: true,
+  notify_daily_digest: true,
+  notify_daily_summary: true,
 };
+
+/** LINE notification categories shown on the Settings page — each row maps
+ *  to one AppSettings boolean; `types` lists the ntype strings it covers
+ *  (must stay in sync with backend NOTIFY_CATEGORY_FIELDS). */
+const NOTIFY_CATEGORIES: {
+  key: keyof AppSettings;
+  icon: IconName;
+  label: string;
+  desc: string;
+}[] = [
+  { key: "notify_trade_opened", icon: "bolt", label: "ไม้เปิด",
+    desc: "แจ้งเมื่อระบบเปิด order ใหม่ (trade_opened)" },
+  { key: "notify_trade_closed", icon: "checkCircle", label: "ไม้ปิด / กำไร-ขาดทุน",
+    desc: "แจ้งเมื่อปิดไม้ รวมถึง partial TP1 (trade_closed)" },
+  { key: "notify_stop_loss", icon: "shield", label: "Stop Loss",
+    desc: "แจ้งเมื่อราคาชน SL และระบบตัดขาดทุนอัตโนมัติ (stop_loss)" },
+  { key: "notify_risk_warning", icon: "warning", label: "ความเสี่ยง",
+    desc: "เตือน drawdown / kill switch / ความเสี่ยงพอร์ต (risk_warning)" },
+  { key: "notify_daily_digest", icon: "scroll", label: "สรุปประจำวัน (AI digest)",
+    desc: "สรุปตลาด + แผนเทรดประจำวันจาก AI (daily_digest)" },
+  { key: "notify_daily_summary", icon: "chart", label: "รายงานพอร์ต/ตลาดรายวัน",
+    desc: "สรุปกำไร-ขาดทุนพอร์ตและตลาดรายวัน/สัปดาห์/เดือน (daily_portfolio_summary ฯลฯ)" },
+];
 
 export default function SettingsPage() {
   const { capital, setCapital } = usePortfolio();
@@ -134,6 +164,22 @@ export default function SettingsPage() {
       const res = await api.lineRemoveTarget(id);
       setLineMsg(res.message);
       loadLineTargets();
+    } finally {
+      setLineBusy(false);
+    }
+  };
+
+  // --- per-category notification switch (instant save) ---
+  const toggleNotify = async (key: keyof AppSettings, value: boolean) => {
+    if (!cfg) return;
+    setLineBusy(true);
+    setLineMsg("");
+    try {
+      const res = await api.saveSettings({ [key]: value } as Partial<AppSettings>);
+      setCfg(res.settings);
+      setLineMsg(res.ok ? "บันทึกการแจ้งเตือนแล้ว" : res.message);
+    } catch (e) {
+      setLineMsg(`${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLineBusy(false);
     }
@@ -603,6 +649,41 @@ export default function SettingsPage() {
           หรือวาง Group ID ด้วยมือด้านล่าง
         </p>
         {lineMsg && <p className="text-sm mt-2">{lineMsg}</p>}
+
+        {/* --- per-category notification switches --- */}
+        <div className="mt-4 rounded border border-slate-700 bg-surface/40 p-3">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1 flex items-center gap-1.5">
+            <Icon n="message" size={13} /> หมวดหมู่การแจ้งเตือน
+          </p>
+          <p className="text-xs text-slate-500 mb-2">
+            ปิดหมวดไหนระบบจะไม่ส่ง LINE หมวดนั้นทันที (ทั้งคิวและ push ด่วน) — บันทึกอัตโนมัติเมื่อกดสวิตช์
+          </p>
+          <div className="divide-y divide-slate-800">
+            {NOTIFY_CATEGORIES.map((cat) => {
+              const on = cfg ? Boolean(cfg[cat.key]) : true;
+              return (
+                <div key={cat.key} className="flex items-center gap-3 py-2.5">
+                  <span className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                    on ? "bg-accent/15 text-accent" : "bg-slate-800 text-slate-500"}`}>
+                    <Icon n={cat.icon} size={16} />
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">{cat.label}</p>
+                    <p className="text-xs text-slate-500">{cat.desc}</p>
+                  </div>
+                  <button role="switch" aria-checked={on} aria-label={cat.label}
+                    disabled={!cfg || lineBusy}
+                    onClick={() => toggleNotify(cat.key, !on)}
+                    className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                      on ? "bg-profit" : "bg-slate-700"}`}>
+                    <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                      on ? "left-[21px]" : "left-[3px]"}`} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
 
         {diag && (
           <div className="mt-3 rounded border border-slate-700 bg-surface/40 p-3 text-sm space-y-1">

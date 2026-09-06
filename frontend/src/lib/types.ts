@@ -430,6 +430,13 @@ export interface AppSettings {
   monitor_refresh_sec: number;
   /** Auto-refresh interval (seconds) for the signals page — 0 = off (DB-stored) */
   signals_refresh_sec: number;
+  /** LINE notification categories — per-category on/off (default true) */
+  notify_trade_opened: boolean;
+  notify_trade_closed: boolean;
+  notify_stop_loss: boolean;
+  notify_risk_warning: boolean;
+  notify_daily_digest: boolean;
+  notify_daily_summary: boolean;
 }
 
 export interface SettingsSaveResult {

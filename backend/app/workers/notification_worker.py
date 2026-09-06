@@ -14,7 +14,8 @@ from app.integrations.line_client import (
     build_daily_portfolio_summary,
 )
 from app.services.database import Database
-from app.services.notification_service import NotificationService
+from app.services.notification_service import NotificationService, category_enabled
+from app.api.routes.settings import get_app_settings
 
 log = logging.getLogger(__name__)
 
@@ -23,9 +24,24 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
     """Deliver queued notifications through the right channel."""
     pending = db.select("notifications", filters={"status": "pending"}, limit=50)
     sent = 0
+    # Load settings once per dispatch — category switches may have changed
+    # since the rows were queued.
+    try:
+        settings = get_app_settings(db)
+    except Exception:
+        settings = None
     for n in pending:
         if not n.get("user_id"):
             continue  # broadcast rows need a recipient resolution step
+        # Re-check the category switch at delivery time (it may have been
+        # turned off after the row was queued).
+        if not category_enabled(settings, n.get("type", "")):
+            db.update("notifications", n["id"], {
+                "status": "skipped",
+                "error": "category disabled",
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            })
+            continue
         ok = await notifier.push_line(n["user_id"], n["message"])
         db.update("notifications", n["id"], {
             "status": "sent" if ok else "failed",
