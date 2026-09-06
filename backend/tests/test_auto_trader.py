@@ -12,6 +12,7 @@ Run from backend/: C:/Python314/python.exe -m pytest tests/test_auto_trader.py -
 """
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -521,6 +522,69 @@ class TestAutoTrader:
         assert out["fired"] == 0 and out["skipped"] == 1
         assert broker.orders == []
         assert db.rows["signals"][0]["approval"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_db_read_failure_fails_closed(self, broker, notifier):
+        """Regression (prod 2026-09-06 21:25 UTC): a transient Supabase read
+        failure made db.select() return [] silently, so the duplicate-position
+        gate saw NO open positions and fired duplicate AUDUSD/XAUUSD orders on
+        top of live ones (the misleading 4:58 'expired' log came later, from
+        fresh signals that had nowhere to go). The gate must fail closed:
+        no readable open-positions table → no orders at all, signals stay
+        pending, and an order_blocked event explains why."""
+        class BoomDB(FakeDatabase):
+            def select_ex(self, *a, **kw):
+                raise RuntimeError("supabase read failed (transient)")
+
+        db = BoomDB(rows={"signals": [
+            {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "approval": "pending",
+             "created_at": datetime.now(timezone.utc).isoformat()}]})
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["fired"] == 0 and out["blocked"] == 0 and out["skipped"] == 0
+        assert out["aborted"] == "open_positions_unreadable"
+        assert broker.orders == []                       # nothing fired
+        assert db.rows["signals"][0]["approval"] == "pending"
+        blocks = [r for (_t, r) in db.inserted
+                  if r.get("event") == "order_blocked"]
+        assert len(blocks) == 1
+        assert "อ่านสถานะไม้เปิดไม่สำเร็จ" in blocks[0].get("reason", "")
+
+    @pytest.mark.asyncio
+    async def test_broker_book_blocks_even_without_db_rows(self, broker):
+        """Second line of defense: the broker's own position book (kept in
+        memory, rehydrated from the broker at startup) must block a duplicate
+        even if the paper_trades table read returned no rows."""
+        class BookedBroker(FakeBroker):
+            async def all_positions(self):
+                return [SimpleNamespace(asset="XAUUSD", ticket="T1")]
+
+        db = FakeDatabase(rows={"signals": [          # paper_trades EMPTY on db
+            {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "approval": "pending",
+             "created_at": datetime.now(timezone.utc).isoformat()}]})
+        out = await auto_trader.trade_once(db, BookedBroker(), notifier)
+        assert out["fired"] == 0 and out["skipped"] == 1
+        assert db.rows["signals"][0]["approval"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_broker_book_failure_is_tolerated(self, broker, notifier):
+        """If only the broker book read fails (DB layer fine), the cycle must
+        still run — the DB layer is the primary guard, broker merge is best-
+        effort defense-in-depth."""
+        class BadBookBroker(FakeBroker):
+            async def all_positions(self):
+                raise RuntimeError("broker book unavailable")
+
+        db = FakeDatabase(rows={"signals": [
+            {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "approval": "pending",
+             "created_at": datetime.now(timezone.utc).isoformat()}]})
+        out = await auto_trader.trade_once(db, BadBookBroker(), notifier)
+        assert out["fired"] == 1 and out["blocked"] == 0 and out["skipped"] == 0
 
     @pytest.mark.asyncio
     async def test_stale_signal_skipped(self, broker, notifier):

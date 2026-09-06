@@ -58,6 +58,11 @@ class FakeDatabase:
             rows = [r for r in rows if r.get(col) == val]
         return rows
 
+    def select_ex(self, *args, **kwargs) -> list[dict]:
+        """Same contract as Database.select_ex — errors propagate instead of
+        being swallowed. In-memory: identical to select (never raises)."""
+        return self.select(*args, **kwargs)
+
     def update(self, table: str, row_id: str, changes: dict) -> bool:
         for r in self.rows.get(table, []):
             if r.get("id") == row_id:

@@ -89,7 +89,8 @@ def expire_stale_pending_signals(db) -> int:
                 direction=str(sig.get("direction") or ""),
                 confidence=sig.get("confidence"), entry=sig.get("entry"),
                 source="scanner",
-                reason=f"pending เกิน {SIGNAL_TTL_MIN} นาที — ไม่ได้เปิดออเดอร์")
+                reason=(f"สัญญาณนี้ pending เกิน {SIGNAL_TTL_MIN} นาที — "
+                        "หมดอายุ ไม่ได้ใช้เปิดออเดอร์"))
     return expired
 
 

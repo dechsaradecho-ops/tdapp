@@ -11,6 +11,7 @@ correlation cap and risk officer apply identically to both paths.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 
 from app.models.schemas import AppSettings
@@ -35,10 +36,46 @@ async def trade_once(db, broker, notifier) -> dict:
     # stack a second position on an asset that already has one open. The
     # scanner now dedups too, but this gate is the last line before an order
     # leaves the platform.
-    open_assets = {
-        str(r.get("asset") or "").upper()
-        for r in db.select("paper_trades", filters={"status": "open"}, limit=200)
-    }
+    #
+    # FAIL-CLOSED (2026-09-07): the old read used db.select, which swallows
+    # errors and returns [] — a transient Supabase hiccup (prod 2026-09-06
+    # 21:25 UTC) made this gate see NO open positions and fired duplicate
+    # AUDUSD/XAUUSD orders on top of live ones. Now: (1) a read error aborts
+    # the whole cycle — never trade when the safety data is unavailable;
+    # (2) the broker's own book (DB-independent, rehydrated at startup) is
+    # merged in as a second source of truth.
+    try:
+        open_assets = {
+            str(r.get("asset") or "").upper()
+            for r in db.select_ex("paper_trades", filters={"status": "open"},
+                                  limit=200)
+        }
+    except Exception as exc:
+        log.error("auto-trader: cannot read open positions (%s) — aborting "
+                  "cycle, %d pending signal(s) untouched", exc, len(pending))
+        for sig in pending:
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(sig.get("id") or ""),
+                asset=str(sig.get("asset") or ""),
+                direction=str(sig.get("direction") or ""),
+                confidence=sig.get("confidence"), entry=sig.get("entry"),
+                source="auto",
+                reason="อ่านสถานะไม้เปิดไม่สำเร็จ — งดเทรดรอบนี้ (fail-safe กันเปิดซ้ำ)")
+        return {"mode": "auto", "picked": len(pending), "fired": 0,
+                "blocked": 0, "skipped": 0, "expired": expired,
+                "aborted": "open_positions_unreadable"}
+    broker_assets: set[str] = set()
+    try:
+        if broker is not None and hasattr(broker, "all_positions"):
+            positions = broker.all_positions()
+            if inspect.iscoroutine(positions):
+                positions = await positions
+            broker_assets = {
+                str(getattr(p, "asset", "") or "").upper() for p in positions}
+    except Exception as exc:
+        log.warning("auto-trader: broker book read failed (%s) — the DB "
+                    "layer still guards the gate", exc)
+    open_assets |= broker_assets
     fired, blocked, skipped = 0, 0, 0
     for sig in pending:
         entry = float(sig.get("entry") or 0)

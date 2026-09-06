@@ -79,6 +79,27 @@ class Database:
             log.error("select %s failed: %s", table, exc)
             return []
 
+    def select_ex(self, table: str, filters: Optional[dict] = None,
+                  order: str = "created_at", desc: bool = True, limit: int = 50,
+                  offset: int = 0) -> list[dict]:
+        """Like select() but errors PROPAGATE to the caller.
+
+        Safety gates must distinguish 'no rows' from 'read failed': select()
+        swallows errors into [], which once made the auto-trader's
+        duplicate-position gate blind (prod 2026-09-06 21:25 UTC — a transient
+        read failure let duplicate AUDUSD/XAUUSD orders fire on top of open
+        ones). Fail-closed callers use this and abort the action when the
+        read breaks.
+        """
+        if not self._client:
+            raise RuntimeError(
+                f"db unavailable: {self.init_error or 'client missing'}")
+        q = self._client.table(table).select("*")
+        for col, val in (filters or {}).items():
+            q = q.eq(col, val)
+        q = q.order(order, desc=desc).limit(limit).offset(offset)
+        return list(q.execute().data or [])
+
     def select_paged(self, table: str, filters: Optional[dict] = None,
                      order: str = "created_at", desc: bool = True,
                      page_size: int = 1000,
