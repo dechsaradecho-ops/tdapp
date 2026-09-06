@@ -3,7 +3,12 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `79b4645` (prod hash `DFB879C8F6`, verified 2026-09-06)
+> สถานะล่าสุด: commit `b2a2bae`, verified 2026-09-06
+>
+> ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html** — Next.js สร้าง buildId ใหม่ทุกครั้งที่ build
+> ทำให้ hash local ≠ prod เสมอ (แม้โค้ดเดียวกัน) — วิธีตรวจ deploy ถึงจริง: เทียบ **file size**
+> ของ index.html + สแกน **JS chunks** (`/_next/static/chunks/app/<page>/page-*.js`) หา string
+> ใหม่ที่รอดจาก minification (เช่น `tdapp_chat_history`, `capital<=0`)
 
 ---
 
@@ -377,8 +382,13 @@ nav[aria-label="เมนูหลัก"] > div:first-child { animation: lg-sli
 
 /* ตาราง: แถวโผล่ทีละแถว — tbody tr nth-child(1..8) delay 0.02s→0.16s (step .02s), n+9 = 0.18s */
 /* แชท: ฟองข้อความ (.max-w-\[85\%\]) animate lg-pop-in .3s */
-/* accordion: details summary + * lg-rise-in .3s, summary:active scale(0.99) */
 
+/* แชท — "กำลังคิด" indicator (commit 2c5e717): Tailwind built-ins ไม่ใช้ lg-* keyframes
+   จุดเด้ง 3 จุด + ข้อความ pulse + นับวินาที (thinkSecs = setInterval 1s ระหว่าง loading) */
+/* 🚨 ต้องแสดงตลอดระหว่าง loading — ห้ามผูกกับเงื่อนไข "ยังไม่มีข้อความตอบ"
+   (เดิม {loading && !last?.content} ทำให้ indicator หายพอ AI เริ่มพิมพ์ทีละ chunk) */
+
+/* accordion: details summary + * lg-rise-in .3s, summary:active scale(0.99) */
 /* เคารพ OS */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -387,6 +397,21 @@ nav[aria-label="เมนูหลัก"] > div:first-child { animation: lg-sli
   }
   html { scroll-behavior: auto; }
 }
+```
+
+**ตัวอย่าง "กำลังคิด" indicator (ทั้ง `/chat` + `ChatWidget`):**
+
+```tsx
+{loading && (
+  <div className="flex items-center gap-2 text-slate-400 text-xs animate-pulse">
+    <span className="inline-flex gap-1" aria-hidden="true">
+      <span className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce [animation-delay:0ms]" />
+      <span className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce [animation-delay:150ms]" />
+      <span className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce [animation-delay:300ms]" />
+    </span>
+    💭 AI กำลังคิด... ({thinkSecs}s)
+  </div>
+)}
 ```
 
 ---
@@ -423,7 +448,7 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 5. ☐ Header sticky แก้วใส rgba(5,5,8,0.32) (§6)
 6. ☐ MobileNav floating dock สไลด์ซ้ายขวา + auto-center active tab (§7) + `main pb-24`
 7. ☐ ปุ่ม 4 บทบาท tinted + radius 12px + scale(0.97) (§8)
-8. ☐ ฟอร์มแก้วฝ้า + focus ring ฟ้า + กัน iOS zoom 16px (§9)
+8. ☐ ฟอร์มแก้วฝ้า + **select โปร่ง (ห้ามใส่ bg-surface ทับ)** + focus ring ฟ้า + กัน iOS zoom 16px (§9)
 9. ☐ Pill ตาราง: ครอบค่าด้วย `<span>` ใน td เสมอ — ห้าม pill บน td โดยตรง (§10)
 10. ☐ ตารางมือถือ `width: auto` + wrapper เลื่อนแนวนอน — `overflow-x-auto` ต้องอยู่ div ลูก ไม่ใช่บน `.panel` (§11)
 11. ☐ Animations + stagger + reduced-motion (§12)
