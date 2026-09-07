@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Icon from "@/components/Icon";
 import { API_BASE } from "@/lib/types";
-import { getToken } from "@/lib/auth";
+import { clearToken, getToken, notifyAuthExpired } from "@/lib/auth";
 import { CHAT_HISTORY_MAX, ChatMsg, loadChatHistory, saveChatHistory } from "@/lib/chat_history";
 
 const SUGGESTIONS = [
@@ -61,6 +61,15 @@ export default function ChatWidget() {
         // context ที่ส่งให้ AI ก็จำกัด 20 ข้อความล่าสุดเท่ากัน
         body: JSON.stringify({ messages: next.slice(-CHAT_HISTORY_MAX) }),
       });
+      // 401 = session token หมดอายุ (12 ชม. หรือ server restart) — ต้อง
+      // ล็อกกลับไปหน้า PIN แบบเดียวกับ api.ts (handle401) ไม่งั้นแชทจะ
+      // โชว์ "เชื่อมต่อ AI ไม่ได้: HTTP 401" โดยไม่มีทางให้ผู้ใช้ล็อกอินใหม่
+      // (บั๊ก "AI chat no reply" 2026-09-07)
+      if (res.status === 401) {
+        clearToken();
+        notifyAuthExpired();
+        throw new Error("หมดเวลาเข้าใช้งาน — ใส่ PIN อีกครั้งเพื่อใช้แชทต่อ");
+      }
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
       // stream the reply: append chunks as they arrive (AI "typing" effect)
@@ -91,7 +100,9 @@ export default function ChatWidget() {
         saveChatHistory(finalMsgs);
       }
     } catch (e) {
-      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content: `เชื่อมต่อ AI ไม่ได้: ${e}` }];
+      const msg = e instanceof Error ? e.message : String(e);
+      const content = msg.startsWith("หมดเวลา") ? msg : `เชื่อมต่อ AI ไม่ได้: ${msg}`;
+      const errMsgs: ChatMsg[] = [...next, { role: "assistant", content }];
       setMessages(errMsgs);
       saveChatHistory(errMsgs);
     } finally {
