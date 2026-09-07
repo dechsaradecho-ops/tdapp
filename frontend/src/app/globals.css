@@ -270,6 +270,57 @@ textarea::placeholder {
   color: #64748b;
 }
 
+/* Range slider (ปรับความสว่างพื้นหลัง) — track บางแก้ว + thumb วงกลมขาว 44px touch target */
+.bg-dim-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 28px;
+  background: transparent;
+  cursor: pointer;
+  min-height: 0; /* โอเวอร์ไรด์ min-height 44px ของ input ทั่วไป (ถ้าถูก @apply ครอบ) */
+  padding: 0;
+  border: none;
+}
+.bg-dim-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+.bg-dim-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -9px; /* จัดกลางบน track 4px */
+  border-radius: 999px;
+  background: #f8fafc;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+.bg-dim-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+.bg-dim-slider::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #f8fafc;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+.bg-dim-slider:focus-visible {
+  outline: none;
+}
+.bg-dim-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.35);
+}
+.bg-dim-slider:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Dropdown (select) — ซ่อนลูกศร native วาดลูกศรแก้วเอง
    (หมายเหตุ: ตัว popup ที่กางออกมาเป็น native ของ OS — iOS ใช้ wheel picker ของตัวเอง) */
 select {
