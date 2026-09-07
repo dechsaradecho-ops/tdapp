@@ -7,12 +7,51 @@ prompt enforces the safety contract.
 from __future__ import annotations
 
 import json
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
 import httpx
 
 from app.core.ai_config import get_ai_config
+
+# OpenCode Zen Go gateway REQUIRES a stable per-conversation session id in the
+# `x-opencode-session` header (see https://opencode.ai/docs/go/#where-can-i-use-it).
+# Without it the gateway answers 400 MissingSessionID even when the key is valid —
+# the 2026-09-07 "[AI ERROR] ... HTTPStatusError" chat failure. One id per provider
+# instance is enough: it is stable for the process lifetime (routing + prompt
+# caching) and requests here are stateless completions, not a chat thread.
+_OPENCODE_SESSION_ID = str(uuid.uuid4())
+
+
+def _gateway_headers(api_key: str) -> dict[str, str]:
+    """Headers for OpenAI-compatible gateway calls (opencode zen et al).
+
+    - x-opencode-session: required by the Go gateway (400 MissingSessionID otherwise)
+    - User-Agent: gateway asks clients to identify themselves rather than send
+      a generic SDK user agent
+    """
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "x-opencode-session": _OPENCODE_SESSION_ID,
+        "User-Agent": "tdapp-backend/1.0",
+    }
+
+
+def _gateway_error_detail(exc: Exception) -> str:
+    """Extract the gateway's error body from an HTTPStatusError so 400/401/429
+    responses are diagnosable (the plain class name hides the real reason)."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            body = resp.json()
+            err = body.get("error", body)
+            if isinstance(err, dict):
+                return str(err.get("type") or err.get("message") or body)[:200]
+            return str(body)[:200]
+        except Exception:  # noqa: BLE001 — non-JSON body
+            return resp.text[:200]
+    return ""
 
 SYSTEM_PROMPT = """You are a professional AI Wealth & Trading Advisor for Forex, Gold (XAUUSD),
 Crypto, Indices and CFDs. Your goal is to help users assess the FEASIBILITY of return targets
@@ -88,7 +127,7 @@ class AIProvider(ABC):
                 async with client.stream(
                     "POST",
                     f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers=_gateway_headers(self.api_key),
                     json={
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
@@ -115,8 +154,10 @@ class AIProvider(ABC):
                             emitted = True
                             yield piece
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            detail = _gateway_error_detail(exc)
             yield (
-                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
+                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}"
+                f"{' — ' + detail if detail else ''}). "
                 "ตรวจสอบว่า AI_API_KEY ตรงกับ provider/url ใน ai.config.json หรือไม่ "
                 "(provider ปัจจุบันดูได้ที่ GET /health) — key ต้องเป็นของ gateway "
                 "ตาม url ใน ai.config.json เท่านั้น"
@@ -146,7 +187,7 @@ class DeepSeekProvider(AIProvider):
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers=_gateway_headers(self.api_key),
                     json={
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
@@ -157,8 +198,10 @@ class DeepSeekProvider(AIProvider):
                 resp.raise_for_status()
                 return self._extract(resp.json())
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            detail = _gateway_error_detail(exc)
             return (
-                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
+                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}"
+                f"{' — ' + detail if detail else ''}). "
                 "ตรวจสอบว่า AI_API_KEY ตรงกับ provider ใน ai.config.json หรือไม่ "
                 "(key ของ DeepSeek ขึ้นต้น sk- / key ของ GLM เป็นรูปแบบ id.secret)"
             )
@@ -179,7 +222,7 @@ class GLMProvider(AIProvider):
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers=_gateway_headers(self.api_key),
                     json={
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
@@ -190,8 +233,10 @@ class GLMProvider(AIProvider):
                 resp.raise_for_status()
                 return self._extract(resp.json())
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            detail = _gateway_error_detail(exc)
             return (
-                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
+                f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}"
+                f"{' — ' + detail if detail else ''}). "
                 "ตรวจสอบว่า AI_API_KEY ตรงกับ provider ใน ai.config.json หรือไม่ "
                 "(key ของ DeepSeek ขึ้นต้น sk- / key ของ GLM เป็นรูปแบบ id.secret)"
             )
