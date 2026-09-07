@@ -45,6 +45,16 @@ export interface AssetOpportunity {
   reasons: string[];
 }
 
+export interface MarketSummary {
+  regime: string;
+  confidence: number;
+  explanation: string;
+  sentiment: "bullish" | "bearish" | "neutral";
+  opportunities: AssetOpportunity[];
+  min_confidence?: number;
+  min_confidence_gold?: number | null;
+}
+
 export interface DbCheckResult {
   table?: string;
   client: "ok" | "unavailable";

@@ -11,7 +11,12 @@ from fastapi import APIRouter, Request
 from app.api.routes.settings import get_app_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
-from app.models.schemas import AssetOpportunity, MarketSummary, MarketRegime
+from app.models.schemas import (
+    AppSettings,
+    AssetOpportunity,
+    MarketRegime,
+    MarketSummary,
+)
 
 router = APIRouter()
 
@@ -44,7 +49,13 @@ REGIME_EXPLANATION = {
 async def market_summary(request: Request) -> MarketSummary:
     db = request.app.state.db
     engine = StrategyEngine()
-    assets = _market_assets(db)
+    # One settings load drives both the symbol universe and the confidence
+    # gates echoed back to the frontend (per-symbol Confidence % badges).
+    try:
+        settings = get_app_settings(db)
+    except Exception:
+        settings = AppSettings()
+    assets = settings.effective_assets() or list(ASSETS)
 
     opportunities: list[AssetOpportunity] = []
     snapshot_of: dict[str, IndicatorSnapshot] = {}
@@ -111,4 +122,6 @@ async def market_summary(request: Request) -> MarketSummary:
             regime, "ตลาดไซด์เวย์ — ADX ต่ำกว่า 25, รอ breakout หรือเทรด range"),
         sentiment=sentiment,
         opportunities=sorted(opportunities, key=lambda o: -o.score),
+        min_confidence=settings.min_confidence,
+        min_confidence_gold=settings.min_confidence_gold,
     )

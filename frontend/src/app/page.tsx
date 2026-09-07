@@ -6,7 +6,7 @@ import GoalForm from "@/components/GoalForm";
 import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
 import { api } from "@/lib/api";
-import { fmtMoney } from "@/lib/format";
+import { fmtMoney, scoreColor } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import { MarketSummary } from "@/lib/types";
 
@@ -18,6 +18,8 @@ const SYMBOLS: Record<string, string> = {
   GBPUSD: "OANDA:GBPUSD",
   AUDUSD: "OANDA:AUDUSD",
 };
+// Pairs ที่ไม่มีใน SYMBOLS (เช่น CHFJPY จาก allowed_assets) ใช้ generic OANDA mapping
+const tvSymbol = (a: string) => SYMBOLS[a] ?? `OANDA:${a}`;
 
 export default function DashboardPage() {
   const [summary, setSummary] = useState<MarketSummary | null>(null);
@@ -31,6 +33,15 @@ export default function DashboardPage() {
       .then((s) => { setSummary(s); setSummaryLoading(false); })
       .catch(() => { setSummaryErr(true); setSummaryLoading(false); });
   }, []);
+
+  // ปุ่มสัญลักษณ์ = ทุก asset ใน summary.opportunities (follows allowed_assets)
+  // fallback เป็น SYMBOLS เดิมถ้ายังไม่มีข้อมูล
+  const symbolList = summary?.opportunities.length
+    ? summary.opportunities.map((o) => o.asset)
+    : Object.keys(SYMBOLS);
+  const confByAsset = new Map(
+    (summary?.opportunities ?? []).map((o) => [o.asset, o.score]),
+  );
 
   return (
     <div className="space-y-6">
@@ -76,16 +87,24 @@ export default function DashboardPage() {
 
       <section className="grid md:grid-cols-3 gap-4">
         <div className="panel md:col-span-2">
-          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น */}
+          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น, badge Confidence % ต่อสัญลักษณ์ */}
           <div className="flex flex-wrap gap-2 mb-3">
-            {Object.keys(SYMBOLS).map((a) => (
-              <button key={a} onClick={() => setSelected(a)}
-                className={`px-3 py-2 min-h-[40px] rounded-xl text-sm border ${selected === a ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}>
-                {a}
-              </button>
-            ))}
+            {symbolList.map((a) => {
+              const conf = confByAsset.get(a);
+              return (
+                <button key={a} onClick={() => setSelected(a)}
+                  className={`px-3 py-2 min-h-[40px] rounded-xl text-sm border inline-flex items-center gap-1.5 ${selected === a ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}>
+                  {a}
+                  {conf != null && (
+                    <span className={`text-xs font-bold ${selected === a ? "" : scoreColor(conf)}`}>
+                      {conf.toFixed(0)}%
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
-          <TradingViewChart symbol={SYMBOLS[selected]} />
+          <TradingViewChart symbol={tvSymbol(selected)} />
         </div>
         <div className="panel">
           <h2 className="panel-title">Opportunity Score</h2>
@@ -93,6 +112,8 @@ export default function DashboardPage() {
             opportunities={summary?.opportunities ?? []}
             loading={summaryLoading}
             error={summaryErr}
+            minConfidence={summary?.min_confidence}
+            minConfidenceGold={summary?.min_confidence_gold}
           />
         </div>
       </section>

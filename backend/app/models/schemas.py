@@ -130,6 +130,10 @@ class MarketSummary(BaseModel):
     explanation: str
     sentiment: Literal["bullish", "bearish", "neutral"]
     opportunities: list[AssetOpportunity]
+    # Gate thresholds from trading_settings — frontend uses these to badge each
+    # symbol's confidence as pass/fail (XAUUSD compares against the gold gate).
+    min_confidence: float = 70.0
+    min_confidence_gold: Optional[float] = None
 
 
 # ---------- Signals / Trades ----------
