@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
+import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
@@ -326,18 +327,15 @@ export default function MonitorPage() {
           <h2 className="panel-title">ไม้ที่เปิดค้าง (Paper)</h2>
           <div className="flex items-center gap-3">
             {updatedAt && <span className="text-xs text-slate-500">อัปเดต {updatedAt}</span>}
-            <select
-              value={intervalSec}
-              onChange={(e) => changeInterval(Number(e.target.value))}
-              className="border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
-              aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
-            >
-              {REFRESH_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  รีเฟรช: {o.label}
-                </option>
-              ))}
-            </select>
+            <GlassSelect
+              value={String(intervalSec)}
+              onChange={(v) => changeInterval(Number(v))}
+              className="text-xs"
+              ariaLabel="ตั้งเวลารีเฟรชอัตโนมัติ"
+              options={REFRESH_OPTIONS.map((o) => ({
+                value: String(o.value), label: `รีเฟรช: ${o.label}`,
+              }))}
+            />
             <button onClick={togglePause} disabled={busy || !snap}
               className={snap?.pause.paused
                 ? "bg-profit text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:brightness-90"

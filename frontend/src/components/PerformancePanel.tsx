@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import {
   BacktestConfig,
@@ -292,17 +293,15 @@ export default function PerformancePanel() {
         <div className="flex flex-wrap gap-3 items-end">
           <label className="text-sm">
             Asset
-            <select value={btAsset} onChange={(e) => setBtAsset(e.target.value)}
-              className="mt-1 block border border-slate-700 rounded px-3 py-2">
-              {ASSETS.map((a) => <option key={a} value={a}>{a}</option>)}
-            </select>
+            <GlassSelect value={btAsset} onChange={setBtAsset} className="mt-1 block"
+              options={ASSETS.map((a) => ({ value: a, label: a }))} />
           </label>
           <label className="text-sm">
             Indicator
-            <select value={btIndicator} onChange={(e) => setBtIndicator(e.target.value as typeof btIndicator)}
-              className="mt-1 block border border-slate-700 rounded px-3 py-2">
-              {INDICATORS.map((i) => <option key={i} value={i}>{i}</option>)}
-            </select>
+            <GlassSelect value={btIndicator}
+              onChange={(v) => setBtIndicator(v as typeof btIndicator)}
+              className="mt-1 block"
+              options={INDICATORS.map((i) => ({ value: i, label: i }))} />
           </label>
           <label className="text-sm">
             Days

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
+import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import SignalCard from "@/components/SignalCard";
 import SignalLogsPanel from "@/components/SignalLogsPanel";
@@ -139,18 +140,15 @@ export default function SignalsPage() {
             </span>
           )}
 
-          <select
-            value={intervalSec}
-            onChange={(e) => changeInterval(Number(e.target.value))}
-            className="border border-slate-700 rounded px-2 py-2 text-xs min-h-[40px]"
-            aria-label="ตั้งเวลารีเฟรชอัตโนมัติ"
-          >
-            {REFRESH_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                รีเฟรชอัตโนมัติ: {o.label}
-              </option>
-            ))}
-          </select>
+          <GlassSelect
+            value={String(intervalSec)}
+            onChange={(v) => changeInterval(Number(v))}
+            className="text-xs"
+            ariaLabel="ตั้งเวลารีเฟรชอัตโนมัติ"
+            options={REFRESH_OPTIONS.map((o) => ({
+              value: String(o.value), label: `รีเฟรชอัตโนมัติ: ${o.label}`,
+            }))}
+          />
 
           <button
             onClick={refresh}

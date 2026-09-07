@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import { fmtMoney, probabilityLabel } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
@@ -12,6 +13,12 @@ const SCENARIO_LABELS: Record<string, string> = {
   normal_case: "Normal Case",
   worst_case: "Worst Case",
 };
+
+const RISK_PROFILES = [
+  { value: "conservative", label: "Conservative" },
+  { value: "moderate", label: "Moderate" },
+  { value: "aggressive", label: "Aggressive" },
+];
 
 const REGIME_LABELS: Record<string, string> = {
   strong_bull_trend: "Bull แรง",
@@ -76,12 +83,8 @@ export default function GoalForm() {
           </label>
           <label className="block text-sm">
             Risk Profile
-            <select value={profile} onChange={(e) => setProfile(e.target.value)}
-              className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
-              <option value="conservative">Conservative</option>
-              <option value="moderate">Moderate</option>
-              <option value="aggressive">Aggressive</option>
-            </select>
+            <GlassSelect value={profile} onChange={setProfile} className="mt-1 w-full"
+              options={RISK_PROFILES} />
           </label>
           <label className="block text-sm">
             Max Drawdown (%)
@@ -91,12 +94,12 @@ export default function GoalForm() {
           </label>
           <label className="block text-sm">
             Trading Mode
-            <select value={mode} onChange={(e) => setMode(e.target.value)}
-              className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2">
-              <option value="auto">AUTO</option>
-              <option value="semi_auto">SEMI-AUTO</option>
-              <option value="manual">MANUAL</option>
-            </select>
+            <GlassSelect value={mode} onChange={setMode} className="mt-1 w-full"
+              options={[
+                { value: "auto", label: "AUTO" },
+                { value: "semi_auto", label: "SEMI-AUTO" },
+                { value: "manual", label: "MANUAL" },
+              ]} />
           </label>
           <button onClick={submit} disabled={loading}
             className="w-full bg-accent text-white font-semibold rounded py-2 hover:brightness-110 disabled:opacity-50">

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import BackgroundPicker from "@/components/BackgroundPicker";
+import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import PinManager from "@/components/PinManager";
@@ -78,6 +79,23 @@ const NOTIFY_CATEGORIES: {
     desc: "สรุปตลาด + แผนเทรดประจำวันจาก AI (daily_digest)" },
   { key: "notify_daily_summary", icon: "chart", label: "รายงานพอร์ต/ตลาดรายวัน",
     desc: "สรุปกำไร-ขาดทุนพอร์ตและตลาดรายวัน/สัปดาห์/เดือน (daily_portfolio_summary ฯลฯ)" },
+];
+
+/** GlassSelect option sets (2026-09-07 — custom liquid-glass dropdowns) */
+const RISK_PROFILES = [
+  { value: "conservative", label: "Conservative" },
+  { value: "moderate", label: "Moderate" },
+  { value: "aggressive", label: "Aggressive" },
+];
+const ORDER_MODES = [
+  { value: "auto", label: "Auto — ระบบเทรดเอง" },
+  { value: "semi_auto", label: "Semi-Auto — รอยืนยันก่อน" },
+  { value: "manual", label: "Manual — ระบบไม่ยิง order" },
+];
+const SL_MODES = [
+  { value: "short", label: "สั้น ×1.0 ATR — SL เข้ม ปิดไว" },
+  { value: "medium", label: "กลาง ×1.5 ATR — ตามสัญญาณ (ค่าเริ่มต้น)" },
+  { value: "long", label: "ยาว ×2.0 ATR — SL กว้าง ทนผันผวน" },
 ];
 
 export default function SettingsPage() {
@@ -301,12 +319,8 @@ export default function SettingsPage() {
           <NumField label="Max Drawdown (%)" value={maxDd} onChange={setMaxDd} step={0.5} />
           <label className="block text-sm">
             Risk Profile
-            <select value={profile} onChange={(e) => setProfile(e.target.value)}
-              className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
-              <option value="conservative">Conservative</option>
-              <option value="moderate">Moderate</option>
-              <option value="aggressive">Aggressive</option>
-            </select>
+            <GlassSelect value={profile} onChange={setProfile} className="mt-1 w-full"
+              options={RISK_PROFILES} />
           </label>
           <button onClick={recommend} disabled={loading}
             className="w-full bg-accent text-white font-semibold rounded py-2 disabled:opacity-50">
@@ -403,36 +417,26 @@ export default function SettingsPage() {
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">โปรไฟล์ &amp; Signal Gates</p>
               <label className="block text-sm">
                 โหมดเทรด (order_mode)
-                <select value={cfg.order_mode}
-                  onChange={(e) => set("order_mode", e.target.value)}
-                  className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
-                  <option value="auto">Auto — ระบบเทรดเอง</option>
-                  <option value="semi_auto">Semi-Auto — รอยืนยันก่อน</option>
-                  <option value="manual">Manual — ระบบไม่ยิง order</option>
-                </select>
+                <GlassSelect value={cfg.order_mode}
+                  onChange={(v) => set("order_mode", v)} className="mt-1 w-full"
+                  options={ORDER_MODES} />
               </label>
               <label className="block text-sm">
                 ระยะ SL/TP ที่ใช้เปิด order (sl_distance_mode)
-                <select value={cfg.sl_distance_mode}
-                  onChange={(e) => set("sl_distance_mode", e.target.value as AppSettings["sl_distance_mode"])}
-                  className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
-                  <option value="short">สั้น ×1.0 ATR — SL เข้ม ปิดไว</option>
-                  <option value="medium">กลาง ×1.5 ATR — ตามสัญญาณ (ค่าเริ่มต้น)</option>
-                  <option value="long">ยาว ×2.0 ATR — SL กว้าง ทนผันผวน</option>
-                </select>
+                <GlassSelect value={cfg.sl_distance_mode}
+                  onChange={(v) => set("sl_distance_mode", v as AppSettings["sl_distance_mode"])}
+                  className="mt-1 w-full"
+                  options={SL_MODES} />
                 <span className="text-xs text-slate-500 mt-1 block">
                   การ์ดสัญญาณเก็บราคากลาง (×1.5) — ตอนยิง order ระบบคำนวณ SL/TP ใหม่ตามระดับนี้
                 </span>
               </label>
               <label className="block text-sm">
                 Risk Profile
-                <select value={cfg.risk_profile}
-                  onChange={(e) => set("risk_profile", e.target.value as RiskProfile)}
-                  className="mt-1 w-full border border-slate-700 rounded px-3 py-2">
-                  <option value="conservative">Conservative</option>
-                  <option value="moderate">Moderate</option>
-                  <option value="aggressive">Aggressive</option>
-                </select>
+                <GlassSelect value={cfg.risk_profile}
+                  onChange={(v) => set("risk_profile", v as RiskProfile)}
+                  className="mt-1 w-full"
+                  options={RISK_PROFILES} />
               </label>
               <NumField label="Min Confidence (%)" value={cfg.min_confidence}
                 onChange={(v) => set("min_confidence", v)} step={1} />
