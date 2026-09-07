@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
@@ -26,7 +27,9 @@ const REFRESH_OPTIONS = [
 
 /** Badge "ระดับถูกขยับ" ข้างค่า SL/TP ในตารางไม้เปิด — hover หรือแตะเพื่อดู
  *  รายละเอียด: ค่าเริ่มต้น → ค่าปัจจุบัน, เวลาที่ขยับ และเหตุผล
- *  (breakeven = ทุนคืน, trailing = trailing stop, manual = ปรับด้วยมือ). */
+ *  (breakeven = ทุนคืน, trailing = trailing stop, manual = ปรับด้วยมือ).
+ *  PC: hover แสดง native title + คลิกเปิด popover ได้ / มือถือ: แตะเปิด popover —
+ *  popover แบบ glass ใช้ position: fixed ตามตำแหน่งป้าย ใช้งานเหมือนกันทุกอุปกรณ์. */
 function LevelMovedBadge({ moved, initial, current, movedAt, reason, level }: {
   moved: boolean;
   initial: number | null;
@@ -35,6 +38,46 @@ function LevelMovedBadge({ moved, initial, current, movedAt, reason, level }: {
   reason: string;
   level: "SL" | "TP";
 }) {
+  const [pop, setPop] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  const place = useCallback(() => {
+    const btn = btnRef.current, popEl = popRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pw = popEl?.offsetWidth ?? 260;
+    const ph = popEl?.offsetHeight ?? 100;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    let top = r.top - ph - 8;                 // เหนือป้ายเป็นค่าเริ่มต้น
+    if (top < 8) top = r.bottom + 8;          // พื้นที่บนไม่พอ → แสดงใต้ป้ายแทน
+    setPos({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!pop) return;
+    place();
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    // touchstart จับก่อน click เพื่อไม่ให้การแตะนอกลูกบิดปิด-เปิดซ้ำ
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onScrollOrResize = () => setPop(false);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [pop, place]);
+
   if (!moved) return null;
   const reasonLabel =
     reason === "breakeven" ? "ทุนคืน (Breakeven)"
@@ -47,9 +90,30 @@ function LevelMovedBadge({ moved, initial, current, movedAt, reason, level }: {
     : "-";
   const title = `${level} ถูกขยับ: ${initial != null ? fmtNum(initial, 5) : "-"} → ${current != null ? fmtNum(current, 5) : "-"}\nเมื่อ: ${when}\nเหตุผล: ${reasonLabel}`;
   return (
-    <span title={title} className="ml-1 inline-flex cursor-help align-middle" aria-label={title}>
-      <Icon n="arrowsH" size={12} className="text-accent" />
-    </span>
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setPop((v) => !v)}
+        title={title}
+        aria-label={title}
+        aria-expanded={pop}
+        className="ml-1 inline-flex cursor-help align-middle p-1 -m-1 touch-manipulation"
+      >
+        <Icon n="arrowsH" size={12} className="text-accent" />
+      </button>
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="tooltip"
+          style={{ position: "fixed", top: pos.top, left: pos.left, maxWidth: "min(280px, calc(100vw - 16px))" }}
+          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed whitespace-pre-line text-slate-200"
+        >
+          {title}
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -294,41 +358,7 @@ export default function MonitorPage() {
 
       {/* ---------- Stats ---------- */}
       <section className="space-y-2">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <h2 className="panel-title">สถิติการเทรด</h2>
-          <div className="flex items-center gap-2">
-            <button onClick={() => openGroupModal("all")} disabled={groupBusy}
-              className="bg-loss text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
-              title="ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน">
-              ปิดทั้งหมด
-            </button>
-            <button onClick={() => openGroupModal("profit")} disabled={groupBusy}
-              className="bg-profit text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
-              title="ปิดเฉพาะไม้ที่กำไร (ที่ราคาปัจจุบัน)">
-              ปิดกำไร
-            </button>
-            <button onClick={() => openGroupModal("loss")} disabled={groupBusy}
-              className="border border-loss text-loss font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:bg-loss/10"
-              title="ปิดเฉพาะไม้ที่ขาดทุน (cut loss ทั้งกลุ่ม)">
-              ปิดขาดทุน
-            </button>
-            <button onClick={handleResetStats} disabled={resetting}
-              className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
-              title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
-              {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
-            </button>
-          </div>
-        </div>
-        {closeAllMsg && (
-          <p className="text-xs text-slate-400 bg-white/[0.05] border border-white/10 rounded-xl px-3 py-2">
-            {closeAllMsg}
-          </p>
-        )}
-        {resetMsg && (
-          <p className="text-xs text-slate-400 bg-white/[0.05] border border-white/10 rounded-xl px-3 py-2">
-            {resetMsg}
-          </p>
-        )}
+        <h2 className="panel-title">สถิติการเทรด</h2>
         <section className="grid grid-cols-2 md:grid-cols-6 gap-3">
           <div className="panel">
             <p className="text-xs text-slate-500">เทรดวันนี้</p>
@@ -471,6 +501,40 @@ export default function MonitorPage() {
               </tbody>
             </table>
           </div>
+        )}
+
+        {/* ---------- ปุ่มจัดการกลุ่ม — ย้ายมาไว้ด้านล่างตาราง (ใช้งานสะดวกบนมือถือ) ---------- */}
+        <div className="flex items-center flex-wrap gap-2 mt-4">
+          <button onClick={() => openGroupModal("all")} disabled={groupBusy}
+            className="bg-loss text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
+            title="ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน">
+            ปิดทั้งหมด
+          </button>
+          <button onClick={() => openGroupModal("profit")} disabled={groupBusy}
+            className="bg-profit text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
+            title="ปิดเฉพาะไม้ที่กำไร (ที่ราคาปัจจุบัน)">
+            ปิดกำไร
+          </button>
+          <button onClick={() => openGroupModal("loss")} disabled={groupBusy}
+            className="border border-loss text-loss font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:bg-loss/10"
+            title="ปิดเฉพาะไม้ที่ขาดทุน (cut loss ทั้งกลุ่ม)">
+            ปิดขาดทุน
+          </button>
+          <button onClick={handleResetStats} disabled={resetting}
+            className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
+            title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
+            {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
+          </button>
+        </div>
+        {closeAllMsg && (
+          <p className="text-xs text-slate-400 bg-white/[0.05] border border-white/10 rounded-xl px-3 py-2 mt-2">
+            {closeAllMsg}
+          </p>
+        )}
+        {resetMsg && (
+          <p className="text-xs text-slate-400 bg-white/[0.05] border border-white/10 rounded-xl px-3 py-2 mt-2">
+            {resetMsg}
+          </p>
         )}
       </div>
 
