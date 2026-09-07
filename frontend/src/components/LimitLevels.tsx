@@ -11,11 +11,11 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
   if (!signal.limit_levels?.length) return null;
   const buy = signal.direction === "BUY";
   const label = buy ? "Buy Limit" : "Sell Limit";
-  // 3 ระดับแนวรับ (rung 1-3) — ใช้ "ระดับ" เพื่อไม่ซ้ำกับ tier ระยะ SL/TP
-  // (สั้น/กลาง/ยาว) ที่แสดงแยกใน SltpLevels
-  const tierLabels = ["ระดับ 1", "ระดับ 2", "ระดับ 3"];
+  // 3 ระดับแนวรับ (rung 1-3) — แสดงแค่เลข 1/2/3 ใน pill (ผู้ใช้ขอ 2026-09-07:
+  // "ระดับ 1,2,3 ให้เหลือแค่ 1.2.3") ไม่ซ้ำกับ tier ระยะ SL/TP (สั้น/กลาง/ยาว) ใน SltpLevels
+  const tierLabels = ["1", "2", "3"];
   const tierBadge = (i: number) =>
-    tierLabels[i] ?? `ระดับ ${i + 1}`;
+    tierLabels[i] ?? String(i + 1);
 
   return (
     <div className="mt-2">
@@ -26,15 +26,15 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
         {signal.limit_levels.map((lv: LimitLevel, i: number) => (
           <div key={i} className={`rounded p-2 border ${buy ? "border-profit/40 bg-profit/5" : "border-loss/40 bg-loss/5"}`}>
             <div className="flex items-center justify-between mb-1">
-              <span className={`text-xs font-bold ${buy ? "text-profit" : "text-loss"}`}>
+              <span className={`inline-flex items-center justify-center min-w-[22px] h-[22px] rounded-full px-1.5 text-xs font-bold ${buy ? "bg-profit/15 text-profit" : "bg-loss/15 text-loss"}`}>
                 {tierBadge(i)}
               </span>
               <span className="text-xs text-slate-500">{label} {i + 1} · {lv.risk_pct}%</span>
             </div>
             <p className="font-semibold text-sm">{fmtNum(lv.price, 5)}</p>
-            <div className="mt-1 space-y-0.5 text-xs">
-              <p className="text-loss">SL {fmtNum(lv.sl, 5)}</p>
-              <p className="text-profit">TP {fmtNum(lv.tp, 5)}</p>
+            <div className="mt-1 space-y-1 text-xs">
+              <p><span className="inline-flex items-center rounded-full bg-loss/15 text-loss px-2 py-0.5 font-semibold">SL {fmtNum(lv.sl, 5)}</span></p>
+              <p><span className="inline-flex items-center rounded-full bg-profit/15 text-profit px-2 py-0.5 font-semibold">TP {fmtNum(lv.tp, 5)}</span></p>
               <p className="text-slate-500">RR 1:{lv.rr}</p>
             </div>
           </div>

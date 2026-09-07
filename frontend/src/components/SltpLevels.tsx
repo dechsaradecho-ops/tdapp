@@ -37,9 +37,9 @@ export default function SltpLevels({ signal }: { signal: SignalProposal }) {
                 </span>
                 <span className="text-[10px] text-slate-500">×{lv.atr_multiple} ATR</span>
               </div>
-              <div className="space-y-0.5 text-xs">
-                <p className="text-loss">SL {fmtNum(lv.stop_loss, 5)}</p>
-                <p className="text-profit">TP {fmtNum(lv.take_profit, 5)}</p>
+              <div className="space-y-1 text-xs">
+                <p><span className="inline-flex items-center rounded-full bg-loss/15 text-loss px-2 py-0.5 font-semibold">SL {fmtNum(lv.stop_loss, 5)}</span></p>
+                <p><span className="inline-flex items-center rounded-full bg-profit/15 text-profit px-2 py-0.5 font-semibold">TP {fmtNum(lv.take_profit, 5)}</span></p>
                 <p className="text-slate-500">RR 1:{lv.rr}</p>
               </div>
             </div>
