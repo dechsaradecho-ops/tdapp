@@ -362,7 +362,8 @@ def test_scan_once_persists_journal_and_respects_quality_filter():
     import asyncio
     results = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         scan_once(db))
-    assert len(results) == 5
+    from app.integrations import quotes as quotes_mod
+    assert len(results) == len(quotes_mod.SUPPORTED_ASSETS)
     tables = [t for t, _ in db.inserted]
     assert "market_analysis" in tables
 

@@ -132,17 +132,53 @@ class TestMarketScanner:
 
     @pytest.mark.asyncio
     async def test_scan_persists_market_analysis_for_all_assets(self, monkeypatch):
+        """The legacy 5 pairs must ALWAYS have analysis rows — the full
+        universe (superset) is asserted by test_scan_analyses_full_supported_universe."""
         db = FakeDatabase()
         await market_scanner.scan_once(db)
         assets = {row["asset"] for table, row in db.inserted
                   if table == "market_analysis"}
-        assert assets == set(market_scanner.SCAN_ASSETS)
+        assert set(market_scanner.SCAN_ASSETS) <= assets
+
+    @pytest.mark.asyncio
+    async def test_scan_analyses_full_supported_universe(self, monkeypatch):
+        """User request (2026-09-07): Confidence % for ALL priceable symbols —
+        market_analysis must cover every SUPPORTED_ASSETS pair, not just the
+        allowed_assets whitelist."""
+        from app.integrations import quotes as quotes_mod
+        db = FakeDatabase()
+        await market_scanner.scan_once(db)
+        assets = {row["asset"] for table, row in db.inserted
+                  if table == "market_analysis"}
+        assert assets == set(quotes_mod.SUPPORTED_ASSETS)
+
+    @pytest.mark.asyncio
+    async def test_signals_only_for_allowed_assets(self, monkeypatch):
+        """allowed_assets stays the TRADING whitelist: pairs outside it get
+        analysis rows (Confidence % display) but NEVER signal rows."""
+        from app.integrations import quotes as quotes_mod
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(allowed_assets=["EURUSD"]))
+        await market_scanner.scan_once(db)
+        analysis = {row["asset"] for table, row in db.inserted
+                    if table == "market_analysis"}
+        signals = {row["asset"] for table, row in db.inserted
+                   if table == "signals"}
+        assert analysis == set(quotes_mod.SUPPORTED_ASSETS)
+        assert signals == {"EURUSD"}, (
+            "strong setups outside allowed_assets must not emit signals")
 
     @pytest.mark.asyncio
     async def test_scan_follows_allowed_assets_from_settings(self, monkeypatch):
-        """allowed_assets (Settings page) drives the scan universe: only the
-        configured pairs are analysed; unknown pairs are dropped by
-        effective_assets()."""
+        """allowed_assets (Settings page) drives the TRADING universe: only
+        the configured pairs emit signals; unknown pairs are dropped by
+        effective_assets(). Analysis still covers the full universe."""
         db = FakeDatabase()
 
         async def snap(asset, news_sentiment=0.0):
@@ -153,13 +189,14 @@ class TestMarketScanner:
                             lambda _db: AppSettings(
                                 allowed_assets=["EURUSD", "GBPJPY", "FAKEUSD"]))
         await market_scanner.scan_once(db)
-        assets = {row["asset"] for table, row in db.inserted
-                  if table == "market_analysis"}
-        assert assets == {"EURUSD", "GBPJPY"}  # FAKEUSD dropped by whitelist
+        signals = {row["asset"] for table, row in db.inserted
+                   if table == "signals"}
+        assert signals == {"EURUSD", "GBPJPY"}  # FAKEUSD dropped by whitelist
 
     @pytest.mark.asyncio
     async def test_scan_falls_back_when_settings_empty(self, monkeypatch):
-        """Empty allowed_assets → scanner keeps the default 5-asset universe."""
+        """Empty allowed_assets → scanner keeps the default 5-asset TRADING
+        universe (analysis still covers the full SUPPORTED_ASSETS)."""
         db = FakeDatabase()
 
         async def snap(asset, news_sentiment=0.0):
@@ -169,9 +206,9 @@ class TestMarketScanner:
         monkeypatch.setattr(market_scanner, "get_app_settings",
                             lambda _db: AppSettings(allowed_assets=[]))
         await market_scanner.scan_once(db)
-        assets = {row["asset"] for table, row in db.inserted
-                  if table == "market_analysis"}
-        assert assets == set(market_scanner.SCAN_ASSETS)
+        signals = {row["asset"] for table, row in db.inserted
+                   if table == "signals"}
+        assert signals == set(market_scanner.SCAN_ASSETS)
 
     @pytest.mark.asyncio
     async def test_scan_rows_have_required_columns(self, monkeypatch):
@@ -493,8 +530,9 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        from app.integrations import quotes as quotes_mod
         results = await market_scanner.scan_once(db)
-        assert len(results) == 5           # scan still completes
+        assert len(results) == len(quotes_mod.SUPPORTED_ASSETS)  # full universe
         # nothing persisted except the lifecycle log rows (signal_log logs
         # the 'created' attempt even when the signals insert silently fails)
         assert [row for table, row in db.inserted if table != "signal_logs"] == []

@@ -1,7 +1,9 @@
 """Worker #1 — Market Scanner (every 5 min).
 
-Analyzes EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD: trend, volatility,
-opportunity score → persists to market_analysis + signals when strong.
+Analyzes the FULL priceable universe (quotes.SUPPORTED_ASSETS — 28 pairs)
+for the dashboard's Confidence % display, but only allowed_assets (user's
+Settings) can generate signals: trend, volatility, opportunity score →
+persists to market_analysis + signals when strong (allowed assets only).
 
 Data feed: live OHLCV from Yahoo Finance chart API (no key required).
 Falls back to the random-walk demo feed when the live feed is unavailable.
@@ -31,16 +33,26 @@ SCAN_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
 
 
 def _scan_assets(settings) -> list[str]:
-    """Tradable universe from the user's Settings (allowed_assets).
+    """FULL analysis universe: every priceable pair (SUPPORTED_ASSETS).
 
-    Falls back to the hardcoded SCAN_ASSETS when settings are unavailable
-    (fresh install / DB down) so the scanner never goes blind.
+    The user asked (2026-09-07) for Confidence % on ALL symbols to help
+    decision-making — including pairs NOT in allowed_assets. allowed_assets
+    remains the TRADING whitelist only (signal emission below).
+    Falls back to the hardcoded SCAN_ASSETS when quotes is unavailable
+    (fresh install) so the scanner never goes blind.
     """
     try:
-        assets = settings.effective_assets() if settings else []
+        return list(quotes.SUPPORTED_ASSETS)
     except Exception:
-        assets = []
-    return assets or list(SCAN_ASSETS)
+        return list(SCAN_ASSETS)
+
+
+def _tradable_assets(settings) -> set[str]:
+    """Trading whitelist (allowed_assets) — only these may emit signals."""
+    try:
+        return set(settings.effective_assets() if settings else [])
+    except Exception:
+        return set()
 
 
 async def scan_once(db: Database) -> list[dict]:
@@ -52,6 +64,7 @@ async def scan_once(db: Database) -> list[dict]:
     # Settings loaded once per cycle — the per-asset Min Confidence (gold)
     # gate below needs them BEFORE the emit block.
     settings = get_app_settings(db)
+    tradable = _tradable_assets(settings)
 
     for asset in _scan_assets(settings):
         ind = await _snapshot_for(asset, news_by_asset.get(asset, 0.0))
@@ -69,6 +82,13 @@ async def scan_once(db: Database) -> list[dict]:
         }
         db.insert("market_analysis", row)
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})
+
+        # Only allowed_assets TRADE — every other pair is analysis-only
+        # (Confidence % display). Everything below this guard is signal
+        # generation, which must stay confined to the user's whitelist.
+        if asset not in tradable:
+            results[-1]["not_tradable"] = True
+            continue
 
         # Strong setups produce a signal (SEMI-AUTO approval flow)
         # Signal quality filter: confidence < min_confidence => NO TRADE
@@ -223,7 +243,17 @@ def _news_sentiment_by_asset(db: Database) -> dict[str, float]:
 
 def _random_walk_snapshot(asset: str, news_sentiment: float = 0.0) -> IndicatorSnapshot:
     """Demo feed — fallback when the live data feed is unavailable."""
-    base = {"EURUSD": 1.085, "GBPUSD": 1.265, "USDJPY": 149.5, "AUDUSD": 0.652, "XAUUSD": 2400.0}[asset]
+    base = {"EURUSD": 1.085, "GBPUSD": 1.265, "USDJPY": 149.5, "AUDUSD": 0.652, "XAUUSD": 2400.0}.get(asset)
+    if base is None:
+        # Non-legacy pair (SUPPORTED_ASSETS beyond the original 5) — derive a
+        # plausible base from the pair structure so the demo feed still works.
+        parts = quotes.fx_parts(asset)
+        if parts and parts[1] == "JPY":
+            base = 150.0
+        elif parts:
+            base = 1.0
+        else:
+            base = 100.0
     drift = random.uniform(-0.3, 0.3)
     price = base * (1 + drift / 100)
     return IndicatorSnapshot(

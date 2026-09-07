@@ -8,7 +8,7 @@ import TradingViewChart from "@/components/TradingViewChart";
 import { api } from "@/lib/api";
 import { fmtMoney, scoreColor } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
-import { MarketSummary } from "@/lib/types";
+import { AppSettings, MarketSummary } from "@/lib/types";
 
 // เดิมอยู่หน้า /market (รวมเข้าหน้าหลักตามแผนจัดเมนูใหม่ Plan B)
 const SYMBOLS: Record<string, string> = {
@@ -25,6 +25,7 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<MarketSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryErr, setSummaryErr] = useState(false);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [selected, setSelected] = useState("XAUUSD");
   const { capital, equity, pnl } = usePortfolio();
 
@@ -32,6 +33,9 @@ export default function DashboardPage() {
     api.marketSummary()
       .then((s) => { setSummary(s); setSummaryLoading(false); })
       .catch(() => { setSummaryErr(true); setSummaryLoading(false); });
+    // allowed_assets (trading whitelist) — ใช้แยก badge "ดูอย่างเดียว" ให้
+    // สัญลักษณ์ที่ประเมินแต่ไม่เข้าระบบสัญญาณ/เทรด; ล้มเหลวได้ (auth) — หน้ายังใช้ได้
+    api.getSettings().then(setSettings).catch(() => { });
   }, []);
 
   // ปุ่มสัญลักษณ์ = ทุก asset ใน summary.opportunities (follows allowed_assets)
@@ -87,10 +91,12 @@ export default function DashboardPage() {
 
       <section className="grid md:grid-cols-3 gap-4">
         <div className="panel md:col-span-2">
-          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น, badge Confidence % ต่อสัญลักษณ์ */}
+          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น, badge Confidence % ต่อสัญลักษณ์
+              ตัวที่ไม่ได้อยู่ใน allowed_assets แสดง "ดูอย่างเดียว" (ประเมินแต่ไม่เข้าระบบสัญญาณ/เทรด) */}
           <div className="flex flex-wrap gap-2 mb-3">
             {symbolList.map((a) => {
               const conf = confByAsset.get(a);
+              const tradable = !settings?.allowed_assets?.length || settings.allowed_assets.includes(a);
               return (
                 <button key={a} onClick={() => setSelected(a)}
                   className={`px-3 py-2 min-h-[40px] rounded-xl text-sm border inline-flex items-center gap-1.5 ${selected === a ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}>
@@ -99,6 +105,9 @@ export default function DashboardPage() {
                     <span className={`text-xs font-bold ${selected === a ? "" : scoreColor(conf)}`}>
                       {conf.toFixed(0)}%
                     </span>
+                  )}
+                  {!tradable && (
+                    <span className="text-[10px] text-slate-500 border border-white/10 rounded px-1">ดูอย่างเดียว</span>
                   )}
                 </button>
               );
@@ -114,6 +123,7 @@ export default function DashboardPage() {
             error={summaryErr}
             minConfidence={summary?.min_confidence}
             minConfidenceGold={summary?.min_confidence_gold}
+            tradableAssets={settings?.allowed_assets}
           />
         </div>
       </section>

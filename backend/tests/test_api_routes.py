@@ -145,7 +145,8 @@ class TestMarketSummaryTiers:
         monkeypatch.setattr(market_route.quotes, "fetch_all_snapshots", fake_fetch)
         body = (await call("GET", "/api/market/summary")).json()
         assert body["regime"] in ("strong_bull_trend", "bull_trend")
-        assert len(body["opportunities"]) == 5
+        from app.integrations import quotes as quotes_mod
+        assert len(body["opportunities"]) == len(quotes_mod.SUPPORTED_ASSETS)
 
     @pytest.mark.asyncio
     async def test_tier3_demo_when_no_rows_and_no_network(self, monkeypatch):

@@ -49,19 +49,24 @@ REGIME_EXPLANATION = {
 async def market_summary(request: Request) -> MarketSummary:
     db = request.app.state.db
     engine = StrategyEngine()
-    # One settings load drives both the symbol universe and the confidence
+    # One settings load drives the trading whitelist AND the confidence
     # gates echoed back to the frontend (per-symbol Confidence % badges).
     try:
         settings = get_app_settings(db)
     except Exception:
         settings = AppSettings()
-    assets = settings.effective_assets() or list(ASSETS)
+    # Dashboard Confidence % covers the FULL priceable universe (user request
+    # 2026-09-07: "ให้ประเมินตัวที่ไม่ได้อยู่ใน allowed_assets ด้วย") —
+    # allowed_assets stays the trading whitelist, not the display universe.
+    assets = list(quotes.SUPPORTED_ASSETS)
 
     opportunities: list[AssetOpportunity] = []
     snapshot_of: dict[str, IndicatorSnapshot] = {}
 
     # 1) Worker-produced analysis (persisted by the Market Scanner every 5 min)
-    rows = db.select("market_analysis", limit=25)
+    # limit=50: one scanner cycle now writes ~28 rows (full universe), so the
+    # old limit=25 truncated the tail of each cycle into slower tier-2 fetches.
+    rows = db.select("market_analysis", limit=50)
     for row in rows:
         if row["asset"] not in {o.asset for o in opportunities}:
             opportunities.append(AssetOpportunity(
@@ -70,12 +75,15 @@ async def market_summary(request: Request) -> MarketSummary:
                 reasons=[row.get("explanation", "")],
             ))
 
-    # 2) No worker rows → fetch live quotes right now (no DB needed)
-    if not opportunities:
+    # 2) Partial fill: live-fetch ONLY symbols with no worker row yet (e.g.
+    # the scanner hasn't cycled since SUPPORTED_ASSETS widened, or a pair is
+    # missing) — never clobber fresh worker scores with a live refetch.
+    have = {o.asset for o in opportunities}
+    if set(assets) - have:
         try:
-            snaps = await quotes.fetch_all_snapshots(assets)
+            snaps = await quotes.fetch_all_snapshots([a for a in assets if a not in have])
             for asset in assets:
-                if asset in snaps:
+                if asset in snaps and asset not in have:
                     ind = IndicatorSnapshot(**{**snaps[asset], "source": "live"})
                     snapshot_of[asset] = ind
                     opp = engine.opportunity_score(ind)
@@ -86,10 +94,14 @@ async def market_summary(request: Request) -> MarketSummary:
         except Exception:
             pass  # network/quote failure → final fallback below
 
-    # 3) Deterministic demo (fresh install, no DB, no network)
+    # 3) Deterministic demo (fresh install, no DB, no network) — fills only
+    # symbols still missing, so real data above is never overwritten.
+    have = {o.asset for o in opportunities}
+    demo_fill = [a for a in assets if a in DEMO and a not in have]
     if not opportunities:
-        opportunities = [engine.opportunity_score(DEMO[a]) for a in assets if a in DEMO] or [
-            engine.opportunity_score(DEMO[a]) for a in ASSETS]
+        demo_fill = [a for a in ASSETS if a in DEMO]  # nothing at all → legacy 5
+    for a in demo_fill:
+        opportunities.append(engine.opportunity_score(DEMO[a]))
 
     top_snapshot = snapshot_of.get(opportunities[0].asset) if opportunities else None
     if top_snapshot is None:
