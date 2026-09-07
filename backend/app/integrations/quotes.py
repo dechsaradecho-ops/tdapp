@@ -1,12 +1,12 @@
 """Live market data fetcher.
 
-Sources (สวนกลับไปใช้ API ที่เสถียรกว่า Yahoo):
-  - FX pairs (EURUSD/GBPUSD/USDJPY/AUDUSD) → Frankfurter (ECB reference rates).
-    ฟรี ไม่ต้องมี API key แต่ให้เฉพาะราคาปิดรายวัน (วันทำการ) — OHLC ถูก
-    สังเคราะห์จาก close ต่อเนื่อง (open = close วันก่อน) เพื่อให้ indicator
-    กลุ่ม ADX/ATR/Supertrend ยังคำนวณได้
-  - Gold (XAUUSD) → Twelve Data /time_series (free key, OHLC จริง)
-    ใช้ env var TWELVEDATA_API_KEY (free tier: 800 credits/day)
+Feed chain (2026-09-07 — Yahoo เป็นหลัก):
+  1) Yahoo chart API — REAL intraday OHLC candles สำหรับทุกคู่ใน
+     SUPPORTED_ASSETS (FX ผ่าน `XXXYYY=X` ทุกคู่, ทองผ่าน COMEX `GC=F`)
+  2) Frankfurter (ECB) — FX เท่านั้น, เฉพาะราคาปิดรายวัน (fallback เมื่อ
+     Yahoo ล่ม); ฟรี ไม่ต้องมี API key, OHLC สังเคราะห์จาก close ต่อเนื่อง
+  2b) Twelve Data — ทองคำ (XAUUSD) เฉพาะเมื่อ Yahoo ล่ม, ต้องมี API key
+  3) Spot: Yahoo → exchangerate-api.com (6 rotating keys, คู่ ECB ทั้งหมด)
 
 Degrades gracefully: on network failure it raises QuotesUnavailable and the
 market scanner falls back to the random-walk demo feed.
@@ -27,9 +27,12 @@ from app.services import quote_log
 
 log = logging.getLogger(__name__)
 
-# Feed routing per asset
+# Feed routing per asset — SECONDARY feeds only. Yahoo candles are the
+# primary source for every supported asset (see fetch_candles); the mapping
+# below is the fallback chain used when the Yahoo candle request fails.
 FEED_FRANKFURTER = "frankfurter"   # FX daily closes (no key)
 FEED_TWELVEDATA = "twelvedata"     # Gold OHLC (free key required)
+FEED_YAHOO = "yahoo"               # primary: real intraday OHLC, no key
 
 ASSET_FEEDS: dict[str, str] = {
     "EURUSD": FEED_FRANKFURTER,
@@ -39,6 +42,38 @@ ASSET_FEEDS: dict[str, str] = {
     "XAUUSD": FEED_TWELVEDATA,
 }
 
+# ---- Supported trading universe (Settings page list) ---------------------
+# Every pair here is covered by the PRIMARY feed (Yahoo: any FX spot symbol
+# `XXXYYY=X`) AND by the fallbacks (Frankfurter/exchangerate support any
+# ECB-reference pair; gold stays on TwelveData/GC=F). Pairs listed = pairs
+# the app can actually price — nothing outside this registry is selectable
+# in the Settings page.
+DEFAULT_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
+
+SUPPORTED_ASSETS: list[str] = [
+    # Majors
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
+    # EUR crosses
+    "EURGBP", "EURJPY", "EURAUD", "EURNZD", "EURCAD", "EURCHF",
+    # GBP crosses
+    "GBPJPY", "GBPAUD", "GBPNZD", "GBPCAD", "GBPCHF",
+    # AUD / NZD crosses
+    "AUDJPY", "AUDNZD", "AUDCAD", "AUDCHF", "NZDJPY", "NZDCAD",
+    # CAD / CHF crosses
+    "CADJPY", "CADCHF", "CHFJPY",
+    # Metals (Yahoo: COMEX future GC=F, TwelveData: XAU/USD)
+    "XAUUSD",
+]
+
+# Currencies covered by the fallback rate APIs (ECB reference set — the
+# Frankfurter + exchangerate-api payload universe).
+_ECB_CURRENCIES = {
+    "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "EUR", "GBP",
+    "HKD", "HUF", "IDR", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "MYR",
+    "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TRY", "USD",
+    "ZAR",
+}
+
 # asset → (base, quote) for Frankfurter
 FX_PAIRS: dict[str, tuple[str, str]] = {
     "EURUSD": ("EUR", "USD"),
@@ -46,6 +81,25 @@ FX_PAIRS: dict[str, tuple[str, str]] = {
     "USDJPY": ("USD", "JPY"),
     "AUDUSD": ("AUD", "USD"),
 }
+
+
+def fx_parts(asset: str) -> tuple[str, str] | None:
+    """6-char FX symbol → (base, quote); None for non-FX (XAUUSD) assets.
+
+    Generic derivation keeps every SUPPORTED_ASSETS FX pair priceable by
+    the fallback rate feeds without per-pair tables. Metals (XAUUSD) are
+    excluded — they have no rate-API mapping and must stay on their own
+    feeds (Yahoo GC=F / TwelveData).
+    """
+    a = str(asset).upper()
+    if len(a) != 6 or not a.isalpha() or a in ("XAUUSD", "XAGUSD"):
+        return None
+    return a[:3], a[3:]
+
+
+def is_supported_asset(asset: str) -> bool:
+    """True when the pair is in the priceable universe (Settings whitelist)."""
+    return str(asset).upper() in SUPPORTED_ASSETS
 
 FRANKFURTER_URL = "https://api.frankfurter.dev/v1"  # .app domain 301-redirects มาที่นี่
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
@@ -66,6 +120,21 @@ YAHOO_SYMBOLS: dict[str, str] = {
     "AUDUSD": "AUDUSD=X",
     "XAUUSD": "GC=F",  # COMEX gold future ≈ spot (no XAUUSD symbol on Yahoo)
 }
+
+
+def _yahoo_symbol(asset: str) -> str | None:
+    """asset → Yahoo chart symbol (explicit map first, generic FX after).
+
+    Yahoo serves ANY FX spot pair as `XXXYYY=X`, so every 6-letter FX pair
+    in SUPPORTED_ASSETS works without a per-pair table. Gold maps to the
+    COMEX future GC=F. Non-FX / unknown assets return None.
+    """
+    a = str(asset).upper()
+    if a in YAHOO_SYMBOLS:
+        return YAHOO_SYMBOLS[a]
+    if fx_parts(a) and a in SUPPORTED_ASSETS:
+        return f"{a}=X"
+    return None
 SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps feeds tiny
 _spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
 
@@ -76,9 +145,12 @@ _exchange_key_idx = 0
 
 def _exchange_pair(asset: str) -> tuple[str, str] | None:
     """asset → (base, quote) for exchangerate-api; None for unsupported (XAUUSD)."""
-    pair = {"EURUSD": ("EUR", "USD"), "GBPUSD": ("GBP", "USD"),
-            "USDJPY": ("USD", "JPY"), "AUDUSD": ("AUD", "USD")}
-    return pair.get(asset)
+    if asset in FX_PAIRS:
+        return FX_PAIRS[asset]
+    parts = fx_parts(asset)
+    if parts and all(c in _ECB_CURRENCIES for c in parts):
+        return parts
+    return None
 
 
 async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
@@ -161,14 +233,89 @@ class Candle:
     c: float
 
 
+# Yahoo /chart 1d candles: requested calendar span per `days` of bars.
+def _yahoo_candle_range(days: int) -> str:
+    if days <= 7:
+        return "5d"
+    if days <= 30:
+        return "1mo"
+    if days <= 90:
+        return "3mo"
+    if days <= 365:
+        return "1y"
+    return "2y"
+
+
+async def _fetch_yahoo_candles(asset: str, client: httpx.AsyncClient,
+                               days: int) -> list[Candle]:
+    """PRIMARY candle feed — Yahoo chart API daily OHLC, oldest-first.
+
+    Covers every SUPPORTED_ASSETS pair (FX via `XXXYYY=X`, gold via the
+    COMEX future GC=F) with REAL high/low data — no key required. Null bars
+    (holidays/half sessions) are skipped. Raises QuotesUnavailable on any
+    HTTP/parse failure so the caller can fall through to Frankfurter/
+    TwelveData.
+    """
+    sym = _yahoo_symbol(asset)
+    if not sym:
+        raise QuotesUnavailable(f"{asset}: no yahoo symbol mapping")
+    url = f"{YAHOO_CHART_URL}/{sym}"
+    t0 = time.monotonic()
+    try:
+        resp = await client.get(
+            url, params={"interval": "1d", "range": _yahoo_candle_range(days)},
+            headers={"User-Agent": YAHOO_UA}, timeout=15.0)
+        dur = int((time.monotonic() - t0) * 1000)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        dur = int((time.monotonic() - t0) * 1000)
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="yahoo", url=url, status="error",
+            error=str(exc), duration_ms=dur)
+        raise QuotesUnavailable(f"{asset}: yahoo candle request failed ({exc})") from exc
+
+    result = ((payload.get("chart") or {}).get("result") or [None])[0]
+    quote_block = (((result or {}).get("indicators") or {}).get("quote") or [None])[0]
+    if not result or not quote_block:
+        err = ((payload.get("chart") or {}).get("error") or {}).get("description", "empty chart payload")
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="yahoo", url=url, status="error",
+            http_status=resp.status_code, error=err, duration_ms=dur)
+        raise QuotesUnavailable(f"{asset}: yahoo chart payload unusable ({err})")
+
+    candles: list[Candle] = []
+    for o, h, l, c in zip(quote_block.get("open") or [],
+                          quote_block.get("high") or [],
+                          quote_block.get("low") or [],
+                          quote_block.get("close") or []):
+        if o is None or h is None or l is None or c is None:
+            continue  # holiday / half-session bar
+        candles.append(Candle(o=float(o), h=float(h), l=float(l), c=float(c)))
+
+    quote_log.log_call(
+        asset=asset, category=quote_log.category_for(asset),
+        provider="yahoo", url=url, status="success",
+        http_status=resp.status_code,
+        price=candles[-1].c if candles else None,
+        duration_ms=dur)
+    return candles
+
+
 async def _fetch_fx(asset: str, client: httpx.AsyncClient,
                     days: int) -> list[Candle]:
     """Frankfurter time series → daily-close candles (oldest-first).
 
-    ECB publishes one close per business day; weekends/holidays are absent
-    from the payload entirely (no null-gap rows to filter).
+    FALLBACK feed (Yahoo ล่มเท่านั้น) — ECB publishes one close per business
+    day; weekends/holidays are absent from the payload entirely (no null-gap
+    rows to filter).
     """
-    base, quote = FX_PAIRS[asset]
+    parts = FX_PAIRS.get(asset) or fx_parts(asset)
+    if not parts:
+        raise QuotesUnavailable(f"{asset}: no FX pair mapping for frankfurter")
+    base, quote = parts
     # ~1.6 calendar days per trading day covers weekends + ECB holidays,
     # +10 days slack so short months still satisfy the 30-bar minimum.
     start = (date.today() - timedelta(days=int(days * 1.6) + 10)).isoformat()
@@ -286,15 +433,30 @@ async def _fetch_gold(client: httpx.AsyncClient, days: int) -> list[Candle]:
 
 async def fetch_candles(asset: str, client: httpx.AsyncClient,
                         days: int = 40) -> list[Candle]:
-    """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable."""
-    feed = ASSET_FEEDS.get(asset)
-    if feed is None:
+    """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable.
+
+    Chain: Yahoo (primary, real OHLC) → mapped fallback feed
+    (Frankfurter FX / TwelveData gold). Only assets inside SUPPORTED_ASSETS
+    (or the explicit ASSET_FEEDS map) are priceable.
+    """
+    if asset not in SUPPORTED_ASSETS and asset not in ASSET_FEEDS:
         raise QuotesUnavailable(f"no feed mapping for {asset}")
 
-    if feed == FEED_TWELVEDATA:
-        candles = await _fetch_gold(client, days)
-    else:
-        candles = await _fetch_fx(asset, client, days)
+    candles: list[Candle] = []
+    try:
+        candles = await _fetch_yahoo_candles(asset, client, days)
+    except QuotesUnavailable as yahoo_exc:
+        feed = ASSET_FEEDS.get(asset)
+        if feed is None:
+            raise yahoo_exc from None
+        try:
+            if feed == FEED_TWELVEDATA:
+                candles = await _fetch_gold(client, days)
+            else:
+                candles = await _fetch_fx(asset, client, days)
+        except QuotesUnavailable as fallback_exc:
+            raise QuotesUnavailable(
+                f"{asset}: yahoo failed ({yahoo_exc}) and fallback failed ({fallback_exc})") from fallback_exc
 
     if len(candles) < 30:  # need enough bars for EMA200-substitute + ADX
         raise QuotesUnavailable(f"{asset}: only {len(candles)} candles")
@@ -476,7 +638,7 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
         headers = {"User-Agent": YAHOO_UA}
 
         async def _yahoo_one(asset: str) -> tuple[str, float | None, str]:
-            sym = YAHOO_SYMBOLS.get(asset)
+            sym = _yahoo_symbol(asset)
             if not sym:
                 return asset, None, f"no spot symbol mapping for {asset}"
             url = f"{YAHOO_CHART_URL}/{sym}"

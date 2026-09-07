@@ -437,7 +437,22 @@ export interface AppSettings {
   notify_risk_warning: boolean;
   notify_daily_digest: boolean;
   notify_daily_summary: boolean;
+  /** Tradable universe — scanner analyses + platform trades these pairs only */
+  allowed_assets: string[];
 }
+
+/** Pairs the price feeds cover (mirror of backend quotes.SUPPORTED_ASSETS).
+ *  Only these are offered in the Settings add-pair dropdown. */
+export const SUPPORTED_ASSETS = [
+  "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
+  "EURGBP", "EURJPY", "EURAUD", "EURNZD", "EURCAD", "EURCHF",
+  "GBPJPY", "GBPAUD", "GBPNZD", "GBPCAD", "GBPCHF",
+  "AUDJPY", "AUDNZD", "AUDCAD", "AUDCHF", "NZDJPY", "NZDCAD",
+  "CADJPY", "CADCHF", "CHFJPY",
+  "XAUUSD",
+] as const;
+
+export const DEFAULT_ASSETS: string[] = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"];
 
 export interface SettingsSaveResult {
   ok: boolean;

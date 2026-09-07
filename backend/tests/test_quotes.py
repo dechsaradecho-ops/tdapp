@@ -189,9 +189,14 @@ class TestFetchCandles:
 
     @pytest.mark.asyncio
     async def test_gold_without_key_raises_unavailable(self, monkeypatch):
+        """Yahoo down + no TwelveData key → the fallback chain exhausts."""
         from app.core.config import get_settings as _gs
         monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
         client = httpx.AsyncClient()
+
+        async def fake_get(*a, **kw):
+            return _resp({}, status=503)  # Yahoo (and everything) fails
+        client.get = fake_get
         with pytest.raises(quotes.QuotesUnavailable):
             await quotes.fetch_candles("XAUUSD", client)
         await client.aclose()
@@ -253,6 +258,127 @@ class TestFetchCandles:
             assert asset in quotes.ASSET_FEEDS
         assert quotes.ASSET_FEEDS["XAUUSD"] == quotes.FEED_TWELVEDATA
         assert quotes.ASSET_FEEDS["GBPUSD"] == quotes.FEED_FRANKFURTER
+
+
+# ---------------------------------------------------------------------------
+# Yahoo-first candle chain + supported universe (2026-09-07)
+# ---------------------------------------------------------------------------
+def _yahoo_chart_payload(closes: list[float]) -> dict:
+    """Minimal Yahoo /chart payload — one bar per close, OHLC synthesized."""
+    return {"chart": {"result": [{
+        "meta": {"symbol": "TEST"},
+        "indicators": {"quote": [{
+            "open": [c * 0.999 for c in closes],
+            "high": [c * 1.001 for c in closes],
+            "low": [c * 0.998 for c in closes],
+            "close": closes,
+        }]},
+    }], "error": None}}
+
+
+class TestYahooFirstChain:
+    @pytest.mark.asyncio
+    async def test_yahoo_is_primary_for_fx(self):
+        """fetch_candles hits Yahoo FIRST for FX pairs (not Frankfurter)."""
+        closes = [1.10 + 0.001 * i for i in range(35)]
+        client = httpx.AsyncClient()
+        called = {"url": ""}
+
+        async def fake_get(url, *a, **kw):
+            called["url"] = url
+            return _resp(_yahoo_chart_payload(closes))
+        client.get = fake_get
+        candles = await quotes.fetch_candles("EURUSD", client)
+        assert "query1.finance.yahoo.com" in called["url"]
+        assert "EURUSD=X" in called["url"]
+        assert len(candles) == 35
+        assert candles[0].c == closes[0]
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_yahoo_covers_settings_added_pair(self):
+        """A pair added via Settings (e.g. GBPJPY) prices through Yahoo."""
+        closes = [190.0 + i for i in range(35)]
+        client = httpx.AsyncClient()
+        called = {"url": ""}
+
+        async def fake_get(url, *a, **kw):
+            called["url"] = url
+            return _resp(_yahoo_chart_payload(closes))
+        client.get = fake_get
+        candles = await quotes.fetch_candles("GBPJPY", client)
+        assert "GBPJPY=X" in called["url"]
+        assert len(candles) == 35
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_fx_falls_back_to_frankfurter_when_yahoo_fails(self, monkeypatch):
+        """Yahoo down → FX falls through to the Frankfurter fallback feed."""
+        closes = [100.0 + i for i in range(35)]
+        client = httpx.AsyncClient()
+        urls: list[str] = []
+
+        async def fake_get(url, *a, **kw):
+            urls.append(url)
+            if "yahoo" in url:
+                return _resp({}, status=503)
+            return _resp(_fx_payload(closes))
+        client.get = fake_get
+        candles = await quotes.fetch_candles("EURUSD", client)
+        assert any("yahoo" in u for u in urls)
+        assert any("frankfurter" in u for u in urls)
+        assert len(candles) == 35
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_gold_falls_back_to_twelvedata_when_yahoo_fails(self, monkeypatch):
+        """Yahoo down → XAUUSD falls through to TwelveData (key present)."""
+        from app.core.config import get_settings as _gs
+        closes = [2400.0 + i for i in range(35)]
+        client = httpx.AsyncClient()
+        urls: list[str] = []
+
+        async def fake_get(url, *a, **kw):
+            urls.append(url)
+            if "yahoo" in url:
+                return _resp({}, status=503)
+            return _resp(_gold_payload(closes))
+        client.get = fake_get
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "td-demo-key",
+                            raising=False)
+        candles = await quotes.fetch_candles("XAUUSD", client)
+        assert any("twelvedata" in u for u in urls)
+        assert len(candles) == 35
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_asset_still_raises(self):
+        client = httpx.AsyncClient()
+        with pytest.raises(quotes.QuotesUnavailable):
+            await quotes.fetch_candles("NOPE", client)
+        await client.aclose()
+
+    def test_supported_assets_registry(self):
+        """Registry covers the original 5 + Settings-addable pairs; every
+        entry is Yahoo-priceable (generic XXXYYY=X or GC=F)."""
+        for a in ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"):
+            assert a in quotes.SUPPORTED_ASSETS
+        for a in ("GBPJPY", "NZDUSD", "USDCAD", "EURGBP", "CADCHF"):
+            assert a in quotes.SUPPORTED_ASSETS
+        assert quotes._yahoo_symbol("GBPJPY") == "GBPJPY=X"
+        assert quotes._yahoo_symbol("XAUUSD") == "GC=F"
+        assert quotes._yahoo_symbol("NOPE") is None
+
+    def test_generic_fx_parts(self):
+        assert quotes.fx_parts("EURUSD") == ("EUR", "USD")
+        assert quotes.fx_parts("GBPJPY") == ("GBP", "JPY")
+        assert quotes.fx_parts("XAUUSD") is None  # not pure-alpha FX
+        assert quotes.fx_parts("BTCUSD") == ("BTC", "USD")
+
+    def test_exchange_pair_generic(self):
+        assert quotes._exchange_pair("GBPJPY") == ("GBP", "JPY")
+        assert quotes._exchange_pair("XAUUSD") is None  # no rate-API mapping
+        assert quotes._exchange_pair("ZZZQQQ") is None  # non-ECB currencies
 
 
 # ---------------------------------------------------------------------------

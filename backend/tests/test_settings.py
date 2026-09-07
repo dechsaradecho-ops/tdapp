@@ -26,6 +26,7 @@ from app.models.schemas import (
     effective_min_confidence,
     effective_min_lot,
 )
+from app.integrations import quotes
 from tests.test_workers import FakeDatabase
 
 # ---------------------------------------------------------------------------
@@ -413,3 +414,48 @@ async def test_reset_settings_reverts_to_defaults():
     # GET now returns defaults again
     res2 = await call("GET", "/api/settings")
     assert res2.json()["min_confidence"] == 70
+
+
+# ---------------------------------------------------------------------------
+# allowed_assets — user-managed tradable universe
+# ---------------------------------------------------------------------------
+def test_app_settings_allowed_assets_default():
+    from app.integrations import quotes
+    s = AppSettings()
+    assert s.allowed_assets == quotes.DEFAULT_ASSETS
+    assert s.effective_assets() == quotes.DEFAULT_ASSETS
+
+
+def test_effective_assets_drops_unknown_and_dedupes():
+    from app.integrations import quotes
+    s = AppSettings(allowed_assets=["EURUSD", "eurusd", "FAKEUSD", "XAUUSD"])
+    eff = s.effective_assets()
+    assert eff == ["EURUSD", "XAUUSD"]  # dedup + whitelist only
+    assert "FAKEUSD" not in quotes.SUPPORTED_ASSETS
+
+
+def test_effective_assets_empty_falls_back_to_defaults():
+    s = AppSettings(allowed_assets=[])
+    assert s.effective_assets() == quotes.DEFAULT_ASSETS
+
+
+@pytest.mark.asyncio
+async def test_put_settings_persists_allowed_assets():
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings",
+                     {"allowed_assets": ["EURUSD", "GBPJPY", "XAUUSD"]})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["allowed_assets"] == ["EURUSD", "GBPJPY", "XAUUSD"]
+    assert db._client.row["allowed_assets"] == ["EURUSD", "GBPJPY", "XAUUSD"]
+
+
+@pytest.mark.asyncio
+async def test_get_settings_returns_allowed_assets_from_row():
+    row = AppSettings(allowed_assets=["USDJPY"]).model_dump(mode="json")
+    set_state(SettingsDatabase(row))
+    res = await call("GET", "/api/settings")
+    assert res.status_code == 200
+    assert res.json()["allowed_assets"] == ["USDJPY"]

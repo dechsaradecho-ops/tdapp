@@ -8,6 +8,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.integrations import quotes
 from app.integrations.quotes import Candle, _adx, _atr_pct, _ema, _rsi, _supertrend_dir
 
 
@@ -603,11 +604,24 @@ class ExposureEngine:
     }
 
     @classmethod
+    def _currencies_for(cls, asset: str) -> list[str]:
+        """Exposure currencies for any asset — explicit map first, then a
+        generic FX derivation so Settings-added pairs (EURJPY, GBPCAD, …)
+        bucket correctly instead of landing in "Other"."""
+        ccy = cls.CURRENCY_MAP.get(asset)
+        if ccy:
+            return ccy
+        parts = quotes.fx_parts(asset)
+        if parts:
+            return list(parts)
+        return ["Other"]
+
+    @classmethod
     def analyze(cls, open_positions: list[dict]) -> list[ExposureBreakdown]:
         """positions: [{"asset", "direction": BUY/SELL, "volume"(lots), "price"}]."""
         notional: dict[str, float] = {}
         for p in open_positions:
-            ccy = cls.CURRENCY_MAP.get(p["asset"], ["Other"])
+            ccy = cls._currencies_for(str(p["asset"]).upper())
             weight = float(p.get("volume", 0)) * float(p.get("price", 1))
             signed = weight if str(p.get("direction", "")).upper() == "BUY" else -weight
             for c in ccy:
@@ -1362,6 +1376,29 @@ class AppSettings(BaseModel):
     notify_risk_warning: bool = True
     notify_daily_digest: bool = True
     notify_daily_summary: bool = True
+
+    # ---- Tradable universe (Settings page) ---------------------------------
+    # Assets the user wants the scanner to analyse and the platform to trade.
+    # The Settings UI only offers pairs from quotes.SUPPORTED_ASSETS (pairs
+    # the price feeds actually cover). Empty/None → DEFAULT_ASSETS so old
+    # rows keep the original 5-asset behaviour.
+    allowed_assets: list[str] = Field(
+        default_factory=lambda: list(quotes.DEFAULT_ASSETS))
+
+    def effective_assets(self) -> list[str]:
+        """Sanitized tradable list — validated against SUPPORTED_ASSETS.
+
+        Drops unknown/duplicate entries; falls back to DEFAULT_ASSETS when
+        nothing valid remains (e.g. a hand-edited DB row).
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for a in self.allowed_assets or []:
+            u = str(a).upper()
+            if u in quotes.SUPPORTED_ASSETS and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out or list(quotes.DEFAULT_ASSETS)
 
 
 class SettingsSaveResult(BaseModel):

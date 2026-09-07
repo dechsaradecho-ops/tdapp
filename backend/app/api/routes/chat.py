@@ -89,8 +89,9 @@ async def _build_context(db, broker=None) -> str:
 
     if not per_asset:
         try:
+            from app.api.routes.market import _market_assets
             snaps = await quotes.fetch_all_snapshots(
-                ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD", "AUDUSD"])
+                _market_assets(db))
             for asset, snap in snaps.items():
                 ind = IndicatorSnapshot(**{**snap, "source": "live"})
                 opp = engine.opportunity_score(ind)

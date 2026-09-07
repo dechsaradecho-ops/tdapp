@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.models.schemas import AppSettings
 from app.workers import (calendar_sync, daily_digest, market_scanner,
                          news_analysis, position_guard, portfolio_monitor)
 
@@ -132,6 +133,41 @@ class TestMarketScanner:
     @pytest.mark.asyncio
     async def test_scan_persists_market_analysis_for_all_assets(self, monkeypatch):
         db = FakeDatabase()
+        await market_scanner.scan_once(db)
+        assets = {row["asset"] for table, row in db.inserted
+                  if table == "market_analysis"}
+        assert assets == set(market_scanner.SCAN_ASSETS)
+
+    @pytest.mark.asyncio
+    async def test_scan_follows_allowed_assets_from_settings(self, monkeypatch):
+        """allowed_assets (Settings page) drives the scan universe: only the
+        configured pairs are analysed; unknown pairs are dropped by
+        effective_assets()."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(
+                                allowed_assets=["EURUSD", "GBPJPY", "FAKEUSD"]))
+        await market_scanner.scan_once(db)
+        assets = {row["asset"] for table, row in db.inserted
+                  if table == "market_analysis"}
+        assert assets == {"EURUSD", "GBPJPY"}  # FAKEUSD dropped by whitelist
+
+    @pytest.mark.asyncio
+    async def test_scan_falls_back_when_settings_empty(self, monkeypatch):
+        """Empty allowed_assets → scanner keeps the default 5-asset universe."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(allowed_assets=[]))
         await market_scanner.scan_once(db)
         assets = {row["asset"] for table, row in db.inserted
                   if table == "market_analysis"}

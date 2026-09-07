@@ -12,7 +12,7 @@ import { usePortfolio } from "@/lib/portfolio";
 import {
   AppSettings, DbCheckResult, DbCounts, LineDiag, LineEventsResponse,
   LineSimulateResult, LineTargetsResponse, LineTestResult, PauseStatus,
-  PortfolioRecommendation, RiskProfile,
+  PortfolioRecommendation, RiskProfile, SUPPORTED_ASSETS, DEFAULT_ASSETS,
 } from "@/lib/types";
 import type { IconName } from "@/components/Icon";
 
@@ -56,6 +56,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   notify_risk_warning: true,
   notify_daily_digest: true,
   notify_daily_summary: true,
+  allowed_assets: DEFAULT_ASSETS,
 };
 
 /** LINE notification categories shown on the Settings page — each row maps
@@ -97,6 +98,10 @@ const SL_MODES = [
   { value: "medium", label: "กลาง ×1.5 ATR — ตามสัญญาณ (ค่าเริ่มต้น)" },
   { value: "long", label: "ยาว ×2.0 ATR — SL กว้าง ทนผันผวน" },
 ];
+
+/** Add-pair dropdown options — only pairs the price feeds cover. */
+const ADDABLE_ASSETS = SUPPORTED_ASSETS.filter(
+  (a) => !DEFAULT_ASSETS.includes(a));
 
 export default function SettingsPage() {
   const { capital, setCapital } = usePortfolio();
@@ -411,6 +416,54 @@ export default function SettingsPage() {
         </div>
 
         {cfg && (
+          <>
+          {/* --- Tradable pairs (allowed_assets) --- */}
+          <div className="mt-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">คู่เงินที่เทรดได้ (allowed_assets)</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Scanner จะวิเคราะห์เฉพาะคู่ที่เลือก — รายการยึดตามฟีดราคาที่รองรับจริง (Yahoo → Frankfurter/TwelveData → exchangerate)
+            </p>
+            <div className="flex flex-wrap gap-2 mt-2">
+              {(cfg.allowed_assets?.length ? cfg.allowed_assets : DEFAULT_ASSETS).map((a) => (
+                <span key={a}
+                  className="inline-flex items-center gap-1.5 bg-surface border border-slate-700 rounded-full pl-3 pr-1.5 py-1 text-sm">
+                  {a}
+                  <button type="button" title={`เอา ${a} ออก`}
+                    onClick={() => set("allowed_assets",
+                      (cfg.allowed_assets ?? []).filter((x) => x !== a))}
+                    className="w-5 h-5 rounded-full text-slate-400 hover:text-loss hover:bg-slate-800 leading-none">
+                    ×
+                  </button>
+                </span>
+              ))}
+              {!cfg.allowed_assets?.length && (
+                <span className="text-xs text-slate-500 self-center">(ค่าเริ่มต้น 5 คู่ — กดบันทึกเพื่อเก็บรายการที่แก้)</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mt-3">
+              <GlassSelect
+                value=""
+                onChange={(v) => {
+                  if (!v) return;
+                  const cur = cfg.allowed_assets ?? [];
+                  if (!cur.includes(v)) set("allowed_assets", [...cur, v]);
+                }}
+                className="w-56"
+                placeholder="+ เพิ่มคู่เงิน…"
+                options={ADDABLE_ASSETS.filter((a) => !(cfg.allowed_assets ?? []).includes(a))
+                  .map((a) => ({ value: a, label: a }))} />
+              <button type="button"
+                onClick={() => set("allowed_assets", [...DEFAULT_ASSETS])}
+                className="text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded px-3 py-2">
+                คืนค่าเริ่มต้น (5 คู่)
+              </button>
+            </div>
+            {!cfg.allowed_assets?.length && (
+              <p className="text-xs text-amber-400 mt-2">
+                ยังไม่ได้เลือกคู่ใด — ระบบจะใช้ค่าเริ่มต้น 5 คู่จนกว่าจะบันทึกรายการใหม่
+              </p>
+            )}
+          </div>
           <div className="mt-4 grid md:grid-cols-4 gap-4">
             {/* --- Profile & signal gates --- */}
             <div className="space-y-3">
@@ -567,6 +620,7 @@ export default function SettingsPage() {
                 onChange={(v) => set("backtest_days", v)} step={10} />
             </div>
           </div>
+          </>
         )}
       </div>
 

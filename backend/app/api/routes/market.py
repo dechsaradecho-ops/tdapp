@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from app.api.routes.settings import get_app_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
 from app.models.schemas import AssetOpportunity, MarketSummary, MarketRegime
@@ -15,6 +16,15 @@ from app.models.schemas import AssetOpportunity, MarketSummary, MarketRegime
 router = APIRouter()
 
 ASSETS = ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD", "AUDUSD"]
+
+
+def _market_assets(db) -> list[str]:
+    """Dashboard universe = user's allowed_assets (fallback: hardcoded)."""
+    try:
+        assets = get_app_settings(db).effective_assets()
+    except Exception:
+        assets = []
+    return assets or list(ASSETS)
 
 # Demo snapshot (until Market Scanner persists real rows into market_analysis)
 DEMO: dict[str, IndicatorSnapshot] = {
@@ -34,6 +44,7 @@ REGIME_EXPLANATION = {
 async def market_summary(request: Request) -> MarketSummary:
     db = request.app.state.db
     engine = StrategyEngine()
+    assets = _market_assets(db)
 
     opportunities: list[AssetOpportunity] = []
     snapshot_of: dict[str, IndicatorSnapshot] = {}
@@ -51,8 +62,8 @@ async def market_summary(request: Request) -> MarketSummary:
     # 2) No worker rows → fetch live quotes right now (no DB needed)
     if not opportunities:
         try:
-            snaps = await quotes.fetch_all_snapshots(ASSETS)
-            for asset in ASSETS:
+            snaps = await quotes.fetch_all_snapshots(assets)
+            for asset in assets:
                 if asset in snaps:
                     ind = IndicatorSnapshot(**{**snaps[asset], "source": "live"})
                     snapshot_of[asset] = ind
@@ -66,7 +77,8 @@ async def market_summary(request: Request) -> MarketSummary:
 
     # 3) Deterministic demo (fresh install, no DB, no network)
     if not opportunities:
-        opportunities = [engine.opportunity_score(DEMO[a]) for a in ASSETS]
+        opportunities = [engine.opportunity_score(DEMO[a]) for a in assets if a in DEMO] or [
+            engine.opportunity_score(DEMO[a]) for a in ASSETS]
 
     top_snapshot = snapshot_of.get(opportunities[0].asset) if opportunities else None
     if top_snapshot is None:

@@ -35,6 +35,7 @@ export default function GlassSelect({
   options,
   className = "",
   ariaLabel,
+  placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -42,6 +43,8 @@ export default function GlassSelect({
   /** sizing/placement ของกล่อง trigger เช่น "mt-1 w-full" หรือ "text-xs" */
   className?: string;
   ariaLabel?: string;
+  /** text เมื่อ value ไม่ตรง option ใด (เช่น dropdown "เพิ่มรายการ") */
+  placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -127,7 +130,9 @@ export default function GlassSelect({
         onClick={() => setOpen((v) => !v)}
         className="glass-select-trigger w-full flex items-center justify-between gap-2 text-left"
       >
-        <span className="truncate">{current?.label ?? ""}</span>
+        <span className={`truncate ${current ? "" : "text-slate-500"}`}>
+          {current?.label ?? placeholder ?? ""}
+        </span>
         <svg
           className={`shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
           width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"

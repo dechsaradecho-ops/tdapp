@@ -97,6 +97,29 @@ class PaperBroker(Broker):
             "AUDUSD": 0.65200, "XAUUSD": 2400.00,
         }
 
+    def ensure_price(self, asset: str) -> float:
+        """Seed a plausible price for any supported asset on first touch.
+
+        The Settings page can add pairs (e.g. USDJPY crosses) that were never
+        in the hardcoded seed table; without this, mark_price returns 0.0
+        and the position guard sees a dead mark. FX pairs derive a magnitude
+        from the quote currency; metals get a fixed seed.
+        """
+        a = str(asset).upper()
+        price = self._prices.get(a)
+        if price:
+            return price
+        if a == "XAUUSD":
+            price = 2400.00
+        elif a.endswith("JPY"):
+            price = 149.500
+        elif a.endswith("USD"):
+            price = 1.08500
+        else:
+            price = 1.00000
+        self._prices[a] = price
+        return price
+
     async def connect(self) -> bool:
         return True
 

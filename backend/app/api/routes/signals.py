@@ -19,7 +19,7 @@ from app.services.execution import (
 )
 from app.services.notification_service import NotificationService
 
-from app.api.routes.market import DEMO
+from app.api.routes.market import DEMO, _market_assets
 from app.api.routes.settings import get_app_settings
 
 router = APIRouter()
@@ -201,7 +201,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     if is_market_closed():
         return proposals
     try:
-        snaps = await quotes.fetch_all_snapshots(list(DEMO.keys()))
+        snaps = await quotes.fetch_all_snapshots(_market_assets(db))
     except Exception:
         snaps = {}
     live_feed = await _feed_status_for(sorted(snaps.keys()))

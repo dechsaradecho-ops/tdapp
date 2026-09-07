@@ -30,6 +30,19 @@ log = logging.getLogger(__name__)
 SCAN_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
 
 
+def _scan_assets(settings) -> list[str]:
+    """Tradable universe from the user's Settings (allowed_assets).
+
+    Falls back to the hardcoded SCAN_ASSETS when settings are unavailable
+    (fresh install / DB down) so the scanner never goes blind.
+    """
+    try:
+        assets = settings.effective_assets() if settings else []
+    except Exception:
+        assets = []
+    return assets or list(SCAN_ASSETS)
+
+
 async def scan_once(db: Database) -> list[dict]:
     """One scan cycle. Live quotes when available, demo feed otherwise."""
     engine = StrategyEngine()
@@ -40,7 +53,7 @@ async def scan_once(db: Database) -> list[dict]:
     # gate below needs them BEFORE the emit block.
     settings = get_app_settings(db)
 
-    for asset in SCAN_ASSETS:
+    for asset in _scan_assets(settings):
         ind = await _snapshot_for(asset, news_by_asset.get(asset, 0.0))
         if ind.source == "live":
             live_used += 1

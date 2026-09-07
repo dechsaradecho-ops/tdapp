@@ -32,8 +32,9 @@ async def recommend(payload: PortfolioInput, request: Request) -> PortfolioRecom
         # No worker rows → live quotes (demo only as last resort)
         from app.integrations import quotes
         try:
+            from app.api.routes.market import _market_assets
             snaps = await quotes.fetch_all_snapshots(
-                ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD", "AUDUSD"])
+                _market_assets(db))
             for asset, snap in snaps.items():
                 ind = IndicatorSnapshot(**{**snap, "source": "live"})
                 opp = StrategyEngine().opportunity_score(ind)
