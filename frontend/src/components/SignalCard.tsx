@@ -71,7 +71,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
           <span className="text-slate-400">ราคาตลาดตอนนี้</span>
           <span className="font-semibold text-accent">{fmtNum(signal.live_price, 5)}</span>
           {signal.entry > 0 && (
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold ${liveDeltaPct >= 0 ? "bg-profit/15 text-profit" : "bg-loss/15 text-loss"}`}>
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold ${liveDeltaPct >= 0 ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
               {liveDeltaPct >= 0 ? "▲" : "▼"} {Math.abs(liveDeltaPct).toFixed(2)}%
             </span>
           )}
@@ -137,7 +137,7 @@ function Field({ label, value }: { label: string; value: string }) {
   return (
     <div className="bg-white/[0.05] rounded-xl p-2 border border-white/10">
       <p className="text-xs text-slate-500">{label}</p>
-      <p className="font-semibold">{value}</p>
+      <p className="font-bold">{value}</p>
     </div>
   );
 }

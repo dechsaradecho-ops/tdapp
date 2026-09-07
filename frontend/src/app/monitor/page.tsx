@@ -390,11 +390,11 @@ export default function MonitorPage() {
                         {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"}
                       </span>
                     </td>
-                    <td className="py-2 pr-4">{fmtNum(p.volume, 2)}</td>
-                    <td className="py-2 pr-4">{fmtNum(p.entry_price, 5)}</td>
-                    <td className="py-2 pr-4">{fmtNum(p.current_price, 5)}</td>
-                    <td className="py-2 pr-4"><span className="text-loss">{p.stop_loss != null ? fmtNum(p.stop_loss, 5) : "-"}</span></td>
-                    <td className="py-2 pr-4"><span className="text-profit">{p.take_profit != null ? fmtNum(p.take_profit, 5) : "-"}</span></td>
+                    <td className="py-2 pr-4 font-bold">{fmtNum(p.volume, 2)}</td>
+                    <td className="py-2 pr-4 font-bold">{fmtNum(p.entry_price, 5)}</td>
+                    <td className="py-2 pr-4 font-bold">{fmtNum(p.current_price, 5)}</td>
+                    <td className="py-2 pr-4"><span className="font-bold text-loss">{p.stop_loss != null ? fmtNum(p.stop_loss, 5) : "-"}</span></td>
+                    <td className="py-2 pr-4"><span className="font-bold text-profit">{p.take_profit != null ? fmtNum(p.take_profit, 5) : "-"}</span></td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
@@ -463,10 +463,10 @@ export default function MonitorPage() {
                         {t.direction === "BUY" ? "▲" : "▼"} {t.direction}
                       </span>
                     </td>
-                    <td className="py-2 pr-4">{fmtNum(t.volume, 2)}</td>
-                    <td className="py-2 pr-4">{fmtNum(t.entry_price, 5)}</td>
-                    <td className="py-2 pr-4">{t.exit_price != null ? fmtNum(t.exit_price, 5) : "-"}</td>
-                    <td className="py-2 pr-4">
+                    <td className="py-2 pr-4 font-bold">{fmtNum(t.volume, 2)}</td>
+                    <td className="py-2 pr-4 font-bold">{fmtNum(t.entry_price, 5)}</td>
+                    <td className="py-2 pr-4 font-bold">{t.exit_price != null ? fmtNum(t.exit_price, 5) : "-"}</td>
+                    <td className="py-2 pr-4 font-bold">
                       {t.pnl != null ? (
                         <span className={`font-bold ${t.pnl >= 0 ? "text-profit" : "text-loss"}`}>
                           {t.pnl >= 0 ? "+" : ""}${fmtNum(t.pnl, 2)}

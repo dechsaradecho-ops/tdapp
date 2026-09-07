@@ -168,7 +168,7 @@ export default function SignalLogsPanel() {
                   <td className="py-2 pr-3 font-bold">{l.asset || "—"}</td>
                   <td className="py-2 pr-3">
                     {l.direction
-                      ? <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-bold ${l.direction === "buy" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
+                      ? <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-bold ${l.direction === "buy" ? "bg-emerald-500/30 text-emerald-400" : "bg-red-500/30 text-red-400"}`}>
                           {l.direction.toUpperCase()}
                         </span>
                       : "—"}
@@ -176,15 +176,15 @@ export default function SignalLogsPanel() {
                   <td className="py-2 pr-3">
                     <span className={`px-2 py-0.5 rounded whitespace-nowrap ${meta.cls}`}>{meta.label}</span>
                   </td>
-                  <td className="py-2 pr-3">{l.confidence != null ? `${l.confidence}%` : "—"}</td>
-                  <td className="py-2 pr-3 font-mono">{l.entry != null ? fmtNum(l.entry, 4) : "—"}</td>
-                  <td className="py-2 pr-3">{l.stop_loss != null ? <span className="inline-flex items-center rounded-full bg-loss/15 text-loss px-2 py-0.5 font-mono">{fmtNum(l.stop_loss, 4)}</span> : "—"}</td>
-                  <td className="py-2 pr-3">{l.take_profit != null ? <span className="inline-flex items-center rounded-full bg-profit/15 text-profit px-2 py-0.5 font-mono">{fmtNum(l.take_profit, 4)}</span> : "—"}</td>
-                  <td className="py-2 pr-3 font-mono">{l.exit_price != null ? fmtNum(l.exit_price, 4) : "—"}</td>
-                  <td className="py-2 pr-3">{l.volume != null ? l.volume : "—"}</td>
+                  <td className="py-2 pr-3 font-bold">{l.confidence != null ? `${l.confidence}%` : "—"}</td>
+                  <td className="py-2 pr-3 font-mono font-bold">{l.entry != null ? fmtNum(l.entry, 4) : "—"}</td>
+                  <td className="py-2 pr-3">{l.stop_loss != null ? <span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5 font-mono font-bold">{fmtNum(l.stop_loss, 4)}</span> : "—"}</td>
+                  <td className="py-2 pr-3">{l.take_profit != null ? <span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5 font-mono font-bold">{fmtNum(l.take_profit, 4)}</span> : "—"}</td>
+                  <td className="py-2 pr-3 font-mono font-bold">{l.exit_price != null ? fmtNum(l.exit_price, 4) : "—"}</td>
+                  <td className="py-2 pr-3 font-bold">{l.volume != null ? l.volume : "—"}</td>
                   <td className="py-2 pr-3">
                     {l.pnl != null
-                      ? <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono font-semibold ${l.pnl >= 0 ? "bg-profit/15 text-profit" : "bg-loss/15 text-loss"}`}>
+                      ? <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono font-bold ${l.pnl >= 0 ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
                           {l.pnl.toFixed(2)}
                         </span>
                       : <span className="font-mono text-slate-500">—</span>}

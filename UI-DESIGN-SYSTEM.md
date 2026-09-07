@@ -3,7 +3,7 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `a13eb36`, verified 2026-09-06 (deploy ถึง prod แล้ว + ทดสอบ toggle จริงบน prod ผ่าน) — §15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด (6 หมวด, migration 020 รันแล้ว — เดิมชื่อ 012 ถูก rename เพราะชนเบอร์กับ 012_min_confidence_gold)
+> สถานะล่าสุด: commit `67a2dfd`, verified 2026-09-07 — §10.1 pill แบบ component บนหน้า signals (SL/TP, ▲▼, BUY/SELL, PnL + tier badge เลข 1/2/3) · ก่อนหน้า: `a13eb36` verified 2026-09-06 (§15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด — 6 หมวด, migration 020 รันแล้ว — เดิมชื่อ 012 ถูก rename เพราะชนเบอร์กับ 012_min_confidence_gold)
 >
 > ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html หรือชื่อไฟล์ chunk** — Next.js สร้าง buildId/chunk-hash
 > ใหม่ทุกครั้งที่ build และ build บน Render ให้ hash ต่างจาก local เสมอ (แม้โค้ดเดียวกัน — ยืนยันแล้ว
@@ -349,6 +349,34 @@ td .text-loss, td .text-red-400 {
 
 > 🚨 **บทเรียน (bug จริง 2 ครั้ง):** (1) ใส่ `display: inline-block` บน td โดยตรง → cell หลุดจากกริดตาราง คอลัมน์ SL/TP เลื่อนทับกันทั้งแถว (2) ใส่ pill bg บน td → พื้นกินทั้ง cell ไม่พอดีตัวหนังสือ ทางแก้สุดท้ายคือ span wrapper เท่านั้น ตรวจเสมอด้วยการเทียบ `getBoundingClientRect().x` ของ thead vs tbody ทุกคอลัมน์ + span width < td width
 
+### 10.1 Pill แบบ component (หน้า signals — commit 67a2dfd)
+
+นอกจาก pill อัตโนมัติจาก CSS ด้านบน (ครอบ class `text-profit`/`text-loss` ลอย ๆ ใน td) หน้า signals ใช้ **pill แบบเขียน class ตรง** — คุมพื้น tint 30% + ตัวอักษรโทนเดียวกัน + น้ำหนักใน class เดียว (ตัวเลขเป็นตัวหนาเสมอ):
+
+```tsx
+// pill มาตรฐาน — SL/TP, PnL, ▲▼ % (เข้ม /30 + ตัวหนา ตาม request 2026-09-07 "pill เข้มอีก" และ "ตัวเลขให้เป็นตัวหนา")
+<span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5 font-bold">TP 0.73313</span>
+<span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5 font-bold">SL 0.71268</span>
+
+// tier badge วงกลม — เลขล้วน 1/2/3 (ผู้ใช้ขอ 2026-09-07: "ระดับ 1,2,3 ให้เหลือแค่ 1.2.3")
+<span className={`inline-flex items-center justify-center min-w-[22px] h-[22px] rounded-full px-1.5 text-xs font-bold ${
+  buy ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>1</span>
+```
+
+**จุดที่ใช้แล้ว (67a2dfd):**
+- `LimitLevels.tsx` — tier badge วงกลม 1/2/3 + แถว SL/TP เป็น pill
+- `SltpLevels.tsx` — SL/TP ทุก tier เป็น pill
+- `SignalCard.tsx` — ▲▼ % ราคาตลาดเทียบ entry เป็น pill (เขียวขึ้น/แดงลง)
+- `SignalLogsPanel.tsx` — คอลัมน์ ทิศทาง (BUY/SELL), SL, TP, PnL เป็น pill
+
+**กฎ:** ข้อความสีใหม่บนหน้า signals ต่อจากนี้ใช้ pill แบบนี้เสมอ — อย่าปล่อยเป็นตัวอักษรสีลอย ๆ (ยกเว้นตารางที่ pill CSS §10 จัดการให้อยู่แล้ว) และยังคงห้ามใส่ pill บน td โดยตรง
+
+### 10.2 ตัวเลขเป็นตัวหนา (หน้า signals + monitor — request 2026-09-07 "หน้า signal และ monitor ตัวเลขให้เป็นตัวหนา")
+
+- ทุกตัวเลข (ราคา, lots, PnL, confidence, %) ใช้ `font-bold` — ไม่ใช้ `font-semibold` กับตัวเลขอีกต่อไป
+- **Monitor:** ตารางไม้ค้าง (Lots/Entry/ราคาปัจจุบัน/SL/TP/PnL) + ตารางประวัติ order (Lots/Entry/Exit/PnL) ใส่ `font-bold` ที่ td หรือ span ข้างใน
+- **Signals:** Field ใน SignalCard (`font-bold`), ราคาใน LimitLevels (`font-bold text-sm`), pill SL/TP เปลี่ยน `font-semibold` → `font-bold`, ตาราง SignalLogsPanel (confidence/entry/exit/volume) เป็น `font-mono font-bold`
+
 ---
 
 ## 11. ตารางบนมือถือ
@@ -455,7 +483,7 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 6. ☐ MobileNav floating dock สไลด์ซ้ายขวา + auto-center active tab (§7) + `main pb-24`
 7. ☐ ปุ่ม 4 บทบาท tinted + radius 12px + scale(0.97) (§8)
 8. ☐ ฟอร์มแก้วฝ้า + **select โปร่ง (ห้ามใส่ bg-surface ทับ)** + focus ring ฟ้า + กัน iOS zoom 16px (§9)
-9. ☐ Pill ตาราง: ครอบค่าด้วย `<span>` ใน td เสมอ — ห้าม pill บน td โดยตรง (§10)
+9. ☐ Pill ตาราง: ครอบค่าด้วย `<span>` ใน td เสมอ — ห้าม pill บน td โดยตรง (§10) · ข้อความสีบนหน้า signals ใช้ pill แบบ component (§10.1)
 10. ☐ ตารางมือถือ `width: auto` + wrapper เลื่อนแนวนอน — `overflow-x-auto` ต้องอยู่ div ลูก ไม่ใช่บน `.panel` (§11)
 11. ☐ Animations + stagger + reduced-motion (§12)
 12. ☐ Safe-area, tap-highlight, scrollbar, viewport (§13)

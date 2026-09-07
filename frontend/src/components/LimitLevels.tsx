@@ -26,15 +26,15 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
         {signal.limit_levels.map((lv: LimitLevel, i: number) => (
           <div key={i} className={`rounded p-2 border ${buy ? "border-profit/40 bg-profit/5" : "border-loss/40 bg-loss/5"}`}>
             <div className="flex items-center justify-between mb-1">
-              <span className={`inline-flex items-center justify-center min-w-[22px] h-[22px] rounded-full px-1.5 text-xs font-bold ${buy ? "bg-profit/15 text-profit" : "bg-loss/15 text-loss"}`}>
+              <span className={`inline-flex items-center justify-center min-w-[22px] h-[22px] rounded-full px-1.5 text-xs font-bold ${buy ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
                 {tierBadge(i)}
               </span>
               <span className="text-xs text-slate-500">{label} {i + 1} · {lv.risk_pct}%</span>
             </div>
-            <p className="font-semibold text-sm">{fmtNum(lv.price, 5)}</p>
+            <p className="font-bold text-sm">{fmtNum(lv.price, 5)}</p>
             <div className="mt-1 space-y-1 text-xs">
-              <p><span className="inline-flex items-center rounded-full bg-loss/15 text-loss px-2 py-0.5 font-semibold">SL {fmtNum(lv.sl, 5)}</span></p>
-              <p><span className="inline-flex items-center rounded-full bg-profit/15 text-profit px-2 py-0.5 font-semibold">TP {fmtNum(lv.tp, 5)}</span></p>
+              <p><span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5 font-bold">SL {fmtNum(lv.sl, 5)}</span></p>
+              <p><span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5 font-bold">TP {fmtNum(lv.tp, 5)}</span></p>
               <p className="text-slate-500">RR 1:{lv.rr}</p>
             </div>
           </div>
