@@ -48,6 +48,22 @@ class AIProvider(ABC):
     async def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
         """Return the assistant's reply text."""
 
+    @staticmethod
+    def _extract(data: dict) -> str:
+        """message.content, falling back to reasoning_content (reasoning models
+        can return an empty content with only reasoning — surface something)."""
+        msg = data["choices"][0]["message"]
+        content = (msg.get("content") or "").strip()
+        if content:
+            return content
+        reasoning = (msg.get("reasoning_content") or "").strip()
+        if reasoning:
+            return (
+                "[AI ERROR] โมเดลคิดเสร็จแต่ไม่ได้เขียนคำตอบ (reasoning กินโควตา "
+                "max_tokens) — ส่วนสรุปจากการคิดล่าสุด:\n" + reasoning[-600:]
+            )
+        return ""
+
     async def chat_stream(self, messages: list[dict[str, str]],
                           temperature: float = 0.3) -> AsyncIterator[str]:
         """Yield reply chunks as they arrive (OpenAI-compatible SSE streaming).
@@ -56,7 +72,17 @@ class AIProvider(ABC):
         "AI กำลังคิด..." for the full generation time.
         On upstream failure yields a single chunk with the same error text
         that `chat` returns, so the UI contract stays identical.
+
+        Reasoning-model guard (2026-09-07 "no reply" bug): reasoning models
+        (omen-alpha ฯลฯ) emit delta.reasoning_content while thinking and may
+        burn the whole max_tokens budget BEFORE any delta.content — the
+        stream then ends empty and the UI shows "(no reply)". Two defenses:
+        1) max_tokens 2048 gives the model headroom to finish thinking and
+        still write the answer;
+        2) if zero content chunks were emitted, fall back to the non-stream
+        endpoint which assembles message.content server-side after reasoning.
         """
+        emitted = False
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 async with client.stream(
@@ -67,7 +93,9 @@ class AIProvider(ABC):
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
                         "temperature": temperature,
-                        "max_tokens": 1024,
+                        # 2048: reasoning models spend completion tokens thinking
+                        # before the answer — 1024 can run out mid-reasoning
+                        "max_tokens": 2048,
                         "stream": True,
                     },
                 ) as resp:
@@ -84,6 +112,7 @@ class AIProvider(ABC):
                             continue
                         piece = delta.get("content")
                         if piece:
+                            emitted = True
                             yield piece
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             yield (
@@ -91,6 +120,14 @@ class AIProvider(ABC):
                 "ตรวจสอบว่า AI_API_KEY ตรงกับ provider/url ใน ai.config.json หรือไม่ "
                 "(provider ปัจจุบันดูได้ที่ GET /health) — key ต้องเป็นของ gateway "
                 "ตาม url ใน ai.config.json เท่านั้น"
+            )
+            return
+        if not emitted:
+            # stream ended with zero content (reasoning ate the budget, or the
+            # gateway dropped the text) — one retry via the non-stream endpoint
+            reply = await self.chat(messages, temperature)
+            yield reply or (
+                "[AI ERROR] โมเดลไม่ส่งข้อความกลับ (empty completion) — ลองถามใหม่อีกครั้ง"
             )
 
 
@@ -114,11 +151,11 @@ class DeepSeekProvider(AIProvider):
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
                         "temperature": temperature,
-                        "max_tokens": 1024,
+                        "max_tokens": 2048,
                     },
                 )
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+                return self._extract(resp.json())
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             return (
                 f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
@@ -147,11 +184,11 @@ class GLMProvider(AIProvider):
                         "model": self.model,
                         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
                         "temperature": temperature,
-                        "max_tokens": 1024,
+                        "max_tokens": 2048,
                     },
                 )
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+                return self._extract(resp.json())
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             return (
                 f"[AI ERROR] เรียก {self.name} API ไม่สำเร็จ ({exc.__class__.__name__}). "
