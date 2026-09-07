@@ -1,0 +1,9 @@
+provider=deepseek model=omen-alpha
+base_url=https://opencode.ai/zen/go/v1
+config OK (base_url clean)
+provider class=DeepSeekProvider name=deepseek
+--- chat() 5.5s ---
+ระวังความผันผวนแรงจากข้อมูลเศรษฐกิจสหรัฐ/เสียง Fed ที่ดันดอกเบี้ยยีลด์ จึงควรลดขนาดโพซิชันและตั้ง SL ให้แน่นหนาครับ
+--- chat_stream() 5.8s ---
+ระวังความผันผวนแรงช่วงข่าวเศรษฐกิจสหรัฐ/เสียง Fed ที่ดันดอลลาร์และบอนด์ไทเลอร์ ซึ่งอาจทำให้ทองสวิงแหลมทั้งสองทิศทาง จึงควรลดขนาดโพซิชันและตั้ง SL ให้แน่น
+ALL OK — omen-alpha chat + stream both return content

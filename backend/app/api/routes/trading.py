@@ -775,6 +775,151 @@ async def close_all_positions(payload: CloseAllRequest,
         if closed or failed else "ไม่มีไม้ที่เปิดค้างอยู่")
 
 
+# ------------------------------------------------------------- close group
+class CloseGroupRequest(BaseModel):
+    """ปิดไม้เป็นกลุ่มตามผลลัพธ์ (monitor ปิดกำไร/ปิดขาดทุน buttons)."""
+    confirm: bool = False
+    # "profit" = ปิดเฉพาะไม้ที่กำไร, "loss" = เฉพาะไม้ที่ขาดทุน
+    group: str = "profit"
+    close_reason: str = "close_group"
+
+
+@router.post("/positions/close-group", response_model=CloseAllResult)
+async def close_group_positions(payload: CloseGroupRequest,
+                                request: Request) -> CloseAllResult:
+    """Close open paper positions filtered by unrealized result.
+
+    Same flow as close-all (live mark → broker close → PnL → journal →
+    signal_log → one LINE summary) but only for tickets whose live mark
+    puts them in profit (group="profit") or loss (group="loss").
+    """
+    import logging
+    from types import SimpleNamespace
+
+    from app.services.notification_service import NotificationService
+
+    log = logging.getLogger(__name__)
+    db = request.app.state.db
+    broker = request.app.state.broker
+
+    if not payload.confirm:
+        return CloseAllResult(ok=False, closed=0, failed=0,
+                              message="ต้องยืนยัน (confirm=true) ก่อนปิดกลุ่ม")
+    if payload.group not in ("profit", "loss"):
+        return CloseAllResult(ok=False, closed=0, failed=0,
+                              message="group ต้องเป็น 'profit' หรือ 'loss'")
+
+    open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+    if not open_rows:
+        return CloseAllResult(ok=True, closed=0, failed=0,
+                              message="ไม่มีไม้ที่เปิดค้างอยู่")
+
+    # one live-mark batch for all assets — needed BEFORE filtering so the
+    # profit/loss split uses the same mark the close will settle at
+    assets = sorted({str(r.get("asset") or "").upper() for r in open_rows})
+    marks: dict[str, float] = {}
+    try:
+        marks, _failures = await _spot_prices(assets)
+    except Exception as exc:
+        log.warning("close-group: live marks unavailable: %s", exc)
+
+    def _mark_for(row: dict) -> float:
+        asset = str(row.get("asset") or "").upper()
+        px = float(marks.get(asset) or 0)
+        return px
+
+    def _unrealized(row: dict) -> float:
+        """Unrealized PnL sign-proxy at the live mark (0 = no mark → skip)."""
+        m = _mark_for(row)
+        if not m:
+            return 0.0
+        entry = float(row.get("entry_price") or 0)
+        direction = str(row.get("direction") or "").upper()
+        if entry <= 0:
+            return 0.0
+        diff = m - entry
+        return diff if direction == "BUY" else -diff
+
+    # filter by unrealized result at the live mark (rows without a mark are
+    # excluded from both groups to avoid closing on stale data)
+    if payload.group == "profit":
+        targets = [r for r in open_rows if _unrealized(r) > 0]
+    else:
+        targets = [r for r in open_rows if _unrealized(r) < 0]
+    if not targets:
+        label = "กำไร" if payload.group == "profit" else "ขาดทุน"
+        return CloseAllResult(ok=True, closed=0, failed=0,
+                              message=f"ไม่มีไม้ที่{label}อยู่")
+
+    results: list[dict] = []
+    closed = failed = 0
+    total_pnl = 0.0
+    for row in targets:
+        ticket = str(row.get("ticket") or "")
+        asset = str(row.get("asset") or "").upper()
+        entry = float(row.get("entry_price") or 0)
+        exit_price = float(marks.get(asset) or 0)
+        if not exit_price:
+            try:
+                exit_price = float(await broker.mark_price(ticket))
+            except Exception:
+                exit_price = 0.0
+        if not exit_price:
+            try:
+                exit_price = float(await broker.quote(asset))
+            except Exception:
+                exit_price = 0.0
+        if not exit_price:
+            exit_price = entry  # last resort: flat PnL
+
+        result = await broker.close_position(ticket)
+        if not result.ok:
+            failed += 1
+            results.append({"ticket": ticket, "asset": asset, "ok": False,
+                            "message": result.message})
+            continue
+
+        pos = SimpleNamespace(
+            direction=str(row.get("direction") or "BUY").upper(),
+            current_price=exit_price, entry_price=entry,
+            volume=float(row.get("volume") or 0), asset=asset)
+        pnl = round(execution.PaperBrokerPnl.compute(pos), 2)
+        execution.close_trade_rows(db, ticket, exit_price, pnl,
+                                   payload.close_reason)
+        signal_log.log_event(
+            db=db, event="closed", asset=asset,
+            direction=str(row.get("direction") or ""), entry=entry,
+            exit_price=exit_price, pnl=pnl, ticket=ticket, source="user",
+            reason=f"ปิด{'กำไร' if payload.group == 'profit' else 'ขาดทุน'} ({payload.close_reason}) @ {exit_price:g}")
+        total_pnl += pnl
+        closed += 1
+        results.append({"ticket": ticket, "asset": asset, "ok": True,
+                        "pnl": pnl, "exit_price": exit_price})
+
+    warnings: list[str] = []
+    try:
+        notifier = NotificationService(db, request.app.state.line)
+        label = "Close Profit" if payload.group == "profit" else "Close Loss"
+        await notifier.notify(
+            "", "trade_closed",
+            f"✋ {label}\nปิด {closed} ไม้ (ล้มเหลว {failed}) — "
+            f"PnL รวม {total_pnl:+,.2f} USD",
+        )
+        warnings.append("notify ok")
+    except Exception as exc:
+        warnings.append(f"notify failed: {exc}")
+
+    log.info("close-group(%s): closed=%d failed=%d pnl=%.2f",
+             payload.group, closed, failed, total_pnl)
+    return CloseAllResult(
+        ok=failed == 0, closed=closed, failed=failed,
+        total_pnl=round(total_pnl, 2), results=results,
+        message=(f"ปิด{'กำไร' if payload.group == 'profit' else 'ขาดทุน'}แล้ว "
+                 f"{closed} ไม้ (ล้มเหลว {failed}) — "
+                 f"PnL รวม {total_pnl:+,.2f} USD")
+        if closed or failed else "ไม่มีไม้ที่เปิดค้างอยู่")
+
+
 # ------------------------------------------------------------- equity curve
 @router.get("/equity-curve")
 async def equity_curve(request: Request, days: int = 90) -> dict:

@@ -684,6 +684,122 @@ class TestClosePosition:
 
 
 # ---------------------------------------------------------------------------
+# /api/trading/positions/close-group — ปิดกำไร/ปิดขาดทุน (monitor buttons)
+# ---------------------------------------------------------------------------
+class TestCloseGroup:
+    def _rows(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        return [
+            {  # BUY in profit at mark 1.095
+                "id": "row-1", "ticket": "PAPER-000001", "asset": "EURUSD",
+                "direction": "buy", "volume": 0.01, "entry_price": 1.08500,
+                "status": "open", "source": "auto",
+                "created_at": now.isoformat(),
+            },
+            {  # BUY in loss at mark 1.095
+                "id": "row-2", "ticket": "PAPER-000002", "asset": "GBPUSD",
+                "direction": "buy", "volume": 0.01, "entry_price": 1.10500,
+                "status": "open", "source": "auto",
+                "created_at": now.isoformat(),
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_profit_group_closes_only_winners(self, monkeypatch):
+        """group=profit → only the winning ticket is closed, loser untouched."""
+        import app.api.routes.trading as trading_route
+
+        rows = self._rows()
+        db = FakeDatabase(rows={"paper_trades": rows})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            # EURUSD above entry (profit), GBPUSD below entry (loss)
+            return {"EURUSD": 1.09500, "GBPUSD": 1.09500}, {}
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        body = (await call("POST", "/api/trading/positions/close-group",
+                           {"confirm": True, "group": "profit"})).json()
+        assert body["ok"] is True
+        assert body["closed"] == 1
+        assert body["failed"] == 0
+        assert body["results"][0]["ticket"] == "PAPER-000001"
+        assert body["total_pnl"] > 0
+        assert rows[0]["status"] == "closed"
+        assert rows[1]["status"] == "open"   # losing row untouched
+
+    @pytest.mark.asyncio
+    async def test_loss_group_closes_only_losers(self, monkeypatch):
+        """group=loss → only the losing ticket is closed (cut loss)."""
+        import app.api.routes.trading as trading_route
+
+        rows = self._rows()
+        db = FakeDatabase(rows={"paper_trades": rows})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.09500, "GBPUSD": 1.09500}, {}
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        body = (await call("POST", "/api/trading/positions/close-group",
+                           {"confirm": True, "group": "loss"})).json()
+        assert body["ok"] is True
+        assert body["closed"] == 1
+        assert body["results"][0]["ticket"] == "PAPER-000002"
+        assert body["total_pnl"] < 0
+        assert rows[0]["status"] == "open"   # winning row untouched
+        assert rows[1]["status"] == "closed"
+
+    @pytest.mark.asyncio
+    async def test_requires_confirm(self):
+        db = FakeDatabase(rows={"paper_trades": self._rows()})
+        set_state(db)
+        body = (await call("POST", "/api/trading/positions/close-group",
+                           {"group": "profit"})).json()
+        assert body["ok"] is False
+        assert "confirm" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_empty_group_returns_message(self, monkeypatch):
+        """No losing rows → ok with message, nothing closed."""
+        import app.api.routes.trading as trading_route
+
+        rows = [r for r in self._rows() if r["ticket"] == "PAPER-000001"]
+        db = FakeDatabase(rows={"paper_trades": rows})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.09500}, {}  # only profit rows exist
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        body = (await call("POST", "/api/trading/positions/close-group",
+                           {"confirm": True, "group": "loss"})).json()
+        assert body["ok"] is True
+        assert body["closed"] == 0
+        assert "ไม่มีไม้ที่ขาดทุน" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_no_marks_closes_nothing(self, monkeypatch):
+        """Feed down → no marks → no group assignment → nothing closed."""
+        import app.api.routes.trading as trading_route
+
+        rows = self._rows()
+        db = FakeDatabase(rows={"paper_trades": rows})
+        set_state(db)
+
+        async def dead_spot(assets, **_kw):
+            return {}, {"EURUSD": "x", "GBPUSD": "x"}
+
+        monkeypatch.setattr(trading_route, "_spot_prices", dead_spot)
+        body = (await call("POST", "/api/trading/positions/close-group",
+                           {"confirm": True, "group": "profit"})).json()
+        assert body["ok"] is True
+        assert body["closed"] == 0
+        assert rows[0]["status"] == "open"
+        assert rows[1]["status"] == "open"
+
+
+# ---------------------------------------------------------------------------
 # /api/trading/stats/reset — 🗑 รีเซ็ตสถิติ (monitor page)
 # ---------------------------------------------------------------------------
 class TestStatsReset:

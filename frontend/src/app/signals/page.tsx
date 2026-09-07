@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import AiAdvicePanel from "@/components/AiAdvicePanel";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -172,6 +173,8 @@ export default function SignalsPage() {
       )}
       {/* สถานะฟีดราคา — ทุกการ์ดแชร์ probe เดียวกันต่อ request */}
       <FeedStatusBanner feed={signals[0]?.feed_status} />
+      {/* คำแนะนำจาก AI — สรุปสัญญาณที่แสดงตอนนี้เป็นภาษาคน (stream จาก /api/chat/stream) */}
+      <AiAdvicePanel signals={[...pending, ...approved]} />
       {!signals.length && !error && !loading && (
         <p className="text-slate-500 text-sm">
           {session?.market_closed

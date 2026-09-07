@@ -1,0 +1,12 @@
+health 200: {"status":"ok","platform":"AI Wealth & Trading Advisor","deployment":"render","workers":"running","jobs":["portfolio_monitor","notifications","auto_trader","position_guard","market_scanner","news_analysis","daily_digest","calendar_sync"],"db":"ok","db_detail":"connected","ai":"deepseek"}
+--- /api/chat 200 in 11.1s ---
+{"reply":"**สถานะ: ห้ามเปิดออเดอร์ใหม่ — ระบบ PAUSE อยู่**\n\n1. **ความเสี่ยงวิกฤต**: Drawdown 37.12% เกินลิมิต 10% มาก → Kill Switch ทำงาน ต้องรีวิวด้วยตนเองก่อน\n2. **พอร์ต**: Equity 63.51 จากทุน 101 (uPnL -39.63) มี 11 ออเดอร์เปิดค้าง — หลายตัวซ้ำ (EURUSD/AUDUSD 5 คู่ซ้ำ) ถือว่า overexposure\n3. **ตลาด**: Bull trend แข็งแรง AUDUSD โอกาส 75/100 สูงสุด — แต่โอกาสดีไม่มีความหมายถ้าควบคุมความเสี่ยงไม่ได้\n4. **สิ่งที่ควรทำ**: รีวิวสถานะ XAUUSD BUY @4521 (ขาดทุน -45.10) และพิจารณาปิดออเดอร์ซ้ำเพื่อลด exposure\n\n**สรุป: WAIT — แก้ปัญหา drawdown และลดสถานะก่อน ห้ามเทรดเพิ่มเด็ดขาด**","grounded_on":["market_condition","risk_analysis","opportunity_score","portfolio_status","open_orders","recent_orders"]}
+--- /api/chat/stream 200 in 26.1s ---
+**ทอง (XAUUSD): อัปเทรนด์ แต่โอกาสต่ำ — ห้ามเพิ่มไม้**
+
+1. สถานะตลาด: ทองแนวโน้มขาขึ้น แต่ Opportunity Score แค่ 49/100 (ต่ำกว่า AUDUSD 75) — โมเมนตัมไม่ชัดพอสำหรับเข้าใหม่
+2. พอร์ตวิกฤต: Drawdown 37.12% เกินลิมิต 10% → ระบบ PAUSE การเทรดทั้งหมด ต้องรีวิวด้วยตัวเองก่อน
+3. ไม้ทองที่ถืออยู่: 1 ไม้คือคุ้มทุน (4476.6), อีกไม้ขาดทุนลอย -45.10 USD — ควรพิจารณาตัดทุน/ลดขนาดตามแผน SL ที่วางไว้
+4. ข้อควรระวัง: อย่าเทียบชนะไม้ใหม่เพื่อ "แชร์" ขาดทุน — เสี่ยงพังพอร์ต
+
+**สรุป: WAIT — แก้ไม้ทองที่ขาดทุนก่อน แล้วค่อยกลับมาเทรด**

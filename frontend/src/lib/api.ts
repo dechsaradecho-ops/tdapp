@@ -162,6 +162,10 @@ export const api = {
 
   tradingKillSwitch: () => get<KillSwitch>("/api/trading/kill-switch"),
 
+  // GET /api/trading/equity-curve — กราฟมูลค่าพอร์ตรายวัน (performance page)
+  equityCurve: (days = 90) =>
+    get<EquityCurve>(`/api/trading/equity-curve?days=${days}`),
+
   tradingJournal: (days = 30) =>
     get<JournalAnalysis>(`/api/trading/journal?days=${days}`),
 
@@ -207,10 +211,11 @@ export const api = {
     post<CloseAllResult>("/api/trading/positions/close-all",
       { confirm: true, close_reason }),
 
-  // GET /api/trading/equity-curve — equity snapshots chart (performance page)
-  equityCurve: (days = 90) =>
-    get<EquityCurve>(`/api/trading/equity-curve?days=${days}`),
-
+    // POST /api/trading/positions/close-group — ปิดเฉพาะกลุ่มไม้ที่กำไร
+    // (group="profit") หรือขาดทุน (group="loss") — monitor ปุ่มปิดกำไร/ปิดขาดทุน
+    closeGroup: (group: "profit" | "loss", close_reason = "close_group") =>
+      post<CloseAllResult>("/api/trading/positions/close-group",
+        { confirm: true, group, close_reason }),
   // GET /api/trading/signal-report — win rate by asset/band/regime
   signalReport: (days = 30) =>
     get<SignalReport>(`/api/trading/signal-report?days=${days}`),

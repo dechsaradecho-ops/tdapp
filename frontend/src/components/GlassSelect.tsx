@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-export type GlassOption = { value: string; label: string };
+/**
+ * ตัวเลือกของ GlassSelect — label เป็น ReactNode ได้ (เช่น ใส่ badge %,
+ * ไอคอน ฯลฯ) แต่ trigger label ที่โชว์ตอนปิด ใช้ plainLabel แทนเพื่อไม่ให้
+ * ปุ่ม trigger บวม (rich label มีไว้เฉพาะตอนกางรายการ)
+ */
+export type GlassOption = { value: string; label: React.ReactNode; /** ข้อความล้วนโชว์ที่ trigger (default: strip จาก label) */ plainLabel?: string };
 
 /** จริง ๆ แล้ว <640px — ตรงกับ breakpoint sm ของ Tailwind */
 function useIsMobile() {
@@ -52,6 +57,9 @@ export default function GlassSelect({
   const isMobile = useIsMobile();
 
   const current = options.find((o) => o.value === value) ?? options[0];
+  // trigger ใช้ plainLabel ถ้ามี — rich JSX label (badge ฯลฯ) เอาไว้โชว์เฉพาะใน popup
+  const currentText = current?.plainLabel
+    ?? (typeof current?.label === "string" ? current.label : "");
 
   // คลิกนอกกล่อง → ปิด (ปิดเฉพาะ target ที่ “ไม่ใช่” popup/scrim — มือถือ
   // popup ถูก portal ไป body จึงต้องเช็ค closest ด้วย ไม่งั้นคลิก item = ปิดก่อนเลือก)
@@ -131,7 +139,7 @@ export default function GlassSelect({
         className="glass-select-trigger w-full flex items-center justify-between gap-2 text-left"
       >
         <span className={`truncate ${current ? "" : "text-slate-500"}`}>
-          {current?.label ?? placeholder ?? ""}
+          {currentText || placeholder || ""}
         </span>
         <svg
           className={`shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`}

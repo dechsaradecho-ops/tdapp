@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
@@ -65,7 +66,6 @@ export default function MonitorPage() {
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetMsg, setResetMsg] = useState("");
-  const [closingAll, setClosingAll] = useState(false);
   const [closeAllMsg, setCloseAllMsg] = useState("");
   // Risk Engine Status (จากหน้า /risk เดิม — รวมเข้ามอนิเตอร์ตามแผนจัดเมนูใหม่)
   const [risk, setRisk] = useState<RiskStatus | null>(null);
@@ -185,31 +185,38 @@ export default function MonitorPage() {
     }
   };
 
-  // ปิดทั้งหมด — ปิดไม้เปิดค้างทุกไม้ในครั้งเดียว (confirm ก่อนยิง)
-  const handleCloseAll = async () => {
-    if (closingAll) return;
+  // ปิดไม้เป็นกลุ่ม (ทั้งหมด/กำไร/ขาดทุน) — เปิด popup สรุปก่อนเสมอ
+  // (ผู้ใช้ขอ 2026-09-07: ปุ่ม 3 ปุ่ม + popup สรุปก่อนยิง แทน window.confirm)
+  const [groupMode, setGroupMode] = useState<CloseGroupMode | null>(null);
+  const [groupBusy, setGroupBusy] = useState(false);
+  const [groupError, setGroupError] = useState("");
+
+  const openGroupModal = (mode: CloseGroupMode) => {
     const openCount = snap?.stats.open_positions ?? 0;
     if (openCount === 0) {
       setCloseAllMsg("ไม่มีไม้ที่เปิดค้างอยู่");
       return;
     }
-    const ok = window.confirm(
-      `ปิดไม้ทั้งหมด ${openCount} ไม้?\n\n` +
-      "• ปิดทุกไม้ที่ราคาปัจจุบัน (mark price)\n" +
-      "• PnL แต่ละไม้ถูกบันทึกลงสมุดรายวัน\n" +
-      "• ทำแล้วย้อนกลับไม่ได้");
-    if (!ok) return;
-    setClosingAll(true);
-    setCloseAllMsg("");
+    setGroupError("");
+    setGroupMode(mode);
+  };
+
+  const confirmCloseGroup = async () => {
+    if (!groupMode || groupBusy) return;
+    setGroupBusy(true);
+    setGroupError("");
     try {
-      const res = await api.closeAll();
+      const res = groupMode === "all"
+        ? await api.closeAll()
+        : await api.closeGroup(groupMode);
+      setGroupMode(null);
       setCloseAllMsg(res.message ||
-        (res.ok ? `ปิดแล้ว ${res.closed} ไม้` : "ปิดทั้งหมดไม่สำเร็จ"));
+        (res.ok ? `ปิดแล้ว ${res.closed} ไม้` : "ปิดไม่สำเร็จ"));
       await load();
     } catch (e) {
-      setCloseAllMsg(e instanceof Error ? e.message : String(e));
+      setGroupError(e instanceof Error ? e.message : String(e));
     } finally {
-      setClosingAll(false);
+      setGroupBusy(false);
     }
   };
 
@@ -290,10 +297,20 @@ export default function MonitorPage() {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h2 className="panel-title">สถิติการเทรด</h2>
           <div className="flex items-center gap-2">
-            <button onClick={handleCloseAll} disabled={closingAll}
+            <button onClick={() => openGroupModal("all")} disabled={groupBusy}
               className="bg-loss text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
               title="ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน">
-              {closingAll ? "กำลังปิด..." : "ปิดทั้งหมด"}
+              ปิดทั้งหมด
+            </button>
+            <button onClick={() => openGroupModal("profit")} disabled={groupBusy}
+              className="bg-profit text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
+              title="ปิดเฉพาะไม้ที่กำไร (ที่ราคาปัจจุบัน)">
+              ปิดกำไร
+            </button>
+            <button onClick={() => openGroupModal("loss")} disabled={groupBusy}
+              className="border border-loss text-loss font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:bg-loss/10"
+              title="ปิดเฉพาะไม้ที่ขาดทุน (cut loss ทั้งกลุ่ม)">
+              ปิดขาดทุน
             </button>
             <button onClick={handleResetStats} disabled={resetting}
               className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
@@ -532,6 +549,15 @@ export default function MonitorPage() {
 
       {/* ---------- Popup สรุปผลการปิดไม้ ---------- */}
       <ClosePositionModal result={closeResult} onClose={() => setCloseResult(null)} />
+      {/* ---------- Popup สรุปก่อนปิดเป็นกลุ่ม (ทั้งหมด/กำไร/ขาดทุน) ---------- */}
+      <CloseGroupModal
+        mode={groupMode}
+        positions={snap?.open_positions ?? []}
+        busy={groupBusy}
+        errorMsg={groupError}
+        onConfirm={confirmCloseGroup}
+        onClose={() => { if (!groupBusy) setGroupMode(null); }}
+      />
       </>
       )}
     </div>

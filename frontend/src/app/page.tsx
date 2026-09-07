@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import AutoTradeReadinessCard from "@/components/AutoTradeReadinessCard";
 import GoalForm from "@/components/GoalForm";
+import GlassSelect from "@/components/GlassSelect";
 import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
 import { api } from "@/lib/api";
@@ -46,6 +47,37 @@ export default function DashboardPage() {
   const confByAsset = new Map(
     (summary?.opportunities ?? []).map((o) => [o.asset, o.score]),
   );
+  // dropdown options — เรียง confidence มาก → น้อย (fallback ที่ยังไม่มีคะแนน
+  // ไปอยู่ท้ายสุด), badge % สีตามเกณฑ์เดียวกับ OpportunityScore
+  const tradableSet = settings?.allowed_assets?.length
+    ? new Set(settings.allowed_assets) : null;
+  const symbolOptions = symbolList
+    .map((a) => {
+      const conf = confByAsset.get(a);
+      const tradable = !tradableSet || tradableSet.has(a);
+      return {
+        value: a,
+        plainLabel: conf != null ? `${a} · ${conf.toFixed(0)}%` : a,
+        label: (
+          <span className="inline-flex items-center gap-1.5">
+            {a}
+            {conf != null && (
+              <span className={`text-xs font-bold ${scoreColor(conf)}`}>
+                {conf.toFixed(0)}%
+              </span>
+            )}
+            {!tradable && (
+              <span className="text-[10px] text-slate-500 border border-white/10 rounded px-1">ดูอย่างเดียว</span>
+            )}
+          </span>
+        ),
+      };
+    })
+    .sort((x, y) => {
+      const cx = confByAsset.get(x.value) ?? -1;
+      const cy = confByAsset.get(y.value) ?? -1;
+      return cy - cx;
+    });
 
   return (
     <div className="space-y-6">
@@ -91,27 +123,18 @@ export default function DashboardPage() {
 
       <section className="grid md:grid-cols-3 gap-4">
         <div className="panel md:col-span-2">
-          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น, badge Confidence % ต่อสัญลักษณ์
-              ตัวที่ไม่ได้อยู่ใน allowed_assets แสดง "ดูอย่างเดียว" (ประเมินแต่ไม่เข้าระบบสัญญาณ/เทรด) */}
-          <div className="flex flex-wrap gap-2 mb-3">
-            {symbolList.map((a) => {
-              const conf = confByAsset.get(a);
-              const tradable = !settings?.allowed_assets?.length || settings.allowed_assets.includes(a);
-              return (
-                <button key={a} onClick={() => setSelected(a)}
-                  className={`px-3 py-2 min-h-[40px] rounded-xl text-sm border inline-flex items-center gap-1.5 ${selected === a ? "border-accent text-accent bg-accent/10" : "border-white/15 bg-white/[0.04] text-slate-400 active:bg-white/10"}`}>
-                  {a}
-                  {conf != null && (
-                    <span className={`text-xs font-bold ${selected === a ? "" : scoreColor(conf)}`}>
-                      {conf.toFixed(0)}%
-                    </span>
-                  )}
-                  {!tradable && (
-                    <span className="text-[10px] text-slate-500 border border-white/10 rounded px-1">ดูอย่างเดียว</span>
-                  )}
-                </button>
-              );
-            })}
+          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น
+              เดิมเป็น chip 28 ปุ่มเล็มพื้นที่หน้าจอมาก (ผู้ใช้ขอ 2026-09-07) →
+              dropdown เดียว + เรียงตาม confidence มาก → น้อย
+              GlassSelect รับ label เป็น JSX ได้แล้ว (badge % สีตามเกณฑ์) */}
+          <div className="mb-3">
+            <GlassSelect
+              value={selected}
+              onChange={setSelected}
+              className="w-full md:max-w-xs"
+              ariaLabel="เลือกสัญลักษณ์"
+              options={symbolOptions}
+            />
           </div>
           <TradingViewChart symbol={tvSymbol(selected)} />
         </div>
