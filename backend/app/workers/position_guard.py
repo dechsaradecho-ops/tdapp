@@ -144,6 +144,13 @@ async def _manage_position(db, broker, pos: Position, price: float,
                 if result.ok:
                     pos.stop_loss = round(new_sl, 5)
                     out["moved_sl"] = True
+                    # Persist the move back to the journal row — otherwise the
+                    # monitor kept showing the ORIGINAL SL forever (migration
+                    # 021 powers the "SL ถูกขยับ" badge on the monitor page).
+                    execution.persist_sl_move(
+                        db, str(pos.ticket or ""), pos.stop_loss,
+                        "breakeven" if abs(pos.stop_loss - pos.entry_price) < 1e-9
+                        else "trailing")
                     signal_log.log_event(
                         db=db, event="order_opened", asset=str(pos.asset or ""),
                         direction=str(pos.direction or ""),

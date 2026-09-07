@@ -491,6 +491,13 @@ export interface MonitorOpenPosition {
   unrealized_pnl: number;
   source: string;
   created_at: string | null;
+  /** SL/TP move tracking (migration 021) — badge + tooltip on monitor. */
+  initial_stop_loss: number | null;
+  initial_take_profit: number | null;
+  sl_moved_at: string | null;
+  sl_move_reason: string;
+  tp_moved_at: string | null;
+  tp_move_reason: string;
 }
 
 /** One execution-journal row (open, closed or rejected). */

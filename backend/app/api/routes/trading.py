@@ -434,6 +434,90 @@ async def close_position(payload: ClosePositionRequest,
     )
 
 
+# ------------------------------------------------- manual SL/TP level adjust
+class AdjustLevelsRequest(BaseModel):
+    """Manual SL/TP adjust (monitor page). At least one level required."""
+    ticket: str
+    stop_loss: float | None = None
+    take_profit: float | None = None
+
+
+@router.post("/positions/levels")
+async def adjust_levels(payload: AdjustLevelsRequest, request: Request) -> dict:
+    """Manually move SL and/or TP of ONE open position (monitor page).
+
+    Mirrors the guard's SL move path: broker modify → persist_sl_move /
+    persist_tp_move (journal + move metadata, migration 021) → lifecycle log
+    → LINE notify. The monitor page badges cells whose value differs from
+    the initial levels and tooltips the move details.
+    """
+    import logging
+    from app.services.notification_service import NotificationService
+
+    log = logging.getLogger(__name__)
+    db = request.app.state.db
+    broker = request.app.state.broker
+    ticket = payload.ticket.strip()
+
+    if payload.stop_loss is None and payload.take_profit is None:
+        return {"ok": False, "message": "ระบุ SL หรือ TP ใหม่อย่างน้อยหนึ่งค่า"}
+
+    rows = db.select("paper_trades", filters={"ticket": ticket, "status": "open"},
+                     limit=1)
+    if not rows:
+        return {"ok": False,
+                "message": f"ไม่พบไม้ที่เปิดอยู่กับ ticket {ticket}"}
+    row = rows[0]
+    asset = str(row.get("asset") or "")
+
+    moved: list[str] = []
+    errors: list[str] = []
+
+    if payload.stop_loss is not None:
+        result = await broker.modify_stop_loss(ticket, float(payload.stop_loss))
+        if result.ok:
+            execution.persist_sl_move(db, ticket, float(payload.stop_loss),
+                                      "manual (monitor)")
+            moved.append(f"SL {payload.stop_loss:g}")
+        else:
+            errors.append(f"SL: {result.message}")
+
+    if payload.take_profit is not None:
+        result = await broker.modify_take_profit(ticket, float(payload.take_profit))
+        if result.ok:
+            execution.persist_tp_move(db, ticket, float(payload.take_profit),
+                                      "manual (monitor)")
+            moved.append(f"TP {payload.take_profit:g}")
+        else:
+            errors.append(f"TP: {result.message}")
+
+    if not moved:
+        return {"ok": False, "message": "; ".join(errors) or "ปรับระดับไม่สำเร็จ"}
+
+    reason = f"ปรับด้วยมือจากหน้า monitor → {' · '.join(moved)}"
+    signal_log.log_event(
+        db=db, event="order_opened", asset=asset,
+        direction=str(row.get("direction") or ""),
+        entry=float(row.get("entry_price") or 0),
+        stop_loss=float(payload.stop_loss) if payload.stop_loss is not None else None,
+        take_profit=float(payload.take_profit) if payload.take_profit is not None else None,
+        ticket=ticket, source="auto", reason=reason)
+
+    try:
+        notifier = NotificationService(db, request.app.state.line)
+        await notifier.notify(
+            str(row.get("user_id") or "demo"), "trade_opened",
+            f"🔧 Levels Adjusted\nAsset: {asset}\n"
+            f"{'\n'.join(moved)}\nTicket: {ticket}")
+    except Exception as exc:
+        log.debug("levels-adjust notify failed: %s", exc)
+
+    message = f"ปรับ{' และ '.join(moved)} เรียบร้อย"
+    if errors:
+        message += f" (บางส่วนไม่สำเร็จ: {'; '.join(errors)})"
+    return {"ok": True, "message": message, "moved": moved, "errors": errors}
+
+
 # ----------------------------------------------------------------- stats reset
 class StatsResetRequest(BaseModel):
     confirm: bool = False

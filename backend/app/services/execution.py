@@ -158,10 +158,53 @@ def set_pause(db, paused: bool, reason: str = "") -> PauseStatus:
 # ---------------------------------------------------------------------------
 def record_trade(db, trade: dict[str, Any]) -> None:
     """Insert one execution row into paper_trades (never raises)."""
+    # Snapshot the levels the position was OPENED with — the monitor page
+    # compares current SL/TP against these to badge moved levels (migration
+    # 021). Missing keys (legacy callers/tests) just stay None.
+    trade.setdefault("initial_stop_loss", trade.get("stop_loss"))
+    trade.setdefault("initial_take_profit", trade.get("take_profit"))
     try:
         db.insert("paper_trades", trade)
     except Exception as exc:  # pragma: no cover — Database.insert already swallows
         log.error("record_trade failed: %s", exc)
+
+
+def persist_sl_move(db, ticket: str, new_sl: float, reason: str) -> None:
+    """Write a guard SL move back to the open paper_trades row.
+
+    The guard moves the SL on the broker book (breakeven → trailing), but
+    without this write the journal kept the ORIGINAL stop_loss — the monitor
+    showed a stale SL and there was no way to badge "SL ถูกขยับ" (migration
+    021). Never raises: a failed write only costs the badge, never the trade.
+    """
+    try:
+        rows = db.select("paper_trades",
+                         filters={"ticket": str(ticket or ""), "status": "open"},
+                         limit=1)
+        if rows:
+            db.update("paper_trades", rows[0]["id"], {
+                "stop_loss": round(float(new_sl), 5),
+                "sl_moved_at": now_iso(),
+                "sl_move_reason": str(reason or "")[:200],
+            })
+    except Exception as exc:
+        log.error("persist_sl_move failed for %s: %s", ticket, exc)
+
+
+def persist_tp_move(db, ticket: str, new_tp: float, reason: str) -> None:
+    """Write a TP move back to the open paper_trades row (same as SL)."""
+    try:
+        rows = db.select("paper_trades",
+                         filters={"ticket": str(ticket or ""), "status": "open"},
+                         limit=1)
+        if rows:
+            db.update("paper_trades", rows[0]["id"], {
+                "take_profit": round(float(new_tp), 5),
+                "tp_moved_at": now_iso(),
+                "tp_move_reason": str(reason or "")[:200],
+            })
+    except Exception as exc:
+        log.error("persist_tp_move failed for %s: %s", ticket, exc)
 
 
 def close_trade_rows(db, ticket: str, exit_price: float, pnl: float,
@@ -697,6 +740,14 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             unrealized_pnl=unrealized,
             source=r.get("source", "auto"),
             created_at=_parse_dt(r.get("created_at")),
+            # SL/TP move tracking (migration 021) — the UI badges cells whose
+            # value differs from the level the position opened with.
+            initial_stop_loss=float(r["initial_stop_loss"]) if r.get("initial_stop_loss") is not None else None,
+            initial_take_profit=float(r["initial_take_profit"]) if r.get("initial_take_profit") is not None else None,
+            sl_moved_at=_parse_dt(r.get("sl_moved_at")),
+            sl_move_reason=str(r.get("sl_move_reason") or ""),
+            tp_moved_at=_parse_dt(r.get("tp_moved_at")),
+            tp_move_reason=str(r.get("tp_move_reason") or ""),
         ))
 
     recent = [MonitorTrade(

@@ -974,6 +974,43 @@ class TestPositionGuardManagement:
                                         settings=settings)
         assert all(m >= first - 1e-9 for m in moved)
 
+    @pytest.mark.asyncio
+    async def test_sl_move_persisted_to_journal(self, monkeypatch):
+        """A guard SL move must write stop_loss + move metadata back to the
+        open paper_trades row (migration 021) — the monitor page reads it to
+        badge the moved SL."""
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = self._db()
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
+        row = db.rows["paper_trades"][0]
+        assert row["stop_loss"] == pytest.approx(1.1000)  # breakeven = entry
+        assert row["sl_moved_at"]  # timestamp set
+        assert row["sl_move_reason"] == "breakeven"
+
+    @pytest.mark.asyncio
+    async def test_sl_move_not_persisted_when_modify_fails(self, monkeypatch):
+        """Broker rejects the move → journal row must stay untouched."""
+        from app.workers import position_guard
+        from app.integrations.brokers import OrderResult
+
+        async def reject(ticket, sl):
+            return OrderResult(ok=False, message="not supported")
+
+        broker = self._broker()
+        broker.modify_stop_loss = reject
+        db = self._db()
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
+        row = db.rows["paper_trades"][0]
+        assert row["stop_loss"] == 1.0900  # original
+        assert row.get("sl_moved_at") is None
+
 
 # ---------------------------------------------------------------------------
 # Portfolio monitor — breach → pause + notify + equity snapshots

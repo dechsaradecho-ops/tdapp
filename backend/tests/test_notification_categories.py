@@ -209,6 +209,117 @@ def test_dispatch_pending_skips_disabled_category():
 
 
 # ---------------------------------------------------------------------------
+# 3b. LINE delivery fix (prod 2026-09-07): trade_opened / trade_closed were
+# never delivered — the queue rejected the pseudo-user "demo" (uuid cast),
+# dispatch skipped empty-user rows, and push_line filtered line_users by the
+# same bogus uuid.
+# ---------------------------------------------------------------------------
+class UuidCastDB(SettingsDatabase):
+    """Mimics Postgres: notifications.user_id is a uuid FK — any non-uuid
+    string ('demo', 'u1') makes the insert fail; NULL passes."""
+
+    def insert(self, table, row):
+        if table == "notifications" and row.get("user_id") not in (None, ""):
+            return None  # Database.insert swallows the error
+        return super().insert(table, row)
+
+
+def test_trade_opened_pushes_immediately_and_marks_queue_sent():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify("u1", "trade_opened", "opened!"))
+    assert len(line.pushed) == 1                  # immediate push, no worker wait
+    rows = [r for t, r in db.inserted if t == "notifications"]
+    assert rows and rows[0]["status"] == "sent"   # worker must NOT re-deliver
+
+
+def test_trade_closed_pushes_immediately():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify("u1", "trade_closed", "closed!"))
+    assert len(line.pushed) == 1
+
+
+def test_failed_immediate_push_stays_pending_for_worker_retry():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    # no line_targets / line_users → push reaches nobody → ok=False
+
+    asyncio.run(svc.notify("u1", "trade_opened", "opened!"))
+    assert line.pushed == []
+    rows = [r for t, r in db.inserted if t == "notifications"]
+    assert rows and rows[0]["status"] == "pending"  # worker retries later
+
+
+def test_queue_notification_retries_without_bogus_user_id():
+    """The uuid-cast failure must not kill the row — retry once with
+    user_id stripped (NULL = broadcast to every enabled chat)."""
+    db = UuidCastDB()
+    app.state.db = db
+
+    from app.services.database import queue_notification
+    queue_notification(db, "demo", "trade_opened", "opened!")
+
+    rows = [r for t, r in db.inserted if t == "notifications"]
+    assert len(rows) == 1                         # retry succeeded
+    assert rows[0]["user_id"] is None             # bogus uuid stripped
+    assert rows[0]["status"] == "pending"
+
+
+def test_dispatch_pending_delivers_broadcast_rows():
+    """Rows with a NULL user_id are delivered, not skipped."""
+    from app.workers.notification_worker import dispatch_pending
+
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["notifications"] = [
+        {"id": "n1", "user_id": None, "type": "trade_opened",
+         "message": "opened", "status": "pending"},
+    ]
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    sent = asyncio.run(dispatch_pending(db, svc))
+    assert sent == 1
+    assert db.rows["notifications"][0]["status"] == "sent"
+
+
+def test_push_line_ignores_user_id_filter():
+    """push_line must reach enabled chats even with the pseudo-user id —
+    the old eq-filter on line_users.user_id silently matched nothing."""
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_users"] = [
+        {"id": "lu1", "user_id": "not-a-uuid", "line_user_id": "U-me",
+         "notification_enabled": True},
+        {"id": "lu2", "user_id": "not-a-uuid", "line_user_id": "U-off",
+         "notification_enabled": False},
+    ]
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    ok = asyncio.run(svc.push_line("demo", "hello"))
+    assert ok is True
+    assert {t for t, _ in line.pushed} == {"U-me", "grp1"}  # disabled skipped
+
+
+# ---------------------------------------------------------------------------
 # 4. Settings API round-trip for notify_* booleans
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

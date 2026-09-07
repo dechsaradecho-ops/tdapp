@@ -31,8 +31,9 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
     except Exception:
         settings = None
     for n in pending:
-        if not n.get("user_id"):
-            continue  # broadcast rows need a recipient resolution step
+        # NOTE: rows with a NULL user_id are delivered, not skipped — the
+        # queue strips user_id when the pseudo-user "demo" fails the uuid
+        # cast, and push_line targets every enabled chat anyway.
         # Re-check the category switch at delivery time (it may have been
         # turned off after the row was queued).
         if not category_enabled(settings, n.get("type", "")):

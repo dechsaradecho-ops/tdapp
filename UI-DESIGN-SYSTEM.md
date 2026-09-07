@@ -377,6 +377,14 @@ td .text-loss, td .text-red-400 {
 - **Monitor:** ตารางไม้ค้าง (Lots/Entry/ราคาปัจจุบัน/SL/TP/PnL) + ตารางประวัติ order (Lots/Entry/Exit/PnL) ใส่ `font-bold` ที่ td หรือ span ข้างใน
 - **Signals:** Field ใน SignalCard (`font-bold`), ราคาใน LimitLevels (`font-bold text-sm`), pill SL/TP เปลี่ยน `font-semibold` → `font-bold`, ตาราง SignalLogsPanel (confidence/entry/exit/volume) เป็น `font-mono font-bold`
 
+### 10.3 Badge "ระดับถูกขยับ" (SL/TP move indicator — monitor, 2026-09-07)
+
+- **จุดประสงค์:** บอกผู้ใช้ว่า SL/TP ของไม้ค้างถูกขยับจากค่าตั้งต้น (breakeven / trailing / ปรับมือ) — กดค้าง/ชี้เพื่อดู tooltip
+- **Pattern:** `<span title={...} className="ml-1 inline-flex cursor-help align-middle">` ครอบ `<Icon n="arrowsH" size={12} className="text-accent" />` — ไอคอนลูกศรซ้ายขวาเล็ก ๆ สี accent ต่อท้ายตัวเลข SL/TP
+- **Tooltip:** native `title` (ไม่ใช้ portal) — รูปแบบ `"SL ถูกขยับ: {initial} → {current}\nเมื่อ: {th-TH short}\nเหตุผล: {reasonLabel}"` (breakeven→"ทุนคืน (Breakeven)", trailing→"Trailing Stop", manual*→"ปรับด้วยมือ")
+- **เงื่อนไขแสดง:** `moved_at != null` **หรือ** `initial != null && |current - initial| > 1e-9` (กันกรณี migration 021 ยังไม่ apply → initial เป็น null แต่ค่าต่างกันจริง)
+- **Component:** `LevelMovedBadge` ใน `frontend/src/app/monitor/page.tsx` — return `null` เมื่อไม่ moved; ใช้ได้กับตารางอื่นที่มีค่าระดับเปลี่ยนแปลงตามเวลา
+
 ---
 
 ## 11. ตารางบนมือถือ

@@ -14,7 +14,8 @@ from app.services.database import Database, queue_notification
 
 log = logging.getLogger(__name__)
 
-CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news"}
+CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news",
+                  "trade_opened", "trade_closed"}
 
 # Cooldown for risk_warning: the portfolio monitor re-evaluates every minute,
 # so a standing breach would push an identical LINE alert once a minute.
@@ -78,11 +79,16 @@ class NotificationService:
             log.info("notify skipped (risk_warning cooldown %.0f min)",
                      RISK_WARNING_COOLDOWN_MIN)
             return
-        queue_notification(self.db, user_id, ntype, message)
-
-        if not is_critical:
-            return
-        await self.push_line(user_id, message)
+        # Critical types push immediately; the queue row is stamped 'sent'
+        # so worker #4 doesn't re-deliver the same message a minute later.
+        # A failed immediate push stays 'pending' — the worker retries it.
+        # Non-critical types queue as 'pending' — the worker is the sender.
+        if is_critical:
+            ok = await self.push_line(user_id, message)
+            queue_notification(self.db, user_id, ntype, message,
+                               status="sent" if ok else "pending")
+        else:
+            queue_notification(self.db, user_id, ntype, message)
 
     def _risk_warning_on_cooldown(self) -> bool:
         """True when a risk_warning row was already queued inside the window.
@@ -107,12 +113,17 @@ class NotificationService:
 
     async def push_line(self, user_id: str, message: str) -> bool:
         """Push to every enabled LINE target of the user: personal chats
-        (line_users) AND registered groups/rooms (line_targets)."""
+        (line_users) AND registered groups/rooms (line_targets).
+
+        GOTCHA (prod 2026-09-07): user_id is NOT used to filter line_users —
+        the column is a uuid FK but the app runs on the pseudo-user "demo",
+        so the eq-filter made PostgREST fail (swallowed by select) and
+        personal chats never received anything. The app is single-user:
+        every enabled chat gets every alert."""
         ok = False
-        line_users = self.db.select("line_users", filters={"user_id": user_id})
-        for lu in line_users:
-            if lu.get("notification_enabled"):
-                ok = await self.line.push(lu["line_user_id"], message) or ok
+        for lu in self.db.select("line_users",
+                                 filters={"notification_enabled": True}):
+            ok = await self.line.push(lu["line_user_id"], message) or ok
         for t in self.db.select("line_targets",
                                 filters={"notification_enabled": True}):
             ok = await self.line.push(t["target_id"], message) or ok

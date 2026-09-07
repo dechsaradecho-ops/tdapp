@@ -1184,6 +1184,15 @@ class MonitorOpenPosition(BaseModel):
     unrealized_pnl: float
     source: str = "auto"
     created_at: Optional[datetime] = None
+    # SL/TP move tracking (migration 021) — the monitor page badges cells
+    # whose value differs from the level the position was opened with and
+    # tooltips the details (original → current, when, why).
+    initial_stop_loss: Optional[float] = None
+    initial_take_profit: Optional[float] = None
+    sl_moved_at: Optional[datetime] = None
+    sl_move_reason: str = ""
+    tp_moved_at: Optional[datetime] = None
+    tp_move_reason: str = ""
 
 
 class MonitorTrade(BaseModel):

@@ -171,17 +171,28 @@ class Database:
 
 
 def queue_notification(db: Database, user_id: str, ntype: str, message: str,
-                       channel: str = "line") -> None:
+                       channel: str = "line", status: str = "pending") -> None:
     """Persist a notification row (worker #4 picks up pending rows).
 
     Disabled categories are skipped upstream in NotificationService.notify —
     so rows here always represent deliverable messages.
+
+    GOTCHA (prod 2026-09-07): notifications.user_id is a uuid FK but the app
+    runs on the pseudo-user "demo" — the uuid cast error killed EVERY queued
+    row silently (Database.insert swallows), so non-critical alerts
+    (trade_opened / trade_closed / daily_digest) never reached LINE. Retry
+    once with user_id stripped: the column is nullable and dispatch treats
+    NULL as broadcast-to-all-enabled-targets.
     """
-    db.insert("notifications", {
-        "user_id": user_id, "channel": channel, "type": ntype,
-        "message": message, "status": "pending",
+    row = {
+        "user_id": user_id or None, "channel": channel, "type": ntype,
+        "message": message, "status": status,
         # Explicit stamp — the risk_warning cooldown and the daily-digest
         # dedup read created_at back; don't depend on the DB default (fakes
         # in tests never fill it).
         "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if db.insert("notifications", row) is not None:
+        return
+    row["user_id"] = None  # uuid cast retry — see GOTCHA above
+    db.insert("notifications", row)

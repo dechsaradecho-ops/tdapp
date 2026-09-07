@@ -45,6 +45,14 @@ class FakeBroker:
     async def quote(self, asset: str) -> float:
         return 0.0
 
+    async def modify_stop_loss(self, ticket: str, stop_loss: float) -> object:
+        return SimpleNamespace(ok=True, broker_order_id=ticket,
+                               message=f"SL moved to {stop_loss:g}")
+
+    async def modify_take_profit(self, ticket: str, take_profit: float) -> object:
+        return SimpleNamespace(ok=True, broker_order_id=ticket,
+                               message=f"TP moved to {take_profit:g}")
+
 
 class FakeLine:
     async def push(self, user_id: str, message: str) -> None:

@@ -77,6 +77,13 @@ class Broker(ABC):
         """
         return OrderResult(ok=False, message="modify_stop_loss not supported")
 
+    async def modify_take_profit(self, ticket: str, take_profit: float) -> OrderResult:
+        """Move the TP of an open position (manual adjust from the monitor).
+
+        Default implementation: unsupported (real adapters override).
+        """
+        return OrderResult(ok=False, message="modify_take_profit not supported")
+
     async def partial_close(self, ticket: str, volume: float) -> OrderResult:
         """Close part of an open position (TP1 partial take-profit).
 
@@ -168,6 +175,15 @@ class PaperBroker(Broker):
         pos.stop_loss = float(stop_loss)
         return OrderResult(ok=True, broker_order_id=ticket,
                            message=f"SL moved to {stop_loss:g}")
+
+    async def modify_take_profit(self, ticket: str, take_profit: float) -> OrderResult:
+        """Move the TP of an open paper position (manual adjust)."""
+        pos = self._positions.get(ticket)
+        if pos is None:
+            return OrderResult(ok=False, message=f"unknown ticket {ticket}")
+        pos.take_profit = float(take_profit)
+        return OrderResult(ok=True, broker_order_id=ticket,
+                           message=f"TP moved to {take_profit:g}")
 
     async def partial_close(self, ticket: str, volume: float) -> OrderResult:
         """Close part of a paper position; the remainder keeps its ticket.
