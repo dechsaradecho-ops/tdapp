@@ -3,7 +3,7 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `67a2dfd`, verified 2026-09-07 — §10.1 pill แบบ component บนหน้า signals (SL/TP, ▲▼, BUY/SELL, PnL + tier badge เลข 1/2/3) · ก่อนหน้า: `a13eb36` verified 2026-09-06 (§15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด — 6 หมวด, migration 020 รันแล้ว — เดิมชื่อ 012 ถูก rename เพราะชนเบอร์กับ 012_min_confidence_gold)
+> สถานะล่าสุด: commit `2d76bca`, verified 2026-09-07 — pill เข้ม /30 + ตัวเลขหนาทั้งหน้า signals/monitor (§10.1–10.2) · ก่อนหน้า: `67a2dfd` (§10.1 pill แบบ component บนหน้า signals — SL/TP, ▲▼, BUY/SELL, PnL + tier badge เลข 1/2/3) · `a13eb36` verified 2026-09-06 (§15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด — 6 หมวด, migration 020 รันแล้ว — เดิมชื่อ 012 ถูก rename เพราะชนเบอร์กับ 012_min_confidence_gold)
 >
 > ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html หรือชื่อไฟล์ chunk** — Next.js สร้าง buildId/chunk-hash
 > ใหม่ทุกครั้งที่ build และ build บน Render ให้ hash ต่างจาก local เสมอ (แม้โค้ดเดียวกัน — ยืนยันแล้ว
