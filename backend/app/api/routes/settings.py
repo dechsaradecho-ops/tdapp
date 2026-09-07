@@ -90,7 +90,15 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
             message="saved")
     except Exception as exc:
         log.error("save app_settings failed: %s", exc)
-        return SettingsSaveResult(ok=False, settings=merged, message=str(exc))
+        # PGRST204 = PostgREST schema cache miss — almost always a missing
+        # column from a migration that hasn't been applied yet. Surface a
+        # friendly, actionable message instead of the raw PostgREST payload.
+        raw = str(exc)
+        if "PGRST204" in raw and "allowed_assets" in raw:
+            return SettingsSaveResult(
+                ok=False, settings=merged,
+                message="ยังไม่มี column allowed_assets ใน Supabase — รัน database/021_allowed_assets.sql ใน SQL Editor ก่อน")
+        return SettingsSaveResult(ok=False, settings=merged, message=raw)
 
 
 @router.post("/reset", response_model=SettingsSaveResult)
