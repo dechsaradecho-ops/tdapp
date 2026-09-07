@@ -36,7 +36,14 @@ class AIConfig:
     def __init__(self, provider: str = "deepseek", api_key: str = "", url: str = "", model: str = "") -> None:
         self.provider = provider
         self.api_key = api_key
-        self.base_url = (url or DEFAULT_BASE_URLS.get(provider, DEFAULT_BASE_URLS["deepseek"])).rstrip("/")
+        # base_url must NOT include /chat/completions — ai_provider appends it.
+        # Tolerate users pasting the full endpoint (2026-09-07 config mistake
+        # that produced .../chat/completions/chat/completions → 404 → no reply).
+        self.base_url = (
+            (url or DEFAULT_BASE_URLS.get(provider, DEFAULT_BASE_URLS["deepseek"]))
+            .rstrip("/")
+            .removesuffix("/chat/completions")
+        )
         self.model = model or DEFAULT_MODELS.get(provider, DEFAULT_MODELS["deepseek"])
 
     @property
