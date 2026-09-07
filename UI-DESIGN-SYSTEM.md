@@ -303,6 +303,8 @@ option { background-color: #15151c; color: #e2e8f0; }
 
 **Select = liquid glass เต็มรูปแบบ (อัปเดต 2026-09-06):** ห้ามใส่ `bg-surface` หรือ bg ทึบทับ select อีกต่อไป — ทุก dropdown ในแอป (10 จุด: monitor/signals refresh, settings ×4, performance, GoalForm, ฯลฯ) ใช้พื้นหลังโปร่ง `rgba(255,255,255,0.05)` + `backdrop-filter: blur(5px)` จาก rule กลางด้านบน ถ้าเผลอใส่ `bg-surface` (สีพื้นทึบ) ทับ จะทำให้ select เป็นก้อนทึบตัดกับ card แก้วรอบ ๆ ทันที ตรวจง่าย ๆ: เปิด dropdown แล้วต้องมองทะลุเห็น aurora เบลอ ๆ ด้านหลัง
 
+**GlassSelect = standard ใหม่ของ dropdown ทุกตัว (อัปเดต 2026-09-07):** native `<select>` ถูกแทนด้วย component `frontend/src/components/GlassSelect.tsx` ทั้ง 10 จุดแล้ว (monitor/signals refresh, settings ×4, GoalForm ×2, PerformancePanel ×2) — เหตุผล: popup รายการของ native `<select>` เป็น **OS-drawn** (Windows/Android วาดดำทึบเสมอ ปรับ CSS ไม่ได้) จึงไม่มีทางเป็นแก้วฝ้าได้ GlassSelect วาด trigger + popup เอง: trigger = `.glass-select-trigger` (โปร่ง blur(5px) + chevron SVG หมุนตอนเปิด), popup = `.glass-select-popup` (blur(18px) saturate(160%) + border ขาว + shadow เหมือน iOS popover, animation glass-pop 0.14s), item = `.glass-select-item` + `.is-active` (hover/keyboard) + `.is-selected` (ฟ้า + ✓) รองรับ keyboard ครบ (ArrowUp/Down, Enter, Escape) + aria (listbox/option/expanded) + ปิดเมื่อคลิกนอก **กฎ: dropdown ใหม่ทุกตัวต่อจากนี้ใช้ `<GlassSelect>` เท่านั้น — ห้ามกลับไปใช้ native `<select>`** (CSS rule เดิมของ select/option ยังเก็บไว้เป็น fallback เท่านั้น)
+
 ---
 
 ## 10. Pill ตัวเลขเขียว/แดงในตาราง ⚠️ (จุดพังง่ายที่สุด)
