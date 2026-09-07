@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { scoreColor } from "@/lib/format";
 import { AssetOpportunity } from "@/lib/types";
 
@@ -22,6 +23,9 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
    * ("ดูอย่างเดียว"); undefined/empty = all tradable (settings not loaded). */
   tradableAssets?: string[];
 }) {
+  // Client-side paging (หน้าละ 5) — 28 คู่ใน universe ยาวเกินไปสำหรับการอ่านครั้งเดียว
+  const PAGE_SIZE = 5;
+  const [page, setPage] = useState(1);
   if (loading) {
     return <p className="text-slate-500 text-sm animate-pulse">⏳ กำลังโหลดข้อมูลตลาด... (Render cold start อาจใช้เวลาสักครู่)</p>;
   }
@@ -36,9 +40,14 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
   };
   const isTradable = (asset: string): boolean =>
     !tradableAssets?.length || tradableAssets.includes(asset);
+  const totalPages = Math.max(1, Math.ceil(opportunities.length / PAGE_SIZE));
+  // clamp แทน reset — dashboard poll ทุก 30 วิ อย่าบังคับผู้ใช้กลับหน้า 1 ตอนข้อมูลรีเฟรช
+  const safePage = Math.min(page, totalPages);
+  const pageRows = opportunities.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
   return (
+    <div>
     <div className="space-y-3">
-      {opportunities.map((o) => {
+      {pageRows.map((o) => {
         const gate = gateFor(o.asset);
         const passes = gate != null && o.score >= gate;
         const tradable = isTradable(o.asset);
@@ -80,6 +89,29 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
         </div>
         );
       })}
+    </div>
+    {opportunities.length > 0 && (
+      <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+        <p className="text-xs text-slate-500">
+          หน้า {safePage}/{totalPages} · แสดง {pageRows.length} จาก {opportunities.length} รายการ
+        </p>
+        {totalPages > 1 && (
+          <div className="flex items-center gap-2">
+            <button onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={safePage <= 1}
+              className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+              ก่อนหน้า
+            </button>
+            <span className="text-xs text-slate-400">{safePage} / {totalPages}</span>
+            <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={safePage >= totalPages}
+              className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+              ถัดไป
+            </button>
+          </div>
+        )}
+      </div>
+    )}
     </div>
   );
 }
