@@ -1,8 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export type GlassOption = { value: string; label: string };
+
+/** จริง ๆ แล้ว <640px — ตรงกับ breakpoint sm ของ Tailwind */
+function useIsMobile() {
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 639px)");
+    const update = () => setMobile(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  return mobile;
+}
 
 /**
  * Liquid-glass dropdown — replaces native <select> ทั้งแอป (2026-09-07).
@@ -32,14 +46,18 @@ export default function GlassSelect({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
 
   const current = options.find((o) => o.value === value) ?? options[0];
 
-  // คลิกนอกกล่อง → ปิด
+  // คลิกนอกกล่อง → ปิด (ปิดเฉพาะ target ที่ “ไม่ใช่” popup/scrim — มือถือ
+  // popup ถูก portal ไป body จึงต้องเช็ค closest ด้วย ไม่งั้นคลิก item = ปิดก่อนเลือก)
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      const t = e.target as Node | null;
+      if (t instanceof Element && t.closest(".glass-select-popup, .glass-select-scrim")) return;
+      if (rootRef.current && !rootRef.current.contains(t)) {
         setOpen(false);
       }
     };
@@ -82,6 +100,22 @@ export default function GlassSelect({
     }
   };
 
+  const items = options.map((o, i) => (
+    <button
+      type="button"
+      key={o.value}
+      role="option"
+      aria-selected={o.value === value}
+      onMouseEnter={() => setActive(i)}
+      onClick={() => pick(o.value)}
+      className={`glass-select-item ${i === active ? "is-active" : ""} ${
+        o.value === value ? "is-selected" : ""
+      }`}
+    >
+      {o.label}
+    </button>
+  ));
+
   return (
     <div ref={rootRef} className={`relative ${className}`} onKeyDown={onKeyDown}>
       <button
@@ -103,25 +137,28 @@ export default function GlassSelect({
         </svg>
       </button>
 
-      {open && (
-        <div role="listbox" className="glass-select-popup">
-          {options.map((o, i) => (
-            <button
-              type="button"
-              key={o.value}
-              role="option"
-              aria-selected={o.value === value}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => pick(o.value)}
-              className={`glass-select-item ${i === active ? "is-active" : ""} ${
-                o.value === value ? "is-selected" : ""
-              }`}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* มือถือ: portal ไป body — backdrop-filter ของ .panel สร้าง containing block
+          ทำ position:fixed ในการ์ดวัดกับการ์ด ไม่ใช่จอ → sheet ต้องอยู่นอกการ์ด
+          (desktop คง absolute ติดกับ trigger เหมือนเดิม) */}
+      {open && isMobile
+        ? createPortal(
+            <>
+              <div
+                className="glass-select-scrim"
+                aria-hidden="true"
+                onClick={() => setOpen(false)}
+              />
+              <div role="listbox" aria-label={ariaLabel} className="glass-select-popup">
+                {items}
+              </div>
+            </>,
+            document.body,
+          )
+        : open && (
+            <div role="listbox" aria-label={ariaLabel} className="glass-select-popup">
+              {items}
+            </div>
+          )}
     </div>
   );
 }

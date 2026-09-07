@@ -342,6 +342,67 @@ option {
 .panel:has(.glass-select-popup) {
   z-index: 25;
 }
+/* scrim มือถือ — แสดงเฉพาะ < 640px (แตะเพื่อปิด sheet) */
+.glass-select-scrim {
+  display: none;
+}
+@media (max-width: 639px) {
+  /* --- Bottom sheet มือถือ (iOS action-sheet style) ---
+     popup = portal ไป body (หนี containing block ของ .panel) ลอยขึ้นจาก
+    ล่างจอเต็มความกว้าง + scrim แตะปิด + item สูง 44px (touch target)
+     z 48/49 = เหนือ MobileNav z-40 แต่ต่ำกว่า modal/AuthGate z-50 */
+  .glass-select-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 48;
+    background: rgba(0, 0, 0, 0.45);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    touch-action: none; /* กัน scroll เพจหลัง sheet ผ่านนิ้ว */
+  }
+  .glass-select-popup {
+    position: fixed;
+    z-index: 49;
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-height: 60vh;
+    border-radius: 1.25rem 1.25rem 0 0;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+    animation: glass-sheet-up 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+    overscroll-behavior: contain; /* กัน scroll ทะลุไปเพจหลัง */
+  }
+  .glass-select-popup::before {
+    /* แถบจับ (drag handle) — sticky ไม่เลื่อนหายตอน scroll รายการ */
+    content: "";
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: block;
+    width: 40px;
+    height: 4px;
+    margin: 0 auto 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.30);
+  }
+  .glass-select-item {
+    min-height: 44px; /* touch target มาตรฐาน iOS */
+    display: flex;
+    align-items: center;
+    font-size: 1rem;
+  }
+  .glass-select-item.is-selected::after {
+    float: none;
+    margin-left: auto;
+    padding-left: 0.75rem;
+  }
+}
+@keyframes glass-sheet-up {
+  from { opacity: 0; transform: translateY(28px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 @keyframes glass-pop {
   from { opacity: 0; transform: translateY(-4px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
