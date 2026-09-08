@@ -358,6 +358,39 @@ class TestLimitLadder:
             assert lv.price == round(2400.0 + sl_distance * step, 5)
             assert lv.tp < lv.price < lv.sl            # short: mirrored
 
+    # ---- Strategy D: breakout invalidation SL ------------------------------
+    def test_invalidation_sl_below_broken_level(self):
+        """invalidation_level > 0 → SL sits below the broken level minus a
+        0.5×ATR buffer (2400 @1% ATR → buffer 12; level 2380 → SL 2368).
+        The structural stop wins even when tighter than the plain ATR stop
+        (2360) — a failed breakout exits at the structure, not later."""
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True,
+                                       invalidation_level=2380.0)
+        assert p.stop_loss == pytest.approx(2368.0, abs=0.01)
+        assert p.stop_loss > 2360.0  # tighter than the plain ATR stop
+
+    def test_invalidation_sl_ignored_when_zero(self):
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        base = self.engine.build_proposal(ind, opp, 0.5, True)
+        with_inv = self.engine.build_proposal(ind, opp, 0.5, True,
+                                              invalidation_level=0.0)
+        assert base.stop_loss == with_inv.stop_loss
+
+    def test_breakout_bonus_and_reasons(self):
+        """Active breakout adds a small bonus + Thai reason; none otherwise."""
+        base = self.engine.opportunity_score(make_ind())
+        breakout = self.engine.opportunity_score(
+            make_ind(breakout_state=2.0, breakout_level=2390.0))
+        retest = self.engine.opportunity_score(
+            make_ind(breakout_state=1.0, breakout_level=2390.0))
+        assert breakout.score == base.score + 5
+        assert retest.score == base.score + 3
+        assert any("Breakout" in r for r in breakout.reasons)
+        assert any("Retest" in r for r in retest.reasons)
+
 
 class TestSltpPreview:
     """SL/TP distance tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR)."""

@@ -421,6 +421,8 @@ export interface AppSettings {
   partial_trigger_r: number;
   /** Time stop: close positions older than this many days (0 = off) */
   max_hold_days: number;
+  /** Strategy D: XAUUSD only trades breakout/retest setups (false = old behaviour) */
+  gold_breakout_only: boolean;
   /** Simulated spread (price units) applied to paper fills */
   paper_spread: number;
   max_drawdown_pct: number;

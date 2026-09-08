@@ -46,6 +46,13 @@ class IndicatorSnapshot:
     news_sentiment: float = 0.0    # -1 .. +1
     high_impact_event: bool = False
 
+    # Breakout-retest context (strategy D — gold only, 0.0 elsewhere).
+    # breakout_state: 2 = breakout (close above prior 20-bar high),
+    # 1 = retest (dipped back to the level, closed above it), 0 = none.
+    # breakout_level: the broken high — SL invalidation reference.
+    breakout_state: float = 0.0
+    breakout_level: float = 0.0
+
     source: str = "demo"           # "live" (quote feed) / "demo" (random-walk fallback)
 
     reasons: list[str] = field(default_factory=list)
@@ -158,6 +165,22 @@ class StrategyEngine:
             score += 5
             reasons.append("Supertrend + MACD ยืนยันทิศเดียวกัน")
 
+        # --- Breakout-retest bonus (strategy D — gold live snapshots) ------
+        if ind.breakout_state == 2:
+            score += 5
+            reasons.append(
+                f"Breakout เหนือแนวต้าน 20 แท่ง ({ind.breakout_level:g}) — "
+                "โมเมนตัมทะลุแนวยืนยันแล้ว")
+        elif ind.breakout_state == 1:
+            score += 3
+            reasons.append(
+                f"Retest แนว breakout ({ind.breakout_level:g}) สำเร็จ — "
+                "จุดเข้ายืนยันแล้ว ลดความเสี่ยง false breakout")
+        elif ind.asset.upper() == "XAUUSD":
+            reasons.append(
+                "ทอง: ยังไม่มีจังหวะ breakout/retest — รอการทะลุแนวสูง 20 แท่ง "
+                "(โหมด Gold Breakout Only)")
+
         score = max(0.0, min(100.0, score))
         return AssetOpportunity(
             asset=ind.asset, score=round(score, 1),
@@ -181,11 +204,25 @@ class StrategyEngine:
         atr_multiple_sl: float = 1.5,
         rr_target: float = 2.0,
         risk_profile: RiskProfile = RiskProfile.moderate,
+        invalidation_level: float = 0.0,
     ) -> SignalProposal:
-        """Turn the scored snapshot into an explainable BUY/SELL proposal with SL/TP."""
+        """Turn the scored snapshot into an explainable BUY/SELL proposal with SL/TP.
+
+        invalidation_level (strategy D — gold breakout): when > 0 the SL is
+        placed below/above the broken level with a 0.5×ATR buffer — the
+        breakout structure IS the stop, so this distance wins even when
+        tighter than the plain ATR stop (floored at 0.5×ATR so a too-close
+        level can't create a hair-trigger SL).
+        """
         direction = "BUY" if regime_bullish else "SELL"
         sign = 1 if regime_bullish else -1
         sl_distance = max(ind.price * ind.atr_pct / 100.0 * atr_multiple_sl, ind.price * 0.001)
+        if invalidation_level > 0:
+            atr_price = ind.price * ind.atr_pct / 100.0
+            invalidation_sl = (invalidation_level - 0.5 * atr_price if regime_bullish
+                               else invalidation_level + 0.5 * atr_price)
+            sl_distance = max(abs(ind.price - invalidation_sl),
+                              atr_price * 0.5, ind.price * 0.001)
         stop_loss = ind.price - sign * sl_distance
         take_profit = ind.price + sign * sl_distance * rr_target
         confidence = self._confidence(opp.score, ind)

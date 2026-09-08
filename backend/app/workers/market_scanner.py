@@ -95,6 +95,19 @@ async def scan_once(db: Database) -> list[dict]:
         # (gold uses its own Min Confidence (gold) threshold).
         min_conf = effective_min_confidence(settings, asset)
         if opp.score >= min_conf:
+            # Strategy D — gold breakout-retest gate. Gold's high ATR makes
+            # narrow pullback entries unattractive; XAUUSD only trades an
+            # active breakout (close above the prior 20-bar high) or a
+            # successful retest of it. Prod evidence: gold scored 65+ every
+            # day in a bull market and opened chase entries that lost.
+            # gold_breakout_only=False restores the old behaviour.
+            if (asset.upper() == GOLD_ASSET
+                    and getattr(settings, "gold_breakout_only", True)
+                    and ind.breakout_state <= 0):
+                log.info("Signal for %s skipped: no breakout/retest setup "
+                         "(strategy D gate)", asset)
+                results[-1]["breakout_gate_skipped"] = True
+                continue
             # Market-closed guard — FX/gold trade Sun 21:00 UTC → Fri 21:00
             # UTC. Emitting signals into a closed market would pin entries at
             # Friday's close for the whole weekend (the "ราคาเก่า" complaint).
@@ -150,7 +163,11 @@ async def scan_once(db: Database) -> list[dict]:
             bullish = ind.ema_fast > ind.ema_slow
             proposal = engine.build_proposal(
                 ind, opp, risk_per_trade_pct=settings.risk_per_trade_pct,
-                regime_bullish=bullish)
+                regime_bullish=bullish,
+                # Strategy D — gold SL anchored at the broken level (ATR
+                # invalidation buffer) instead of the plain ATR stop.
+                invalidation_level=(ind.breakout_level
+                                    if asset.upper() == GOLD_ASSET else 0.0))
             # Re-anchor the proposal at the LIVE spot price before persisting.
             # ind.price comes from fetch_all_snapshots (Frankfurter daily ECB
             # closes + TwelveData gold) — one close per business day — so a

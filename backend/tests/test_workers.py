@@ -97,11 +97,14 @@ class FakeDatabase:
 # ---------------------------------------------------------------------------
 def strong_snapshot(asset: str, news_sentiment: float = 0.0):
     from app.engine.strategy_engine import IndicatorSnapshot
+    # breakout context (strategy D): strong setups carry an active breakout
+    # above the broken 99.0 level so the gold gate lets them through.
     return IndicatorSnapshot(
         asset=asset, price=100.0, ema_fast=105.0, ema_slow=95.0,
         adx=40.0, supertrend_dir=1, rsi=62.0, macd_hist=2.0,
         atr_pct=0.8, volatility_index=12.0, news_sentiment=news_sentiment,
-        high_impact_event=False, source="live")
+        high_impact_event=False, source="live",
+        breakout_state=2.0, breakout_level=99.0)
 
 
 def choppy_snapshot(asset: str, news_sentiment: float = 0.0):
@@ -110,7 +113,8 @@ def choppy_snapshot(asset: str, news_sentiment: float = 0.0):
         asset=asset, price=100.0, ema_fast=100.4, ema_slow=99.6,
         adx=12.0, supertrend_dir=0, rsi=50.0, macd_hist=0.1,
         atr_pct=0.5, volatility_index=8.0, news_sentiment=news_sentiment,
-        high_impact_event=False, source="live")
+        high_impact_event=False, source="live",
+        breakout_state=2.0, breakout_level=99.0)
 
 
 class TestMarketScanner:
@@ -242,6 +246,76 @@ class TestMarketScanner:
         signal_rows = [row for table, row in db.inserted if table == "signals"]
         assert signal_rows, "score>=70 setup must persist a signal row"
         assert all(r["confidence"] >= 70 for r in signal_rows)
+
+    # ---- Strategy D: gold breakout-retest gate -----------------------------
+    @staticmethod
+    def _gold_breakout_snapshot(asset: str, state: float, news_sentiment: float = 0.0):
+        """Strong XAUUSD snapshot with breakout context (broken level 99.0)."""
+        ind = strong_snapshot(asset, news_sentiment)
+        ind.breakout_state = state
+        ind.breakout_level = 99.0 if state else 0.0
+        return ind
+
+    @pytest.mark.asyncio
+    async def test_gold_blocked_without_breakout(self, monkeypatch):
+        """Strategy D: strong XAUUSD score but breakout_state=0 → NO signal,
+        while EURUSD (same strength) still emits."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            if asset == "XAUUSD":
+                return self._gold_breakout_snapshot(asset, 0.0, news_sentiment)
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings())
+        await market_scanner.scan_once(db)
+        signals = {row["asset"] for table, row in db.inserted
+                   if table == "signals"}
+        assert "XAUUSD" not in signals
+        assert "EURUSD" in signals
+
+    @pytest.mark.asyncio
+    async def test_gold_passes_on_breakout_and_retest(self, monkeypatch):
+        """breakout_state 2 (breakout) or 1 (retest) → XAUUSD emits, and the
+        persisted SL is anchored at the broken level (invalidation SL)."""
+        from app.services import execution
+        for state in (2.0, 1.0):
+            db = FakeDatabase()
+
+            async def snap(asset, news_sentiment=0.0, _state=state):
+                return self._gold_breakout_snapshot(asset, _state, news_sentiment)
+
+            monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+            monkeypatch.setattr(market_scanner, "get_app_settings",
+                                lambda _db: AppSettings())
+            await market_scanner.scan_once(db)
+            gold = [row for table, row in db.inserted
+                    if table == "signals" and row["asset"] == "XAUUSD"]
+            assert gold, f"breakout_state={state} must emit a gold signal"
+            # SL anchored at the broken level 99 − 0.5×ATR buffer: snapshot
+            # price 100, ATR 0.8 → SL 98.6; the spot re-anchor (×101/100)
+            # shifts it to ≈99.586 — below the re-anchored level (99.99).
+            assert abs(gold[0]["stop_loss"] - 99.586) < 0.05
+            assert gold[0]["stop_loss"] < 99.99
+
+    @pytest.mark.asyncio
+    async def test_gold_gate_disabled_by_setting(self, monkeypatch):
+        """gold_breakout_only=False → old behaviour (gold emits without
+        breakout context)."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return self._gold_breakout_snapshot(asset, 0.0, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(gold_breakout_only=False))
+        await market_scanner.scan_once(db)
+        signals = {row["asset"] for table, row in db.inserted
+                   if table == "signals"}
+        assert "XAUUSD" in signals
 
     @pytest.mark.asyncio
     async def test_frequency_limits_come_from_user_settings(self, monkeypatch):

@@ -1347,6 +1347,15 @@ class AppSettings(BaseModel):
     # disables the feature.
     max_hold_days: int = 5
 
+    # ---- Strategy D — gold breakout-retest gate ----------------------------
+    # Gold's high ATR makes narrow pullback entries unattractive: in prod,
+    # XAUUSD scored 65+ every day in a bull market and chase entries lost.
+    # When True, XAUUSD only emits signals on an active breakout (close above
+    # the prior 20-bar high) or a successful retest of it, and the SL anchors
+    # at the broken level with a 0.5×ATR invalidation buffer. False = old
+    # behaviour (gold trades like every other asset).
+    gold_breakout_only: bool = True
+
     # ---- Paper execution realism ------------------------------------------
     # Simulated spread (in price units) applied to paper fills: BUYs fill at
     # entry + spread/2, SELLs at entry − spread/2, so paper PnL reflects the

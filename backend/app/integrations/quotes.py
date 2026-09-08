@@ -549,6 +549,37 @@ def _adx(candles: list[Candle], period: int = 14) -> float:
     return sum(dxs[-period:]) / period
 
 
+def _breakout_state(candles: list[Candle], lookback: int = 20,
+                    retest_tol_pct: float = 0.15) -> tuple[float, float]:
+    """Breakout-retest state over the last ``lookback`` bars (gold-specific).
+
+    The level is the highest high of the 20 bars BEFORE the previous bar
+    (window excludes both the breakout bar and the current bar).
+
+    Returns (breakout_state, breakout_level):
+      state 2 = breakout: the last close crosses ABOVE the prior high
+                while the previous close was still below/at it.
+      state 1 = retest: the last candle dipped into the level zone
+                (low ≤ level + tol) and closed ABOVE the level — the classic
+                "retest สำเร็จ" entry trigger.
+      state 0 = no active breakout setup.
+    breakout_level = the broken N-bar high (invalidation reference for the
+    SL), 0.0 when no breakout.
+    """
+    if len(candles) < lookback + 2:
+        return 0.0, 0.0
+    window = candles[-(lookback + 2):-2]
+    level = max(c.h for c in window)
+    last = candles[-1]
+    prev = candles[-2]
+    if last.c > level and prev.c <= level:
+        return 2.0, round(level, 5)
+    tol = level * retest_tol_pct / 100.0
+    if last.c > level and last.l <= level + tol:
+        return 1.0, round(level, 5)
+    return 0.0, 0.0
+
+
 def _supertrend_dir(candles: list[Candle], period: int = 10, mult: float = 3.0) -> int:
     """Coarse Supertrend direction: +1 up / -1 down (price vs trailing band)."""
     if len(candles) < period + 1:
@@ -591,6 +622,11 @@ def snapshot_from_candles(asset: str, candles: list[Candle],
     # volatility index proxy: normalized ATR (percent-of-price based 0-100 scale)
     vol_index = min(atr_pct * 8.0, 100.0)
 
+    # Breakout-retest context (gold-specific entry strategy D). Other assets
+    # keep 0.0 — the scanner gate only consumes it for XAUUSD.
+    breakout_state, breakout_level = _breakout_state(candles) \
+        if asset.upper() == "XAUUSD" else (0.0, 0.0)
+
     return {
         "asset": asset,
         "price": round(price, 5),
@@ -605,6 +641,8 @@ def snapshot_from_candles(asset: str, candles: list[Candle],
         "volatility_index": round(vol_index, 1),
         "news_sentiment": news_sentiment,
         "high_impact_event": high_impact_event,
+        "breakout_state": breakout_state,
+        "breakout_level": breakout_level,
     }
 
 

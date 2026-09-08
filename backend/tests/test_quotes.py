@@ -432,6 +432,50 @@ class TestSnapshotFromCandles:
 
 
 # ---------------------------------------------------------------------------
+# Breakout-retest state (strategy D — gold)
+# ---------------------------------------------------------------------------
+class TestBreakoutState:
+    def _candles(self, closes: list[float], wick: float = 0.5) -> list[quotes.Candle]:
+        out: list[quotes.Candle] = []
+        for i, c in enumerate(closes):
+            o = closes[i - 1] if i else c
+            out.append(quotes.Candle(o=o, h=max(o, c) + wick,
+                                     l=min(o, c) - wick, c=c))
+        return out
+
+    def test_breakout_detected(self):
+        """Close crosses above the prior 20-bar high → state 2 + level."""
+        closes = [100.0] * 25 + [101.0]
+        state, level = quotes._breakout_state(self._candles(closes))
+        assert state == 2.0
+        assert level == pytest.approx(100.5)  # prior high incl. wick
+
+    def test_retest_detected(self):
+        """Dip back into the level zone then close above it → state 1."""
+        closes = [100.0] * 25 + [101.0, 100.6]
+        state, level = quotes._breakout_state(self._candles(closes))
+        assert state == 1.0
+        assert level == pytest.approx(100.5)
+
+    def test_no_setup_when_below_level(self):
+        closes = [100.0] * 26
+        state, level = quotes._breakout_state(self._candles(closes))
+        assert state == 0.0 and level == 0.0
+
+    def test_too_few_candles(self):
+        state, level = quotes._breakout_state(self._candles([100.0] * 10))
+        assert state == 0.0 and level == 0.0
+
+    def test_snapshot_fields_gold_only(self):
+        """XAUUSD carries breakout fields; other assets stay 0.0."""
+        up = make_candles(60, start=2400.0, drift=2.0, noise=1.0)
+        gold = quotes.snapshot_from_candles("XAUUSD", up)
+        assert "breakout_state" in gold and "breakout_level" in gold
+        fx = quotes.snapshot_from_candles("EURUSD", make_candles(60))
+        assert fx["breakout_state"] == 0.0 and fx["breakout_level"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Spot feed — Yahoo chart API primary + exchangerate-api.com fallback
 # ---------------------------------------------------------------------------
 def _ex_resp(quote: str, rate: float, status: int = 200):

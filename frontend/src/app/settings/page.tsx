@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   partial_close_pct: 0,
   partial_trigger_r: 1.0,
   max_hold_days: 5,
+  gold_breakout_only: true,
   paper_spread: 0,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
@@ -519,6 +520,22 @@ export default function SettingsPage() {
               </label>
               <NumField label="Min Opportunity (%)" value={cfg.min_opportunity}
                 onChange={(v) => set("min_opportunity", v)} step={1} />
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1">
+                  <p className="text-sm">Gold Breakout Only (XAUUSD)</p>
+                  <p className="text-xs text-slate-500">
+                    ทองเปิดเฉพาะจังหวะ breakout 20 แท่ง หรือ retest สำเร็จ — SL ยึดแนวที่ทะลุ (ปิด = เทรดเหมือนคู่อื่น)
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.gold_breakout_only}
+                  aria-label="Gold Breakout Only"
+                  onClick={() => toggleNotify("gold_breakout_only", !cfg.gold_breakout_only)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.gold_breakout_only ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.gold_breakout_only ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
               <NumField label="Capital (USD)" value={cfg.capital}
                 onChange={(v) => set("capital", v)} step={100} />
             </div>
