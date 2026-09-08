@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from app.api.routes.settings import get_app_settings
 from app.integrations.brokers import OrderRequest
+from app.integrations import quotes
 from app.models.schemas import (
     AppSettings,
     EconomicCalendarEngine,
@@ -506,6 +507,33 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          opportunity: float, signal_id: Optional[str],
                          source: str) -> GateReport:
     """Gate → size → place order → journal → notify. The single execution path."""
+    # ---- Live-price re-anchor (2026-09-08) --------------------------------
+    # The stored signal row can be up to SIGNAL_TTL_MIN (30 min) old, so its
+    # entry price may no longer be the market price when the order actually
+    # fires. Fetch the intraday spot (Yahoo, same feed the scanner uses to
+    # re-anchor cards) and shift entry/SL/TP proportionally so the REAL order
+    # starts from the CURRENT price — not the price on the card. Fail-safe:
+    # any feed error keeps the signal prices (old behaviour) rather than
+    # blocking the trade.
+    reanchor_note = ""
+    if entry and entry > 0:
+        try:
+            spot, _spot_fail = await quotes.fetch_spot_prices([asset])
+            live_price = float(spot.get(asset) or 0)
+        except Exception as exc:
+            log.warning("live re-anchor failed for %s: %s", asset, exc)
+            live_price = 0.0
+        if live_price > 0 and abs(live_price - entry) > 1e-9:
+            shift = live_price / entry
+            stop_loss = round(stop_loss * shift, 5) if stop_loss else stop_loss
+            take_profit = (round(take_profit * shift, 5)
+                           if take_profit else take_profit)
+            reanchor_note = (f"re-anchor ราคาจริง {entry:g} → {live_price:g} "
+                             f"(SL/TP ขยับตามสัดส่วน)")
+            log.info("execute_signal re-anchor %s %s: %.5f → %.5f",
+                     direction, asset, entry, live_price)
+            entry = live_price
+
     # sl_distance_mode: stored signal rows always carry the กลาง (×1.5 ATR)
     # SL/TP (the default tier). If the user picked สั้น/ยาว in Settings,
     # re-derive SL/TP for the chosen tier from the entry and the base
@@ -577,7 +605,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         stop_loss=stop_loss, take_profit=take_profit, source=source,
         ticket=str(result.broker_order_id or ""), volume=lots,
         reason=f"เปิดออเดอร์ {direction} {lots:g} lots @ {fill_price:g} (" + (
-            "auto" if source == "auto" else "อนุมัติเอง") + ")")
+            "auto" if source == "auto" else "อนุมัติเอง") + ")" + (
+            f" — {reanchor_note}" if reanchor_note else ""))
     if notifier is not None:
         try:
             await notifier.notify(

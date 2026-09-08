@@ -318,6 +318,60 @@ class TestMarketScanner:
         assert "XAUUSD" in signals
 
     @pytest.mark.asyncio
+    async def test_sl_clamp_equalizes_distance_across_assets(self, monkeypatch):
+        """SL distance clamp (Settings): two assets with very different ATR
+        must end up with the SAME SL distance when min=max — the user's fix
+        for 'SL/TP ของแต่ละสัญลักษณ์ไม่เท่ากัน'."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            ind = strong_snapshot(asset, news_sentiment)
+            ind.atr_pct = 0.3 if asset == "EURUSD" else 1.5  # 4× volatility gap
+            return ind
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings(sl_distance_min_pct=0.8,
+                                                    sl_distance_max_pct=0.8))
+        await market_scanner.scan_once(db)
+        rows = [row for table, row in db.inserted if table == "signals"]
+        by_asset = {r["asset"]: r for r in rows}
+        assert {"EURUSD", "GBPUSD"} <= set(by_asset)
+        for r in rows:
+            if r["asset"] == "XAUUSD":
+                continue  # strategy-D invalidation stop is exempt from the clamp
+            dist_pct = abs(r["entry"] - r["stop_loss"]) / r["entry"] * 100
+            # spot re-anchor ×101/100 shifts the % slightly — allow tolerance
+            assert dist_pct == pytest.approx(0.8, abs=0.05), (
+                f"{r['asset']} SL distance {dist_pct:.2f}% outside the 0.8% band")
+        # without the clamp the two distances would differ ~5× (0.36% vs 1.8%)
+        # gold keeps its structural breakout stop (exempt — level anchor wins)
+        gold_dist = abs(by_asset["XAUUSD"]["entry"]
+                        - by_asset["XAUUSD"]["stop_loss"]) / by_asset["XAUUSD"]["entry"] * 100
+        assert gold_dist > 0.8  # structural stop (99 − 0.5×ATR ≈ 1.75%), unclamped
+
+    @pytest.mark.asyncio
+    async def test_sl_clamp_off_by_default(self, monkeypatch):
+        """Default settings (0/0) → ATR stops untouched."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "get_app_settings",
+                            lambda _db: AppSettings())
+        await market_scanner.scan_once(db)
+        rows = [row for table, row in db.inserted if table == "signals"]
+        assert rows
+        for r in rows:
+            if r["asset"] == "XAUUSD":
+                continue  # gold uses the strategy-D structural stop (1.4%), not ATR
+            dist_pct = abs(r["entry"] - r["stop_loss"]) / r["entry"] * 100
+            # strong_snapshot: price 100, ATR 0.8% × 1.5 = 1.2% (re-anchored ≈1.2%)
+            assert dist_pct == pytest.approx(1.2, abs=0.05)
+
+    @pytest.mark.asyncio
     async def test_frequency_limits_come_from_user_settings(self, monkeypatch):
         """Regression (2026-09-04): the scanner hardcoded FrequencyEngine(moderate)
         (max 6/day) and ignored the user's saved settings — raising max_trades_daily

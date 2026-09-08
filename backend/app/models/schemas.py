@@ -1377,6 +1377,14 @@ class AppSettings(BaseModel):
     # tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR); the stored signal row
     # carries กลาง prices, execute_signal re-derives SL/TP for this tier.
     sl_distance_mode: Literal["short", "medium", "long"] = "medium"
+    # ---- SL distance clamp (equal risk distance per asset) -----------------
+    # Keep the SL inside a % of price band so every asset risks a similar
+    # distance. Close-only FX feeds (Frankfurter) have no intraday wicks →
+    # ATR understated → SL too tight, while OHLC feeds (gold) don't — SLs
+    # drifted 0.62%→1.17% across pairs in prod. 0 disables a bound; set BOTH
+    # to the same value (e.g. 0.8/0.8) to force a fixed SL distance.
+    sl_distance_min_pct: float = 0.0
+    sl_distance_max_pct: float = 0.0
     default_equity: float = 10_000.0
     paper_virtual_capital: float = 100_000.0
 

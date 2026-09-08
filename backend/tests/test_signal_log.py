@@ -273,9 +273,14 @@ async def test_scanner_logs_created_event(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_signal_logs_opened_and_blocked():
+async def test_execute_signal_logs_opened_and_blocked(monkeypatch):
     from app.services import execution
     from tests.test_auto_trader import clean_settings, db_with_client
+
+    # keep the live-price re-anchor feed offline
+    async def fake_spot(assets, **_kw):
+        return {}, {}
+    monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
 
     class OkBroker:
         async def place_order(self, order):

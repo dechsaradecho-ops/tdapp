@@ -45,6 +45,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   correlation_cap: 80,
   order_mode: "auto",
   sl_distance_mode: "medium",
+  sl_distance_min_pct: 0,
+  sl_distance_max_pct: 0,
   default_equity: 10_000,
   paper_virtual_capital: 100_000,
   backtest_days: 120,
@@ -486,6 +488,16 @@ export default function SettingsPage() {
                   การ์ดสัญญาณเก็บราคากลาง (×1.5) — ตอนยิง order ระบบคำนวณ SL/TP ใหม่ตามระดับนี้
                 </span>
               </label>
+              <div className="grid grid-cols-2 gap-2">
+                <NumField label="SL ขั้นต่ำ (% ของราคา)" value={cfg.sl_distance_min_pct}
+                  onChange={(v) => set("sl_distance_min_pct", v)} step={0.1} />
+                <NumField label="SL ขั้นสูง (% ของราคา)" value={cfg.sl_distance_max_pct}
+                  onChange={(v) => set("sl_distance_max_pct", v)} step={0.1} />
+              </div>
+              <p className="text-xs text-slate-500 -mt-2">
+                บังคับระยะ SL ทุกสัญลักษณ์ให้อยู่ในแถบ % นี้ (0 = ไม่จำกัด) — ใส่ค่าเท่ากันทั้งสองช่อง
+                เช่น 0.8/0.8 เพื่อให้ทุกไม้เสี่ยงระยะเท่ากัน แก้ปัญหา SL ห่างไม่เท่ากันเพราะ ATR ต่างกัน
+              </p>
               <label className="block text-sm">
                 Risk Profile
                 <GlassSelect value={cfg.risk_profile}

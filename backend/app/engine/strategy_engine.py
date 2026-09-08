@@ -204,19 +204,33 @@ class StrategyEngine:
         atr_multiple_sl: float = 1.5,
         rr_target: float = 2.0,
         risk_profile: RiskProfile = RiskProfile.moderate,
+        sl_min_pct: float = 0.0,
+        sl_max_pct: float = 0.0,
         invalidation_level: float = 0.0,
     ) -> SignalProposal:
         """Turn the scored snapshot into an explainable BUY/SELL proposal with SL/TP.
+
+        sl_min_pct / sl_max_pct (Settings → SL distance clamp): pin the stop
+        inside a % of price band so every asset risks a similar distance —
+        close-only FX feeds understate ATR (no intraday wicks) while OHLC
+        feeds don't, which made SLs drift 0.62%→1.17% per pair. 0 = off.
 
         invalidation_level (strategy D — gold breakout): when > 0 the SL is
         placed below/above the broken level with a 0.5×ATR buffer — the
         breakout structure IS the stop, so this distance wins even when
         tighter than the plain ATR stop (floored at 0.5×ATR so a too-close
-        level can't create a hair-trigger SL).
+        level can't create a hair-trigger SL). The structural stop is
+        EXEMPT from the clamp — clamping it would break the level anchor.
         """
         direction = "BUY" if regime_bullish else "SELL"
         sign = 1 if regime_bullish else -1
         sl_distance = max(ind.price * ind.atr_pct / 100.0 * atr_multiple_sl, ind.price * 0.001)
+        clamped = False
+        if invalidation_level <= 0:  # clamp only the plain ATR stop
+            if sl_max_pct > 0 and sl_distance > ind.price * sl_max_pct / 100.0:
+                sl_distance, clamped = ind.price * sl_max_pct / 100.0, True
+            if sl_min_pct > 0 and sl_distance < ind.price * sl_min_pct / 100.0:
+                sl_distance, clamped = ind.price * sl_min_pct / 100.0, True
         if invalidation_level > 0:
             atr_price = ind.price * ind.atr_pct / 100.0
             invalidation_sl = (invalidation_level - 0.5 * atr_price if regime_bullish
@@ -229,6 +243,12 @@ class StrategyEngine:
 
         reasons = list(ind.reasons) or list(opp.reasons)
         reasons.insert(0, f"Opportunity Score {opp.score:.0f}/100 ({opp.band.value})")
+        if clamped:
+            lo = f"{sl_min_pct:g}%" if sl_min_pct > 0 else "—"
+            hi = f"{sl_max_pct:g}%" if sl_max_pct > 0 else "—"
+            reasons.insert(1, (
+                f"SL ปรับเป็น {sl_distance / ind.price * 100:.2f}% ของราคา "
+                f"(แถบกำหนด {lo}–{hi}) — ให้ทุกสัญลักษณ์เสี่ยงระยะใกล้เคียงกัน"))
 
         decision = self._decision(opp.score, ind)
 

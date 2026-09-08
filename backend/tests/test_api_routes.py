@@ -476,6 +476,15 @@ class TestSignalsLatestTiers:
 # /api/signals/approve — write path
 # ---------------------------------------------------------------------------
 class TestApproveFlow:
+    @pytest.fixture(autouse=True)
+    def _no_network_execution_spot(self, monkeypatch):
+        """Approve executes through execute_signal, which re-anchors the
+        entry at the live spot price — keep that feed offline in tests."""
+        from app.services import execution
+        async def fake_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+
     @pytest.mark.asyncio
     async def test_reject_updates_row_and_returns_status(self):
         db = FakeDatabase(rows={"signals": [

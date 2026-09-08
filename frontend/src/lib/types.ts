@@ -435,6 +435,9 @@ export interface AppSettings {
   correlation_cap: number;
   order_mode: string;
   sl_distance_mode: "short" | "medium" | "long";
+  /** SL distance clamp (% of price) — 0 disables a bound; min=max forces a fixed distance */
+  sl_distance_min_pct: number;
+  sl_distance_max_pct: number;
   default_equity: number;
   paper_virtual_capital: number;
   backtest_days: number;

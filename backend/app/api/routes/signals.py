@@ -209,7 +209,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         ind = IndicatorSnapshot(**{**snap, "source": "live"})
         opp = engine.opportunity_score(ind)
         proposals.append(engine.build_proposal(
-            ind, opp, s.risk_per_trade_pct, ind.ema_fast > ind.ema_slow))
+            ind, opp, s.risk_per_trade_pct, ind.ema_fast > ind.ema_slow,
+            sl_min_pct=s.sl_distance_min_pct,
+            sl_max_pct=s.sl_distance_max_pct))
     if proposals:
         for p in proposals:
             p.feed_status = live_feed
@@ -219,7 +221,10 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     for asset, ind in DEMO.items():
         opp = engine.opportunity_score(ind)
         bullish = ind.ema_fast > ind.ema_slow
-        proposals.append(engine.build_proposal(ind, opp, s.risk_per_trade_pct, bullish))
+        proposals.append(engine.build_proposal(
+            ind, opp, s.risk_per_trade_pct, bullish,
+            sl_min_pct=s.sl_distance_min_pct,
+            sl_max_pct=s.sl_distance_max_pct))
     for p in proposals:
         p.feed_status = demo_feed
     return proposals

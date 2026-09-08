@@ -426,6 +426,48 @@ class TestSltpPreview:
         for lv in p.sltp_levels:
             assert lv.take_profit < p.entry < lv.stop_loss  # short: SL above, TP below
 
+    # ---- SL distance clamp (ระยะ SL เท่ากันทุกสัญลักษณ์) --------------------
+    def test_clamp_widens_tight_atr_stop(self):
+        """ATR stop below the min band → widened to the band floor."""
+        ind = make_ind(price=2400.0, atr_pct=0.3)  # plain dist = 10.8 (0.45%)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True,
+                                       sl_min_pct=0.8, sl_max_pct=0.8)
+        assert abs((p.entry - p.stop_loss) - 19.2) < 0.01  # 2400 × 0.8%
+
+    def test_clamp_narrows_wide_atr_stop(self):
+        """ATR stop above the max band → narrowed to the band ceiling."""
+        ind = make_ind(price=2400.0, atr_pct=2.0)  # plain dist = 72.0 (3.0%)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True,
+                                       sl_min_pct=0.8, sl_max_pct=0.8)
+        assert abs((p.entry - p.stop_loss) - 19.2) < 0.01
+
+    def test_clamp_off_by_default(self):
+        """0/0 (default) → plain ATR stop untouched."""
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True)
+        assert abs((p.entry - p.stop_loss) - 36.0) < 0.01
+
+    def test_clamp_reason_added(self):
+        """A clamped proposal explains the adjustment on the card."""
+        ind = make_ind(price=2400.0, atr_pct=0.3)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True,
+                                       sl_min_pct=0.8, sl_max_pct=0.8)
+        assert any("SL ปรับเป็น" in r for r in p.reason)
+
+    def test_clamp_does_not_touch_invalidation_stop(self):
+        """Strategy D structural stop is exempt — the level anchor must win."""
+        ind = make_ind(price=2400.0, atr_pct=1.0)
+        opp = self.engine.opportunity_score(ind)
+        p = self.engine.build_proposal(ind, opp, 0.5, True,
+                                       sl_min_pct=0.8, sl_max_pct=0.8,
+                                       invalidation_level=2380.0)
+        # structural SL 2368 (level 2380 − 0.5×24 ATR buffer) — NOT 2380.8
+        assert p.stop_loss == pytest.approx(2368.0, abs=0.01)
+
 
 # ---------------------------------------------------------------------------
 # Risk Engine

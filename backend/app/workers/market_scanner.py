@@ -164,6 +164,9 @@ async def scan_once(db: Database) -> list[dict]:
             proposal = engine.build_proposal(
                 ind, opp, risk_per_trade_pct=settings.risk_per_trade_pct,
                 regime_bullish=bullish,
+                # SL distance clamp (Settings) — equal risk distance per asset.
+                sl_min_pct=settings.sl_distance_min_pct,
+                sl_max_pct=settings.sl_distance_max_pct,
                 # Strategy D — gold SL anchored at the broken level (ATR
                 # invalidation buffer) instead of the plain ATR stop.
                 invalidation_level=(ind.breakout_level

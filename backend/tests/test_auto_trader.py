@@ -146,6 +146,19 @@ def notifier():
 # 1. Gate pipeline + position sizing
 # ---------------------------------------------------------------------------
 class TestGatePipeline:
+    @pytest.fixture(autouse=True)
+    def _no_network_execution_spot(self, monkeypatch):
+        """execute_signal re-anchors entry/SL/TP at the LIVE spot price before
+        opening an order — patch the feed so tests stay offline. Default fake
+        returns NO prices → the signal prices pass through untouched (the
+        exact re-anchor behaviour has its own dedicated tests below).
+        Class-scoped on purpose: TestPositionGuard patches the SAME module
+        attribute with its own registry fake — a module-level autouse here
+        would clobber it depending on fixture ordering."""
+        async def fake_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+
     @pytest.mark.asyncio
     async def test_clean_signal_fires_and_journals(self, broker, notifier):
         db = FakeDatabase()
@@ -271,6 +284,81 @@ class TestGatePipeline:
         order = broker.orders[0]
         assert order.stop_loss == 1.0800
         assert order.take_profit == 1.0950
+
+    @pytest.mark.asyncio
+    async def test_live_reanchor_shifts_entry_sl_tp(self, broker, notifier, monkeypatch):
+        """The stored row's entry can be up to 30 min old — execute_signal
+        must fire the order at the CURRENT spot price, shifting SL/TP
+        proportionally so distances (and therefore risk) stay honest."""
+        async def live_spot(assets, **_kw):
+            return {"XAUUSD": 2420.0}, {}
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", live_spot)
+        db = FakeDatabase()
+        s = clean_settings()
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-ra", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        shift = 2420.0 / 2400.0
+        assert order.stop_loss == pytest.approx(round(2350.0 * shift, 5))
+        assert order.take_profit == pytest.approx(round(2500.0 * shift, 5))
+        # fill = re-anchored entry ± half spread
+        assert order.entry_price == pytest.approx(
+            execution.apply_spread(2420.0, "BUY", s.paper_spread))
+        # sizing uses the re-anchored (live) entry/SL, not the stale row
+        assert order.volume == pytest.approx(execution.size_position(
+            s, 2420.0, round(2350.0 * shift, 5), asset="XAUUSD"), abs=1e-9)
+        # journal row + lifecycle log carry the re-anchored order
+        journal = db.rows.get("paper_trades", [])
+        assert journal[0]["entry_price"] == pytest.approx(order.entry_price)
+        opened = [row for table, row in db.inserted
+                  if table == "signal_logs" and row.get("event") == "order_opened"]
+        assert opened and "re-anchor" in opened[0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_live_reanchor_runs_before_sl_tier_rederive(self, broker, notifier, monkeypatch):
+        """Ordering matters: sl_distance_mode tiers must be derived from the
+        LIVE entry (after re-anchor), not from the stale stored prices."""
+        async def live_spot(assets, **_kw):
+            return {"XAUUSD": 2420.0}, {}
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", live_spot)
+        db = FakeDatabase()
+        report = await execution.execute_signal(
+            db, broker, notifier, clean_settings(sl_distance_mode="long"),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-ra2", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        # live base distance = 2420 − 2350·(2420/2400) then ×(2.0/1.5) tier
+        live_sl = round(2350.0 * (2420.0 / 2400.0), 5)
+        dist = (2420.0 - live_sl) * (2.0 / 1.5)
+        assert order.stop_loss == pytest.approx(round(2420.0 - dist, 5), abs=1e-4)
+
+    @pytest.mark.asyncio
+    async def test_live_reanchor_failsafe_keeps_signal_prices(self, broker, notifier, monkeypatch):
+        """Feed down → keep the signal prices (old behaviour) — never block
+        or distort the trade because a quote API hiccuped."""
+        async def dead_spot(assets, **_kw):
+            raise RuntimeError("feed down")
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", dead_spot)
+        db = FakeDatabase()
+        report = await execution.execute_signal(
+            db, broker, notifier, clean_settings(sl_distance_mode="medium"),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-ra3", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == 2350.0
+        assert order.take_profit == 2500.0
+        assert order.entry_price == pytest.approx(2400.0, abs=1e-3)
 
     @pytest.mark.asyncio
     async def test_pause_blocks_execution(self, broker, notifier):
@@ -466,6 +554,14 @@ class TestGatePipeline:
 # 2. AutoTrader worker
 # ---------------------------------------------------------------------------
 class TestAutoTrader:
+    @pytest.fixture(autouse=True)
+    def _no_network_execution_spot(self, monkeypatch):
+        """trade_once → execute_signal re-anchors at the live spot — keep the
+        feed offline (same class-scoping rationale as TestGatePipeline)."""
+        async def fake_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+
     @pytest.mark.asyncio
     async def test_semi_auto_mode_does_nothing(self, broker, notifier):
         db = db_with_client()

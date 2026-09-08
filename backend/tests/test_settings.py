@@ -33,10 +33,19 @@ from tests.test_workers import FakeDatabase
 # Fake supabase-style client for the app_settings single row
 # ---------------------------------------------------------------------------
 class FakeSettingsClient:
-    """Minimal .table().select/.upsert/.delete chainable fake."""
+    """Minimal .table().select/.upsert/.delete chainable fake.
 
-    def __init__(self, row: dict | None = None):
+    `fail_columns` simulates a Supabase table that is MISSING some columns
+    (migrations not yet applied): the first upsert containing one of them
+    raises the PostgREST PGRST204 error so the retry path is exercised.
+    """
+
+    def __init__(self, row: dict | None = None,
+                 fail_columns: tuple[str, ...] = ()):
         self.row = dict(row) if row else None
+        self.fail_columns = set(fail_columns)
+        self.upsert_count = 0
+        self.saved_rows: list[dict] = []
 
     def table(self, _name: str) -> "FakeSettingsClient":
         return self
@@ -51,6 +60,14 @@ class FakeSettingsClient:
         return self
 
     def upsert(self, row: dict) -> "FakeSettingsClient":
+        self.upsert_count += 1
+        for col in self.fail_columns:
+            if col in row:
+                raise RuntimeError(
+                    '{"code":"PGRST204","message":"Could not find the \''
+                    + col + '\' column of \'trading_settings\' in the schema '
+                    'cache"}')
+        self.saved_rows.append(dict(row))
         self.row = dict(row)
         return self
 
@@ -459,3 +476,59 @@ async def test_get_settings_returns_allowed_assets_from_row():
     res = await call("GET", "/api/settings")
     assert res.status_code == 200
     assert res.json()["allowed_assets"] == ["USDJPY"]
+
+
+# ---------------------------------------------------------------------------
+# PGRST204 resilience — missing column (migration not applied) must NOT kill
+# the whole save. Regression: min_confidence_gold stopped persisting once the
+# frontend started sending newer fields (max_hold_days / gold_breakout_only /
+# sl_distance_*) whose columns didn't exist in prod Supabase yet.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_put_settings_survives_missing_column_and_saves_rest():
+    """PGRST204 on one column → retry without it; other fields still land."""
+    db = SettingsDatabase(None)
+    db._client = FakeSettingsClient(None, fail_columns=("sl_distance_min_pct",))
+    set_state(db)
+    res = await call("PUT", "/api/settings",
+                     {"min_confidence_gold": 85, "sl_distance_min_pct": 0.8})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert "sl_distance_min_pct" in body["message"]  # friendly skip note
+    # the important part: min_confidence_gold WAS saved
+    assert db._client.row["min_confidence_gold"] == 85
+    assert "sl_distance_min_pct" not in db._client.row
+    assert db._client.upsert_count == 2  # failed attempt + retry
+
+
+@pytest.mark.asyncio
+async def test_put_settings_missing_column_retry_keeps_merge_semantics():
+    """Retry must still merge with the stored row, not replace it."""
+    db = SettingsDatabase(None)
+    db._client = FakeSettingsClient(None, fail_columns=("gold_breakout_only",))
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"gold_breakout_only": False,
+                                              "min_confidence": 80})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert db._client.row["min_confidence"] == 80
+    assert "gold_breakout_only" not in db._client.row
+    # untouched fields keep defaults (merge, not replace)
+    assert db._client.row["news_block_minutes"] == 30
+
+
+@pytest.mark.asyncio
+async def test_put_settings_missing_column_get_falls_back_cleanly():
+    """After a skipped-column save, GET must still return valid settings."""
+    db = SettingsDatabase(None)
+    db._client = FakeSettingsClient(None, fail_columns=("sl_distance_max_pct",))
+    set_state(db)
+    await call("PUT", "/api/settings", {"min_confidence_gold": 65})
+    res = await call("GET", "/api/settings")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["min_confidence_gold"] == 65
+    # missing column → schema default on GET
+    assert body["sl_distance_max_pct"] == 0

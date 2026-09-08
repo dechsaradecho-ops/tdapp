@@ -91,9 +91,29 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     except Exception as exc:
         log.error("save app_settings failed: %s", exc)
         # PGRST204 = PostgREST schema cache miss — almost always a missing
-        # column from a migration that hasn't been applied yet. Surface a
-        # friendly, actionable message instead of the raw PostgREST payload.
+        # column from a migration that hasn't been applied yet. Retry the
+        # upsert WITHOUT the unknown column(s) so the other settings still
+        # land (e.g. min_confidence_gold used to fail to save entirely once
+        # newer columns like sl_distance_* had no migration applied yet).
         raw = str(exc)
+        if "PGRST204" in raw:
+            import re
+            m = (re.search(r"'([^']+)'\s+of schema", raw)
+                 or re.search(r"Could not find the '([^']+)' column", raw))
+            missing = m.group(1) if m else None
+            if missing and missing in row:
+                row.pop(missing, None)
+                try:
+                    resp = db._client.table(SETTINGS_TABLE).upsert(row).execute()
+                    if resp.data:
+                        return SettingsSaveResult(
+                            ok=True, settings=_row_to_settings(resp.data[0]),
+                            message=(f"saved (column '{missing}' skipped — "
+                                     "รัน migration ที่เกี่ยวข้องใน Supabase "
+                                     "SQL Editor เพื่อเปิดใช้ฟีเจอร์นี้)"))
+                except Exception as exc2:
+                    log.error("save app_settings retry without %s failed: %s",
+                              missing, exc2)
         if "PGRST204" in raw and "allowed_assets" in raw:
             return SettingsSaveResult(
                 ok=False, settings=merged,
