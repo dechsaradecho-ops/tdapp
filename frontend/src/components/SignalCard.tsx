@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { API_BASE, SignalProposal } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
+import CopyNum from "@/components/CopyNum";
 import Icon from "@/components/Icon";
 import LimitLevels from "@/components/LimitLevels";
 import SltpLevels from "@/components/SltpLevels";
@@ -58,10 +59,10 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       <div className="grid grid-cols-2 gap-2 text-sm mb-2">
         <Field label="Confidence" value={`${signal.confidence}%`} />
         <Field label="Risk / Trade" value={`${signal.risk_per_trade_pct}%`} />
-        <Field label="Entry" value={fmtNum(signal.entry, 5)} />
+        <Field label="Entry" value={<CopyNum value={signal.entry} />} />
         <Field label="RR" value={`1 : ${signal.expected_rr}`} />
-        <Field label="Stop Loss" value={fmtNum(signal.stop_loss, 5)} />
-        <Field label="Take Profit" value={fmtNum(signal.take_profit, 5)} />
+        <Field label="Stop Loss" value={<CopyNum value={signal.stop_loss} />} />
+        <Field label="Take Profit" value={<CopyNum value={signal.take_profit} />} />
       </div>
       {signal.live_price != null && signal.live_price > 0 && (
         // ราคาตลาดปัจจุบัน (spot feed) เทียบกับ entry บนการ์ด — ถ้า entry
@@ -133,7 +134,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="bg-white/[0.05] rounded-xl p-2 border border-white/10">
       <p className="text-xs text-slate-500">{label}</p>

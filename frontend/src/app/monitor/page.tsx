@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
+import CopyNum from "@/components/CopyNum";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -467,10 +468,10 @@ export default function MonitorPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4 font-bold">{fmtNum(p.volume, 2)}</td>
-                    <td className="py-2 pr-4 font-bold">{fmtNum(p.entry_price, 5)}</td>
+                    <td className="py-2 pr-4 font-bold"><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">{fmtNum(p.current_price, 5)}</td>
-                    <td className="py-2 pr-4"><span className="font-bold text-loss">{p.stop_loss != null ? fmtNum(p.stop_loss, 5) : "-"}</span><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
-                    <td className="py-2 pr-4"><span className="font-bold text-profit">{p.take_profit != null ? fmtNum(p.take_profit, 5) : "-"}</span><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
+                    <td className="py-2 pr-4"><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
+                    <td className="py-2 pr-4"><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}

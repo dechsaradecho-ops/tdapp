@@ -1,7 +1,7 @@
 "use client";
 
 import { LimitLevel, SignalProposal } from "@/lib/types";
-import { fmtNum } from "@/lib/format";
+import CopyNum from "@/components/CopyNum";
 
 /**
  * Laddered entry cards — buy limit / sell limit ระดับ (แนวรับหลายแนว)
@@ -31,10 +31,10 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
               </span>
               <span className="text-xs text-slate-500">{label} {i + 1} · {lv.risk_pct}%</span>
             </div>
-            <p className="font-bold text-sm">{fmtNum(lv.price, 5)}</p>
+            <p className="font-bold text-sm"><CopyNum value={lv.price} /></p>
             <div className="mt-1 space-y-1 text-xs">
-              <p><span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5 font-bold">SL {fmtNum(lv.sl, 5)}</span></p>
-              <p><span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5 font-bold">TP {fmtNum(lv.tp, 5)}</span></p>
+              <p><span className="inline-flex items-center gap-1 rounded-full bg-loss/30 text-loss px-2 py-0.5 font-bold">SL <CopyNum value={lv.sl} /></span></p>
+              <p><span className="inline-flex items-center gap-1 rounded-full bg-profit/30 text-profit px-2 py-0.5 font-bold">TP <CopyNum value={lv.tp} /></span></p>
               <p className="text-slate-500">RR 1:{lv.rr}</p>
             </div>
           </div>
