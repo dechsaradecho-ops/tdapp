@@ -419,6 +419,8 @@ export interface AppSettings {
   partial_close_pct: number;
   /** R-multiple that triggers the partial close */
   partial_trigger_r: number;
+  /** Time stop: close positions older than this many days (0 = off) */
+  max_hold_days: number;
   /** Simulated spread (price units) applied to paper fills */
   paper_spread: number;
   max_drawdown_pct: number;

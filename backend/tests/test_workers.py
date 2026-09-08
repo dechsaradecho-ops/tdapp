@@ -1011,6 +1011,101 @@ class TestPositionGuardManagement:
         assert row["stop_loss"] == 1.0900  # original
         assert row.get("sl_moved_at") is None
 
+    # ---- Strategy E: time stop (max_hold_days) ---------------------------
+    @pytest.mark.asyncio
+    async def test_time_stop_closes_aged_position(self, monkeypatch):
+        """Position older than max_hold_days → closed with reason "time",
+        journaled + signal-logged, even when SL/TP were never touched."""
+        from app.workers import position_guard
+        closed: list[str] = []
+        broker = self._broker()
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        # Position opened 7 days ago (default limit = 5 days)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=7)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=5,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == ["T1"]
+        assert summary["closed"] == 1
+        row = db.rows["paper_trades"][0]
+        assert row["status"] == "closed"
+        assert row["close_reason"] == "time"
+
+    @pytest.mark.asyncio
+    async def test_time_stop_spares_fresh_position(self, monkeypatch):
+        """Age < max_hold_days → position stays open."""
+        from app.workers import position_guard
+        closed: list[str] = []
+        broker = self._broker()
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=2)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=5,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert summary["closed"] == 0
+        assert db.rows["paper_trades"][0]["status"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_time_stop_disabled_at_zero(self, monkeypatch):
+        """max_hold_days = 0 → feature off, however old the position is."""
+        from app.workers import position_guard
+        closed: list[str] = []
+        broker = self._broker()
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=30)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=30)).isoformat())
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert db.rows["paper_trades"][0]["status"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_time_stop_hits_aged_position_even_with_sl(self, monkeypatch):
+        """Live price never touched SL/TP → previously skipped forever; now the
+        time stop still closes it (the stale-chase scenario from production)."""
+        from app.workers import position_guard
+        closed: list[str] = []
+        broker = self._broker(sl=1.0500)  # SL far below live 1.2500
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=6)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=5,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == ["T1"]
+        assert summary["closed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_carries_opened_at(self):
+        """rehydrate_book must restore opened_at from created_at — otherwise a
+        restart resets the time-stop clock and stale trades live forever."""
+        from app.workers import position_guard
+
+        class BookBroker:
+            def __init__(self):
+                self._positions = {}
+                self._seq = 0
+
+        old = datetime.now(timezone.utc) - timedelta(days=9)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "PAPER-000007", "asset": "EURUSD",
+             "status": "open", "direction": "buy", "volume": 0.01,
+             "entry_price": 1.1615, "user_id": "u1",
+             "created_at": old.isoformat()}]})
+        broker = BookBroker()
+        await position_guard.rehydrate_book(db, broker)
+        pos = broker._positions["PAPER-000007"]
+        assert pos.opened_at is not None
+        assert (datetime.now(timezone.utc) - pos.opened_at).days >= 8
+
 
 # ---------------------------------------------------------------------------
 # Portfolio monitor — breach → pause + notify + equity snapshots

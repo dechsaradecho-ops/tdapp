@@ -245,6 +245,30 @@ class TestOpportunityScore:
         opp = self.engine.opportunity_score(make_ind())
         assert len(opp.reasons) >= 3
 
+    # ---- Strategy A: pullback-in-trend beats extended chase ---------------
+    def test_pullback_beats_chase_in_uptrend(self):
+        """RSI ~45 (ย่อในเทรนด์) ต้องได้คะแนนมากกว่า RSI ~65 (ไล่ราคา)"""
+        pullback = self.engine.opportunity_score(
+            make_ind(rsi=45.0, macd_hist=0.5))
+        chase = self.engine.opportunity_score(
+            make_ind(rsi=65.0, macd_hist=2.5))
+        assert pullback.score > chase.score
+        assert any("pullback" in r for r in pullback.reasons)
+
+    def test_pullback_reason_written_for_sell_side(self):
+        """SELL: rally ขึ้นในเทรนด์ขาลง (RSI ~55) ได้คะแนนดีกว่า oversold ลึก"""
+        engine = self.engine
+        rally = engine.opportunity_score(
+            make_ind(ema_fast=2380.0, ema_slow=2420.0,
+                     supertrend_dir=-1, rsi=55.0, macd_hist=-0.5))
+        assert rally.score > 0
+        assert any("rally" in r for r in rally.reasons)
+        # rally-to-sell ต้องไม่แพ้ bear chase (RSI ต่ำ = ขายบน oversold)
+        deep = engine.opportunity_score(
+            make_ind(ema_fast=2380.0, ema_slow=2420.0,
+                     supertrend_dir=-1, rsi=35.0, macd_hist=-2.5))
+        assert rally.score >= deep.score
+
 
 class TestBuildProposal:
     def setup_method(self):

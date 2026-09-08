@@ -91,16 +91,46 @@ class StrategyEngine:
             score += 5
             reasons.append(f"ADX = {ind.adx:.0f} (<25) → เทรนด์อ่อน/ไซด์เวย์")
 
-        # --- Momentum (0-25) ---
-        if ind.rsi >= 55 and ind.rsi <= 70:
-            score += 15
-            reasons.append(f"RSI = {ind.rsi:.0f} → โมเมนตัมเป็นบวกแบบไม่ร้อนเกินไป")
-        elif ind.rsi > 70:
-            score += 5
-            reasons.append(f"RSI = {ind.rsi:.0f} → overbought เสี่ยงย่อ")
-        elif ind.rsi < 45 and ind.supertrend_dir > 0:
-            score += 8
-            reasons.append(f"RSI = {ind.rsi:.0f} แต่ Supertrend ยังขาขึ้น → โอกาส buy on dip")
+        # --- Momentum (0-25): pullback-in-trend beats chase ---
+        # สถิติ prod ชี้ว่าการไล่ราคา (chase) ที่ RSI สูงแล้วแพงกว่าการรอจังหวะย่อ
+        # → ให้น้ำหนัก "pullback ในเทรนด์" มากกว่า "โมเมนตัมร้อนแรง"
+        bull_trend = (
+            ind.ema_fast > ind.ema_slow
+            if (ind.ema_fast and ind.ema_slow) else ind.supertrend_dir > 0
+        )
+        if bull_trend:
+            if 40 <= ind.rsi <= 55 and ind.supertrend_dir > 0:
+                score += 15
+                reasons.append(
+                    f"RSI = {ind.rsi:.0f} + Supertrend ขาขึ้น → จังหวะ pullback "
+                    "(ราคาย่อในเทรนด์ขาขึ้น) จุดเข้าดีกว่าการไล่ราคา")
+            elif 55 < ind.rsi <= 70:
+                score += 5
+                reasons.append(
+                    f"RSI = {ind.rsi:.0f} → โมเมนตัมร้อนแรงไปแล้ว เข้าตอนนี้คือการไล่ราคา (chase)")
+            elif ind.rsi > 70:
+                score += 5
+                reasons.append(f"RSI = {ind.rsi:.0f} → overbought เสี่ยงย่อ")
+            elif ind.rsi < 40 and ind.supertrend_dir > 0:
+                score += 8
+                reasons.append(
+                    f"RSI = {ind.rsi:.0f} ย่อลึก แต่ Supertrend ยังขาขึ้น → รอสัญญาณกลับตัวก่อนเข้า")
+        else:
+            if 45 <= ind.rsi <= 60 and ind.supertrend_dir < 0:
+                score += 15
+                reasons.append(
+                    f"RSI = {ind.rsi:.0f} + Supertrend ขาลง → จังหวะ rally ขึ้นในเทรนด์ขาลง "
+                    "จุดขายดีกว่าการไล่เทลอง")
+            elif 30 <= ind.rsi < 45:
+                score += 5
+                reasons.append(f"RSI = {ind.rsi:.0f} → โมเมนตัมขาลง ระวัง oversold ลึกเกิน")
+            elif ind.rsi > 60 and ind.supertrend_dir < 0:
+                score += 8
+                reasons.append(
+                    f"RSI = {ind.rsi:.0f} rally สูงแต่ Supertrend ยังขาลง → จุดขายแต่เสี่ยงสูง")
+            elif ind.rsi < 30:
+                score += 5
+                reasons.append(f"RSI = {ind.rsi:.0f} → oversold เสี่ยง bounce แรง")
         if ind.macd_hist > 0:
             score += 10
             reasons.append("MACD histogram เป็นบวก → โมเมนตัมยืนยันทิศทาง")

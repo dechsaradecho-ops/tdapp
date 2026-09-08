@@ -590,6 +590,7 @@ export default function MonitorPage() {
                       {t.close_reason === "sl" ? "ตัดขาดทุน (SL)"
                         : t.close_reason === "tp" ? "ถึงเป้า (TP)"
                         : t.close_reason === "manual" ? "ปิดเอง"
+                        : t.close_reason === "time" ? "หมดเวลา (Time Stop)"
                         : "-"}
                     </td>
                     <td className="py-2 text-xs">{t.source === "auto" ? "Auto" : "Approve"}</td>

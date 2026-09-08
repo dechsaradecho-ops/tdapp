@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   trail_atr_mult: 2.0,
   partial_close_pct: 0,
   partial_trigger_r: 1.0,
+  max_hold_days: 5,
   paper_spread: 0,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
@@ -583,6 +584,11 @@ export default function SettingsPage() {
               </span>
               <NumField label="Partial Trigger (×R)" value={cfg.partial_trigger_r}
                 onChange={(v) => set("partial_trigger_r", v)} step={0.1} />
+              <NumField label="Max Hold Days (วัน)" value={cfg.max_hold_days}
+                onChange={(v) => set("max_hold_days", v)} step={1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                ถือไม้ครบกี่วัน ให้ระบบปิดเอง (0 = ปิดการใช้งาน)
+              </span>
               <NumField label="Paper Spread (ราคา)" value={cfg.paper_spread}
                 onChange={(v) => set("paper_spread", v)} step={0.00001} />
               <span className="block text-xs text-slate-500 -mt-2">

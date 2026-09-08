@@ -1342,6 +1342,10 @@ class AppSettings(BaseModel):
     # reaches partial_trigger_r × R, then trail the remainder. 0 disables.
     partial_close_pct: float = 0.0
     partial_trigger_r: float = 1.0
+    # Time stop: close any position older than max_hold_days days regardless
+    # of PnL — stale trend-chase entries decay instead of recovering. 0
+    # disables the feature.
+    max_hold_days: int = 5
 
     # ---- Paper execution realism ------------------------------------------
     # Simulated spread (in price units) applied to paper fills: BUYs fill at

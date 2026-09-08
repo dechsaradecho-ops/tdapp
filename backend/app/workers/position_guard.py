@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from app.integrations import quotes
 from app.integrations.brokers import Position
@@ -225,6 +226,40 @@ async def guard_once(db, broker, notifier: NotificationService,
             (pos.direction == "BUY" and price >= tp)
             or (pos.direction == "SELL" and price <= tp))
         if not (hit_sl or hit_tp):
+            # ---- time stop: close stale positions (max_hold_days) ----
+            # SL/TP always wins (checked first); this only fires when neither
+            # was touched but the trade has simply been open too long.
+            max_hold = int(getattr(s, "max_hold_days", 0) or 0)
+            opened_at = getattr(pos, "opened_at", None)
+            if max_hold > 0 and opened_at is not None:
+                age_days = (datetime.now(timezone.utc) - opened_at).total_seconds() / 86400.0
+                if age_days >= max_hold:
+                    result = await broker.close_position(pos.ticket)
+                    if not result.ok:
+                        log.warning("time-stop close %s failed: %s",
+                                    pos.ticket, result.message)
+                        continue
+                    pnl = execution.PaperBrokerPnl.compute(pos)
+                    execution.close_trade_rows(db, pos.ticket, price, pnl, "time")
+                    signal_log.log_event(
+                        db=db, event="closed", asset=str(pos.asset or ""),
+                        direction=str(pos.direction or ""),
+                        entry=pos.entry_price, exit_price=price, pnl=pnl,
+                        ticket=str(pos.ticket or ""), source="auto",
+                        reason=f"หมดเวลาถือไม้ (time stop) เกิน {max_hold} วัน "
+                               f"— ปิดที่ {price:g}")
+                    closed += 1
+                    try:
+                        await notifier.notify(
+                            pos.user_id, "trade_closed",
+                            f"⏱ Position Closed (TIME STOP)\n"
+                            f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
+                            f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
+                            f"Held: {age_days:.1f} days (limit {max_hold})\n"
+                            f"PnL: {pnl:+,.2f}",
+                        )
+                    except Exception as exc:
+                        log.error("time-stop notify failed: %s", exc)
             continue
 
         reason = "sl" if hit_sl else "tp"
@@ -330,6 +365,21 @@ async def rehydrate_book(db, broker) -> int:
             # TP1 already fired for this position before the restart — carry
             # the flag into the book or the guard would partial-close again.
             book[ticket].partial_done = bool(row.get("partial_done"))  # type: ignore[attr-defined]
+            # Time-stop age must survive restarts — restore opened_at from the
+            # journal row's created_at (Position's default is "now", which
+            # would silently reset the clock on every deploy).
+            opened_at = None
+            created = row.get("created_at")
+            if created:
+                try:
+                    opened_at = datetime.fromisoformat(
+                        str(created).replace("Z", "+00:00"))
+                    if opened_at.tzinfo is None:
+                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    opened_at = None
+            if opened_at is not None:
+                book[ticket].opened_at = opened_at
             seen.add(ticket)
             restored += 1
             # Walk the order sequence past every restored ticket so future
