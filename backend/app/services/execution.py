@@ -37,6 +37,7 @@ from app.models.schemas import (
     TradeLimits,
     effective_min_confidence,
     effective_min_lot,
+    effective_spread,
     risk_to_lot,
     risk_to_lot_for,
 )
@@ -573,11 +574,13 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         return report
     report.size_lots = lots
 
-    # Paper realism: fill at entry ± spread/2 (Settings → paper_spread).
-    # SL/TP stay anchored to the mid-based levels the signal card showed;
-    # only the fill price moves, so the position starts with the spread cost
-    # baked in exactly like a real account.
-    fill_price = apply_spread(entry, direction, getattr(s, "paper_spread", 0.0))
+    # Paper realism: fill at entry ± spread/2. Spread resolves per symbol:
+    # user override (spread_overrides) → built-in DEFAULT_SPREADS (realistic
+    # typical spread, e.g. gold 0.30 vs EURUSD 0.00010) → legacy global
+    # paper_spread. SL/TP stay anchored to the mid-based levels the signal
+    # card showed; only the fill price moves, so the position starts with the
+    # spread cost baked in exactly like a real account.
+    fill_price = apply_spread(entry, direction, effective_spread(s, asset))
 
     result = await broker.place_order(OrderRequest(
         user_id=user_id, asset=asset, direction=direction, volume=lots,

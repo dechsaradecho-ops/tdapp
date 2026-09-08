@@ -306,9 +306,10 @@ class TestGatePipeline:
         shift = 2420.0 / 2400.0
         assert order.stop_loss == pytest.approx(round(2350.0 * shift, 5))
         assert order.take_profit == pytest.approx(round(2500.0 * shift, 5))
-        # fill = re-anchored entry ± half spread
+        # fill = re-anchored entry ± half of the per-symbol spread
         assert order.entry_price == pytest.approx(
-            execution.apply_spread(2420.0, "BUY", s.paper_spread))
+            execution.apply_spread(2420.0, "BUY",
+                                   execution.effective_spread(s, "XAUUSD")))
         # sizing uses the re-anchored (live) entry/SL, not the stale row
         assert order.volume == pytest.approx(execution.size_position(
             s, 2420.0, round(2350.0 * shift, 5), asset="XAUUSD"), abs=1e-9)
@@ -318,6 +319,52 @@ class TestGatePipeline:
         opened = [row for table, row in db.inserted
                   if table == "signal_logs" and row.get("event") == "order_opened"]
         assert opened and "re-anchor" in opened[0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_fill_uses_per_symbol_builtin_spread(self, broker, notifier):
+        """Paper fills use the per-symbol built-in spread by default — one
+        global paper_spread can never fit every asset (gold ~0.30 vs
+        EURUSD ~0.0001). paper_spread stays 0 here: the fill cost comes
+        from DEFAULT_SPREADS via effective_spread."""
+        db = FakeDatabase()
+        s = clean_settings()  # paper_spread=0, spread_overrides={}
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-spd", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        # gold's built-in spread 0.30 → BUY fills at entry + 0.15
+        assert order.entry_price == pytest.approx(2400.0 + 0.15)
+
+        db2 = FakeDatabase()
+        report2 = await execution.execute_signal(
+            db2, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="SELL",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=85.0, opportunity=80.0, signal_id="sig-spd2", source="auto",
+        )
+        assert report2.allowed, report2.rejects
+        # EURUSD's built-in spread 0.00010 → SELL fills at entry − 0.00005
+        assert broker.orders[1].entry_price == pytest.approx(1.0850 - 0.00005)
+
+    @pytest.mark.asyncio
+    async def test_fill_prefers_spread_override_over_builtin(self, broker, notifier):
+        """A user override (spread_overrides) replaces the built-in spread
+        for that symbol; other symbols keep theirs."""
+        db = FakeDatabase()
+        s = clean_settings(spread_overrides={"XAUUSD": 0.50})
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="SELL",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-spd3", source="auto",
+        )
+        assert report.allowed, report.rejects
+        # override 0.50 → SELL fills at entry − 0.25 (not the built-in 0.15)
+        assert broker.orders[0].entry_price == pytest.approx(2400.0 - 0.25)
 
     @pytest.mark.asyncio
     async def test_live_reanchor_runs_before_sl_tier_rederive(self, broker, notifier, monkeypatch):
@@ -358,7 +405,9 @@ class TestGatePipeline:
         order = broker.orders[0]
         assert order.stop_loss == 2350.0
         assert order.take_profit == 2500.0
-        assert order.entry_price == pytest.approx(2400.0, abs=1e-3)
+        # fail-safe keeps the SIGNAL prices; the fill still carries the
+        # per-symbol spread (gold's built-in 0.30 → BUY at +0.15)
+        assert order.entry_price == pytest.approx(2400.15, abs=1e-3)
 
     @pytest.mark.asyncio
     async def test_pause_blocks_execution(self, broker, notifier):

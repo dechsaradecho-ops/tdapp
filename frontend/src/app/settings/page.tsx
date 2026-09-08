@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   max_hold_days: 5,
   gold_breakout_only: true,
   paper_spread: 0,
+  spread_overrides: null,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
   kill_weekly_loss_pct: 5,
@@ -106,6 +107,29 @@ const SL_MODES = [
 /** Add-pair dropdown options — only pairs the price feeds cover. */
 const ADDABLE_ASSETS = SUPPORTED_ASSETS.filter(
   (a) => !DEFAULT_ASSETS.includes(a));
+
+/** Built-in realistic spreads (mirror of backend DEFAULT_SPREADS) — shown
+ *  as placeholder hints in the per-symbol spread inputs so the user sees
+ *  what value applies when no override is set. */
+const DEFAULT_SPREADS: Record<string, number> = {
+  EURUSD: 0.00010, GBPUSD: 0.00015, USDJPY: 0.015,
+  AUDUSD: 0.00015, NZDUSD: 0.00020, USDCAD: 0.00020, USDCHF: 0.00015,
+  EURGBP: 0.00020, EURJPY: 0.020, EURAUD: 0.00025, EURNZD: 0.00035,
+  EURCAD: 0.00025, EURCHF: 0.00020,
+  GBPJPY: 0.030, GBPAUD: 0.00035, GBPNZD: 0.00045, GBPCAD: 0.00035,
+  GBPCHF: 0.00030,
+  AUDJPY: 0.025, AUDNZD: 0.00035, AUDCAD: 0.00025, AUDCHF: 0.00025,
+  NZDJPY: 0.025, NZDCAD: 0.00030,
+  CADJPY: 0.030, CADCHF: 0.00030, CHFJPY: 0.030,
+  XAUUSD: 0.30,
+};
+
+/** Number of decimals used to render a spread value in placeholders —
+ *  price-unit scales differ wildly (0.0001 vs 0.30). */
+const fmtSpread = (v: number) => {
+  const s = v.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+  return s;
+};
 
 export default function SettingsPage() {
   const { capital, setCapital } = usePortfolio();
@@ -618,11 +642,54 @@ export default function SettingsPage() {
               <span className="block text-xs text-slate-500 -mt-2">
                 ถือไม้ครบกี่วัน ให้ระบบปิดเอง (0 = ปิดการใช้งาน)
               </span>
-              <NumField label="Paper Spread (ราคา)" value={cfg.paper_spread}
+              <NumField label="Paper Spread (ราคา) — ค่าเดิม (fallback)" value={cfg.paper_spread}
                 onChange={(v) => set("paper_spread", v)} step={0.00001} />
               <span className="block text-xs text-slate-500 -mt-2">
-                สเปรดจำลอง — BUY เข้าแพงขึ้น / SELL เข้าถูกลง (0 = ไม่มีสเปรด)
+                ใช้เฉพาะสัญลักษณ์ที่ไม่มีค่าเริ่มต้น/ค่าที่กำหนดเอง (0 = ไม่มีสเปรด)
               </span>
+              {/* --- Per-symbol spread overrides --- */}
+              <div className="pt-2">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Spread รายสัญลักษณ์</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  ทุกสัญลักษณ์มีสเปรดจริงต่างกัน (ทอง ~0.30, EURUSD ~0.0001) — ระบบใช้ค่าเริ่มต้นที่เหมาะสมอัตโนมัติ
+                  ใส่ค่าทับเพื่อกำหนดเอง เว้นว่างเพื่อใช้ค่าเริ่มต้น
+                </p>
+                <div className="mt-2 space-y-1.5">
+                  {(cfg.allowed_assets?.length ? cfg.allowed_assets : DEFAULT_ASSETS).map((a) => {
+                    const ov = cfg.spread_overrides ?? {};
+                    const def = DEFAULT_SPREADS[a];
+                    return (
+                      <label key={a} className="flex items-center gap-2 text-sm">
+                        <span className="w-20 shrink-0 font-medium text-slate-300">{a}</span>
+                        <input type="number" step={0.00001}
+                          value={ov[a] ?? ""}
+                          placeholder={def != null ? `ค่าเริ่มต้น ${fmtSpread(def)}` : `ใช้ค่าเดิม ${cfg.paper_spread}`}
+                          onChange={(e) => {
+                            const next = { ...(cfg.spread_overrides ?? {}) };
+                            if (e.target.value === "") delete next[a];
+                            else next[a] = Number(e.target.value);
+                            set("spread_overrides", next);
+                          }}
+                          className="w-full bg-surface border border-slate-700 rounded px-3 py-2" />
+                        {ov[a] != null && (
+                          <button type="button" onClick={() => {
+                            const next = { ...(cfg.spread_overrides ?? {}) };
+                            delete next[a];
+                            set("spread_overrides", next);
+                          }}
+                            title="ล้างค่า — ใช้สเปรดเริ่มต้นของระบบ"
+                            className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded px-2 py-2">
+                            ล้าง
+                          </button>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-slate-500 mt-1.5">
+                  หน่วยเป็นราคา (bid-ask เต็ม) — BUY เข้าแพงขึ้น spread/2, SELL เข้าถูกลง spread/2
+                </p>
+              </div>
             </div>
 
             {/* --- Kill switch / drawdown --- */}

@@ -354,6 +354,56 @@ def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
     return base if gold is None else float(gold)
 
 
+# ---------- Per-symbol paper spread ----------------------------------------
+# Realistic typical spreads (in PRICE UNITS, full bid-ask width) per symbol.
+# A single global paper_spread can never fit every asset: 0.00015 is honest
+# for EURUSD but absurd for gold (~0.30) and meaningless for USDJPY (~0.015).
+# Values are typical retail spreads for the pairs the feeds cover; the
+# resolver (effective_spread) prefers a user override, then this table, then
+# the legacy global paper_spread.
+DEFAULT_SPREADS: dict[str, float] = {
+    # Majors
+    "EURUSD": 0.00010, "GBPUSD": 0.00015, "USDJPY": 0.015,
+    "AUDUSD": 0.00015, "NZDUSD": 0.00020, "USDCAD": 0.00020,
+    "USDCHF": 0.00015,
+    # EUR crosses
+    "EURGBP": 0.00020, "EURJPY": 0.020, "EURAUD": 0.00025,
+    "EURNZD": 0.00035, "EURCAD": 0.00025, "EURCHF": 0.00020,
+    # GBP crosses
+    "GBPJPY": 0.030, "GBPAUD": 0.00035, "GBPNZD": 0.00045,
+    "GBPCAD": 0.00035, "GBPCHF": 0.00030,
+    # AUD / NZD crosses
+    "AUDJPY": 0.025, "AUDNZD": 0.00035, "AUDCAD": 0.00025,
+    "AUDCHF": 0.00025, "NZDJPY": 0.025, "NZDCAD": 0.00030,
+    # CAD / CHF crosses
+    "CADJPY": 0.030, "CADCHF": 0.00030, "CHFJPY": 0.030,
+    # Metals (COMEX gold — wide spread, ~3 cents on a ~2400 price)
+    "XAUUSD": 0.30,
+}
+
+
+def effective_spread(settings: "AppSettings", asset: Optional[str]) -> float:
+    """Per-symbol paper spread (price units) for paper fills.
+
+    Resolution order:
+      1. User override (settings.spread_overrides[ASSET]) — set from the
+         Settings page per symbol.
+      2. Built-in DEFAULT_SPREADS[ASSET] — realistic typical spread.
+      3. Legacy global paper_spread (0 = no spread) — covers symbols that
+         are not in the table (forward compatibility).
+    """
+    a = str(asset or "").upper()
+    overrides = getattr(settings, "spread_overrides", None) or {}
+    if a in overrides and overrides[a] is not None:
+        try:
+            return max(0.0, float(overrides[a]))
+        except (TypeError, ValueError):
+            pass
+    if a in DEFAULT_SPREADS:
+        return float(DEFAULT_SPREADS[a])
+    return float(getattr(settings, "paper_spread", 0.0) or 0.0)
+
+
 class FrequencyEngine:
     """Guards against overtrading — evaluates every order against profile limits."""
 
@@ -1364,7 +1414,14 @@ class AppSettings(BaseModel):
     # Simulated spread (in price units) applied to paper fills: BUYs fill at
     # entry + spread/2, SELLs at entry − spread/2, so paper PnL reflects the
     # cost a real account would pay. 0 = fill exactly at the mid price.
+    # Legacy global fallback — per-symbol spreads (spread_overrides +
+    # DEFAULT_SPREADS via effective_spread) take precedence for known assets.
     paper_spread: float = 0.0
+    # Per-symbol spread overrides (asset → spread in price units), e.g.
+    # {"XAUUSD": 0.35}. Symbols without an entry use the built-in
+    # DEFAULT_SPREADS table; unknown symbols fall back to paper_spread.
+    # None/{} → built-in defaults only (explicit null clears the override).
+    spread_overrides: Optional[dict[str, float]] = None
 
     max_drawdown_pct: float = 10.0
     kill_daily_loss_pct: float = 2.0

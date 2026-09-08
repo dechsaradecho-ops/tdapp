@@ -216,6 +216,58 @@ def test_effective_min_lot_gold_falls_back_to_base():
     assert effective_min_lot(AppSettings(min_lot=0.03), "") == 0.03
 
 
+# ---------------------------------------------------------------------------
+# 2d) Per-symbol paper spread
+# ---------------------------------------------------------------------------
+def test_effective_spread_builtin_defaults():
+    """Every known asset gets a realistic built-in spread — no config needed."""
+    from app.models.schemas import DEFAULT_SPREADS, effective_spread
+    s = AppSettings()
+    assert effective_spread(s, "XAUUSD") == 0.30
+    assert effective_spread(s, "EURUSD") == 0.00010
+    assert effective_spread(s, "USDJPY") == 0.015
+    assert effective_spread(s, "GBPJPY") == 0.030
+    # case-insensitive
+    assert effective_spread(s, "xauusd") == 0.30
+
+
+def test_effective_spread_table_covers_supported_assets():
+    """The built-in table must cover every tradable asset (settings page
+    universe) — otherwise the legacy global paper_spread leaks into the
+    fill of a symbol that should have a realistic default."""
+    from app.models.schemas import DEFAULT_SPREADS, effective_spread
+    missing = [a for a in quotes.SUPPORTED_ASSETS
+               if effective_spread(AppSettings(), a)
+               != DEFAULT_SPREADS[a]]
+    assert missing == []
+
+
+def test_effective_spread_override_wins():
+    """User override (spread_overrides) beats the built-in default."""
+    from app.models.schemas import effective_spread
+    s = AppSettings(spread_overrides={"XAUUSD": 0.45, "EURUSD": 0.0002})
+    assert effective_spread(s, "XAUUSD") == 0.45
+    assert effective_spread(s, "EURUSD") == 0.0002
+    # symbols without an override keep the built-in default
+    assert effective_spread(s, "GBPUSD") == 0.00015
+
+
+def test_effective_spread_unknown_asset_falls_back_to_paper_spread():
+    """Symbols outside the built-in table (forward compat) use the legacy
+    global paper_spread; 0 = no spread (old behaviour)."""
+    from app.models.schemas import effective_spread
+    assert effective_spread(AppSettings(), "XAGUSD") == 0.0
+    assert effective_spread(AppSettings(paper_spread=0.00015), "XAGUSD") == 0.00015
+
+
+def test_effective_spread_zero_override_disables_spread():
+    """An explicit 0 override disables the spread for that symbol (paid
+    overrides beat the built-in table — clearing means removing the key)."""
+    from app.models.schemas import effective_spread
+    s = AppSettings(spread_overrides={"XAUUSD": 0.0})
+    assert effective_spread(s, "XAUUSD") == 0.0
+
+
 def test_kill_switch_threshold_overrides():
     loose = KillSwitchEngine(daily_loss_limit=10.0, weekly_loss_limit=20.0,
                              monthly_loss_limit=30.0, drawdown_limit=40.0)
@@ -333,6 +385,45 @@ async def test_get_settings_returns_min_lot_gold_from_row():
     res = await call("GET", "/api/settings")
     assert res.status_code == 200
     assert res.json()["min_lot_gold"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_put_settings_persists_spread_overrides():
+    """spread_overrides (spread รายสัญลักษณ์) round-trips through the API."""
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings",
+                     {"spread_overrides": {"XAUUSD": 0.45}})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["spread_overrides"] == {"XAUUSD": 0.45}
+    assert db._client.row["spread_overrides"] == {"XAUUSD": 0.45}
+
+
+@pytest.mark.asyncio
+async def test_put_settings_empty_spread_overrides_clears_column():
+    """{} (every override cleared in the UI) → column stores NULL so the
+    built-in DEFAULT_SPREADS apply; a stored override is replaced."""
+    db = SettingsDatabase(AppSettings(spread_overrides={"XAUUSD": 0.5})
+                          .model_dump(mode="json"))
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"spread_overrides": {}})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    # null = built-in defaults (same semantics as min_lot_gold)
+    assert body["settings"]["spread_overrides"] is None
+    assert db._client.row["spread_overrides"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_settings_returns_spread_overrides_from_row():
+    row = AppSettings(spread_overrides={"EURUSD": 0.0002})
+    set_state(SettingsDatabase(row.model_dump(mode="json")))
+    res = await call("GET", "/api/settings")
+    assert res.status_code == 200
+    assert res.json()["spread_overrides"] == {"EURUSD": 0.0002}
 
 
 @pytest.mark.asyncio

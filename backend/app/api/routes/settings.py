@@ -68,6 +68,13 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     for opt in ("min_confidence_gold", "min_lot_gold"):
         if opt in (payload or {}) and (payload or {})[opt] is None:
             patch[opt] = None
+    # Per-symbol spread overrides: an empty dict ({} from the Settings page
+    # when every override was cleared) is normalized to None so the JSONB
+    # column stores NULL → built-in DEFAULT_SPREADS apply. Non-empty dicts
+    # pass through (unknown assets are harmless — the resolver ignores them).
+    if "spread_overrides" in (payload or {}) \
+            and not (payload or {}).get("spread_overrides"):
+        patch["spread_overrides"] = None
     # model_validate (NOT model_copy) so client values are coerced to field types —
     # e.g. float 30.0 → int 30; Postgres integer columns reject "30.0" (22P02)
     merged = AppSettings.model_validate({**current.model_dump(), **patch})

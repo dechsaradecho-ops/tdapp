@@ -425,8 +425,12 @@ export interface AppSettings {
   max_hold_days: number;
   /** Strategy D: XAUUSD only trades breakout/retest setups (false = old behaviour) */
   gold_breakout_only: boolean;
-  /** Simulated spread (price units) applied to paper fills */
+  /** Simulated spread (price units) applied to paper fills — legacy global
+   *  fallback; per-symbol spreads take precedence for known assets */
   paper_spread: number;
+  /** Per-symbol spread overrides (asset → spread in price units) — null =
+   *  built-in realistic defaults; symbols without an entry use defaults */
+  spread_overrides: Record<string, number> | null;
   max_drawdown_pct: number;
   kill_daily_loss_pct: number;
   kill_weekly_loss_pct: number;
