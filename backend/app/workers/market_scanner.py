@@ -79,6 +79,10 @@ async def scan_once(db: Database) -> list[dict]:
             "sentiment": "bullish" if ind.ema_fast > ind.ema_slow else "bearish",
             "confidence": opp.score,
             "explanation": " | ".join(opp.reasons[:3]),
+            # Full scoring breakdown — home Opportunity-Score popup shows HOW
+            # the score was computed (every component line, not just the 3
+            # folded into explanation). Empty reasons never written ("" column).
+            "score_reasons": "\n".join(opp.reasons),
         }
         db.insert("market_analysis", row)
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})

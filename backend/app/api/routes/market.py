@@ -69,10 +69,18 @@ async def market_summary(request: Request) -> MarketSummary:
     rows = db.select("market_analysis", limit=50)
     for row in rows:
         if row["asset"] not in {o.asset for o in opportunities}:
+            # score_reasons (migration 026): full scoring breakdown from the
+            # scanner — \n-joined component lines; falls back to the old 3-
+            # reason explanation for rows written before the migration.
+            raw_reasons = str(row.get("score_reasons") or "")
+            reasons = ([s for s in raw_reasons.split("\n") if s.strip()]
+                       if raw_reasons
+                       else [row.get("explanation", "")])
             opportunities.append(AssetOpportunity(
                 asset=row["asset"], score=float(row["confidence"]),
                 band=StrategyEngine.band_of(float(row["confidence"])),
-                reasons=[row.get("explanation", "")],
+                reasons=reasons[:3],
+                score_reasons=reasons,
             ))
 
     # 2) Partial fill: live-fetch ONLY symbols with no worker row yet (e.g.
@@ -90,6 +98,7 @@ async def market_summary(request: Request) -> MarketSummary:
                     opportunities.append(AssetOpportunity(
                         asset=asset, score=opp.score, band=opp.band,
                         reasons=opp.reasons[:3],
+                        score_reasons=list(opp.reasons),
                     ))
         except Exception:
             pass  # network/quote failure → final fallback below

@@ -43,6 +43,8 @@ export interface AssetOpportunity {
   score: number;
   band: "low" | "medium" | "high" | "very_high";
   reasons: string[];
+  /** Full scoring breakdown (ทุก component) — ใช้ใน popup รายละเอียดคะแนน */
+  score_reasons?: string[];
 }
 
 export interface MarketSummary {

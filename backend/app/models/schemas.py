@@ -122,6 +122,10 @@ class AssetOpportunity(BaseModel):
     score: float = Field(ge=0, le=100)
     band: OpportunityBand
     reasons: list[str]
+    # Full scoring breakdown (one line per component, \n-joined in the DB
+    # column score_reasons) — home Opportunity-Score popup shows HOW the
+    # score was computed. Empty when the row predates migration 026.
+    score_reasons: list[str] = []
 
 
 class MarketSummary(BaseModel):
