@@ -112,6 +112,16 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             (r.get("approval") or "pending") == "approved",
             r.get("approved_at") or r.get("created_at") or "",
         ), reverse=True)
+        # Pending = action queue — keep EVERY pending card even when approved
+        # history fills the page budget (pending is bounded by the scanner's
+        # per-asset dedup, ≤1 per asset). The old combined rows[:8] slice let
+        # 8 approved cards push the newest pending signals off the page
+        # entirely (prod 2026-09-08: three 11:16 UTC pending cards invisible
+        # → user reported "signal ใหม่ไม่ gen" while the scanner kept emitting).
+        approved_rows = [r for r in rows if r.get("approval") == "approved"]
+        pending_rows = [r for r in rows
+                        if (r.get("approval") or "pending") == "pending"]
+        rows = approved_rows[:8] + pending_rows
         # Read-time limit note — the scanner keeps generating signals all day
         # even past the user's limits (limits gate ORDER EXECUTION, not signal
         # generation), so pending cards that cannot fire right now carry the
@@ -132,7 +142,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         week_count = len([r for r in todays
                           if str(r.get("created_at", "")) >= week_ago
                           and r.get("status") != "rejected"])
-        for r in rows[:8]:
+        for r in rows:
             entry = float(r["entry"] or 0)
             stop_loss = float(r["stop_loss"] or 0)
             sl_distance = abs(entry - stop_loss)
