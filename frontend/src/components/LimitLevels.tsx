@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { LimitLevel, SignalProposal } from "@/lib/types";
 import CopyNum from "@/components/CopyNum";
 
@@ -8,7 +9,9 @@ import CopyNum from "@/components/CopyNum";
  * Each card: limit price, weight (%), per-level SL / TP at the target RR.
  */
 export default function LimitLevels({ signal }: { signal: SignalProposal }) {
-  if (!signal.limit_levels?.length) return null;
+  const levels = signal.limit_levels ?? [];
+  const [open, setOpen] = useState(true);
+  if (!levels.length) return null;
   const buy = signal.direction === "BUY";
   const label = buy ? "Buy Limit" : "Sell Limit";
   // 3 ระดับแนวรับ (rung 1-3) — แสดงแค่เลข 1/2/3 ใน pill (ผู้ใช้ขอ 2026-09-07:
@@ -18,12 +21,20 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
     tierLabels[i] ?? String(i + 1);
 
   return (
-    <div className="mt-2">
-      <p className="text-xs text-slate-500 mb-1">
-        SL/TP 3 ระดับ — {label} แนวรับกระจายน้ำหนัก {signal.limit_levels.map((l) => `${l.risk_pct}%`).join(" / ")} (RR 1:{signal.expected_rr})
-      </p>
-      <div className="grid grid-cols-3 gap-2">
-        {signal.limit_levels.map((lv: LimitLevel, i: number) => (
+    <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.04]">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-2 py-1.5 text-xs hover:bg-white/10 rounded-xl"
+        aria-expanded={open}
+      >
+        <span className="text-slate-400">
+          SL/TP 3 ระดับ — {label} แนวรับกระจายน้ำหนัก {levels.map((l) => `${l.risk_pct}%`).join(" / ")} (RR 1:{signal.expected_rr})
+        </span>
+        <span className="text-slate-500 shrink-0 ml-2">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+      <div className="grid grid-cols-3 gap-2 px-2 pb-2">
+        {levels.map((lv: LimitLevel, i: number) => (
           <div key={i} className={`rounded p-2 border ${buy ? "border-profit/40 bg-profit/5" : "border-loss/40 bg-loss/5"}`}>
             <div className="flex items-center justify-between mb-1">
               <span className={`inline-flex items-center justify-center min-w-[22px] h-[22px] rounded-full px-1.5 text-xs font-bold ${buy ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
@@ -40,6 +51,7 @@ export default function LimitLevels({ signal }: { signal: SignalProposal }) {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }
