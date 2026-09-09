@@ -5,7 +5,6 @@ import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import CopyNum from "@/components/CopyNum";
-import CalcNotes from "@/components/CalcNotes";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -228,6 +227,7 @@ export default function MonitorPage() {
   // "SL ย้ายไป..." + closed) — โหลดพร้อม snapshot ครั้งเดียว
   const [moveLogs, setMoveLogs] = useState<Record<string, SignalLog[]>>({});
   const [openTimeline, setOpenTimeline] = useState<Record<string, boolean>>({});
+  // popup วิธีคำนวณ / เสี่ยง$ ต่อไม้: กดที่ +x.xxR หรือป้าย ⓘ แล้วเปิด modal กลางจอ
   const [openCalc, setOpenCalc] = useState<Record<string, boolean>>({});
   // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(10);
@@ -568,7 +568,7 @@ export default function MonitorPage() {
                   <th className="py-2 pr-4">SL</th>
                   <th className="py-2 pr-4">TP</th>
                   <th className="py-2 pr-4">PnL (ยังไม่ปิด)</th>
-                  <th className="py-2 pr-4">R / เสี่ยง</th>
+                  <th className="py-2 pr-4">R</th>
                   <th className="py-2 pr-4">Smart Exit</th>
                   <th className="py-2 pr-4">ที่มา</th>
                   <th className="py-2 pr-4">Ticket</th>
@@ -579,12 +579,6 @@ export default function MonitorPage() {
                 {snap.open_positions.map((p) => {
                   const rMult = p.r_multiple ?? 0;
                   const riskUsd = p.risk_amount ?? 0;
-                  const srcLabel =
-                    p.price_source === "spot" ? "spot สด"
-                    : p.price_source === "daily" ? "daily close"
-                    : p.price_source === "broker" ? "broker"
-                    : p.price_source === "entry" ? "entry (ไม่มี feed)"
-                    : "—";
                   const timeline = p.ticket ? (moveLogs[p.ticket] ?? []) : [];
                   const tlOpen = openTimeline[p.id] ?? false;
                   const calcOpen = openCalc[p.id] ?? false;
@@ -602,18 +596,21 @@ export default function MonitorPage() {
                     <td className="py-2 pr-4 font-bold"><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">
                       {fmtNum(p.current_price, 5)}
-                      <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
-                        p.price_source === "spot" ? "bg-profit/20 text-profit"
-                        : p.price_source === "daily" ? "bg-amber-500/20 text-amber-400"
-                        : p.price_source === "entry" ? "bg-loss/20 text-loss"
-                        : "bg-slate-500/20 text-slate-400"}`}
-                        title={p.price_source === "spot" ? "ราคาสดจาก spot feed (Yahoo intraday)"
-                          : p.price_source === "daily" ? "ราคาปิดรายวัน (สำรองตอน spot ล่ม)"
-                          : p.price_source === "broker" ? "ราคาจาก broker book (สำรอง)"
-                          : p.price_source === "entry" ? "ไม่มี feed — ใช้ entry, PnL นิ่ง"
-                          : "ที่มาราคาไม่ทราบ"}>
-                        {srcLabel}
-                      </span>
+                      {p.price_source != null && p.price_source !== "spot" && (
+                        <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                          p.price_source === "daily" ? "bg-amber-500/20 text-amber-400"
+                          : p.price_source === "entry" ? "bg-loss/20 text-loss"
+                          : "bg-slate-500/20 text-slate-400"}`}
+                          title={p.price_source === "daily" ? "ราคาปิดรายวัน (สำรองตอน spot ล่ม)"
+                            : p.price_source === "broker" ? "ราคาจาก broker book (สำรอง)"
+                            : p.price_source === "entry" ? "ไม่มี feed — ใช้ entry, PnL นิ่ง"
+                            : "ที่มาราคาไม่ทราบ"}>
+                          {p.price_source === "daily" ? "daily close"
+                            : p.price_source === "broker" ? "broker"
+                            : p.price_source === "entry" ? "entry (ไม่มี feed)"
+                            : p.price_source}
+                        </span>
+                      )}
                     </td>
                     <td className="py-2 pr-4"><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
                     <td className="py-2 pr-4"><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
@@ -623,19 +620,14 @@ export default function MonitorPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4">
-                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                        <span className={`font-bold ${rMult >= 0 ? "text-profit" : "text-loss"}`}>
-                          {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
-                        </span>
-                        <button
-                          onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
-                          className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-xs text-slate-300 active:bg-white/10"
-                          title={notes.length > 0 ? notes.join("\n") : "ดูวิธีคำนวณ"}
-                          aria-expanded={calcOpen}
-                        >
-                          เสี่ยง ${fmtNum(riskUsd, 2)}
-                        </button>
-                      </span>
+                      <button
+                        onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                        className={`font-bold underline decoration-dotted underline-offset-2 cursor-pointer ${rMult >= 0 ? "text-profit" : "text-loss"}`}
+                        title={notes.length > 0 ? `เสี่ยง $${fmtNum(riskUsd, 2)}\n${notes.join("\n")}` : `เสี่ยง $${fmtNum(riskUsd, 2)} — กดดูวิธีคำนวณ`}
+                        aria-expanded={calcOpen}
+                      >
+                        {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
+                      </button>
                     </td>
                     <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
@@ -645,10 +637,12 @@ export default function MonitorPage() {
                         {notes.length > 0 && (
                           <button
                             onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
-                            className="rounded-full border border-accent/40 bg-accent/10 px-2 py-1 font-semibold text-accent text-xs min-h-[32px] active:brightness-125"
+                            className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-[11px] leading-none text-slate-400 active:bg-white/10"
+                            title="วิธีคำนวณ — กดดู popup"
+                            aria-label="วิธีคำนวณ — กดดู popup"
                             aria-expanded={calcOpen}
                           >
-                            วิธีคำนวณ {calcOpen ? "▾" : "▸"}
+                            ⓘ
                           </button>
                         )}
                         <button
@@ -659,6 +653,41 @@ export default function MonitorPage() {
                           {closingTicket === p.ticket ? "..." : "ปิด"}
                         </button>
                       </span>
+                      {calcOpen && createPortal(
+                        <div
+                          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                          style={{ background: "rgba(0,0,0,0.7)" }}
+                          onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: false }))}
+                        >
+                          <div
+                            className="panel w-full max-w-md space-y-3"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="flex items-center justify-between">
+                              <h3 className="panel-title">
+                                {p.asset} {p.direction} {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R · เสี่ยง ${fmtNum(riskUsd, 2)}
+                              </h3>
+                              <button
+                                onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: false }))}
+                                className="text-slate-400 hover:text-accent text-lg leading-none"
+                                aria-label="ปิดหน้าต่าง"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                            {notes.length > 0 ? (
+                              <ol className="list-decimal list-inside space-y-1 text-slate-300 text-xs">
+                                {notes.map((n, i) => (
+                                  <li key={i}>{n}</li>
+                                ))}
+                              </ol>
+                            ) : (
+                              <p className="text-slate-500 text-xs">ไม่มีรายละเอียดวิธีคำนวณ</p>
+                            )}
+                          </div>
+                        </div>,
+                        document.body
+                      )}
                     </td>
                   </tr>
                   <tr className="border-t border-slate-800/50 whitespace-normal">
@@ -679,11 +708,6 @@ export default function MonitorPage() {
                           </span>
                         )}
                       </div>
-                      {calcOpen && notes.length > 0 && (
-                        <div className="mt-1 max-w-2xl">
-                          <CalcNotes notes={notes} defaultOpen />
-                        </div>
-                      )}
                       {tlOpen && timeline.length > 0 && (
                         <ol className="mt-1 max-w-2xl space-y-1 border-l-2 border-accent/40 pl-3">
                           {timeline.map((l) => (

@@ -497,10 +497,11 @@ async def adjust_levels(payload: AdjustLevelsRequest, request: Request) -> dict:
 
     try:
         notifier = NotificationService(db, request.app.state.line)
+        moved_lines = "\n".join(moved)
         await notifier.notify(
             str(row.get("user_id") or "demo"), "trade_opened",
             f"🔧 Levels Adjusted\nAsset: {asset}\n"
-            f"{'\n'.join(moved)}\nTicket: {ticket}")
+            f"{moved_lines}\nTicket: {ticket}")
     except Exception as exc:
         log.debug("levels-adjust notify failed: %s", exc)
 
