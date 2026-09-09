@@ -81,7 +81,11 @@ class Settings(BaseSettings):
     news_analysis_table: str = "news_analysis"
     ai_daily_report_table: str = "ai_daily_report"
 
-    # Risk defaults (percent)
+    # Risk defaults (percent) — must match risk_engine.DEFAULT_*_PCT
+    # (locked by tests/test_risk_defaults.py). These are the fallback when a
+    # field is missing, NOT the live limits: workers/routes use the DB row
+    # via risk_engine_for_settings(). Never construct a bare RiskEngine()
+    # in app code — it silently reads these instead of the user's Settings.
     default_risk_per_trade: float = 0.5
     default_max_daily_loss: float = 2.0
     default_max_weekly_loss: float = 5.0

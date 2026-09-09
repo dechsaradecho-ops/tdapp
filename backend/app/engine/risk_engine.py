@@ -16,14 +16,29 @@ from typing import Optional
 from app.core.config import get_settings
 from app.models.schemas import AppSettings, RiskStatus
 
+# Single source of truth for engine-level risk defaults (percent of equity):
+#   risk_per_trade 0.5 | max_daily_loss 2 | max_weekly_loss 5
+#   max_monthly_loss 8 | max_drawdown 10
+# RiskConfig field defaults, RiskConfig.from_app_settings fallbacks and
+# Settings env defaults (config.py) must all match these — the regression
+# test tests/test_risk_defaults.py locks that. NOTE: AppSettings user-facing
+# default risk_per_trade_pct is 1.0 (moderate profile), intentionally
+# different — from_app_settings falls back to the values below only when a
+# field is None (legacy row), never to AppSettings() itself.
+DEFAULT_RISK_PER_TRADE_PCT = 0.5
+DEFAULT_MAX_DAILY_LOSS_PCT = 2.0
+DEFAULT_MAX_WEEKLY_LOSS_PCT = 5.0
+DEFAULT_MAX_MONTHLY_LOSS_PCT = 8.0
+DEFAULT_MAX_DRAWDOWN_PCT = 10.0
+
 
 @dataclass
 class RiskConfig:
-    risk_per_trade_pct: float = 0.5
-    max_daily_loss_pct: float = 2.0
-    max_weekly_loss_pct: float = 5.0
-    max_monthly_loss_pct: float = 8.0
-    max_drawdown_pct: float = 10.0
+    risk_per_trade_pct: float = DEFAULT_RISK_PER_TRADE_PCT
+    max_daily_loss_pct: float = DEFAULT_MAX_DAILY_LOSS_PCT
+    max_weekly_loss_pct: float = DEFAULT_MAX_WEEKLY_LOSS_PCT
+    max_monthly_loss_pct: float = DEFAULT_MAX_MONTHLY_LOSS_PCT
+    max_drawdown_pct: float = DEFAULT_MAX_DRAWDOWN_PCT
 
     @classmethod
     def from_settings(cls) -> "RiskConfig":
@@ -51,11 +66,11 @@ class RiskConfig:
             return default if v is None else float(v)
 
         return cls(
-            risk_per_trade_pct=num("risk_per_trade_pct", 0.5),
-            max_daily_loss_pct=num("kill_daily_loss_pct", 2.0),
-            max_weekly_loss_pct=num("kill_weekly_loss_pct", 5.0),
-            max_monthly_loss_pct=num("kill_monthly_loss_pct", 8.0),
-            max_drawdown_pct=num("max_drawdown_pct", 10.0),
+            risk_per_trade_pct=num("risk_per_trade_pct", DEFAULT_RISK_PER_TRADE_PCT),
+            max_daily_loss_pct=num("kill_daily_loss_pct", DEFAULT_MAX_DAILY_LOSS_PCT),
+            max_weekly_loss_pct=num("kill_weekly_loss_pct", DEFAULT_MAX_WEEKLY_LOSS_PCT),
+            max_monthly_loss_pct=num("kill_monthly_loss_pct", DEFAULT_MAX_MONTHLY_LOSS_PCT),
+            max_drawdown_pct=num("max_drawdown_pct", DEFAULT_MAX_DRAWDOWN_PCT),
         )
 
 
