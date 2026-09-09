@@ -623,38 +623,47 @@ export default function MonitorPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4">
-                      <span className={`font-bold ${rMult >= 0 ? "text-profit" : "text-loss"}`}>
-                        {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
-                      </span>
-                      <span className="block text-xs text-slate-500">
-                        เสี่ยง ${fmtNum(riskUsd, 2)}
+                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                        <span className={`font-bold ${rMult >= 0 ? "text-profit" : "text-loss"}`}>
+                          {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
+                        </span>
+                        <button
+                          onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                          className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-xs text-slate-300 active:bg-white/10"
+                          title={notes.length > 0 ? notes.join("\n") : "ดูวิธีคำนวณ"}
+                          aria-expanded={calcOpen}
+                        >
+                          เสี่ยง ${fmtNum(riskUsd, 2)}
+                        </button>
                       </span>
                     </td>
                     <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
                     <td className="py-2 text-xs text-slate-500">{p.ticket || "-"}</td>
                     <td className="py-2">
-                      <button
-                        onClick={() => handleClosePosition(p.ticket)}
-                        disabled={!p.ticket || closingTicket === p.ticket}
-                        className="bg-loss text-white font-semibold rounded px-2.5 py-1.5 text-xs min-h-[32px] disabled:opacity-50 active:brightness-90"
-                      >
-                        {closingTicket === p.ticket ? "..." : "ปิด"}
-                      </button>
+                      <span className="inline-flex items-center gap-1.5">
+                        {notes.length > 0 && (
+                          <button
+                            onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                            className="rounded-full border border-accent/40 bg-accent/10 px-2 py-1 font-semibold text-accent text-xs min-h-[32px] active:brightness-125"
+                            aria-expanded={calcOpen}
+                          >
+                            วิธีคำนวณ {calcOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleClosePosition(p.ticket)}
+                          disabled={!p.ticket || closingTicket === p.ticket}
+                          className="bg-loss text-white font-semibold rounded px-2.5 py-1.5 text-xs min-h-[32px] disabled:opacity-50 active:brightness-90"
+                        >
+                          {closingTicket === p.ticket ? "..." : "ปิด"}
+                        </button>
+                      </span>
                     </td>
                   </tr>
                   <tr className="border-t border-slate-800/50 whitespace-normal">
                     <td colSpan={13} className="py-1 pr-4">
                       <div className="flex flex-wrap items-center gap-2 text-xs">
-                        {notes.length > 0 && (
-                          <button
-                            onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
-                            className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-semibold text-accent"
-                            aria-expanded={calcOpen}
-                          >
-                            วิธีคำนวณ ({notes.length}) {calcOpen ? "▾" : "▸"}
-                          </button>
-                        )}
                         {timeline.length > 0 && (
                           <button
                             onClick={() => setOpenTimeline((v) => ({ ...v, [p.id]: !v[p.id] }))}
