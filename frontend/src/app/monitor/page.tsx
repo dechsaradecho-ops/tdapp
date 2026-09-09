@@ -12,8 +12,7 @@ import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
-import { usePortfolio } from "@/lib/portfolio";
-import { ClosePositionResult, MonitorSnapshot, RiskStatus } from "@/lib/types";
+import { ClosePositionResult, MonitorSnapshot } from "@/lib/types";
 
 // ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.monitor_refresh_sec)
 // ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (backend cache spot quotes 30s ดังนั้น
@@ -232,10 +231,11 @@ export default function MonitorPage() {
   const [resetting, setResetting] = useState(false);
   const [resetMsg, setResetMsg] = useState("");
   const [closeAllMsg, setCloseAllMsg] = useState("");
-  // Risk Engine Status (จากหน้า /risk เดิม — รวมเข้ามอนิเตอร์ตามแผนจัดเมนูใหม่)
-  const [risk, setRisk] = useState<RiskStatus | null>(null);
-  const [riskErr, setRiskErr] = useState("");
-  const { capital, equity, pnl, loaded } = usePortfolio();
+  // Risk Engine Status — ค่าจริงจาก backend (snap.risk คำนวณพร้อม monitor
+  // ด้วย inputs เดียวกับ worker — แทนการยิง /risk/check ด้วยค่าปลอมเดิม
+  // ที่ทำให้การ์ดโชว์ low ทั้งที่ระบบ pause อยู่)
+  const risk = snap?.risk ?? null;
+  const riskErr = !snap ? "" : (!snap.risk ? "ยังไม่มีข้อมูลความเสี่ยง" : "");
   // แท็บย่อย: มอนิเตอร์ | Performance (รวมหน้า /performance เดิม — รอบ 2)
   // static export ไม่มี server — อ่าน ?tab=performance จาก window.location.search ใน effect
   const [tab, setTab] = useState<"monitor" | "performance">("monitor");
@@ -273,21 +273,6 @@ export default function MonitorPage() {
       })
       .catch(() => { /* settings ล้มเหลว — ใช้ค่าเริ่มต้น */ });
   }, []);
-
-  // Risk check — รอให้ store โหลดค่าจริงจาก backend ก่อน (store เริ่มต้นที่ 0)
-  // endpoint บังคับ starting_capital/peak_equity > 0 (422 ถ้ายิง 0)
-  useEffect(() => {
-    if (!loaded || capital <= 0) return;
-    api.checkRisk({
-      starting_capital: capital,
-      peak_equity: capital * 1.02,
-      current_equity: equity,
-      realized_pnl_today: Math.min(pnl, 0),
-      realized_pnl_week: pnl,
-      realized_pnl_month: pnl,
-      open_risk: capital * 0.005,
-    }).then(setRisk).catch((e) => setRiskErr(String(e)));
-  }, [capital, equity, pnl, loaded]);
 
   const changeInterval = async (v: number) => {
     setIntervalSec(v);

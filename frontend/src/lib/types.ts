@@ -611,6 +611,8 @@ export interface MonitorSnapshot {
   /** Live portfolio value from DB — capital + realized + unrealized PnL */
   equity: number;
   pnl: number;
+  /** Real Risk Engine status computed server-side (same inputs as the worker). */
+  risk?: RiskStatus | null;
 }
 
 /** Response of POST /api/trading/positions/close (manual close popup). */

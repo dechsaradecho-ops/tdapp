@@ -1343,6 +1343,11 @@ class MonitorSnapshot(BaseModel):
     order_mode: str = "auto"
     capital: float = 0.0
     kill: KillSwitchStatus
+    # Real Risk Engine evaluation over the same open positions + equity the
+    # worker sees (plan A 2026-09-09: replaces the frontend's fake
+    # /risk/check call with capital*0.005 open_risk that always read "low").
+    # Optional so old cached responses / tests without it still validate.
+    risk: Optional[RiskStatus] = None
     stats: MonitorStats
     open_positions: list[MonitorOpenPosition] = Field(default_factory=list)
     recent: list[MonitorTrade] = Field(default_factory=list)

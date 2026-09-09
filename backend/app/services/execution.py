@@ -1009,9 +1009,46 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # ---- kill switch (single shared path — see evaluate_kill) ------------
     kill = evaluate_kill(db, s)
 
+    # ---- real Risk Engine status (plan A 2026-09-09) ----------------------
+    # Same inputs the portfolio_monitor worker uses: open risk in account
+    # currency (|entry-SL| x lots x contract), live equity, realized PnL
+    # windows and snapshot peak — so the monitor card can never disagree
+    # with the worker's pause verdict again. Fail-safe: any error degrades
+    # to None (the card shows "no data", never a fake "low").
+    risk_status = None
+    try:
+        from app.engine.risk_engine import (
+            PortfolioSnapshot as _RiskSnap,
+            risk_engine_for_settings as _engine_for,
+        )
+        _open_risk = 0.0
+        for _t in open_rows:
+            if _t.get("stop_loss") and _t.get("entry_price"):
+                try:
+                    _contract = PaperBrokerPnl.CONTRACT_SIZES.get(
+                        str(_t.get("asset") or "").upper(), 100_000.0)
+                except Exception:
+                    _contract = 100_000.0
+                _open_risk += abs(float(_t["entry_price"]) - float(_t["stop_loss"])) \
+                    * float(_t.get("volume") or 1) * _contract
+        _daily, _weekly, _monthly = _loss_pcts(db, float(s.capital or 0))
+        _risk_snap = _RiskSnap(
+            starting_capital=float(s.capital or 0),
+            peak_equity=peak_equity(db, float(s.capital or 0), live_equity),
+            current_equity=live_equity,
+            realized_pnl_today=-_daily / 100.0 * float(s.capital or 0),
+            realized_pnl_week=-_weekly / 100.0 * float(s.capital or 0),
+            realized_pnl_month=-_monthly / 100.0 * float(s.capital or 0),
+            open_risk=_open_risk,
+        )
+        risk_status = _engine_for(s).check(_risk_snap)
+    except Exception as exc:
+        log.warning("monitor: risk eval failed: %s", exc)
+        risk_status = None
+
     return MonitorSnapshot(
         pause=get_pause(db), order_mode=s.order_mode, capital=s.capital,
-        kill=kill, stats=stats, open_positions=open_positions, recent=recent,
+        kill=kill, risk=risk_status, stats=stats, open_positions=open_positions, recent=recent,
         generated_at=now,
         feed_status=feed_status,
         equity=live_equity, pnl=live_pnl,
