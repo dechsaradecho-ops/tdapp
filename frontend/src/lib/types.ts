@@ -283,6 +283,9 @@ export interface SignalProposal {
   feed_status?: QuoteFeedStatus | null;
   // Pending-only: นาทีที่เหลือก่อนหมดอายุและระบบเริ่มประเมินใหม่ (TTL 30 นาที)
   expires_min_left?: number | null;
+  // Explainability: ขั้นตอนคำนวณทีละขั้น (SL จาก ATR, TP จาก RR, ขนาดไม้,
+  // สเปรด) — การ์ดแสดงในบล็อก "วิธีคำนวณ" แบบพับได้
+  calc_notes?: string[] | null;
 }
 
 // ---------- Extended Trading System ----------
@@ -579,6 +582,12 @@ export interface MonitorOpenPosition {
   tp_moved_at: string | null;
   tp_move_reason: string;
   exit_info?: SmartExitInfo | null;
+  // Explainability: R ปัจจุบัน, $ เสี่ยงถ้าโดน SL, ที่มาราคา
+  // (spot/daily/broker/entry), ขั้นตอนคำนวณทีละขั้น — ตารางมอนิเตอร์แสดง
+  r_multiple?: number | null;
+  risk_amount?: number | null;
+  price_source?: string | null;
+  calc_notes?: string[] | null;
 }
 
 /** One execution-journal row (open, closed or rejected). */

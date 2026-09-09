@@ -209,6 +209,11 @@ class SignalProposal(BaseModel):
     # the system re-evaluates (SIGNAL_TTL_MIN = 30). Approved/expired cards
     # omit it (None) — no countdown needed once the fate is decided.
     expires_min_left: Optional[float] = None
+    # --- Explainability (2026-09-09): step-by-step Thai calc notes ---
+    # e.g. "SL ห่าง 0.0042 (0.36%) → risk $1.00 ด้วย 0.02 lots (FX 100k)",
+    # "สเปรด 0.00015 → ต้นทุน $0.15", "RR 1:2 จาก SL/TP". The card renders
+    # these in a collapsible "วิธีคำนวณ" block — no bare numbers.
+    calc_notes: list[str] = Field(default_factory=list)
 
 
 class TradeRecord(BaseModel):
@@ -1307,6 +1312,14 @@ class MonitorOpenPosition(BaseModel):
     tp_move_reason: str = ""
     # Smart Exit analysis (None when the engine is disabled or unevaluated).
     exit_info: Optional[SmartExitInfo] = None
+    # --- Explainability (2026-09-09): why these numbers? ---
+    # R-multiple at the current mark, $ risk if SL hits, where the mark
+    # came from (live/broker/entry), and step-by-step Thai calc notes so
+    # the monitor card can show the math instead of bare numbers.
+    r_multiple: float = 0.0
+    risk_amount: float = 0.0
+    price_source: str = ""  # "live" (spot) | "daily" (daily-close fallback) | "broker" | "entry"
+    calc_notes: list[str] = Field(default_factory=list)
 
 
 class MonitorTrade(BaseModel):

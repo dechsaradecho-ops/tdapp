@@ -252,6 +252,41 @@ class StrategyEngine:
 
         decision = self._decision(opp.score, ind)
 
+        # --- Explainability: step-by-step Thai calc notes for the UI ---
+        # The card renders these in a collapsible "วิธีคำนวณ" block so no
+        # number appears without its derivation (SL from ATR, TP from RR,
+        # ladder weights, tier multiples).
+        calc_notes: list[str] = []
+        try:
+            sl_pct = sl_distance / ind.price * 100 if ind.price else 0.0
+            tp_distance = abs(take_profit - ind.price)
+            if invalidation_level > 0:
+                calc_notes.append(
+                    f"SL โครงสร้าง: อ้างอิงแนว breakout {invalidation_level:g} "
+                    f"บวก buffer 0.5×ATR → SL ห่าง {sl_distance:g} "
+                    f"({sl_pct:.2f}% ของราคา {ind.asset})")
+            else:
+                calc_notes.append(
+                    f"SL = ATR {ind.atr_pct:.2f}% × {atr_multiple_sl:g} "
+                    f"→ ห่าง {sl_distance:g} ({sl_pct:.2f}% ของราคา {ind.price:g})")
+                if clamped:
+                    lo = f"{sl_min_pct:g}%" if sl_min_pct > 0 else "—"
+                    hi = f"{sl_max_pct:g}%" if sl_max_pct > 0 else "—"
+                    calc_notes.append(
+                        f"SL โดน clamp เข้าแถบ {lo}–{hi} → ใช้ {sl_pct:.2f}% "
+                        f"แทนค่า ATR ดิบ (ให้ทุกคู่เสี่ยงระยะใกล้กัน)")
+            calc_notes.append(
+                f"TP = SL × RR 1:{rr_target:g} → ห่าง {tp_distance:g} "
+                f"ที่ {take_profit:g} (ฝั่ง {direction})")
+            calc_notes.append(
+                f"ไม้ limit 3 ชั้นที่ −0.25/−0.50/−0.75×SL "
+                f"น้ำหนัก 40/35/25% — SL/TP ทุกชั้นใช้ระยะ SL เดียวกัน")
+            calc_notes.append(
+                "Tier สั้น/กลาง/ยาว = ×1.0/×1.5/×2.0 ของ SL กลาง — "
+                "แถวนี้เก็บราคากลาง ยิงจริงคำนวณใหม่ตามโหมดที่ตั้งไว้")
+        except Exception:
+            pass
+
         return SignalProposal(
             asset=ind.asset,
             direction=direction,
@@ -268,6 +303,7 @@ class StrategyEngine:
                 rr_target=rr_target, atr_multiple_sl=atr_multiple_sl),
             sltp_levels=self.sltp_preview(
                 direction, ind.price, sl_distance, rr_target=rr_target),
+            calc_notes=calc_notes,
         )
 
     # ------------------------------------------------------------------

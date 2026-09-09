@@ -9,7 +9,9 @@ from pydantic import BaseModel
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal,
-                                is_market_closed)
+                                contract_value_for, effective_min_lot,
+                                effective_spread, is_market_closed,
+                                risk_to_lot_for)
 from app.services import execution
 from app.services import signal_log
 from app.services.execution import (
@@ -145,11 +147,52 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         for r in rows:
             entry = float(r["entry"] or 0)
             stop_loss = float(r["stop_loss"] or 0)
+            take_profit = float(r["take_profit"] or 0)
             sl_distance = abs(entry - stop_loss)
+            rr = float(r["expected_rr"] or 2.0)
             ladder = (
                 StrategyEngine.limit_ladder(r["direction"].upper(), entry, sl_distance)
                 if entry > 0 and sl_distance > 0 else []
             )
+            # Explainability (read-time): same sizing math execute_signal
+            # uses — lots from risk_to_lot_for + min_lot floor, spread cost,
+            # RR — so the card's "วิธีคำนวณ" matches the real order.
+            calc_notes: list[str] = []
+            try:
+                asset_u = str(r.get("asset") or "").upper()
+                if entry > 0 and sl_distance > 0:
+                    sl_pct = sl_distance / entry * 100
+                    calc_notes.append(
+                        f"SL ห่าง {sl_distance:g} ({sl_pct:.2f}% ของ entry "
+                        f"{entry:g}) ฝั่ง {str(r.get('direction') or '').upper()}")
+                    tp_dist = abs(take_profit - entry) if take_profit else 0
+                    calc_notes.append(
+                        f"TP ห่าง {tp_dist:g} → RR 1:{rr:g} "
+                        f"(TP {take_profit:g})")
+                    lots = risk_to_lot_for(
+                        float(s.capital or 0), float(s.risk_per_trade_pct or 0),
+                        sl_distance, asset_u)
+                    floor = effective_min_lot(s, asset_u)
+                    lots_used = max(lots, floor)
+                    contract = contract_value_for(asset_u)
+                    risk_usd = sl_distance * lots_used * contract
+                    calc_notes.append(
+                        f"ขนาดไม้: ทุน ${float(s.capital or 0):g} × "
+                        f"{float(s.risk_per_trade_pct or 0):g}% = "
+                        f"${float(s.capital or 0) * float(s.risk_per_trade_pct or 0) / 100:g} "
+                        f"÷ (SL {sl_distance:g} × contract {contract:g}) "
+                        f"→ {lots:g} lots (floor {floor:g} → ใช้ {lots_used:g})")
+                    calc_notes.append(
+                        f"ถ้าโดน SL เสีย ${risk_usd:,.2f} "
+                        f"({risk_usd / float(s.capital or 1) * 100:.2f}% ของทุน)")
+                    spread = effective_spread(s, asset_u)
+                    if spread > 0:
+                        cost = spread * lots_used * contract
+                        calc_notes.append(
+                            f"สเปรด {spread:g} → ต้นทุนเปิดไม้ "
+                            f"${cost:,.2f} (fill ±สเปรด/2)")
+            except Exception:
+                pass
             # Why this pending signal cannot become an order right now —
             # open-position-per-asset gate + limits (quality/regime throttles
             # are scanner-side).
@@ -191,6 +234,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 order_blocked=order_block or None,
                 live_price=live_prices.get(str(r["asset"]).upper()),
                 feed_status=feed,
+                calc_notes=calc_notes,
             ))
             # Countdown for pending cards: how long until this signal ages out
             # of the queue (30-min TTL) and the scanner re-evaluates the setup.

@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import CopyNum from "@/components/CopyNum";
+import CalcNotes from "@/components/CalcNotes";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -12,7 +13,7 @@ import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
-import { ClosePositionResult, MonitorSnapshot } from "@/lib/types";
+import { ClosePositionResult, MonitorSnapshot, SignalLog } from "@/lib/types";
 
 // ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.monitor_refresh_sec)
 // ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (backend cache spot quotes 30s ดังนั้น
@@ -223,6 +224,11 @@ export default function MonitorPage() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string>("");
+  // ไทม์ไลน์ SL/TP ต่อไม้: ticket → events จาก signal-logs (order_opened
+  // "SL ย้ายไป..." + closed) — โหลดพร้อม snapshot ครั้งเดียว
+  const [moveLogs, setMoveLogs] = useState<Record<string, SignalLog[]>>({});
+  const [openTimeline, setOpenTimeline] = useState<Record<string, boolean>>({});
+  const [openCalc, setOpenCalc] = useState<Record<string, boolean>>({});
   // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(10);
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
@@ -250,6 +256,30 @@ export default function MonitorPage() {
       setSnap(s);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+      // ไทม์ไลน์ SL/TP: ดึง signal-logs แล้วจัดกลุ่มตาม ticket — เหตุการณ์
+      // order_opened ที่มี reason "SL ย้ายไป..." คือทุกครั้งที่ guard ขยับ
+      // SL/TP (backend log ไว้ทุก move) — ไม่ต้องเพิ่ม endpoint ใหม่
+      try {
+        const logs = await api.signalLogs(200);
+        const byTicket: Record<string, SignalLog[]> = {};
+        for (const l of logs.logs ?? []) {
+          if (!l.ticket) continue;
+          const moveLike =
+            l.event === "closed" ||
+            (l.event === "order_opened" &&
+              (/SL ย้าย|TP ย้าย|breakeven|trailing/i.test(l.reason || "") ||
+                (l.stop_loss != null && l.stop_loss > 0)));
+          if (!moveLike) continue;
+          (byTicket[l.ticket] ||= []).push(l);
+        }
+        for (const k of Object.keys(byTicket)) {
+          byTicket[k].sort((a, b) =>
+            String(a.created_at || "") < String(b.created_at || "") ? -1 : 1);
+        }
+        setMoveLogs(byTicket);
+      } catch {
+        /* ไทม์ไลน์ล้มเหลว — badge เดิมยังทำงานจาก journal row */
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -538,6 +568,7 @@ export default function MonitorPage() {
                   <th className="py-2 pr-4">SL</th>
                   <th className="py-2 pr-4">TP</th>
                   <th className="py-2 pr-4">PnL (ยังไม่ปิด)</th>
+                  <th className="py-2 pr-4">R / เสี่ยง</th>
                   <th className="py-2 pr-4">Smart Exit</th>
                   <th className="py-2 pr-4">ที่มา</th>
                   <th className="py-2 pr-4">Ticket</th>
@@ -545,7 +576,21 @@ export default function MonitorPage() {
                 </tr>
               </thead>
               <tbody>
-                {snap.open_positions.map((p) => (
+                {snap.open_positions.map((p) => {
+                  const rMult = p.r_multiple ?? 0;
+                  const riskUsd = p.risk_amount ?? 0;
+                  const srcLabel =
+                    p.price_source === "spot" ? "spot สด"
+                    : p.price_source === "daily" ? "daily close"
+                    : p.price_source === "broker" ? "broker"
+                    : p.price_source === "entry" ? "entry (ไม่มี feed)"
+                    : "—";
+                  const timeline = p.ticket ? (moveLogs[p.ticket] ?? []) : [];
+                  const tlOpen = openTimeline[p.id] ?? false;
+                  const calcOpen = openCalc[p.id] ?? false;
+                  const notes = p.calc_notes ?? [];
+                  return (
+                  <>
                   <tr key={p.id} className="border-t border-slate-800">
                     <td className="py-2 pr-4 font-semibold">{p.asset}</td>
                     <td className="py-2 pr-4 font-bold">
@@ -555,12 +600,34 @@ export default function MonitorPage() {
                     </td>
                     <td className="py-2 pr-4 font-bold">{fmtNum(p.volume, 2)}</td>
                     <td className="py-2 pr-4 font-bold"><CopyNum value={p.entry_price} /></td>
-                    <td className="py-2 pr-4 font-bold">{fmtNum(p.current_price, 5)}</td>
+                    <td className="py-2 pr-4 font-bold">
+                      {fmtNum(p.current_price, 5)}
+                      <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                        p.price_source === "spot" ? "bg-profit/20 text-profit"
+                        : p.price_source === "daily" ? "bg-amber-500/20 text-amber-400"
+                        : p.price_source === "entry" ? "bg-loss/20 text-loss"
+                        : "bg-slate-500/20 text-slate-400"}`}
+                        title={p.price_source === "spot" ? "ราคาสดจาก spot feed (Yahoo intraday)"
+                          : p.price_source === "daily" ? "ราคาปิดรายวัน (สำรองตอน spot ล่ม)"
+                          : p.price_source === "broker" ? "ราคาจาก broker book (สำรอง)"
+                          : p.price_source === "entry" ? "ไม่มี feed — ใช้ entry, PnL นิ่ง"
+                          : "ที่มาราคาไม่ทราบ"}>
+                        {srcLabel}
+                      </span>
+                    </td>
                     <td className="py-2 pr-4"><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
                     <td className="py-2 pr-4"><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4">
+                      <span className={`font-bold ${rMult >= 0 ? "text-profit" : "text-loss"}`}>
+                        {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
+                      </span>
+                      <span className="block text-xs text-slate-500">
+                        เสี่ยง ${fmtNum(riskUsd, 2)}
                       </span>
                     </td>
                     <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
@@ -576,7 +643,62 @@ export default function MonitorPage() {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  <tr key={`${p.id}-detail`} className="border-t border-slate-800/50">
+                    <td colSpan={13} className="py-1 pr-4">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        {notes.length > 0 && (
+                          <button
+                            onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                            className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-semibold text-accent"
+                            aria-expanded={calcOpen}
+                          >
+                            วิธีคำนวณ ({notes.length}) {calcOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                        {timeline.length > 0 && (
+                          <button
+                            onClick={() => setOpenTimeline((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                            className="rounded-full border border-white/15 bg-white/[0.04] px-2 py-0.5 font-semibold text-slate-300"
+                            aria-expanded={tlOpen}
+                          >
+                            ไทม์ไลน์ SL/TP ({timeline.length}) {tlOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                        {timeline.length === 0 && (p.sl_moved_at != null || p.tp_moved_at != null) && (
+                          <span className="text-slate-500">
+                            SL/TP ถูกขยับ — ดูรายละเอียดที่ป้าย ↔ ข้างค่า SL/TP
+                          </span>
+                        )}
+                      </div>
+                      {calcOpen && notes.length > 0 && (
+                        <div className="mt-1 max-w-2xl">
+                          <CalcNotes notes={notes} defaultOpen />
+                        </div>
+                      )}
+                      {tlOpen && timeline.length > 0 && (
+                        <ol className="mt-1 max-w-2xl space-y-1 border-l-2 border-accent/40 pl-3">
+                          {timeline.map((l) => (
+                            <li key={l.id} className="text-xs text-slate-300">
+                              <span className="text-slate-500">
+                                {l.created_at ? new Date(l.created_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-"}
+                              </span>
+                              {" · "}
+                              <span className="font-semibold">
+                                {l.event === "closed" ? "ปิดไม้" : "SL/TP ขยับ"}
+                              </span>
+                              {l.stop_loss != null && l.stop_loss > 0 && (
+                                <> — SL {fmtNum(l.stop_loss, 5)}</>
+                              )}
+                              {l.reason && <span className="text-slate-400"> — {l.reason}</span>}
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                    </td>
+                  </tr>
+                  </>
+                  );
+                })}
                 <tr className="border-t-2 border-slate-700 font-bold">
                   <td className="py-2 pr-4" colSpan={7}>รวม uPnL ({snap.open_positions.length} ไม้)</td>
                   <td className="py-2 pr-4">
@@ -584,7 +706,7 @@ export default function MonitorPage() {
                       {unrealizedTotal >= 0 ? "+" : ""}${fmtNum(unrealizedTotal, 2)}
                     </span>
                   </td>
-                  <td colSpan={4} />
+                  <td colSpan={5} />
                 </tr>
               </tbody>
             </table>

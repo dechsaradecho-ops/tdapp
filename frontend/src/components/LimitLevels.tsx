@@ -10,7 +10,7 @@ import CopyNum from "@/components/CopyNum";
  */
 export default function LimitLevels({ signal }: { signal: SignalProposal }) {
   const levels = signal.limit_levels ?? [];
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   if (!levels.length) return null;
   const buy = signal.direction === "BUY";
   const label = buy ? "Buy Limit" : "Sell Limit";

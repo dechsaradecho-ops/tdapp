@@ -8,6 +8,7 @@ import Icon from "@/components/Icon";
 import LimitLevels from "@/components/LimitLevels";
 import SltpLevels from "@/components/SltpLevels";
 import ReasonList from "@/components/ReasonList";
+import CalcNotes from "@/components/CalcNotes";
 
 const DECISION_STYLE: Record<string, string> = {
   "TRADE": "bg-profit/20 text-profit border-profit",
@@ -97,6 +98,8 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       <SltpLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
       <ReasonList reasons={signal.reason} />
+      {/* ขั้นตอนคำนวณทีละขั้น (SL/TP/ขนาดไม้/สเปรด) — ไม่เหลือตัวเลขลอยๆ */}
+      <CalcNotes notes={signal.calc_notes} />
       {signal.approval === "approved" ? (
         // อนุมัติแล้ว/ยิงแล้ว — แสดงสแตมป์เวลาแทนปุ่ม
         <div className="mt-3 flex items-center gap-2 rounded border border-profit/40 bg-profit/10 px-2 py-1.5 text-xs text-profit">

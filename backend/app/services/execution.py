@@ -35,6 +35,7 @@ from app.models.schemas import (
     RiskOfficer,
     RiskProfile,
     TradeLimits,
+    contract_value_for,
     effective_min_confidence,
     effective_min_lot,
     effective_spread,
@@ -794,6 +795,10 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # live marks below AND feeds the Smart Exit block, so the monitor makes
     # exactly 1 spot batch + 1 snapshot batch (30s/60s caches keep both cheap).
     feed_snaps: dict[str, dict] = {}
+    # Which assets got a live spot mark vs a daily-close fallback — the card
+    # shows WHERE each price came from (spot / daily / broker / entry).
+    spot_assets: set[str] = set()
+    daily_assets: set[str] = set()
     if open_rows:
         from app.models.schemas import QuoteFeedStatus
         from app.integrations import quotes as quotes_mod
@@ -804,6 +809,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             for asset, price in prices.items():
                 if price > 0:
                     marks["asset:" + asset] = price
+                    spot_assets.add(asset)
         except Exception as exc:  # whole-feed failure (shouldn't happen —
             # fetch_spot_prices isolates per-asset errors, but stay safe)
             prices, failures = {}, {a: str(exc) for a in assets}
@@ -819,6 +825,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                     price = float((snap or {}).get("price") or 0)
                     if price > 0:
                         marks["asset:" + asset] = price
+                        daily_assets.add(asset)
             except Exception as exc:
                 log.warning("monitor: daily-close fallback failed: %s", exc)
                 feed_snaps = {}
@@ -832,24 +839,27 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             message="; ".join(failures[a] for a in sorted(failures))[:300],
         )
 
-    def mark_for(row: dict) -> float:
-        """Resolve the best mark: live feed → broker book → entry.
+    def mark_for(row: dict) -> tuple[float, str]:
+        """Resolve the best mark + WHERE it came from.
 
-        Priority matters: the PaperBroker book is in-memory and rehydrate
-        seeds it with current_price == entry, so after every deploy the book
-        pins marks at the entry price until the guard's first tick. Ticket
-        marks used to win, which showed uPnL 0.00 for every position right
-        after a restart even while the live feed was healthy. The live spot
-        feed is the real market — it wins; the broker book is only a
-        fallback for assets the feed doesn't cover.
+        Returns (price, source) with source in
+        "spot" | "daily" | "broker" | "entry" so the UI can badge every
+        mark instead of showing a bare number. Priority: live spot feed
+        wins; daily-close snapshots top up what spot missed; broker book
+        covers the rest; entry means "no feed, flat PnL".
         """
         ticket = str(row.get("ticket") or "")
-        asset = "asset:" + str(row.get("asset") or "").upper()
+        asset_u = str(row.get("asset") or "").upper()
+        asset = "asset:" + asset_u
+        if asset_u in spot_assets and asset in marks:
+            return marks[asset], "spot"
+        if asset_u in daily_assets and asset in marks:
+            return marks[asset], "daily"
         if asset in marks:
-            return marks[asset]
-        if ticket in marks:
-            return marks[ticket]
-        return float(row.get("entry_price") or 0)  # unknown → flat PnL, no guess
+            return marks[asset], "broker"
+        if ticket and ticket in marks:
+            return marks[ticket], "broker"
+        return float(row.get("entry_price") or 0), "entry"  # unknown → flat, no guess
 
     # ---- Smart Exit analysis (per-position exit_info) --------------------
     # Read-only evaluation so the monitor shows the same score/quality/
@@ -944,7 +954,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
 
     open_positions = []
     for r in open_rows:
-        mark = mark_for(r)
+        mark, price_source = mark_for(r)
         entry = float(r.get("entry_price") or 0)
         # asset ต้องส่งเข้าไปด้วย — ไม่งั้น PaperBrokerPnl ใช้ FX contract
         # 100,000 กับ XAUUSD (ควรเป็น 100 oz) → uPnL ผิด 1,000 เท่า
@@ -954,6 +964,69 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             entry_price=entry,
             volume=float(r.get("volume") or 0),
             asset=str(r.get("asset") or ""))), 2)
+        # --- Explainability: R / $risk / source / step-by-step notes ---
+        # Every number on the monitor table gets its derivation so the UI
+        # shows math instead of bare values. Fail-safe: any error → zeros.
+        r_multiple = 0.0
+        risk_amount = 0.0
+        calc_notes: list[str] = []
+        exit_info = exit_info_for(r, mark)
+        try:
+            asset_u = str(r.get("asset") or "").upper()
+            direction_u = str(r.get("direction") or "").upper()
+            sign = 1.0 if direction_u == "BUY" else -1.0
+            vol = float(r.get("volume") or 0)
+            sl_v = float(r["stop_loss"]) if r.get("stop_loss") is not None else None
+            tp_v = float(r["take_profit"]) if r.get("take_profit") is not None else None
+            contract = contract_value_for(asset_u)
+            sl_dist = abs(entry - sl_v) if (sl_v is not None and entry) else 0.0
+            if sl_dist > 0:
+                r_multiple = round(sign * (mark - entry) / sl_dist, 2)
+                risk_amount = round(sl_dist * vol * contract, 2)
+            src_label = {"spot": "spot สด (Yahoo intraday)",
+                         "daily": "daily close (สำรองตอน spot ล่ม)",
+                         "broker": "broker book (สำรอง)",
+                         "entry": "entry (ไม่มี feed — PnL นิ่ง)"}.get(
+                             price_source, price_source or "?")
+            calc_notes.append(
+                f"ราคาปัจจุบัน {mark:g} มาจาก {src_label}")
+            calc_notes.append(
+                f"uPnL = {'+' if sign > 0 else '−'}(mark−entry) × {vol:g} lots "
+                f"× contract {contract:g} → ${unrealized:,.2f}")
+            if sl_dist > 0:
+                calc_notes.append(
+                    f"R = {direction_u}×({mark:g}−{entry:g}) ÷ SLระยะ {sl_dist:g} "
+                    f"→ {r_multiple:+.2f}R")
+                calc_notes.append(
+                    f"ถ้าโดน SL เสีย ${risk_amount:,.2f} "
+                    f"({sl_dist:g} × {vol:g} × {contract:g})")
+            if tp_v is not None and sl_dist > 0:
+                tp_r = abs(tp_v - entry) / sl_dist
+                calc_notes.append(f"TP อยู่ที่ {tp_r:.2f}R (TP {tp_v:g})")
+            be_r = float(getattr(s, "breakeven_trigger_r", 0) or 0)
+            if be_r > 0 and sl_dist > 0:
+                be_price = entry + sign * be_r * sl_dist
+                calc_notes.append(
+                    f"Breakeven ที่ +{be_r:g}R → ราคา {be_price:g} "
+                    f"(ถึงแล้ว SL ย้ายมาทุน)")
+            pt_r = float(getattr(s, "partial_trigger_r", 0) or 0)
+            pt_pct = float(getattr(s, "partial_close_pct", 0) or 0)
+            if pt_r > 0 and pt_pct > 0 and sl_dist > 0:
+                pt_price = entry + sign * pt_r * sl_dist
+                calc_notes.append(
+                    f"แบ่งปิด {pt_pct:g}% ที่ +{pt_r:g}R → ราคา {pt_price:g}")
+            isl = r.get("initial_stop_loss")
+            if (isl is not None and sl_v is not None
+                    and abs(float(isl) - sl_v) > 1e-9):
+                calc_notes.append(
+                    f"SL ขยับ {float(isl):g} → {sl_v:g} "
+                    f"({str(r.get('sl_move_reason') or '') or 'guard'})")
+            if exit_info is not None:
+                calc_notes.append(
+                    f"Smart Exit {exit_info.exit_score:.0f}/100 "
+                    f"({exit_info.quality}) → {exit_info.final}")
+        except Exception:
+            pass
         open_positions.append(MonitorOpenPosition(
             id=str(r.get("id")), ticket=str(r.get("ticket") or ""),
             asset=r["asset"], direction=str(r["direction"]).upper(),
@@ -973,7 +1046,11 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             sl_move_reason=str(r.get("sl_move_reason") or ""),
             tp_moved_at=_parse_dt(r.get("tp_moved_at")),
             tp_move_reason=str(r.get("tp_move_reason") or ""),
-            exit_info=exit_info_for(r, mark),
+            exit_info=exit_info,
+            r_multiple=r_multiple,
+            risk_amount=risk_amount,
+            price_source=price_source,
+            calc_notes=calc_notes,
         ))
 
     recent = [MonitorTrade(
