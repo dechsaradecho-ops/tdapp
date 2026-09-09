@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
+import CloseSingleModal from "@/components/CloseSingleModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import CopyNum from "@/components/CopyNum";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
@@ -425,13 +426,18 @@ export default function MonitorPage() {
     }
   };
 
+  // ปิดไม้รายตัวด้วยมือ — เปิด popup ยืนยันก่อนเสมอ แล้วค่อยยิง
+  // (ก่อนหน้านี้ปุ่ม "ปิด" ยิง api.closePosition ทันทีโดยไม่ถาม)
+  const [confirmPos, setConfirmPos] = useState<MonitorSnapshot["open_positions"][number] | null>(null);
+
   // ปิดไม้ด้วยมือ → เด้ง popup สรุปกำไร/ขาดทุน
   const handleClosePosition = async (ticket: string) => {
-    if (!ticket) return;
+    if (!ticket || closingTicket) return;
     setClosingTicket(ticket);
     setCloseError("");
     try {
       const res = await api.closePosition(ticket);
+      setConfirmPos(null);
       if (res.ok) {
         setCloseResult(res);
         await load();
@@ -740,7 +746,7 @@ export default function MonitorPage() {
                           <CalcNotesBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} notes={notes} trigger="info" />
                         )}
                         <button
-                          onClick={() => handleClosePosition(p.ticket)}
+                          onClick={() => setConfirmPos(p)}
                           disabled={!p.ticket || closingTicket === p.ticket}
                           className="bg-loss text-white font-semibold rounded px-2.5 py-1.5 text-xs min-h-[32px] disabled:opacity-50 active:brightness-90"
                         >
@@ -918,6 +924,13 @@ export default function MonitorPage() {
 
       {/* ---------- Popup สรุปผลการปิดไม้ ---------- */}
       <ClosePositionModal result={closeResult} onClose={() => setCloseResult(null)} />
+      {/* ---------- Popup ยืนยันก่อนปิดไม้รายตัว ---------- */}
+      <CloseSingleModal
+        position={confirmPos}
+        busy={closingTicket != null}
+        onConfirm={() => { if (confirmPos?.ticket) handleClosePosition(confirmPos.ticket); }}
+        onClose={() => { if (closingTicket == null) setConfirmPos(null); }}
+      />
       {/* ---------- Popup สรุปก่อนปิดเป็นกลุ่ม (ทั้งหมด/กำไร/ขาดทุน) ---------- */}
       <CloseGroupModal
         mode={groupMode}
