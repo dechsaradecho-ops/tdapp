@@ -210,6 +210,17 @@ export interface RiskStatus {
   open_risk_pct: number;
   trading_paused: boolean;
   message: string;
+  /** Limits the values are judged against (0 = unknown/legacy payload). */
+  daily_loss_limit: number;
+  weekly_loss_limit: number;
+  monthly_loss_limit: number;
+  risk_per_trade_pct: number;
+  /** Individual breach reasons (joined into message). */
+  breaches: string[];
+  /** Provenance of open_risk_pct. */
+  open_risk_amount: number;
+  equity: number;
+  open_positions: number;
 }
 
 export interface LimitLevel {

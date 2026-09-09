@@ -166,6 +166,7 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         realized_pnl_week=_realized_pnl_since(closed, now - timedelta(days=7)),
         realized_pnl_month=realized_month,
         open_risk=open_risk,
+        open_positions=len(open_rows),
     )
     # Limits follow the user's Settings row — RiskEngine() alone reads ENV
     # defaults and kept alerting 2% after the user set daily loss to 5%.

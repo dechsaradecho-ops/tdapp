@@ -80,6 +80,7 @@ class PortfolioSnapshot:
     realized_pnl_week: float
     realized_pnl_month: float
     open_risk: float  # sum of (entry - stop_loss) * exposure for open positions
+    open_positions: int = 0  # count of open trades (provenance for the UI card)
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # ------------------------------------------------------------------
@@ -153,6 +154,14 @@ class RiskEngine:
                 if paused
                 else "All risk metrics within limits."
             ),
+            daily_loss_limit=self.config.max_daily_loss_pct,
+            weekly_loss_limit=self.config.max_weekly_loss_pct,
+            monthly_loss_limit=self.config.max_monthly_loss_pct,
+            risk_per_trade_pct=self.config.risk_per_trade_pct,
+            breaches=list(breaches),
+            open_risk_amount=round(snap.open_risk, 2),
+            equity=round(snap.current_equity, 2),
+            open_positions=int(getattr(snap, "open_positions", 0) or 0),
         )
 
     # ------------------------------------------------------------------

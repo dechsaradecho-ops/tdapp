@@ -258,6 +258,21 @@ class RiskStatus(BaseModel):
     open_risk_pct: float
     trading_paused: bool
     message: str
+    # Limits the current values are judged against (2026-09-09: the monitor
+    # card showed values without limits so users couldn't tell how close to
+    # a breach they were). All default 0.0 so old payloads still validate.
+    daily_loss_limit: float = 0.0
+    weekly_loss_limit: float = 0.0
+    monthly_loss_limit: float = 0.0
+    risk_per_trade_pct: float = 0.0
+    # Individual breach reasons (same strings joined into message) — the UI
+    # renders these as a readable list instead of parsing message.
+    breaches: list[str] = Field(default_factory=list)
+    # Provenance of open_risk_pct: account-currency amount + equity base +
+    # open position count, so the card can show "$X from N trades".
+    open_risk_amount: float = 0.0
+    equity: float = 0.0
+    open_positions: int = 0
 
 
 # ---------- Chat ----------

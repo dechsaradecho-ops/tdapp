@@ -180,6 +180,7 @@ async def _build_context(db, broker=None) -> str:
         starting_capital=cap, peak_equity=_peak, current_equity=equity,
         realized_pnl_today=pnl_today, realized_pnl_week=pnl_week,
         realized_pnl_month=pnl_total, open_risk=_open_risk,
+        open_positions=len(open_pos),
     ))
 
     portfolio_status = (

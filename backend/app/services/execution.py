@@ -1040,6 +1040,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             realized_pnl_week=-_weekly / 100.0 * float(s.capital or 0),
             realized_pnl_month=-_monthly / 100.0 * float(s.capital or 0),
             open_risk=_open_risk,
+            open_positions=len(open_rows),
         )
         risk_status = _engine_for(s).check(_risk_snap)
     except Exception as exc:
