@@ -556,10 +556,10 @@ export default function MonitorPage() {
           <p className="text-slate-500 text-sm mt-3">ไม่มีไม้เปิดค้าง — auto trader จะยิงเมื่อเจอ signal ที่ผ่าน gate</p>
         )}
         {snap && snap.open_positions.length > 0 && (
-          <div className="overflow-x-auto mt-3">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto mt-3 -mx-4 px-4">
+            <table className="w-full text-sm min-w-max md:min-w-0">
               <thead>
-                <tr className="text-left text-xs text-slate-500 uppercase tracking-wide">
+                <tr className="text-left text-xs text-slate-500 uppercase tracking-wide whitespace-nowrap">
                   <th className="py-2 pr-4">Asset</th>
                   <th className="py-2 pr-4">ฝั่ง</th>
                   <th className="py-2 pr-4">Lots</th>
@@ -591,7 +591,7 @@ export default function MonitorPage() {
                   const notes = p.calc_notes ?? [];
                   return (
                   <Fragment key={p.id}>
-                  <tr className="border-t border-slate-800">
+                  <tr className="border-t border-slate-800 whitespace-nowrap">
                     <td className="py-2 pr-4 font-semibold">{p.asset}</td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.direction === "BUY" ? "text-profit" : "text-loss"}>
@@ -643,7 +643,7 @@ export default function MonitorPage() {
                       </button>
                     </td>
                   </tr>
-                  <tr className="border-t border-slate-800/50">
+                  <tr className="border-t border-slate-800/50 whitespace-normal">
                     <td colSpan={13} className="py-1 pr-4">
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         {notes.length > 0 && (
@@ -699,7 +699,7 @@ export default function MonitorPage() {
                   </Fragment>
                   );
                 })}
-                <tr className="border-t-2 border-slate-700 font-bold">
+                <tr className="border-t-2 border-slate-700 font-bold whitespace-nowrap">
                   <td className="py-2 pr-4" colSpan={7}>รวม uPnL ({snap.open_positions.length} ไม้)</td>
                   <td className="py-2 pr-4">
                     <span className={unrealizedTotal >= 0 ? "text-profit" : "text-loss"}>
