@@ -135,6 +135,21 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         # pending signals for these (duplicate-position gate), so the card
         # must say so instead of promising "~1 นาที" forever.
         open_assets = {str(r.get("asset") or "").upper() for r in open_rows}
+        # Portfolio heat base (shared by every pending card below): open
+        # risk $ = Σ|entry−SL|×lots×contract — the same math Gate 6 blocks
+        # on, so the card explains the block before it happens.
+        heat_open_usd = 0.0
+        try:
+            for _t in open_rows:
+                if _t.get("stop_loss") and _t.get("entry_price"):
+                    heat_open_usd += abs(float(_t["entry_price"]) - float(_t["stop_loss"])) \
+                        * float(_t.get("volume") or 0) \
+                        * contract_value_for(str(_t.get("asset") or ""))
+        except Exception:
+            heat_open_usd = 0.0
+        heat_cap = float(getattr(s, "capital", 0) or 0)
+        heat_open_pct = (heat_open_usd / heat_cap * 100.0) if heat_cap > 0 else 0.0
+        heat_limit = float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0)
         today = datetime.now(timezone.utc).date().isoformat()
         todays = db.select("paper_trades", limit=500)
         today_count = len([r for r in todays
@@ -191,6 +206,14 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                         calc_notes.append(
                             f"สเปรด {spread:g} → ต้นทุนเปิดไม้ "
                             f"${cost:,.2f} (fill ±สเปรด/2)")
+                    if heat_cap > 0:
+                        _h_usd = sl_distance * lots_used * contract
+                        _h_pct = _h_usd / heat_cap * 100.0
+                        calc_notes.append(
+                            f"Heat พอร์ต ${heat_open_usd:,.2f} ({heat_open_pct:.2f}%) "
+                            f"+ ไม้นี้ ${_h_usd:,.2f} ({_h_pct:.2f}%) → "
+                            f"รวม {heat_open_pct + _h_pct:.2f}% "
+                            f"เทียบงบ daily {heat_limit:g}%")
             except Exception:
                 pass
             # Why this pending signal cannot become an order right now —
@@ -199,9 +222,19 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             order_block = ""
             if (r.get("approval") or "pending") == "pending":
                 asset = str(r.get("asset") or "").upper()
+                try:
+                    _hl = risk_to_lot_for(float(s.capital or 0), float(s.risk_per_trade_pct or 0), sl_distance, asset)
+                    _hl = max(_hl, effective_min_lot(s, asset))
+                    _new_pct = (sl_distance * _hl * contract_value_for(asset) / heat_cap * 100.0) if (heat_cap > 0 and sl_distance > 0) else 0.0
+                except Exception:
+                    _new_pct = 0.0
                 if asset in open_assets:
                     order_block = (f"ไม่ได้เปิดออเดอร์ใหม่เพราะ {asset} "
                                    f"มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน")
+                elif heat_cap > 0 and heat_open_pct + _new_pct > heat_limit:
+                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะ heat เต็ม "
+                                   f"(ไม้เปิด {heat_open_pct:.2f}% + ไม้นี้ ~{_new_pct:.2f}% "
+                                   f"เกินงบ daily {heat_limit:g}%) — รอปิดไม้เดิมก่อน")
                 elif open_count >= s.max_open_positions:
                     order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
                                    f"(open positions {open_count}/"

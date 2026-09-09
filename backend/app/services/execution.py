@@ -457,10 +457,13 @@ def evaluate_kill(db, s: AppSettings,
 # The gate pipeline
 # ---------------------------------------------------------------------------
 def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
-                  confidence: float, opportunity: float) -> GateReport:
+                  confidence: float, opportunity: float,
+                  entry: Optional[float] = None,
+                  stop_loss: Optional[float] = None) -> GateReport:
     """Run every safety gate. Returns GateReport with allowed=False on any block.
 
     size_lots is computed here too, so callers never place an un-sized order.
+    entry/stop_loss feed Gate 6 (portfolio heat) with the FINAL order levels.
     """
     rejects: list[str] = []
     checks: list[str] = []
@@ -560,6 +563,48 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
         rejects.extend(officer.rejects)
     checks.append(f"risk_officer={officer.verdict}")
 
+    # ---- Gate 6: portfolio heat (open risk + new trade vs daily budget) ---
+    # Prod showed 5 open FX positions risking $52 (55% of a $100 account)
+    # while the gate kept firing — kill uses REALIZED losses only, so open
+    # heat never blocked. Same $ math as the monitor card (fail-safe block).
+    heat_open_pct, heat_new_pct = 0.0, 0.0
+    try:
+        _open = db.select("paper_trades", filters={"status": "open"},
+                          limit=100)
+        _open_risk = 0.0
+        for _t in _open or []:
+            try:
+                if _t.get("stop_loss") and _t.get("entry_price"):
+                    _open_risk += abs(float(_t["entry_price"]) - float(_t["stop_loss"])) \
+                        * float(_t.get("volume") or 0) \
+                        * contract_value_for(str(_t.get("asset") or ""))
+            except Exception:
+                continue
+        _cap = float(getattr(s, "capital", 0) or 0)
+        if _cap > 0:
+            heat_open_pct = _open_risk / _cap * 100.0
+            if entry and stop_loss:
+                try:
+                    _lots = size_position(s, float(entry), float(stop_loss),
+                                          asset=asset)
+                    _dist = abs(float(entry) - float(stop_loss))
+                    heat_new_pct = (_dist * _lots
+                                    * contract_value_for(asset) / _cap * 100.0)
+                except Exception:
+                    heat_new_pct = 0.0
+            _limit = float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0)
+            if heat_open_pct + heat_new_pct > _limit:
+                rejects.append(
+                    f"Portfolio heat เต็ม: ไม้เปิดเสี่ยง "
+                    f"{heat_open_pct:.2f}% (${_open_risk:,.2f}) + "
+                    f"ไม้ใหม่ ~{heat_new_pct:.2f}% "
+                    f"เกินงบ daily {_limit:g}% \u2014 "
+                    f"รอปิดไม้เดิมก่อน")
+        checks.append(f"heat=open {heat_open_pct:.2f}%+new ~{heat_new_pct:.2f}%")
+    except Exception as exc:
+        rejects.append(f"heat eval error: {exc}")
+        checks.append("heat=error")
+
     # ---- Position sizing: risk_to_lot replaces the hardcoded 0.01 ---------
     return GateReport(allowed=not rejects, rejects=rejects, checks=checks,
                       pause=pause)
@@ -651,7 +696,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                 take_profit = round(entry + sign * dist * rr, 5)
             log.info("sl_distance_mode=%s → %s %s SL %.5f", s.sl_distance_mode,
                      direction, asset, stop_loss)
-    report = _gate_blocked(db, s, user_id, asset, confidence, opportunity)
+    report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
+                           entry=entry, stop_loss=stop_loss)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)
         # Lifecycle log: the gate said NO (pause/limits/news/correlation/...).

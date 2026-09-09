@@ -649,12 +649,16 @@ class CorrelationEngine:
 
     @staticmethod
     def asset_class(asset: str) -> str:
-        if asset.endswith("USD") and len(asset) == 6 and asset != "XAUUSD":
-            return "forex"
-        if asset in ("XAUUSD", "XAGUSD"):
+        # Gold/crypto first (all 6-alpha too), then ANY 6-letter pair is FX —
+        # the old endswith("USD") check misclassified USDJPY/EURCHF/GBPCHF
+        # as "indices" so CHF/JPY stacks never tripped the correlation cap.
+        a = str(asset or "").upper()
+        if a in ("XAUUSD", "XAGUSD"):
             return "gold"
-        if asset in ("BTCUSD", "ETHUSD"):
+        if a in ("BTCUSD", "ETHUSD"):
             return "crypto"
+        if len(a) == 6 and a.isalpha():
+            return "forex"
         return "indices"
 
     @classmethod

@@ -211,8 +211,12 @@ class TestGatePipeline:
         """min_lot_gold (ขนาด Lot ขั้นต่ำ gold) floors the REAL XAUUSD order
         volume; an FX order in the same settings keeps the base min_lot."""
         db = FakeDatabase()
+        # kill budget raised: the 0.05 floor risks ~$250 on $100 capital —
+        # Gate 6 (heat) would block it under the default 2% budget, which
+        # would hide the floor behaviour this test isolates.
         s = clean_settings(capital=100.0, risk_per_trade_pct=0.1,
-                           min_lot=0.01, min_lot_gold=0.05)
+                           min_lot=0.01, min_lot_gold=0.05,
+                           kill_daily_loss_pct=500.0)
         report = await execution.execute_signal(
             db, broker, notifier, s,
             user_id="demo", asset="XAUUSD", direction="BUY",
@@ -319,6 +323,55 @@ class TestGatePipeline:
         opened = [row for table, row in db.inserted
                   if table == "signal_logs" and row.get("event") == "order_opened"]
         assert opened and "re-anchor" in opened[0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_heat_gate_blocks_new_order_when_portfolio_full(self, broker, notifier):
+        """Gate 6 (portfolio heat): open risk $52 + new ~$10 exceeds the 60%
+        daily budget → the new order is blocked with a Thai heat message
+        instead of firing on top of a full book."""
+        db = FakeDatabase(rows={"paper_trades": [{
+            "id": "open-1", "asset": "GBPUSD", "direction": "BUY",
+            "volume": 0.02, "entry_price": 1.35557, "stop_loss": 1.34940,
+            "status": "open", "created_at": "2026-09-09T00:00:00+00:00"}]})
+        # capital $20: open heat $12.34 = 61.7% > 60% budget → block
+        s = clean_settings(capital=20.0, kill_daily_loss_pct=60.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.16138, stop_loss=1.15654, take_profit=1.16800,
+            confidence=85.0, opportunity=80.0, signal_id="sig-heat", source="auto",
+        )
+        assert not report.allowed
+        assert any("heat" in c for c in report.checks)
+        assert any("heat" in r or "Heat" in r for r in report.rejects)
+        assert len(broker.orders) == 0
+
+    @pytest.mark.asyncio
+    async def test_heat_gate_allows_trade_inside_budget(self, broker, notifier):
+        """Same setup with room in the budget → the order fires normally."""
+        db = FakeDatabase(rows={"paper_trades": [{
+            "id": "open-1", "asset": "GBPUSD", "direction": "BUY",
+            "volume": 0.02, "entry_price": 1.35557, "stop_loss": 1.34940,
+            "status": "open", "created_at": "2026-09-09T00:00:00+00:00"}]})
+        s = clean_settings(capital=10_000.0, kill_daily_loss_pct=2.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=85.0, opportunity=80.0, signal_id="sig-heatok", source="auto",
+        )
+        assert report.allowed, report.rejects
+        assert len(broker.orders) == 1
+
+    def test_asset_class_covers_all_fx_pairs(self):
+        """USDJPY/EURCHF (no USD suffix) are FX — never 'indices'."""
+        from app.models.schemas import CorrelationEngine
+        assert CorrelationEngine.asset_class("USDJPY") == "forex"
+        assert CorrelationEngine.asset_class("EURCHF") == "forex"
+        assert CorrelationEngine.asset_class("XAUUSD") == "gold"
+        # 4 CHF longs + candidate = concentrated → above a CHF users cap
+        assert CorrelationEngine.portfolio_correlation(
+            ["USDCHF", "EURCHF", "GBPCHF", "CADCHF", "CHFJPY"]) > 40
 
     @pytest.mark.asyncio
     async def test_fill_uses_per_symbol_builtin_spread(self, broker, notifier):
