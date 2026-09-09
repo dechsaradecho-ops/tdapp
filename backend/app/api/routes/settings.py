@@ -92,6 +92,27 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
         if not resp.data:
             return SettingsSaveResult(ok=False, settings=merged,
                                       message="upsert returned no data")
+        # Capital regime change → reseed equity history. A 10k→100 change
+        # leaves 10k-era snapshot peaks that fake 99% drawdown until every
+        # old row ages out (prod 2026-09-09). Same rule as the 3x clamp in
+        # equity_drawdown_pct, but permanent instead of per-read.
+        try:
+            old_cap = float(getattr(current, "capital", 0) or 0)
+            new_cap = float(getattr(merged, "capital", 0) or 0)
+            if old_cap > 0 and new_cap > 0 and abs(new_cap - old_cap) / old_cap > 0.5:
+                from datetime import timezone as _tz
+                for r in db.select("equity_snapshots", limit=500) or []:
+                    try:
+                        db.delete("equity_snapshots", {"id": r.get("id")})
+                    except Exception:
+                        pass
+                db.insert("equity_snapshots", {
+                    "user_id": "demo",
+                    "snapshot_date": datetime.now(_tz.utc).date().isoformat(),
+                    "equity": round(new_cap, 2),
+                })
+        except Exception as exc:
+            log.warning("equity reseed on capital change failed: %s", exc)
         return SettingsSaveResult(
             ok=True, settings=_row_to_settings(resp.data[0]),
             message="saved")

@@ -317,6 +317,12 @@ def equity_drawdown_pct(db, capital: float) -> float:
     equity history; with daily snapshots (portfolio_monitor writes one per
     cycle) the drawdown gate finally works. Falls back to 0.0 when the table
     is missing/empty so old DBs keep behaving as before.
+
+    Ordering is by snapshot_date (NOT created_at — the monitor rewrites
+    today's row in place so created_at order can put a stale row first).
+    Stale peaks from an older capital regime are clamped: snapshots above
+    3x current capital are ignored so a 10k→100 capital change can't read
+    99% drawdown forever (prod 2026-09-09: peak 10k vs equity ~100).
     """
     if not db or not getattr(db, "available", False) or capital <= 0:
         return 0.0
@@ -331,8 +337,13 @@ def equity_drawdown_pct(db, capital: float) -> float:
                 if r.get("equity") is not None]
     if not equities:
         return 0.0
-    peak = max(equities)
-    current = equities[0]  # rows are newest-first
+    current = equities[0]  # rows are newest-first by snapshot_date
+    if current <= 0:
+        return 0.0
+    # Ignore stale peaks from a previous capital regime (reseed/reset leaves
+    # one row at the new capital; older 10k-era rows would fake 99% DD).
+    sane = [v for v in equities if v <= current * 3.0] or [current]
+    peak = max(sane)
     if peak <= 0:
         return 0.0
     return max(0.0, (peak - current) / peak * 100.0)
@@ -386,10 +397,13 @@ def peak_equity(db, capital: float, equity: float) -> float:
         if not db or not getattr(db, "available", False):
             return peak
         rows = db.select("equity_snapshots", limit=400)
+        base = max(capital, equity)
         for r in rows or []:
             try:
                 v = float(r.get("equity") or 0)
-                if v > peak:
+                # Same stale-regime clamp as equity_drawdown_pct: ignore
+                # snapshots from an older capital era (>3x current base).
+                if v > peak and v <= base * 3.0:
                     peak = v
             except Exception:
                 continue
