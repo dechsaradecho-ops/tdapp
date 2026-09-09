@@ -749,6 +749,100 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             return marks[ticket]
         return float(row.get("entry_price") or 0)  # unknown → flat PnL, no guess
 
+    # ---- Smart Exit analysis (per-position exit_info) --------------------
+    # Read-only evaluation so the monitor shows the same score/quality/
+    # recommendation the guard acts on. Fail-safe: disabled → None for all;
+    # no indicator snapshot → None (blind HOLD, same rule as the guard).
+    exit_snaps: dict[str, dict] = {}
+    exit_news_status, exit_news_event = "SAFE", ""
+    exit_avg_hold = 4.0
+    exit_drawdown = 0.0
+    smart_on = bool(getattr(s, "smart_exit_enabled", True))
+    if smart_on and open_rows:
+        try:
+            from app.integrations import quotes as _quotes_exit
+            _exit_assets = sorted({str(r["asset"]).upper() for r in open_rows
+                                   if r.get("asset")})
+            exit_snaps = await _quotes_exit.fetch_all_snapshots(_exit_assets)
+        except Exception:
+            exit_snaps = {}
+        try:
+            _nr = _news_risk(db, s)
+            exit_news_status = str(getattr(_nr, "status", "SAFE") or "SAFE").upper()
+            _nxt = getattr(_nr, "next_high_impact", None)
+            exit_news_event = str(getattr(_nxt, "event", "") or "") if _nxt else ""
+        except Exception:
+            exit_news_status, exit_news_event = "SAFE", ""
+        try:
+            _spans: list[float] = []
+            for _cr in closed_rows:
+                _c = _parse_dt(_cr.get("created_at"))
+                _x = _parse_dt(_cr.get("closed_at"))
+                if _c and _x:
+                    _spans.append(max(0.0, (_x - _c).total_seconds() / 86400.0))
+            if _spans:
+                exit_avg_hold = round(sum(_spans) / len(_spans), 2)
+        except Exception:
+            exit_avg_hold = 4.0
+        try:
+            exit_drawdown = equity_drawdown_pct(db, float(getattr(s, "capital", 0) or 0))
+        except Exception:
+            exit_drawdown = 0.0
+
+    def exit_info_for(row: dict, mark: float):
+        """Build SmartExitInfo for one open row (None when unevaluated)."""
+        if not smart_on:
+            return None
+        try:
+            from app.engine import smart_exit as _se
+            from app.models.schemas import SmartExitInfo as _SEInfo
+            asset_u = str(row.get("asset") or "").upper()
+            snap = dict(exit_snaps.get(asset_u) or {})
+            if not snap:
+                return None
+            entry = float(row.get("entry_price") or 0)
+            sl = float(row["stop_loss"]) if row.get("stop_loss") is not None else None
+            created_dt = _parse_dt(row.get("created_at"))
+            age = ((datetime.now(timezone.utc) - created_dt).total_seconds() / 86400.0
+                   if created_dt else 0.0)
+            age = max(0.0, age)
+            d = _se.evaluate_exit(
+                asset=asset_u,
+                direction=str(row.get("direction") or "").upper(),
+                entry_price=entry, price=float(mark),
+                stop_loss=sl, age_days=age, settings=s,
+                snapshot=snap, news_status=exit_news_status,
+                news_event=exit_news_event,
+                avg_hold_days=exit_avg_hold,
+                drawdown_pct=exit_drawdown)
+            return _SEInfo(
+                position_age_days=d.position_age_days,
+                r_multiple=d.r_multiple,
+                exit_score=d.exit_score, quality=d.quality,
+                factors={
+                    "trend_strength": d.factors.trend_strength,
+                    "momentum": d.factors.momentum,
+                    "volume_proxy": d.factors.volume_proxy,
+                    "market_regime": d.factors.market_regime,
+                    "news_risk": d.factors.news_risk,
+                    "holding_time": d.factors.holding_time,
+                    "volatility": d.factors.volatility,
+                    "opportunity_score": d.factors.opportunity_score,
+                    "risk_exposure": d.factors.risk_exposure,
+                },
+                signals={
+                    "tp_hit": d.signals.tp_hit, "sl_hit": d.signals.sl_hit,
+                    "trailing": d.signals.trailing,
+                    "reversal": d.signals.reversal,
+                    "news": d.signals.news,
+                    "time_stop": d.signals.time_stop,
+                },
+                recommendation=d.recommendation, final=d.final,
+                reasoning=list(d.reasoning or []), trigger=d.trigger,
+            )
+        except Exception:
+            return None
+
     open_positions = []
     for r in open_rows:
         mark = mark_for(r)
@@ -780,6 +874,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             sl_move_reason=str(r.get("sl_move_reason") or ""),
             tp_moved_at=_parse_dt(r.get("tp_moved_at")),
             tp_move_reason=str(r.get("tp_move_reason") or ""),
+            exit_info=exit_info_for(r, mark),
         ))
 
     recent = [MonitorTrade(

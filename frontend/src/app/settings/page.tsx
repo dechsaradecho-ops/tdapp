@@ -34,6 +34,16 @@ const DEFAULT_SETTINGS: AppSettings = {
   partial_trigger_r: 1.0,
   max_hold_days: 5,
   rr_target: 2.0,
+  smart_exit_enabled: true,
+  exit_score_close: 45,
+  profit_protect_r: 2.0,
+  reversal_opp_min: 50,
+  news_exit_enabled: true,
+  news_exit_min_r: 1.0,
+  volatility_exit_atr: 2.5,
+  no_behind_min_r: 0.5,
+  no_behind_hold_mult: 5.0,
+  trailing_ladder: true,
   gold_breakout_only: true,
   paper_spread: 0,
   spread_overrides: null,
@@ -696,6 +706,88 @@ export default function SettingsPage() {
                   หน่วยเป็นราคา (bid-ask เต็ม) — BUY เข้าแพงขึ้น spread/2, SELL เข้าถูกลง spread/2
                 </p>
               </div>
+            </div>
+
+            {/* --- Smart Exit Engine (continuous AI exit evaluation) --- */}
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Smart Exit Engine</p>
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1">
+                  <p className="text-sm">เปิดใช้ Smart Exit</p>
+                  <p className="text-xs text-slate-500">
+                    ประเมินคุณภาพการถือไม้ทุกนาที (9 ปัจจัย) — ปิด/แบ่งปิดเมื่อคะแนนต่ำหรือเจอสัญญาณกลับตัว (ปิด = ใช้ guard เดิมอย่างเดียว)
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.smart_exit_enabled}
+                  aria-label="Smart Exit Enabled"
+                  onClick={() => toggleNotify("smart_exit_enabled", !cfg.smart_exit_enabled)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.smart_exit_enabled ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.smart_exit_enabled ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1">
+                  <p className="text-sm">R-Ladder Trailing</p>
+                  <p className="text-xs text-slate-500">
+                    1R→ทุนคืน / 2R→+1R / 3R→+2R — ไม่คลาย SL กลับ (ปิด = ใช้ breakeven+trailing เดิม)
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.trailing_ladder}
+                  aria-label="Trailing Ladder"
+                  onClick={() => toggleNotify("trailing_ladder", !cfg.trailing_ladder)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.trailing_ladder ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.trailing_ladder ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1">
+                  <p className="text-sm">News Exit</p>
+                  <p className="text-xs text-slate-500">
+                    ข่าว DANGER + มีกำไร → ปิดก่อนข่าว (ปิด = ถือผ่านข่าวตามปกติ)
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.news_exit_enabled}
+                  aria-label="News Exit Enabled"
+                  onClick={() => toggleNotify("news_exit_enabled", !cfg.news_exit_enabled)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.news_exit_enabled ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.news_exit_enabled ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
+              <NumField label="ปิดเมื่อคะแนนต่ำกว่า" value={cfg.exit_score_close}
+                onChange={(v) => set("exit_score_close", v)} step={1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                คะแนนคุณภาพ 0-100 — ต่ำกว่านี้ระบบปิดหรือแบ่งปิด (ค่าเริ่มต้น 45)
+              </span>
+              <NumField label="กันกำไรเมื่อถึง (×R)" value={cfg.profit_protect_r}
+                onChange={(v) => set("profit_protect_r", v)} step={0.5} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                กำไรถึง R นี้แต่คุณภาพไม่ใช่ High → แบ่งปิดครึ่งหนึ่ง (0 = ปิด)
+              </span>
+              <NumField label="เกณฑ์กลับตัว (opportunity)" value={cfg.reversal_opp_min}
+                onChange={(v) => set("reversal_opp_min", v)} step={1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                คะแนนโอกาสฝั่งตรงข้ามต่ำกว่านี้ = สัญญาณกลับตัว 1 เสียง (ต้อง 2/4 เสียงถึงปิด)
+              </span>
+              <NumField label="News Exit ขั้นต่ำ (×R)" value={cfg.news_exit_min_r}
+                onChange={(v) => set("news_exit_min_r", v)} step={0.5} />
+              <NumField label="Volatility Exit (×ATR%)" value={cfg.volatility_exit_atr}
+                onChange={(v) => set("volatility_exit_atr", v)} step={0.5} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                ATR% เกินค่านี้ + มีกำไร → แบ่งปิด (0 = ปิด)
+              </span>
+              <NumField label="No-Behind ขั้นต่ำ (×R)" value={cfg.no_behind_min_r}
+                onChange={(v) => set("no_behind_min_r", v)} step={0.1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                กำไรต่ำกว่านี้ + ถือนานเกิน = ปิดทิ้ง ไม่ปล่อยค้าง (NO POSITION LEFT BEHIND)
+              </span>
+              <NumField label="No-Behind ถือเกิน (×เท่าเฉลี่ย)" value={cfg.no_behind_hold_mult}
+                onChange={(v) => set("no_behind_hold_mult", v)} step={0.5} />
             </div>
 
             {/* --- Kill switch / drawdown --- */}

@@ -118,6 +118,106 @@ function LevelMovedBadge({ moved, initial, current, movedAt, reason, level }: {
   );
 }
 
+/** Badge "Smart Exit" — คะแนนคุณภาพการถือไม้ (0-100) + คำแนะนำ
+ *  แตะ/คลิกเพื่อดู 9 ปัจจัย + เหตุผลภาษาไทย (portal to body เหมือน LevelMovedBadge). */
+function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_positions"][number]["exit_info"]> }) {
+  const [pop, setPop] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  const place = useCallback(() => {
+    const btn = btnRef.current, popEl = popRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pw = popEl?.offsetWidth ?? 300;
+    const ph = popEl?.offsetHeight ?? 200;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    let top = r.top - ph - 8;
+    if (top < 8) top = r.bottom + 8;
+    setPos({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!pop) return;
+    place();
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onScrollOrResize = () => setPop(false);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [pop, place]);
+
+  const qColor =
+    info.quality === "High" ? "text-profit border-profit/40 bg-profit/10"
+    : info.quality === "Medium" ? "text-amber-400 border-amber-400/40 bg-amber-400/10"
+    : "text-loss border-loss/40 bg-loss/10";
+  const recLabel =
+    info.final === "CONTINUE" ? "ถือต่อ"
+    : info.final === "PROTECT" ? "กันกำไร"
+    : info.final === "SCALE_OUT" ? "แบ่งปิด"
+    : info.final === "CLOSE" ? "ปิด"
+    : "ปิดด่วน";
+  const f = info.factors;
+  const factorRows: [string, number][] = [
+    ["เทรนด์", f.trend_strength], ["โมเมนตัม", f.momentum],
+    ["วอลุ่ม", f.volume_proxy], ["Regime", f.market_regime],
+    ["ข่าว", f.news_risk], ["เวลาถือ", f.holding_time],
+    ["ความผันผวน", f.volatility], ["โอกาสใหม่", f.opportunity_score],
+    ["ความเสี่ยงรวม", f.risk_exposure],
+  ];
+  const title = `Smart Exit ${fmtNum(info.exit_score, 0)}/100 (${info.quality}) — ${recLabel}\nR: ${fmtNum(info.r_multiple, 2)} | อายุ ${fmtNum(info.position_age_days, 1)} วัน\n${info.reasoning.join("\n")}`;
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setPop((v) => !v)}
+        title={title}
+        aria-label={title}
+        aria-expanded={pop}
+        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-bold cursor-help touch-manipulation ${qColor}`}
+      >
+        {fmtNum(info.exit_score, 0)} · {recLabel}
+      </button>
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="tooltip"
+          style={{ position: "fixed", top: pos.top, left: pos.left, maxWidth: "min(320px, calc(100vw - 16px))" }}
+          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed text-slate-200"
+        >
+          <div className="font-bold mb-1">Smart Exit {fmtNum(info.exit_score, 0)}/100 ({info.quality}) — {recLabel}</div>
+          <div className="text-slate-400 mb-1">R {fmtNum(info.r_multiple, 2)} · อายุ {fmtNum(info.position_age_days, 1)} วัน · {info.trigger}</div>
+          {factorRows.map(([label, v]) => (
+            <div key={label} className="flex items-center gap-2">
+              <span className="w-20 shrink-0 text-slate-400">{label}</span>
+              <div className="flex-1 h-1.5 rounded bg-slate-700 overflow-hidden">
+                <div className="h-full rounded bg-accent" style={{ width: `${Math.max(0, Math.min(100, v))}%` }} />
+              </div>
+              <span className="w-8 text-right tabular-nums">{fmtNum(v, 0)}</span>
+            </div>
+          ))}
+          <div className="mt-1 whitespace-pre-line text-slate-300">{info.reasoning.join("\n")}</div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
@@ -453,6 +553,7 @@ export default function MonitorPage() {
                   <th className="py-2 pr-4">SL</th>
                   <th className="py-2 pr-4">TP</th>
                   <th className="py-2 pr-4">PnL (ยังไม่ปิด)</th>
+                  <th className="py-2 pr-4">Smart Exit</th>
                   <th className="py-2 pr-4">ที่มา</th>
                   <th className="py-2 pr-4">Ticket</th>
                   <th className="py-2">จัดการ</th>
@@ -477,6 +578,7 @@ export default function MonitorPage() {
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
                       </span>
                     </td>
+                    <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
                     <td className="py-2 text-xs text-slate-500">{p.ticket || "-"}</td>
                     <td className="py-2">
@@ -497,7 +599,7 @@ export default function MonitorPage() {
                       {unrealizedTotal >= 0 ? "+" : ""}${fmtNum(unrealizedTotal, 2)}
                     </span>
                   </td>
-                  <td colSpan={3} />
+                  <td colSpan={4} />
                 </tr>
               </tbody>
             </table>

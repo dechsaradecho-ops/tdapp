@@ -425,6 +425,24 @@ export interface AppSettings {
   max_hold_days: number;
   /** Reward:Risk target — TP = SL distance × rr_target (1:2 default) */
   rr_target: number;
+  /** Smart Exit Engine — continuous AI exit evaluation (false = legacy guard only) */
+  smart_exit_enabled: boolean;
+  /** Hold-quality score below which the engine closes/scales out */
+  exit_score_close: number;
+  /** Profit ≥ this R with quality != High → scale out 50% (0 = off) */
+  profit_protect_r: number;
+  /** Opportunity score below this counts as a reversal vote */
+  reversal_opp_min: number;
+  /** News Exit master switch (DANGER + profit → close early) */
+  news_exit_enabled: boolean;
+  news_exit_min_r: number;
+  /** ATR% above this + profit → scale out (0 = off) */
+  volatility_exit_atr: number;
+  /** NO POSITION LEFT BEHIND: profit < this R + age > mult × avg → close */
+  no_behind_min_r: number;
+  no_behind_hold_mult: number;
+  /** R-ladder trailing 1R→BE / 2R→+1R / 3R→+2R (false = legacy breakeven+trail) */
+  trailing_ladder: boolean;
   /** Strategy D: XAUUSD only trades breakout/retest setups (false = old behaviour) */
   gold_breakout_only: boolean;
   /** Simulated spread (price units) applied to paper fills — legacy global
@@ -492,6 +510,42 @@ export interface PauseStatus {
   paused_at: string | null;
 }
 
+/** 9-factor Smart Exit breakdown (0-100 each, higher = safer to hold). */
+export interface SmartExitFactorScores {
+  trend_strength: number;
+  momentum: number;
+  volume_proxy: number;
+  market_regime: number;
+  news_risk: number;
+  holding_time: number;
+  volatility: number;
+  opportunity_score: number;
+  risk_exposure: number;
+}
+
+export interface SmartExitSignals {
+  tp_hit: boolean;
+  sl_hit: boolean;
+  trailing: boolean;
+  reversal: boolean;
+  news: boolean;
+  time_stop: boolean;
+}
+
+/** Per-position Smart Exit analysis (null when disabled/unevaluated). */
+export interface SmartExitInfo {
+  position_age_days: number;
+  r_multiple: number;
+  exit_score: number;
+  quality: string;
+  factors: SmartExitFactorScores;
+  signals: SmartExitSignals;
+  recommendation: string;
+  final: string;
+  reasoning: string[];
+  trigger: string;
+}
+
 /** One open paper position with a live mark and unrealized PnL. */
 export interface MonitorOpenPosition {
   id: string;
@@ -513,6 +567,7 @@ export interface MonitorOpenPosition {
   sl_move_reason: string;
   tp_moved_at: string | null;
   tp_move_reason: string;
+  exit_info?: SmartExitInfo | null;
 }
 
 /** One execution-journal row (open, closed or rejected). */

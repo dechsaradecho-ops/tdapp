@@ -19,6 +19,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from app.engine import smart_exit
 from app.integrations import quotes
 from app.integrations.brokers import Position
 from app.services import execution
@@ -53,6 +54,187 @@ def _atr_for(pos: Position, fallback_distance: float) -> float:
     if pos.stop_loss is None:
         return fallback_distance * 0.2
     return abs(pos.entry_price - pos.stop_loss) * 0.2
+
+
+def _position_age_days(pos: Position, db=None) -> float:
+    """Age of a position in days — opened_at first, journal created_at fallback.
+
+    Never raises; 0.0 when nothing is known (fresh position).
+    """
+    from datetime import datetime, timezone
+    opened = getattr(pos, "opened_at", None)
+    if opened is not None:
+        try:
+            return max(0.0, (datetime.now(timezone.utc) - opened).total_seconds() / 86400.0)
+        except Exception:
+            pass
+    if db is not None:
+        try:
+            rows = db.select("paper_trades",
+                             filters={"ticket": str(getattr(pos, "ticket", "") or "")},
+                             limit=1)
+            if rows:
+                created = rows[0].get("created_at")
+                if created:
+                    dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+        except Exception:
+            pass
+    return 0.0
+
+
+async def _smart_exit_snapshot(asset: str) -> dict:
+    """Indicator snapshot for the Smart Exit engine (60s cached, fail-safe {}).
+
+    fetch_all_snapshots is the same feed the scanner scores from, so exit
+    analysis sees the same EMA/ADX/RSI/MACD/ATR the entry saw.
+    """
+    try:
+        snaps = await quotes.fetch_all_snapshots([asset])
+        return dict(snaps.get(asset) or {})
+    except Exception as exc:
+        log.debug("smart-exit snapshot unavailable for %s: %s", asset, exc)
+        return {}
+
+
+async def _smart_exit_news(db, s) -> tuple[str, str]:
+    """(status, event) for the Smart Exit engine — reuses the entry news gate.
+
+    Returns ("SAFE", "") when the calendar is missing/empty.
+    """
+    try:
+        risk = execution._news_risk(db, s)
+        status = str(getattr(risk, "status", "SAFE") or "SAFE").upper()
+        nxt = getattr(risk, "next_high_impact", None)
+        event = str(getattr(nxt, "event", "") or "") if nxt else ""
+        return status, event
+    except Exception:
+        return "SAFE", ""
+
+
+def _avg_hold_days(db) -> float:
+    """Mean holding time (days) of closed trades — NO POSITION LEFT BEHIND clock.
+
+    Falls back to 4.0 (spec default) when there is no history yet.
+    """
+    try:
+        rows = db.select("paper_trades", filters={"status": "closed"}, limit=200)
+    except Exception:
+        return 4.0
+    spans: list[float] = []
+    for r in rows or []:
+        try:
+            from datetime import datetime
+            c = r.get("created_at")
+            x = r.get("closed_at")
+            if not c or not x:
+                continue
+            dc = datetime.fromisoformat(str(c).replace("Z", "+00:00"))
+            dx = datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+            if dc.tzinfo is None:
+                from datetime import timezone
+                dc = dc.replace(tzinfo=timezone.utc)
+            if dx.tzinfo is None:
+                from datetime import timezone
+                dx = dx.replace(tzinfo=timezone.utc)
+            spans.append(max(0.0, (dx - dc).total_seconds() / 86400.0))
+        except Exception:
+            continue
+    return round(sum(spans) / len(spans), 2) if spans else 4.0
+
+
+async def _apply_smart_exit(db, broker, pos: Position, price: float,
+                            decision, s,
+                            notifier: NotificationService) -> dict:
+    """Execute a Smart Exit recommendation. Returns {"closed", "partial_closed"}.
+
+    MOVE_SL is handled by the legacy breakeven/trailing pass (it owns SL
+    persistence); this only executes PARTIAL_25/50 and CLOSE. Never raises.
+    """
+    out = {"closed": False, "partial_closed": False}
+    rec = str(getattr(decision, "recommendation", "HOLD") or "HOLD")
+    if rec not in ("PARTIAL_25", "PARTIAL_50", "CLOSE"):
+        return out
+    ticket = str(getattr(pos, "ticket", "") or "")
+    asset = str(getattr(pos, "asset", "") or "")
+    direction = str(getattr(pos, "direction", "") or "")
+    trigger = str(getattr(decision, "trigger", "") or "")
+    why = "; ".join(getattr(decision, "reasoning", []) or [])[:300]
+    reason_prefix = f"smart_exit:{trigger}" if trigger else "smart_exit"
+
+    if rec in ("PARTIAL_25", "PARTIAL_50"):
+        if getattr(pos, "partial_done", False):
+            return out  # TP1 already fired — never scale out twice
+        pct = 25.0 if rec == "PARTIAL_25" else 50.0
+        slice_vol = round(float(pos.volume or 0) * pct / 100.0, 2)
+        if slice_vol <= 0 or slice_vol >= float(pos.volume or 0):
+            return out
+        try:
+            result = await broker.partial_close(ticket, slice_vol)
+        except Exception as exc:
+            log.warning("smart-exit partial %s failed: %s", ticket, exc)
+            return out
+        if not getattr(result, "ok", False):
+            log.warning("smart-exit partial %s rejected: %s", ticket,
+                        getattr(result, "message", ""))
+            return out
+        out["partial_closed"] = True
+        pos.partial_done = True  # type: ignore[attr-defined]
+        try:
+            row_id = str(getattr(pos, "row_id", "") or "")
+            if not row_id:
+                rows = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
+                row_id = str(rows[0].get("id") or "") if rows else ""
+            if row_id:
+                db.update("paper_trades", row_id, {"partial_done": True})
+        except Exception as exc:
+            log.debug("smart-exit partial_done persist failed: %s", exc)
+        signal_log.log_event(
+            db=db, event="closed", asset=asset, direction=direction,
+            entry=pos.entry_price, exit_price=price, ticket=ticket,
+            volume=slice_vol, source="auto",
+            reason=f"{reason_prefix} แบ่งปิด {slice_vol:g} lots @ {price:g} — {why}")
+        try:
+            await notifier.notify(
+                pos.user_id, "trade_closed",
+                f"🧠 Smart Exit ({rec})\nAsset: {asset}\nDirection: {direction}\n"
+                f"Closed: {slice_vol:g} lots @ {price:g}\n"
+                f"Score: {getattr(decision, 'exit_score', '?')} "
+                f"({getattr(decision, 'quality', '?')})\n{why}")
+        except Exception as exc:
+            log.debug("smart-exit partial notify failed: %s", exc)
+        return out
+
+    # rec == "CLOSE"
+    try:
+        result = await broker.close_position(ticket)
+    except Exception as exc:
+        log.warning("smart-exit close %s failed: %s", ticket, exc)
+        return out
+    if not getattr(result, "ok", False):
+        log.warning("smart-exit close %s rejected: %s", ticket,
+                    getattr(result, "message", ""))
+        return out
+    out["closed"] = True
+    pnl = execution.PaperBrokerPnl.compute(pos)
+    execution.close_trade_rows(db, ticket, price, pnl, reason_prefix)
+    signal_log.log_event(
+        db=db, event="closed", asset=asset, direction=direction,
+        entry=pos.entry_price, exit_price=price, pnl=pnl, ticket=ticket,
+        source="auto",
+        reason=f"{reason_prefix} ปิดทั้งไม้ @ {price:g} — {why}")
+    try:
+        await notifier.notify(
+            pos.user_id, "trade_closed",
+            f"🧠 Smart Exit (CLOSE)\nAsset: {asset}\nDirection: {direction}\n"
+            f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
+            f"Score: {getattr(decision, 'exit_score', '?')} "
+            f"({getattr(decision, 'quality', '?')})\nPnL: {pnl:+,.2f}\n{why}")
+    except Exception as exc:
+        log.error("smart-exit close notify failed: %s", exc)
+    return out
 
 
 async def _manage_position(db, broker, pos: Position, price: float,
@@ -121,7 +303,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
             except Exception as exc:
                 log.warning("partial close %s failed: %s", pos.ticket, exc)
 
-    # ---- 2. breakeven + trailing ------------------------------------------
+    # ---- 2. breakeven + trailing (+ R-ladder floor when enabled) ---------
     new_sl: float | None = None
     if be_trigger > 0 and r_multiple >= be_trigger:
         be_price = pos.entry_price
@@ -134,6 +316,21 @@ async def _manage_position(db, broker, pos: Position, price: float,
                 new_sl = max(be_price, trail_price)
             else:
                 new_sl = min(be_price, trail_price)
+            # R-ladder floor (spec priority 4): 1R→BE / 2R→+1R / 3R→+2R.
+            # Gated by trailing_ladder AND trail_mult>0 so breakeven-only
+            # configs (trail 0) keep exact legacy behaviour.
+            try:
+                if bool(getattr(s, "trailing_ladder", False)):
+                    ladder = smart_exit.ladder_sl(
+                        entry_price=pos.entry_price, direction=pos.direction,
+                        r_distance=r_distance, r_multiple=r_multiple)
+                    if ladder is not None:
+                        if sign == 1:
+                            new_sl = max(new_sl, ladder)  # type: ignore[arg-type]
+                        else:
+                            new_sl = min(new_sl, ladder)  # type: ignore[arg-type]
+            except Exception:
+                pass
         else:
             new_sl = be_price
         # only move when it actually improves the stop
@@ -170,6 +367,9 @@ async def guard_once(db, broker, notifier: NotificationService,
     closed = 0
     moved = 0
     partials = 0
+    smart_closed = 0
+    smart_partials = 0
+    emergency_closed = 0
     try:
         positions = await broker.all_positions()
     except Exception as exc:
@@ -190,6 +390,58 @@ async def guard_once(db, broker, notifier: NotificationService,
             from app.models.schemas import AppSettings
             s = AppSettings()
 
+    # ---- Smart Exit shared context (once per cycle, fail-safe) ------------
+    # EXIT PRIORITY 1-8: emergency → SL/TP → trailing(ladder) → AI score →
+    # reversal → time → news. SL/TP/trailing/time live in this loop; the AI
+    # engine supplies score/reversal/news/left-behind/volatility/profit.
+    smart_on = bool(getattr(s, "smart_exit_enabled", True))
+    snaps: dict[str, dict] = {}
+    news_status, news_event = "SAFE", ""
+    avg_hold = 4.0
+    drawdown_pct = 0.0
+    kill_engaged = False
+    kill_triggers: list[str] = []
+    if smart_on and positions:
+        try:
+            assets = sorted({str(p.asset or "").upper() for p in positions})
+            snaps = await quotes.fetch_all_snapshots(assets)
+        except Exception as exc:
+            log.debug("smart-exit snapshots unavailable: %s", exc)
+            snaps = {}
+        try:
+            news_status, news_event = await _smart_exit_news(db, s)
+        except Exception:
+            news_status, news_event = "SAFE", ""
+        try:
+            avg_hold = _avg_hold_days(db)
+        except Exception:
+            avg_hold = 4.0
+        try:
+            drawdown_pct = execution.equity_drawdown_pct(
+                db, float(getattr(s, "capital", 0) or 0))
+        except Exception:
+            drawdown_pct = 0.0
+        # Priority 1 — Emergency Exit: kill switch engaged → close everything.
+        try:
+            from app.models.schemas import KillSwitchEngine
+            daily, weekly, monthly = execution._loss_pcts(
+                db, float(getattr(s, "capital", 0) or 0))
+            ks = KillSwitchEngine(
+                daily_loss_limit=float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0),
+                weekly_loss_limit=float(getattr(s, "kill_weekly_loss_pct", 5.0) or 5.0),
+                monthly_loss_limit=float(getattr(s, "kill_monthly_loss_pct", 8.0) or 8.0),
+                drawdown_limit=float(getattr(s, "max_drawdown_pct", 10.0) or 10.0),
+            ).evaluate(
+                daily_loss_pct=daily, weekly_loss_pct=weekly,
+                monthly_loss_pct=monthly, drawdown_pct=drawdown_pct,
+                broker_connected=True, market_data_ok=True,
+                ai_provider_ok=True, execution_ok=True)
+            kill_engaged = bool(getattr(ks, "engaged", False))
+            kill_triggers = list(getattr(ks, "triggers", []) or [])
+        except Exception as exc:
+            log.debug("smart-exit kill check failed: %s", exc)
+            kill_engaged = False
+
     for pos in positions:
         # refresh mark price: live feed first, then broker-native, then book
         price = live.get(pos.asset.upper()) or 0.0
@@ -207,6 +459,43 @@ async def guard_once(db, broker, notifier: NotificationService,
             continue
         pos.current_price = price
 
+        # ---- Priority 1: Emergency Exit (kill switch engaged) ------------
+        # Closes EVERYTHING immediately — skips management/SL/TP/smart/time.
+        if kill_engaged:
+            try:
+                result = await broker.close_position(pos.ticket)
+            except Exception as exc:
+                log.warning("emergency close %s failed: %s", pos.ticket, exc)
+                continue
+            if not getattr(result, "ok", False):
+                log.warning("emergency close %s rejected: %s", pos.ticket,
+                            getattr(result, "message", ""))
+                continue
+            pnl = execution.PaperBrokerPnl.compute(pos)
+            execution.close_trade_rows(db, pos.ticket, price, pnl, "emergency")
+            signal_log.log_event(
+                db=db, event="closed", asset=str(pos.asset or ""),
+                direction=str(pos.direction or ""),
+                entry=pos.entry_price, exit_price=price, pnl=pnl,
+                ticket=str(pos.ticket or ""), source="auto",
+                reason="🚨 Emergency Exit (kill switch: "
+                       + ("; ".join(kill_triggers)[:200] or "engaged")
+                       + f") — ปิดที่ {price:g}")
+            emergency_closed += 1
+            closed += 1
+            try:
+                await notifier.notify(
+                    pos.user_id, "trade_closed",
+                    f"🚨 Emergency Exit (KILL SWITCH)\n"
+                    f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
+                    f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
+                    f"PnL: {pnl:+,.2f}\n"
+                    + ("; ".join(kill_triggers)[:200] or "kill switch engaged"),
+                )
+            except Exception as exc:
+                log.error("emergency notify failed: %s", exc)
+            continue
+
         # ---- management pass: breakeven / trailing / partial (TP1) ----
         try:
             mgmt = await _manage_position(db, broker, pos, price, s, notifier)
@@ -215,16 +504,52 @@ async def guard_once(db, broker, notifier: NotificationService,
         except Exception as exc:
             log.warning("manage %s failed: %s", pos.ticket, exc)
 
+        # ---- Priorities 2-3: SL/TP hard stops win over everything below --
         sl, tp = pos.stop_loss, pos.take_profit
-        if sl is None and tp is None:
-            continue
-
         hit_sl = sl is not None and (
             (pos.direction == "BUY" and price <= sl)
             or (pos.direction == "SELL" and price >= sl))
         hit_tp = tp is not None and (
             (pos.direction == "BUY" and price >= tp)
             or (pos.direction == "SELL" and price <= tp))
+        if hit_sl or hit_tp:
+            pass  # handled by the SL/TP close block after smart-exit skip
+        elif smart_on:
+            # ---- Priorities 5, 6, 8: AI score / reversal / news ---------
+            # Only when no hard stop was hit. Blind HOLD when the indicator
+            # feed is down (no snapshot) — never close without indicators.
+            # Fail-safe: any eval error just skips to SL/TP + time stop.
+            try:
+                snap = snaps.get(str(pos.asset or "").upper(), {}) or {}
+                if snap:
+                    age = _position_age_days(pos, db)
+                    decision = smart_exit.evaluate_exit(
+                        asset=str(pos.asset or ""),
+                        direction=str(pos.direction or ""),
+                        entry_price=float(pos.entry_price or 0),
+                        price=price, stop_loss=pos.stop_loss,
+                        age_days=age, settings=s, snapshot=snap,
+                        news_status=news_status, news_event=news_event,
+                        avg_hold_days=avg_hold, drawdown_pct=drawdown_pct)
+                    rec = str(getattr(decision, "recommendation", "HOLD")
+                              or "HOLD")
+                    if rec in ("PARTIAL_25", "PARTIAL_50", "CLOSE"):
+                        applied = await _apply_smart_exit(
+                            db, broker, pos, price, decision, s, notifier)
+                        if applied.get("closed"):
+                            closed += 1
+                            smart_closed += 1
+                            continue  # fully closed — skip SL/TP + time stop
+                        if applied.get("partial_closed"):
+                            partials += 1
+                            smart_partials += 1
+                            # remainder falls through to SL/TP + time-stop
+                else:
+                    log.debug("smart-exit skip %s: no snapshot (blind HOLD)",
+                              pos.ticket)
+            except Exception as exc:
+                log.warning("smart-exit eval %s failed: %s", pos.ticket, exc)
+
         if not (hit_sl or hit_tp):
             # ---- time stop: close stale positions (max_hold_days) ----
             # SL/TP always wins (checked first); this only fires when neither
@@ -291,7 +616,9 @@ async def guard_once(db, broker, notifier: NotificationService,
             log.error("close notify failed: %s", exc)
 
     return {"checked": len(positions), "closed": closed,
-            "moved_sl": moved, "partial_closed": partials}
+            "moved_sl": moved, "partial_closed": partials,
+            "smart_closed": smart_closed, "smart_partials": smart_partials,
+            "emergency_closed": emergency_closed}
 
 
 def run_guard_blocking(db, broker, notifier) -> dict:

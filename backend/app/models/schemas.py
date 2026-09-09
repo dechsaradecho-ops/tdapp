@@ -1224,6 +1224,49 @@ class PauseStatus(BaseModel):
 
 
 # ---------- Auto-Trader: monitor dashboard ----------
+class SmartExitFactorScores(BaseModel):
+    """9-factor breakdown of the Smart Exit hold-quality score (0-100 each)."""
+    trend_strength: float = 50.0
+    momentum: float = 50.0
+    volume_proxy: float = 50.0
+    market_regime: float = 50.0
+    news_risk: float = 50.0
+    holding_time: float = 50.0
+    volatility: float = 50.0
+    opportunity_score: float = 50.0
+    risk_exposure: float = 50.0
+
+
+class SmartExitSignals(BaseModel):
+    tp_hit: bool = False
+    sl_hit: bool = False
+    trailing: bool = False
+    reversal: bool = False
+    news: bool = False
+    time_stop: bool = False
+
+
+class SmartExitInfo(BaseModel):
+    """Per-position Smart Exit analysis attached to the monitor snapshot.
+
+    position_age_days / r_multiple / exit_score / quality mirror the spec's
+    EXIT DECISION OUTPUT header (e.g. 4 Days / +1.8R / 42 / Low / Close).
+    recommendation is the engine action, final the portfolio-level decision,
+    reasoning (1-5 lines) ALWAYS explains why — NO POSITION LEFT BEHIND
+    without a reason.
+    """
+    position_age_days: float = 0.0
+    r_multiple: float = 0.0
+    exit_score: float = 50.0
+    quality: str = "Medium"  # High / Medium / Low
+    factors: SmartExitFactorScores = SmartExitFactorScores()
+    signals: SmartExitSignals = SmartExitSignals()
+    recommendation: str = "HOLD"  # HOLD/MOVE_SL/PARTIAL_25/PARTIAL_50/CLOSE/EMERGENCY_CLOSE
+    final: str = "CONTINUE"  # CONTINUE/PROTECT/SCALE_OUT/CLOSE/EMERGENCY_CLOSE
+    reasoning: list[str] = Field(default_factory=list)
+    trigger: str = ""
+
+
 class MonitorOpenPosition(BaseModel):
     """One open paper position with a live mark and unrealized PnL."""
     id: str
@@ -1247,6 +1290,8 @@ class MonitorOpenPosition(BaseModel):
     sl_move_reason: str = ""
     tp_moved_at: Optional[datetime] = None
     tp_move_reason: str = ""
+    # Smart Exit analysis (None when the engine is disabled or unevaluated).
+    exit_info: Optional[SmartExitInfo] = None
 
 
 class MonitorTrade(BaseModel):
@@ -1304,9 +1349,6 @@ class MonitorSnapshot(BaseModel):
     generated_at: Optional[datetime] = None
     # Live-price feed health — rendered as a banner when the feed fails.
     feed_status: Optional[QuoteFeedStatus] = None
-    # Live-price feed health, surfaced to the user on the monitor page.
-    feed_status: Optional[QuoteFeedStatus] = None
-    generated_at: Optional[datetime] = None
     # Live portfolio value for the home page — computed from DB rows
     # (capital + realized closed PnL + unrealized open PnL), replacing the
     # old manual localStorage numbers so รีเซ็ตสถิติ resets them for real.
@@ -1405,6 +1447,34 @@ class AppSettings(BaseModel):
     # 3-tier SL/TP preview on the card. Clamped ≥ 0.5 so a typo can't create
     # a TP inside the SL.
     rr_target: float = 2.0
+
+    # ---- Smart Exit Engine (continuous exit evaluation, worker #6) --------
+    # Every open position passes evaluate_exit() each guard cycle. All fields
+    # carry defaults so an empty trading_settings row behaves identically.
+    # Master switch — False restores the legacy guard (breakeven/trailing/
+    # partial/time-stop only, no AI exit actions).
+    smart_exit_enabled: bool = True
+    # Hold-quality score below which the engine closes (or scales out when
+    # still profitable). Spec example: 42/Low → Close.
+    exit_score_close: float = 45.0
+    # Profit Protection: profit ≥ this R with quality != High → scale out
+    # 50% so a winner can't fully evaporate. 0 disables.
+    profit_protect_r: float = 2.0
+    # Trend Reversal: opportunity score below this counts as a reversal vote
+    # (2+ of 4 votes → CLOSE). Spec: "Opportunity Score Drops Below 50".
+    reversal_opp_min: float = 50.0
+    # News Exit: DANGER calendar + profit ≥ news_exit_min_r → CLOSE early.
+    news_exit_enabled: bool = True
+    news_exit_min_r: float = 1.0
+    # Volatility Exit: ATR% above this + profit → scale out (25/50%).
+    volatility_exit_atr: float = 2.5
+    # NO POSITION LEFT BEHIND: profit < no_behind_min_r AND age >
+    # no_behind_hold_mult × avg holding time → auto CLOSE (Capital Efficiency).
+    no_behind_min_r: float = 0.5
+    no_behind_hold_mult: float = 5.0
+    # R-ladder trailing: 1R→BE / 2R→+1R / 3R→+2R. True = ladder (spec),
+    # False = legacy single breakeven_trigger_r + trail_atr_mult behaviour.
+    trailing_ladder: bool = True
 
     # ---- Strategy D — gold breakout-retest gate ----------------------------
     # Gold's high ATR makes narrow pullback entries unattractive: in prod,
