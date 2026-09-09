@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   partial_close_pct: 0,
   partial_trigger_r: 1.0,
   max_hold_days: 5,
+  rr_target: 2.0,
   gold_breakout_only: true,
   paper_spread: 0,
   spread_overrides: null,
@@ -641,6 +642,11 @@ export default function SettingsPage() {
                 onChange={(v) => set("max_hold_days", v)} step={1} />
               <span className="block text-xs text-slate-500 -mt-2">
                 ถือไม้ครบกี่วัน ให้ระบบปิดเอง (0 = ปิดการใช้งาน)
+              </span>
+              <NumField label="RR Target (1:X)" value={cfg.rr_target}
+                onChange={(v) => set("rr_target", v)} step={0.1} />
+              <span className="block text-xs text-slate-500 -mt-2">
+                กำไรเป้าหมาย = ระยะ SL คูณค่านี้ เช่น 2 → TP อยู่ห่าง 2 เท่าของ SL (ต่ำสุด 0.5)
               </span>
               <NumField label="Paper Spread (ราคา) — ค่าเดิม (fallback)" value={cfg.paper_spread}
                 onChange={(v) => set("paper_spread", v)} step={0.00001} />

@@ -168,6 +168,8 @@ async def scan_once(db: Database) -> list[dict]:
             proposal = engine.build_proposal(
                 ind, opp, risk_per_trade_pct=settings.risk_per_trade_pct,
                 regime_bullish=bullish,
+                # Reward:Risk target (Settings) — TP = SL distance × rr_target.
+                rr_target=max(0.5, float(getattr(settings, "rr_target", 2.0) or 2.0)),
                 # SL distance clamp (Settings) — equal risk distance per asset.
                 sl_min_pct=settings.sl_distance_min_pct,
                 sl_max_pct=settings.sl_distance_max_pct,

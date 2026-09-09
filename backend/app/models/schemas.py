@@ -1400,6 +1400,11 @@ class AppSettings(BaseModel):
     # of PnL — stale trend-chase entries decay instead of recovering. 0
     # disables the feature.
     max_hold_days: int = 5
+    # Reward:Risk target for every new signal — TP = SL distance × rr_target
+    # (1:2 default). Flows into build_proposal → TP, limit ladder and the
+    # 3-tier SL/TP preview on the card. Clamped ≥ 0.5 so a typo can't create
+    # a TP inside the SL.
+    rr_target: float = 2.0
 
     # ---- Strategy D — gold breakout-retest gate ----------------------------
     # Gold's high ATR makes narrow pullback entries unattractive: in prod,
