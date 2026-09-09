@@ -5,6 +5,7 @@ import AiAdvicePanel from "@/components/AiAdvicePanel";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import SignalCard from "@/components/SignalCard";
 import SignalLogsPanel from "@/components/SignalLogsPanel";
 import { api } from "@/lib/api";
@@ -154,9 +155,14 @@ export default function SignalsPage() {
           <button
             onClick={refresh}
             disabled={loading}
+            aria-busy={loading} aria-live="polite"
+            title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
             className="border border-slate-700 bg-white/[0.05] text-slate-200 rounded px-3 py-2 text-xs min-h-[40px] font-semibold active:bg-white/10 disabled:opacity-50"
           >
-            {loading ? "กำลังโหลด..." : "รีเฟรช"}
+            <span className="inline-flex items-center gap-1.5">
+              {loading && <Icon n="spinner" size={14} className="animate-spin" />}
+              รีเฟรช
+            </span>
           </button>
         </div>
       </div>
@@ -175,6 +181,9 @@ export default function SignalsPage() {
       <FeedStatusBanner feed={signals[0]?.feed_status} />
       {/* คำแนะนำจาก AI — สรุปสัญญาณที่แสดงตอนนี้เป็นภาษาคน (stream จาก /api/chat/stream) */}
       <AiAdvicePanel signals={[...pending, ...approved]} />
+      {loading && !signals.length && !error && (
+        <LoadingGraphic message="กำลังโหลดสัญญาณ — API บน Render อาจใช้เวลาเริ่มต้นสักครู่" />
+      )}
       {!signals.length && !error && !loading && (
         <p className="text-slate-500 text-sm">
           {session?.market_closed

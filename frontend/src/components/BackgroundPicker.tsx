@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import Icon from "@/components/Icon";
 
 const BG_KEY = "tdapp_bg_image";
 const BG_EVENT = "tdapp:bg-changed";
@@ -161,9 +162,13 @@ export default function BackgroundPicker() {
         <button
           onClick={() => fileRef.current?.click()}
           disabled={busy}
+          aria-busy={busy}
           className="bg-accent text-white font-semibold rounded px-4 py-2 text-sm disabled:opacity-50"
         >
-          {busy ? "กำลังประมวลผล..." : "เลือกรูป"}
+          <span className="inline-flex items-center gap-1.5">
+            {busy && <Icon n="spinner" size={14} className="animate-spin" />}
+            {busy ? "กำลังประมวลผล..." : "เลือกรูป"}
+          </span>
         </button>
         {preview && (
           <button

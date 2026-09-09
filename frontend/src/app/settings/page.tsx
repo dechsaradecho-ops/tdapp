@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import BackgroundPicker from "@/components/BackgroundPicker";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import PinManager from "@/components/PinManager";
 import { api } from "@/lib/api";
@@ -367,8 +368,12 @@ export default function SettingsPage() {
               options={RISK_PROFILES} />
           </label>
           <button onClick={recommend} disabled={loading}
+            aria-busy={loading}
             className="w-full bg-accent text-white font-semibold rounded py-2 disabled:opacity-50">
-            {loading ? "กำลังคำนวณ..." : "ขอ Portfolio Recommendation"}
+            <span className="inline-flex items-center justify-center gap-1.5">
+              {loading && <Icon n="spinner" size={15} className="animate-spin" />}
+              {loading ? "กำลังคำนวณ..." : "ขอ Portfolio Recommendation"}
+            </span>
           </button>
         </div>
       </div>
@@ -394,7 +399,7 @@ export default function SettingsPage() {
             </div>
           </div>
         ) : (
-          <p className="text-slate-500 text-sm">กำลังโหลด...</p>
+          <LoadingGraphic message="กำลังโหลดคำแนะนำพอร์ต..." compact />
         )}
       </div>
 
@@ -418,8 +423,12 @@ export default function SettingsPage() {
               ค่าเริ่มต้น
             </button>
             <button onClick={save} disabled={saving || !cfg}
+              aria-busy={saving}
               className="bg-accent text-white font-semibold rounded px-4 min-h-[40px] disabled:opacity-50 active:brightness-90">
-              {saving ? "กำลังบันทึก..." : "บันทึกการตั้งค่า"}
+              <span className="inline-flex items-center gap-1.5">
+                {saving && <Icon n="spinner" size={14} className="animate-spin" />}
+                {saving ? "กำลังบันทึก..." : "บันทึกการตั้งค่า"}
+              </span>
             </button>
           </div>
         </div>
@@ -429,7 +438,9 @@ export default function SettingsPage() {
         </p>
 
         {loadErr && <p className="text-loss text-sm mt-2">โหลดค่าไม่สำเร็จ: {loadErr}</p>}
-        {!cfg && !loadErr && <p className="text-slate-500 text-sm mt-3">กำลังโหลด...</p>}
+        {!cfg && !loadErr && (
+          <LoadingGraphic message="กำลังโหลดการตั้งค่าระบบเทรด..." compact />
+        )}
 
         {/* --- Execution switch (blocks BOTH auto trader and /approve) --- */}
         <div className={`mt-4 rounded border px-4 py-3 flex items-center justify-between flex-wrap gap-3 ${
@@ -447,10 +458,14 @@ export default function SettingsPage() {
             </p>
           </div>
           <button onClick={togglePause} disabled={pauseBusy}
+            aria-busy={pauseBusy}
             className={pause?.paused
               ? "bg-profit text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"
               : "bg-loss text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90"}>
-            {pauseBusy ? "กำลังส่ง..." : pause?.paused ? "Resume Auto Trading" : "Pause Auto Trading"}
+            <span className="inline-flex items-center gap-1.5">
+              {pauseBusy && <Icon n="spinner" size={14} className="animate-spin" />}
+              {pauseBusy ? "กำลังส่ง..." : pause?.paused ? "Resume Auto Trading" : "Pause Auto Trading"}
+            </span>
           </button>
         </div>
 
@@ -831,8 +846,12 @@ export default function SettingsPage() {
           พร้อมแสดงจำนวน row จริงในตาราง worker ทั้งหมด
         </p>
         <button onClick={runDbCheck} disabled={dbTesting}
+          aria-busy={dbTesting}
           className="bg-accent text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
-          {dbTesting ? "กำลังทดสอบ..." : "ทดสอบ อ่าน/เขียน DB"}
+          <span className="inline-flex items-center gap-1.5">
+            {dbTesting && <Icon n="spinner" size={15} className="animate-spin" />}
+            {dbTesting ? "กำลังทดสอบ..." : "ทดสอบ อ่าน/เขียน DB"}
+          </span>
         </button>
 
         {dbCheck && (
@@ -897,8 +916,12 @@ export default function SettingsPage() {
               วินิจฉัย
             </button>
             <button onClick={runLineTest} disabled={lineBusy}
+              aria-busy={lineBusy}
               className="bg-accent text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
-              {lineBusy ? "กำลังส่ง..." : "ทดสอบการแจ้งเตือน"}
+              <span className="inline-flex items-center gap-1.5">
+                {lineBusy && <Icon n="spinner" size={14} className="animate-spin" />}
+                {lineBusy ? "กำลังส่ง..." : "ทดสอบการแจ้งเตือน"}
+              </span>
             </button>
           </div>
         </div>
@@ -978,8 +1001,12 @@ export default function SettingsPage() {
               placeholder="พิมพ์ข้อความที่จะทดสอบ เช่น /risk หรือ วันนี้ควรเทรดไหม"
               className="flex-1 min-w-[240px] bg-surface border border-slate-700 rounded px-3 py-2 text-sm" />
             <button onClick={runSimulate} disabled={lineBusy || !simText.trim()}
+              aria-busy={lineBusy}
               className="bg-accent text-white font-semibold rounded px-4 min-h-[44px] disabled:opacity-50 active:brightness-90">
-              {lineBusy ? "กำลังรัน..." : "จำลอง"}
+              <span className="inline-flex items-center gap-1.5">
+                {lineBusy && <Icon n="spinner" size={14} className="animate-spin" />}
+                {lineBusy ? "กำลังรัน..." : "จำลอง"}
+              </span>
             </button>
             <button onClick={loadEvents} disabled={lineBusy}
               className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[44px] active:bg-slate-800 disabled:opacity-40">
@@ -1097,7 +1124,7 @@ export default function SettingsPage() {
             กลุ่ม/แชทที่ลงทะเบียน (event.source.groupId จาก webhook)
           </p>
           {!lineTargets ? (
-            <p className="text-slate-500 text-sm">กำลังโหลด... (หรือยังไม่มีข้อมูล)</p>
+            <LoadingGraphic message="กำลังโหลดรายชื่อกลุ่ม LINE..." compact />
           ) : lineTargets.targets.length === 0 && lineTargets.users.length === 0 ? (
             <p className="text-slate-500 text-sm">
               ยังไม่มี — เพิ่มบอทเข้ากลุ่ม LINE แล้วพิมพ์ @บอท 1 ครั้ง หรือวาง Group ID ด้วยมือด้านบน

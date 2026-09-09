@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import { scoreColor } from "@/lib/format";
 import { AssetOpportunity } from "@/lib/types";
 
@@ -185,7 +186,7 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
   const PAGE_SIZE = 5;
   const [page, setPage] = useState(1);
   if (loading) {
-    return <p className="text-slate-500 text-sm animate-pulse">⏳ กำลังโหลดข้อมูลตลาด... (Render cold start อาจใช้เวลาสักครู่)</p>;
+    return <LoadingGraphic message="กำลังโหลดข้อมูลตลาด... (Render cold start อาจใช้เวลาสักครู่)" />;
   }
   if (!opportunities.length) {
     return error

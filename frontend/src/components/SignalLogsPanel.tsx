@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import { SignalLog, SignalLogSummary } from "@/lib/types";
 
 /** badge สี/ข้อความของแต่ละ lifecycle event */
@@ -74,8 +75,13 @@ export default function SignalLogsPanel() {
           </p>
         </div>
         <button onClick={load} disabled={loading}
+          aria-busy={loading} aria-live="polite"
+          title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
           className="btn-secondary disabled:opacity-50">
-          {loading ? "กำลังโหลด..." : "รีเฟรช"}
+          <span className="inline-flex items-center gap-1.5">
+            {loading && <Icon n="spinner" size={14} className="animate-spin" />}
+            รีเฟรช
+          </span>
         </button>
       </section>
 
@@ -147,8 +153,8 @@ export default function SignalLogsPanel() {
           </thead>
           <tbody>
             {loading && logs.length === 0 && (
-              <tr><td colSpan={14} className="py-6 text-center text-slate-500 animate-pulse">
-                ⏳ กำลังโหลดข้อมูล... (API บน Render อาจใช้เวลาเริ่มต้นสักครู่)
+              <tr><td colSpan={14} className="py-6">
+                <LoadingGraphic message="กำลังโหลดข้อมูล... (API บน Render อาจใช้เวลาเริ่มต้นสักครู่)" compact />
               </td></tr>
             )}
             {!loading && shown.length === 0 && (

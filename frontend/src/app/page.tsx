@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import AutoTradeReadinessCard from "@/components/AutoTradeReadinessCard";
 import GoalForm from "@/components/GoalForm";
 import GlassSelect from "@/components/GlassSelect";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
 import { api } from "@/lib/api";
@@ -114,9 +115,11 @@ export default function DashboardPage() {
             </div>
             <p className="md:col-span-3 text-sm text-slate-400">{summary.explanation}</p>
           </div>
+        ) : summaryLoading ? (
+          <LoadingGraphic message="กำลังโหลดข้อมูลตลาด..." compact />
         ) : (
           <p className="text-slate-500 text-sm">
-            {summaryLoading ? "กำลังโหลด..." : "ไม่มีข้อมูล — ตรวจสอบว่า backend รันอยู่"}
+            ไม่มีข้อมูล — ตรวจสอบว่า backend รันอยู่
           </p>
         )}
       </section>

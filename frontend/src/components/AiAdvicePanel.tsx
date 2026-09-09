@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import { getToken, clearToken, notifyAuthExpired } from "@/lib/auth";
 import { API_BASE, SignalProposal } from "@/lib/types";
 
@@ -99,9 +100,13 @@ export default function AiAdvicePanel({ signals }: { signals: SignalProposal[] }
         <button
           onClick={ask}
           disabled={loading}
+          aria-busy={loading}
           className="border border-slate-700 bg-white/[0.05] text-slate-200 rounded px-3 py-2 text-xs min-h-[36px] font-semibold active:bg-white/10 disabled:opacity-50"
         >
-          {loading ? `กำลังคิด... ${thinkSecs}s` : text ? "ขอคำแนะนำใหม่" : "ขอคำแนะนำ"}
+          <span className="inline-flex items-center gap-1.5">
+            {loading && <Icon n="spinner" size={13} className="animate-spin" />}
+            {loading ? `กำลังคิด... ${thinkSecs}s` : text ? "ขอคำแนะนำใหม่" : "ขอคำแนะนำ"}
+          </span>
         </button>
       </div>
       {error && <p className="text-amber-400 text-sm">{error}</p>}
@@ -111,7 +116,7 @@ export default function AiAdvicePanel({ signals }: { signals: SignalProposal[] }
         </p>
       )}
       {loading && !text && (
-        <p className="text-slate-500 text-sm animate-pulse">🤖 AI กำลังอ่านสัญญาณ... (10–60 วิ)</p>
+        <LoadingGraphic message={`AI กำลังอ่านสัญญาณ... (${thinkSecs}s — อาจใช้ 10–60 วิ)`} compact />
       )}
       {text && (
         <p className="text-sm whitespace-pre-wrap leading-relaxed text-slate-200">{text}</p>

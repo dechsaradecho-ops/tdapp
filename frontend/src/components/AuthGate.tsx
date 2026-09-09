@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import { AUTH_EXPIRED_EVENT, clearToken, getToken, setToken } from "@/lib/auth";
 import { PinStatus } from "@/lib/types";
 
@@ -150,7 +151,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   if (checking) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)", WebkitBackdropFilter: "blur(12px)", backdropFilter: "blur(12px)" }}>
-        <p className="text-slate-400 animate-pulse">กำลังตรวจสอบเซสชัน...</p>
+        <LoadingGraphic message="กำลังตรวจสอบเซสชัน..." />
       </div>
     );
   }

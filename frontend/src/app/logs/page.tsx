@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import {
   QuoteApiLog,
   QuoteLogSummary,
@@ -104,11 +105,19 @@ export default function LogsPage() {
         </div>
         <div className="flex gap-2">
           <button onClick={load} disabled={loading}
+            aria-busy={loading} aria-live="polite"
+            title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
             className="btn-secondary disabled:opacity-50">
-            {loading ? "กำลังโหลด..." : "รีเฟรช"}
+            <span className="inline-flex items-center gap-1.5">
+              {loading && <Icon n="spinner" size={14} className="animate-spin" />}
+              รีเฟรช
+            </span>
           </button>
           <button onClick={runTest} disabled={testing} className="btn-primary">
-            {testing ? "กำลังทดสอบ..." : "ทดสอบดึงราคา"}
+            <span className="inline-flex items-center gap-1.5">
+              {testing && <Icon n="spinner" size={14} className="animate-spin" />}
+              {testing ? "กำลังทดสอบ..." : "ทดสอบดึงราคา"}
+            </span>
           </button>
         </div>
       </section>
@@ -206,7 +215,12 @@ export default function LogsPage() {
             </tr>
           </thead>
           <tbody>
-            {shown.length === 0 && (
+            {loading && logs.length === 0 && (
+              <tr><td colSpan={11} className="py-6">
+                <LoadingGraphic message="กำลังโหลดบันทึก API — Render cold start อาจใช้เวลาสักครู่" compact />
+              </td></tr>
+            )}
+            {!loading && shown.length === 0 && (
               <tr><td colSpan={11} className="py-6 text-center text-slate-500">
                 ยังไม่มี log — กด &quot;ทดสอบดึงราคา&quot; เพื่อสร้างรายการแรก
               </td></tr>

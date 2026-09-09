@@ -102,8 +102,12 @@ export default function GoalForm() {
               ]} />
           </label>
           <button onClick={submit} disabled={loading}
+            aria-busy={loading}
             className="w-full bg-accent text-white font-semibold rounded py-2 hover:brightness-110 disabled:opacity-50">
-            {loading ? "กำลังประเมิน..." : "ประเมินเป้าหมาย"}
+            <span className="inline-flex items-center justify-center gap-1.5">
+              {loading && <Icon n="spinner" size={15} className="animate-spin" />}
+              {loading ? "กำลังประเมิน..." : "ประเมินเป้าหมาย"}
+            </span>
           </button>
           {error && <p className="text-loss text-sm">{error}</p>}
         </div>

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import {
   BacktestConfig,
   BacktestResult,
@@ -124,10 +125,18 @@ export default function PerformancePanel() {
       <div className="flex items-center justify-between">
         <h2 className="panel-title">Performance Dashboard</h2>
         <button onClick={loadAll} disabled={loading}
+          aria-busy={loading} aria-live="polite"
+          title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
           className="text-sm bg-accent text-white font-semibold rounded px-3 py-2 min-h-[40px] disabled:opacity-50 active:brightness-90">
-          {loading ? "กำลังโหลด..." : "รีเฟรช"}
+          <span className="inline-flex items-center gap-1.5">
+            {loading && <Icon n="spinner" size={15} className="animate-spin" />}
+            รีเฟรช
+          </span>
         </button>
       </div>
+      {loading && !freq && !news && !journal && (
+        <LoadingGraphic message="กำลังโหลดข้อมูลประสิทธิภาพ..." compact />
+      )}
 
       {/* Status grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -310,8 +319,12 @@ export default function PerformancePanel() {
               className="mt-1 block w-24 bg-surface border border-slate-700 rounded px-3 py-2" />
           </label>
           <button onClick={runBacktest} disabled={btLoading}
+            aria-busy={btLoading} title={btLoading ? "กำลังรัน backtest..." : "รัน backtest + walk-forward"}
             className="bg-accent text-white font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-50 active:brightness-90">
-            {btLoading ? "กำลังรัน..." : "รัน Backtest + Walk Forward"}
+            <span className="inline-flex items-center gap-1.5">
+              {btLoading && <Icon n="spinner" size={15} className="animate-spin" />}
+              {btLoading ? "กำลังรัน..." : "รัน Backtest + Walk Forward"}
+            </span>
           </button>
         </div>
 

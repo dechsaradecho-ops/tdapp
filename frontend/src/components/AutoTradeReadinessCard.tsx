@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import type {
   AppSettings,
   CorrelationResponse,
@@ -110,9 +111,13 @@ export default function AutoTradeReadinessCard() {
           <button
             onClick={load}
             disabled={loading}
+            aria-busy={loading}
             className="px-3 py-2 min-h-[36px] rounded-xl text-sm border border-white/15 bg-white/[0.04] text-slate-300 active:bg-white/10 disabled:opacity-50"
           >
-            {loading ? "กำลังตรวจ..." : "ตรวจสอบ"}
+            <span className="inline-flex items-center gap-1.5">
+              {loading && <Icon n="spinner" size={14} className="animate-spin" />}
+              {loading ? "กำลังตรวจ..." : "ตรวจสอบ"}
+            </span>
           </button>
         </div>
       </div>
@@ -120,7 +125,7 @@ export default function AutoTradeReadinessCard() {
       {err ? (
         <p className="text-loss text-sm">{err}</p>
       ) : loading && factors.length === 0 ? (
-        <p className="text-slate-500 text-sm">กำลังประเมินปัจจัยทั้งหมด...</p>
+        <LoadingGraphic message="กำลังประเมินปัจจัยทั้งหมด..." compact />
       ) : (
         <>
           {/* ---------- คำตัดสินรวม ---------- */}

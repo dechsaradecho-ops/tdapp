@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import { clearToken, setToken } from "@/lib/auth";
 import { PinStatus } from "@/lib/types";
 
@@ -64,7 +65,7 @@ export default function PinManager() {
     <div className="border border-white/10 bg-white/[0.03] rounded-xl p-3 space-y-2">
       <p className="text-sm font-semibold flex items-center gap-1.5"><Icon n="lock" size={15} /> รหัส PIN (ใช้ปลดล็อกหน้าเว็บ)</p>
       {statusLoading ? (
-        <p className="text-xs text-slate-500 animate-pulse">กำลังเช็คสถานะ PIN...</p>
+        <LoadingGraphic message="กำลังเช็คสถานะ PIN..." compact />
       ) : status?.pin_set ? (
         <p className="text-xs text-profit">ตั้ง PIN ไว้แล้ว — ทุกครั้งที่เปิดเว็บจะขอ PIN ก่อน (ผิด {status.max_failed} ครั้งติด → ล็อก {status.lock_minutes} นาที)</p>
       ) : statusErr ? (
@@ -88,8 +89,12 @@ export default function PinManager() {
           className="min-w-0 flex-1 sm:flex-none sm:w-36 bg-surface border border-slate-700 rounded px-3 py-2 text-center tracking-widest"
         />
         <button onClick={submit} disabled={busy}
+          aria-busy={busy}
           className="bg-accent text-white font-semibold rounded px-4 py-2 text-sm disabled:opacity-50">
-          {busy ? "..." : status?.pin_set ? "เปลี่ยน PIN" : "ตั้ง PIN"}
+          <span className="inline-flex items-center gap-1.5">
+            {busy && <Icon n="spinner" size={13} className="animate-spin" />}
+            {busy ? "กำลังบันทึก..." : status?.pin_set ? "เปลี่ยน PIN" : "ตั้ง PIN"}
+          </span>
         </button>
         {status?.pin_set && (
           <button onClick={logout} disabled={busy}

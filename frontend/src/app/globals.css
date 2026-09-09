@@ -739,6 +739,88 @@ main a, main summary, main div[role="button"], main div[role="button"] > * {
   transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
 }
 
+/* ---------- LoadingGraphic — กราฟวิ่งตอนกำลังโหลด (ใช้ซ้ำทั้งเว็บ) ----------
+   เส้นกราฟ dash ไหล + แท่งเทียนกระดิก + จุดปลายเรืองแสง + equalizer bars */
+.load-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1.25rem 0;
+}
+.load-compact {
+  padding: 0.5rem 0;
+}
+.load-chart {
+  width: 160px;
+  height: 58px;
+  overflow: visible;
+}
+.load-compact .load-chart {
+  width: 120px;
+  height: 44px;
+}
+.load-line {
+  stroke: #0a84ff;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 10 8;
+  animation: load-dash 0.9s linear infinite;
+  filter: drop-shadow(0 0 5px rgba(10, 132, 255, 0.7));
+}
+@keyframes load-dash {
+  to { stroke-dashoffset: -36; }
+}
+.load-candle {
+  fill: rgba(255, 255, 255, 0.16);
+  transform-origin: bottom;
+  transform-box: fill-box;
+  animation: load-candle 1.1s ease-in-out infinite;
+}
+.load-candle.c2 { animation-delay: 0.15s; fill: rgba(10, 132, 255, 0.35); }
+.load-candle.c3 { animation-delay: 0.3s; }
+.load-candle.c4 { animation-delay: 0.45s; fill: rgba(48, 209, 88, 0.35); }
+@keyframes load-candle {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.55); }
+}
+.load-dot {
+  fill: #0a84ff;
+  animation: load-dot 1.2s ease-in-out infinite;
+}
+@keyframes load-dot {
+  0%, 100% { opacity: 1; r: 3.5; }
+  50% { opacity: 0.4; r: 2.5; }
+}
+.load-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 18px;
+}
+.load-bars span {
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #0a84ff, rgba(10, 132, 255, 0.25));
+  animation: load-bar 0.9s ease-in-out infinite;
+}
+.load-bars span:nth-child(1) { height: 60%; animation-delay: 0s; }
+.load-bars span:nth-child(2) { height: 100%; animation-delay: 0.12s; }
+.load-bars span:nth-child(3) { height: 45%; animation-delay: 0.24s; }
+.load-bars span:nth-child(4) { height: 85%; animation-delay: 0.36s; }
+.load-bars span:nth-child(5) { height: 55%; animation-delay: 0.48s; }
+@keyframes load-bar {
+  0%, 100% { transform: scaleY(1); opacity: 1; }
+  50% { transform: scaleY(0.35); opacity: 0.5; }
+}
+.load-msg {
+  font-size: 0.8rem;
+  color: #b6c2d3;
+  text-align: center;
+  max-width: 32rem;
+}
+
 /* หมายเหตุ: .animate-pulse (Tailwind) ใช้เป็น loading indicator หลายจุด — ไม่ override */
 
 /* เคารพการตั้งค่าลด motion ของ OS */

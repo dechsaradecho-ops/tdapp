@@ -123,9 +123,13 @@ export default function CloseGroupModal({
           <button
             onClick={onConfirm}
             disabled={busy || empty}
+            aria-busy={busy}
             className="bg-loss text-white font-semibold rounded px-4 py-2.5 hover:opacity-90 disabled:opacity-50"
           >
-            {busy ? "กำลังปิด..." : `ยืนยันปิด${targets.length > 0 ? ` ${targets.length} ไม้` : ""}`}
+            <span className="inline-flex items-center justify-center gap-1.5">
+              {busy && <Icon n="spinner" size={15} className="animate-spin" />}
+              {busy ? "กำลังปิด..." : `ยืนยันปิด${targets.length > 0 ? ` ${targets.length} ไม้` : ""}`}
+            </span>
           </button>
         </div>
       </div>

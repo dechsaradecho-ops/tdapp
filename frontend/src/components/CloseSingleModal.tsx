@@ -93,9 +93,13 @@ export default function CloseSingleModal({
           <button
             onClick={onConfirm}
             disabled={busy || !position.ticket}
+            aria-busy={busy}
             className="bg-loss text-white font-semibold rounded px-4 py-2.5 hover:opacity-90 disabled:opacity-50 min-h-[44px]"
           >
-            {busy ? "กำลังปิด..." : "ยืนยันปิดไม้"}
+            <span className="inline-flex items-center justify-center gap-1.5">
+              {busy && <Icon n="spinner" size={15} className="animate-spin" />}
+              {busy ? "กำลังปิด..." : "ยืนยันปิดไม้"}
+            </span>
           </button>
         </div>
       </div>

@@ -9,6 +9,7 @@ import CopyNum from "@/components/CopyNum";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
+import LoadingGraphic from "@/components/LoadingGraphic";
 import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
@@ -655,9 +656,7 @@ export default function MonitorPage() {
         </div>
         {err && <p className="text-loss text-sm mt-2">โหลดไม่สำเร็จ: {err}</p>}
         {!snap && !err && (
-          <p className="text-slate-400 text-sm mt-3 animate-pulse">
-            กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ
-          </p>
+          <LoadingGraphic message="กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ" />
         )}
         {closeError && (
           <p className="text-loss text-sm mt-2 bg-loss/10 border border-loss/40 rounded px-3 py-2">
@@ -831,9 +830,13 @@ export default function MonitorPage() {
             ปิดขาดทุน
           </button>
           <button onClick={handleResetStats} disabled={resetting}
+            aria-busy={resetting}
             className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
             title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
-            {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
+            <span className="inline-flex items-center gap-1.5">
+              {resetting && <Icon n="spinner" size={14} className="animate-spin" />}
+              {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
+            </span>
           </button>
         </div>
         {closeAllMsg && (
