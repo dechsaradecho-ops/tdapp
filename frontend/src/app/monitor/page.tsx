@@ -217,6 +217,110 @@ function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_posi
   );
 }
 
+/** Badge "วิธีคำนวณ" — popup แบบเดียวกับ SmartExitBadge (anchored popover
+ *  ต่อปุ่ม ไม่ใช่ modal กลางจอ): แตะ/คลิกที่ +x.xxR หรือ ⓘ แล้วโชว์
+ *  R + เสี่ยง$ + รายละเอียดวิธีคำนวณ — portal to body, ปิดเมื่อแตะข้างนอก. */
+function CalcNotesBadge({ asset, direction, rMult, riskUsd, notes, trigger }: {
+  asset: string;
+  direction: string;
+  rMult: number;
+  riskUsd: number;
+  notes: string[];
+  trigger: "r" | "info";
+}) {
+  const [pop, setPop] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  const place = useCallback(() => {
+    const btn = btnRef.current, popEl = popRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pw = popEl?.offsetWidth ?? 300;
+    const ph = popEl?.offsetHeight ?? 150;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    let top = r.top - ph - 8;
+    if (top < 8) top = r.bottom + 8;
+    setPos({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!pop) return;
+    place();
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onScrollOrResize = () => setPop(false);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [pop, place]);
+
+  const title = notes.length > 0
+    ? `${asset} ${direction} ${rMult >= 0 ? "+" : ""}${fmtNum(rMult, 2)}R · เสี่ยง $${fmtNum(riskUsd, 2)}\n${notes.join("\n")}`
+    : `${asset} ${direction} เสี่ยง $${fmtNum(riskUsd, 2)} — ไม่มีรายละเอียดวิธีคำนวณ`;
+  return (
+    <>
+      {trigger === "r" ? (
+        <button
+          ref={btnRef}
+          type="button"
+          onClick={() => setPop((v) => !v)}
+          title={title}
+          aria-label={title}
+          aria-expanded={pop}
+          className={`font-bold underline decoration-dotted underline-offset-2 cursor-help touch-manipulation ${rMult >= 0 ? "text-profit" : "text-loss"}`}
+        >
+          {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
+        </button>
+      ) : (
+        <button
+          ref={btnRef}
+          type="button"
+          onClick={() => setPop((v) => !v)}
+          title={title}
+          aria-label="วิธีคำนวณ — กดดู popup"
+          aria-expanded={pop}
+          className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-[11px] leading-none text-slate-400 active:bg-white/10 cursor-help touch-manipulation"
+        >
+          ⓘ
+        </button>
+      )}
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="tooltip"
+          style={{ position: "fixed", top: pos.top, left: pos.left, maxWidth: "min(320px, calc(100vw - 16px))" }}
+          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed text-slate-200"
+        >
+          <div className="font-bold mb-1">{asset} {direction} {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R · เสี่ยง ${fmtNum(riskUsd, 2)}</div>
+          {notes.length > 0 ? (
+            <ol className="list-decimal list-inside space-y-1 text-slate-300">
+              {notes.map((n, i) => (
+                <li key={i}>{n}</li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-slate-500">ไม่มีรายละเอียดวิธีคำนวณ</p>
+          )}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
@@ -227,8 +331,6 @@ export default function MonitorPage() {
   // "SL ย้ายไป..." + closed) — โหลดพร้อม snapshot ครั้งเดียว
   const [moveLogs, setMoveLogs] = useState<Record<string, SignalLog[]>>({});
   const [openTimeline, setOpenTimeline] = useState<Record<string, boolean>>({});
-  // popup วิธีคำนวณ / เสี่ยง$ ต่อไม้: กดที่ +x.xxR หรือป้าย ⓘ แล้วเปิด modal กลางจอ
-  const [openCalc, setOpenCalc] = useState<Record<string, boolean>>({});
   // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(10);
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
@@ -535,8 +637,13 @@ export default function MonitorPage() {
               {busy ? "..." : snap?.pause.paused ? "Resume" : "Pause"}
             </button>
             <button onClick={load} disabled={loading}
+              aria-busy={loading} aria-live="polite"
+              title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
               className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50">
-              {loading ? "กำลังโหลด..." : "รีเฟรช"}
+              <span className="inline-flex items-center gap-1.5">
+                <Icon n={loading ? "spinner" : "refresh"} size={15} className={loading ? "animate-spin" : ""} />
+                รีเฟรช
+              </span>
             </button>
           </div>
         </div>
@@ -581,8 +688,10 @@ export default function MonitorPage() {
                   const riskUsd = p.risk_amount ?? 0;
                   const timeline = p.ticket ? (moveLogs[p.ticket] ?? []) : [];
                   const tlOpen = openTimeline[p.id] ?? false;
-                  const calcOpen = openCalc[p.id] ?? false;
                   const notes = p.calc_notes ?? [];
+                  // แถวรายละเอียด (ไทม์ไลน์/คำใบ้ SL ขยับ) — เรนเดอร์เฉพาะเมื่อมีเนื้อหา
+                  // เพื่อไม่ให้มีแถวเปล่าเพิ่มเส้น/ช่องว่างซ้อนในตาราง
+                  const hasDetail = timeline.length > 0 || p.sl_moved_at != null || p.tp_moved_at != null;
                   return (
                   <Fragment key={p.id}>
                   <tr className="border-t border-slate-800 whitespace-nowrap">
@@ -620,14 +729,7 @@ export default function MonitorPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4">
-                      <button
-                        onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
-                        className={`font-bold underline decoration-dotted underline-offset-2 cursor-pointer ${rMult >= 0 ? "text-profit" : "text-loss"}`}
-                        title={notes.length > 0 ? `เสี่ยง $${fmtNum(riskUsd, 2)}\n${notes.join("\n")}` : `เสี่ยง $${fmtNum(riskUsd, 2)} — กดดูวิธีคำนวณ`}
-                        aria-expanded={calcOpen}
-                      >
-                        {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
-                      </button>
+                      <CalcNotesBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} notes={notes} trigger="r" />
                     </td>
                     <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
@@ -635,15 +737,7 @@ export default function MonitorPage() {
                     <td className="py-2">
                       <span className="inline-flex items-center gap-1.5">
                         {notes.length > 0 && (
-                          <button
-                            onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
-                            className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-[11px] leading-none text-slate-400 active:bg-white/10"
-                            title="วิธีคำนวณ — กดดู popup"
-                            aria-label="วิธีคำนวณ — กดดู popup"
-                            aria-expanded={calcOpen}
-                          >
-                            ⓘ
-                          </button>
+                          <CalcNotesBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} notes={notes} trigger="info" />
                         )}
                         <button
                           onClick={() => handleClosePosition(p.ticket)}
@@ -653,44 +747,10 @@ export default function MonitorPage() {
                           {closingTicket === p.ticket ? "..." : "ปิด"}
                         </button>
                       </span>
-                      {calcOpen && createPortal(
-                        <div
-                          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-                          style={{ background: "rgba(0,0,0,0.7)" }}
-                          onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: false }))}
-                        >
-                          <div
-                            className="panel w-full max-w-md space-y-3"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <div className="flex items-center justify-between">
-                              <h3 className="panel-title">
-                                {p.asset} {p.direction} {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R · เสี่ยง ${fmtNum(riskUsd, 2)}
-                              </h3>
-                              <button
-                                onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: false }))}
-                                className="text-slate-400 hover:text-accent text-lg leading-none"
-                                aria-label="ปิดหน้าต่าง"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                            {notes.length > 0 ? (
-                              <ol className="list-decimal list-inside space-y-1 text-slate-300 text-xs">
-                                {notes.map((n, i) => (
-                                  <li key={i}>{n}</li>
-                                ))}
-                              </ol>
-                            ) : (
-                              <p className="text-slate-500 text-xs">ไม่มีรายละเอียดวิธีคำนวณ</p>
-                            )}
-                          </div>
-                        </div>,
-                        document.body
-                      )}
                     </td>
                   </tr>
-                  <tr className="border-t border-slate-800/50 whitespace-normal">
+                  {hasDetail && (
+                  <tr className="whitespace-normal">
                     <td colSpan={13} className="py-1 pr-4">
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         {timeline.length > 0 && (
@@ -729,6 +789,7 @@ export default function MonitorPage() {
                       )}
                     </td>
                   </tr>
+                  )}
                   </Fragment>
                   );
                 })}

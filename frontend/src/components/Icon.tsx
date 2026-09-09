@@ -11,7 +11,7 @@ export type IconName =
   | "archive" | "scroll" | "news" | "inbox" | "lock"
   | "bulb" | "flask" | "coins" | "clock" | "hourglass"
   | "octagon" | "pause" | "play" | "arrowsH"
-  | "message" | "arrowDown" | "undo" | "shield";
+  | "message" | "arrowDown" | "undo" | "shield" | "refresh" | "spinner";
 
 const PATHS: Record<IconName, React.ReactNode> = {
   bot: (
@@ -211,6 +211,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
   ),
   message: <path d="M21 14.5a2 2 0 0 1-2 2H7.5L3 21V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9.5Z" />,
   arrowDown: <path d="M12 4.5v15M5.5 13l6.5 6.5L18.5 13" />,
+  refresh: (
+    <>
+      <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1" />
+      <path d="M20.5 3.5V8H16" />
+    </>
+  ),
+  spinner: <path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" />,
   undo: (
     <>
       <path d="M3.5 7v6h6" />
