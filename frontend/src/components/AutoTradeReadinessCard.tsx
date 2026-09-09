@@ -26,6 +26,8 @@ interface Factor {
   state: FactorState;
   label: string;
   detail: string;
+  /** ถ้ามี = แสดง progress bar ใต้ detail (เช่น โควตา used/limit, correlation/cap) */
+  progress?: { used: number; limit: number };
 }
 
 // ใช้สีแทนเครื่องหมายถูก/ผิด: เขียว = ผ่าน, แดง = ติด, เหลือง = เตือน
@@ -38,6 +40,12 @@ const COLOR: Record<FactorState, string> = {
   pass: "text-profit",
   fail: "text-loss",
   warn: "text-yellow-400",
+};
+// สีแท่ง progress — เขียว = ยังเหลือเยอะ/ผ่าน, แดง = เต็มลิมิต/ติด, เหลือง = เตือน
+const BAR: Record<FactorState, string> = {
+  pass: "bg-profit",
+  fail: "bg-loss",
+  warn: "bg-yellow-400",
 };
 
 export default function AutoTradeReadinessCard() {
@@ -85,6 +93,11 @@ export default function AutoTradeReadinessCard() {
 
   const blockers = factors.filter((f) => f.state === "fail");
   const canTrade = factors.length > 0 && blockers.length === 0;
+  // แถบความพร้อมรวม: ปัจจัยที่ไม่ติด (pass + warn) / ทั้งหมด — warn ยังเทรดได้
+  const okCount = factors.filter((f) => f.state !== "fail").length;
+  const readinessPct = factors.length > 0
+    ? Math.round((okCount / factors.length) * 100)
+    : 0;
 
   return (
     <section className="panel">
@@ -126,6 +139,26 @@ export default function AutoTradeReadinessCard() {
                 ? "ปัจจัยทุกข้อผ่านหมด — เมื่อสัญญาณใหม่เข้าเกณฑ์ ระบบจะยิงออเดอร์เองทันที (ทุก 1 นาที)"
                 : `ติดปัจจัย ${blockers.length} ข้อ: ${blockers.map((b) => b.label).join(" · ")}`}
             </p>
+            {/* แถบความพร้อมรวม — ผ่าน/ทั้งหมด */}
+            <div className="mt-3">
+              <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+                <span>ความพร้อม {okCount}/{factors.length} ปัจจัย</span>
+                <span className={`font-bold ${canTrade ? "text-profit" : "text-loss"}`}>{readinessPct}%</span>
+              </div>
+              <div
+                className="h-2 w-full overflow-hidden rounded-full bg-white/10"
+                role="progressbar"
+                aria-valuenow={okCount}
+                aria-valuemin={0}
+                aria-valuemax={factors.length}
+                aria-label={`ความพร้อม ${okCount} จาก ${factors.length} ปัจจัย`}
+              >
+                <div
+                  className={`h-full rounded-full transition-all ${canTrade ? "bg-profit" : "bg-loss"}`}
+                  style={{ width: `${readinessPct}%` }}
+                />
+              </div>
+            </div>
           </div>
 
           {/* ---------- รายการปัจจัย ---------- */}
@@ -138,11 +171,18 @@ export default function AutoTradeReadinessCard() {
                 <span
                   className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${DOT[f.state]}`}
                 />
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <p className={`text-sm font-semibold ${COLOR[f.state]}`}>
                     {f.label}
                   </p>
                   <p className="text-xs text-slate-400 break-words">{f.detail}</p>
+                  {f.progress && (
+                    <ProgressBar
+                      used={f.progress.used}
+                      limit={f.progress.limit}
+                      state={f.state}
+                    />
+                  )}
                 </div>
               </div>
             ))}
@@ -166,7 +206,30 @@ function quota(label: string, used: number, limit: number, unit: string): Factor
     detail: pass
       ? `${used}/${limit} ${unit} — เหลืออีก ${left} ${unit}`
       : `${used}/${limit} ${unit} — เต็มลิมิตแล้ว รอรีเซ็ตหรือปิดไม้`,
+    progress: { used, limit },
   };
+}
+
+/** แถบ progress ใต้ปัจจัยที่เป็นตัวเลข — กว้างตาม used/limit (ตันที่ 100%) */
+function ProgressBar({ used, limit, state }: { used: number; limit: number; state: FactorState }) {
+  const pct = limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
+  const label = `${used}/${limit}`;
+  return (
+    <div
+      className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/10"
+      role="progressbar"
+      aria-valuenow={used}
+      aria-valuemin={0}
+      aria-valuemax={limit}
+      aria-label={label}
+      title={label}
+    >
+      <div
+        className={`h-full rounded-full transition-all ${BAR[state]}`}
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
 }
 
 function buildFactors(
@@ -252,12 +315,14 @@ function buildFactors(
       state: "pass",
       label: "Correlation",
       detail: `พอร์ต ${corr.portfolio_correlation.toFixed(0)}/cap ${s.correlation_cap} — ความสัมพันธ์สินทรัพย์ต่ำ`,
+      progress: { used: corr.portfolio_correlation, limit: s.correlation_cap },
     });
   } else {
     f.push({
       state: "fail",
       label: "Correlation",
       detail: `พอร์ต ${corr.portfolio_correlation.toFixed(0)} > cap ${s.correlation_cap} — เสี่ยงซ้ำทิศเดียวกัน`,
+      progress: { used: corr.portfolio_correlation, limit: s.correlation_cap },
     });
   }
 
