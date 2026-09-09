@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
@@ -590,8 +590,8 @@ export default function MonitorPage() {
                   const calcOpen = openCalc[p.id] ?? false;
                   const notes = p.calc_notes ?? [];
                   return (
-                  <>
-                  <tr key={p.id} className="border-t border-slate-800">
+                  <Fragment key={p.id}>
+                  <tr className="border-t border-slate-800">
                     <td className="py-2 pr-4 font-semibold">{p.asset}</td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.direction === "BUY" ? "text-profit" : "text-loss"}>
@@ -643,7 +643,7 @@ export default function MonitorPage() {
                       </button>
                     </td>
                   </tr>
-                  <tr key={`${p.id}-detail`} className="border-t border-slate-800/50">
+                  <tr className="border-t border-slate-800/50">
                     <td colSpan={13} className="py-1 pr-4">
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         {notes.length > 0 && (
@@ -696,7 +696,7 @@ export default function MonitorPage() {
                       )}
                     </td>
                   </tr>
-                  </>
+                  </Fragment>
                   );
                 })}
                 <tr className="border-t-2 border-slate-700 font-bold">
