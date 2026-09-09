@@ -23,7 +23,6 @@ from app.models.schemas import (
     FrequencyEngine,
     JournalAnalysis,
     JournalEntry,
-    KillSwitchEngine,
     KillSwitchStatus,
     MarketSessionStatus,
     MonitorSnapshot,
@@ -77,16 +76,28 @@ def _journal_from_rows(rows: list[dict]) -> list[JournalEntry]:
 @router.get("/frequency", response_model=FrequencyDecision)
 async def get_frequency(request: Request,
                         profile: RiskProfile | None = None) -> FrequencyDecision:
-    """Evaluate whether a new trade is allowed under the frequency limits."""
+    """Evaluate whether a new trade is allowed under the frequency limits.
+
+    Counts paper_trades (the live journal) — the old version read the legacy
+    manual trading_journal table, so it always reported 0 while real orders
+    fired through paper_trades. Same counting as the execution gate.
+    """
     db = request.app.state.db
     s = _settings(request)
     eff_profile = profile or s.risk_profile
     today = datetime.now(timezone.utc).date().isoformat()
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
 
-    today_trades = db.select(JOURNAL_TABLE, filters={"trade_date": today}, limit=100)
-    week_trades = db.select(JOURNAL_TABLE, limit=200)
-    week_count = len([r for r in week_trades if str(r.get("trade_date", "")) >= week_ago[:10]])
+    try:
+        all_trades = db.select("paper_trades", limit=500)
+    except Exception:
+        all_trades = []
+    today_trades = [r for r in all_trades
+                    if str(r.get("created_at", ""))[:10] == today
+                    and r.get("status") != "rejected"]
+    week_count = len([r for r in all_trades
+                      if str(r.get("created_at", "")) >= week_ago[:10]
+                      and r.get("status") != "rejected"])
 
     return FrequencyEngine(
         eff_profile,
@@ -186,38 +197,19 @@ async def get_session() -> MarketSessionStatus:
 # ------------------------------------------------------------- kill switch
 @router.get("/kill-switch", response_model=KillSwitchStatus)
 async def get_kill_switch(request: Request) -> KillSwitchStatus:
-    """Aggregate loss/drawdown from journal + infra health → kill switch state."""
+    """Kill switch state — SINGLE shared path (see execution.evaluate_kill).
+
+    Loss/drawdown math comes from paper_trades + equity_snapshots (the same
+    source the entry gate, guard emergency exit and monitor banner use), so
+    the endpoint can never drift apart. The old inline version read the
+    legacy trading_journal table with its own daily/weekly/monthly math.
+    """
     db = request.app.state.db
     broker = request.app.state.broker
-    entries = _journal_from_rows(db.select(JOURNAL_TABLE, limit=200))
     s = _settings(request)
-
-    total_pnl = sum(e.pnl or 0 for e in entries)
-    losses = [e for e in entries if (e.pnl or 0) < 0]
-    # Settings capital replaces the old demo baseline
-    capital = s.capital or 10_000.0
-    today = datetime.now(timezone.utc).date().isoformat()
-    daily = sum(e.pnl or 0 for e in entries
-                if str(e.created_at or e.closed_at or "")[:10] == today)
-    monthly = total_pnl
-    weekly = sum(e.pnl or 0 for e in entries[-20:])
-
-    return KillSwitchEngine(
-        daily_loss_limit=s.kill_daily_loss_pct,
-        weekly_loss_limit=s.kill_weekly_loss_pct,
-        monthly_loss_limit=s.kill_monthly_loss_pct,
-        drawdown_limit=s.max_drawdown_pct,
-    ).evaluate(
-        daily_loss_pct=max(0.0, -daily / capital * 100),
-        weekly_loss_pct=max(0.0, -weekly / capital * 100),
-        monthly_loss_pct=max(0.0, -monthly / capital * 100),
-        # REAL drawdown from equity_snapshots (peak vs newest equity) —
-        # previously hardcoded 0.0 so the DD kill switch could never fire.
-        drawdown_pct=execution.equity_drawdown_pct(db, capital),
+    return execution.evaluate_kill(
+        db, s,
         broker_connected=getattr(broker, "connected", True),
-        market_data_ok=True,
-        ai_provider_ok=True,
-        execution_ok=True,
     )
 
 

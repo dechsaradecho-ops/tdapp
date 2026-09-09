@@ -47,14 +47,55 @@ def _realized_pnl_since(closed_trades: list[dict], since: datetime) -> float:
     return total
 
 
-def _equity(db, capital: float) -> float:
-    """Current equity = settings capital + realized PnL of closed paper trades."""
+def _equity(db, capital: float, broker=None) -> float:
+    """Current equity = capital + realized PnL + unrealized (broker book).
+
+    The old version ignored open positions, so a floating -8% showed as
+    0% drawdown until the trades closed. Unrealized comes from the broker
+    book (no extra feed fetch — the guard refreshes book marks every tick;
+    stale book just means a slightly stale snapshot, never a crash).
+    Never raises.
+    """
     try:
         rows = db.select("paper_trades", filters={"status": "closed"}, limit=500)
     except Exception:
         rows = []
     realized = sum(float(r.get("pnl") or 0) for r in rows)
-    return capital + realized
+    unrealized = 0.0
+    if broker is not None:
+        try:
+            from app.services.execution import PaperBrokerPnl
+            positions = broker.all_positions()
+            import inspect as _inspect
+            if _inspect.iscoroutine(positions):
+                # sync scheduler thread — no running loop here
+                import asyncio as _asyncio
+                try:
+                    _asyncio.get_running_loop()
+                    positions = []
+                except RuntimeError:
+                    positions = _asyncio.run(positions)
+            for pos in positions or []:
+                try:
+                    unrealized += float(PaperBrokerPnl.compute(pos))
+                except Exception:
+                    continue
+        except Exception:
+            unrealized = 0.0
+    return capital + realized + unrealized
+
+
+def _peak_equity(db, capital: float, equity: float) -> float:
+    """Historical peak equity — thin alias of execution.peak_equity.
+
+    Kept for backward-compat (tests import this name); the SINGLE shared
+    definition lives in execution.peak_equity so monitor / chat / kill
+    can never drift apart.
+    """
+    try:
+        return execution.peak_equity(db, capital, equity)
+    except Exception:
+        return max(capital, equity)
 
 
 def _write_equity_snapshot(db, user_id: str, equity: float) -> bool:
@@ -90,7 +131,7 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     capital = s.capital
     user_id = execution.DEFAULT_USER
 
-    equity = _equity(db, capital)
+    equity = _equity(db, capital, broker)
     _write_equity_snapshot(db, user_id, equity)
 
     try:
@@ -101,16 +142,25 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     open_rows = [t for t in trades if t.get("status") == "open"]
 
     realized_month = sum(float(t.get("pnl") or 0) for t in closed)
+    # Open risk in ACCOUNT CURRENCY (contract × lots × SL distance) — same
+    # math as chat context; the old lots-only sum understated gold risk 100×
+    # (XAUUSD contract 100 oz vs FX 100k units).
     open_risk = 0.0
     for t in open_rows:
         if t.get("stop_loss") and t.get("entry_price"):
+            try:
+                from app.services.execution import PaperBrokerPnl as _Pnl
+                _contract = _Pnl.CONTRACT_SIZES.get(
+                    str(t.get("asset") or "").upper(), 100_000.0)
+            except Exception:
+                _contract = 100_000.0
             open_risk += abs(float(t["entry_price"]) - float(t["stop_loss"])) \
-                * float(t.get("volume") or 1)
+                * float(t.get("volume") or 1) * _contract
 
     now = datetime.now(timezone.utc)
     snap = PortfolioSnapshot(
         starting_capital=capital,
-        peak_equity=max(capital, equity),
+        peak_equity=_peak_equity(db, capital, equity),
         current_equity=equity,
         realized_pnl_today=_realized_pnl_since(closed, now - timedelta(days=1)),
         realized_pnl_week=_realized_pnl_since(closed, now - timedelta(days=7)),

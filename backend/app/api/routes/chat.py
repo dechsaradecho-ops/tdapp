@@ -155,10 +155,31 @@ async def _build_context(db, broker=None) -> str:
     unrealized_total = round(sum(p.unrealized_pnl for p in open_pos), 2)
     equity = round(cap + pnl_total + unrealized_total, 2)
 
+    # Peak equity — single shared path (execution.peak_equity reads the
+    # equity_snapshots curve; the old max(cap, equity) zeroed drawdown after
+    # a profitable run). Fail-safe: falls back to max(cap, equity).
+    try:
+        from app.services.execution import peak_equity
+        _peak = peak_equity(db, cap, equity)
+    except Exception:
+        _peak = max(cap, equity)
+    # Open risk from REAL SL distances (same math as portfolio_monitor) —
+    # the old cap*0.005 flat estimate never moved with the actual book.
+    _open_risk = 0.0
+    try:
+        for _p in open_pos:
+            if _p.stop_loss is not None and _p.entry_price:
+                from app.services.execution import PaperBrokerPnl as _Pnl
+                _contract = _Pnl.CONTRACT_SIZES.get(
+                    str(_p.asset or "").upper(), 100_000.0)
+                _open_risk += (abs(float(_p.entry_price) - float(_p.stop_loss))
+                               * float(_p.volume or 0) * _contract)
+    except Exception:
+        _open_risk = 0.0
     risk = risk_engine_for_settings(s).check(PortfolioSnapshot(
-        starting_capital=cap, peak_equity=max(cap, equity), current_equity=equity,
+        starting_capital=cap, peak_equity=_peak, current_equity=equity,
         realized_pnl_today=pnl_today, realized_pnl_week=pnl_week,
-        realized_pnl_month=pnl_total, open_risk=cap * 0.005,
+        realized_pnl_month=pnl_total, open_risk=_open_risk,
     ))
 
     portfolio_status = (

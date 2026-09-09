@@ -5,14 +5,9 @@ Critical alerts are also dispatched immediately by NotificationService.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 
-from app.integrations.line_client import (
-    build_daily_market_summary,
-    build_daily_portfolio_summary,
-)
 from app.services.database import Database
 from app.services.notification_service import NotificationService, category_enabled
 from app.api.routes.settings import get_app_settings
@@ -52,16 +47,5 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
     return sent
 
 
-async def send_daily_summaries(db: Database, notifier: NotificationService) -> None:
-    """Daily Portfolio + Market summaries (scheduled)."""
-    portfolios = db.select("portfolios", limit=100)
-    for p in portfolios:
-        trades = db.select("trades", filters={"user_id": p["user_id"]}, limit=100)
-        pnl = sum(float(t.get("pnl") or 0) for t in trades if t.get("status") == "closed")
-        equity = float(p["capital"]) + pnl
-        msg = build_daily_portfolio_summary(
-            capital=float(p["capital"]), equity=equity, pnl=pnl,
-            goal_pct=float(p["target_return"]), achievement_pct=40.0,
-            probability="High Probability",
-        )
-        await notifier.notify(p["user_id"], "daily_portfolio_summary", msg, critical=False)
+# NOTE: the old send_daily_summaries (portfolios/trades tables) was deleted —
+# daily_digest.send_digest_once is the single daily summary path (run_all.py).

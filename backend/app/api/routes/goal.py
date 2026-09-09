@@ -49,25 +49,13 @@ def _reality_from_db(db) -> GoalRealityContext:
     except Exception:
         pass
 
-    # ---- 3) Kill switch (same loss math the gate uses) -----------------------
+    # ---- 3) Kill switch (single shared path — see evaluate_kill) ---------
     try:
-        from app.services.execution import _loss_pcts
+        from app.services.execution import evaluate_kill
         from app.api.routes.settings import get_app_settings
-        from app.models.schemas import KillSwitchEngine
 
         s = get_app_settings(db)
-        daily, weekly, monthly = _loss_pcts(db, s.capital)
-        ks = KillSwitchEngine(
-            daily_loss_limit=s.kill_daily_loss_pct,
-            weekly_loss_limit=s.kill_weekly_loss_pct,
-            monthly_loss_limit=s.kill_monthly_loss_pct,
-            drawdown_limit=s.max_drawdown_pct,
-        ).evaluate(
-            daily_loss_pct=daily, weekly_loss_pct=weekly, monthly_loss_pct=monthly,
-            drawdown_pct=0.0,
-            broker_connected=True, market_data_ok=True,
-            ai_provider_ok=True, execution_ok=True,
-        )
+        ks = evaluate_kill(db, s)
         ctx.kill_switch_engaged = ks.engaged
         ctx.kill_triggers = list(ks.triggers)
     except Exception:

@@ -339,6 +339,106 @@ def equity_drawdown_pct(db, capital: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Avg hold — SINGLE shared definition (guard Smart Exit + monitor share this)
+# ---------------------------------------------------------------------------
+def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
+    """Mean open→close span in days from closed paper_trades (4.0 fallback).
+
+    Guard used to compute this from its own query and the monitor from its
+    already-fetched closed_rows — same math, two copies. Pass closed_rows
+    when the caller already has them (monitor) to skip a DB round-trip.
+    Never raises.
+    """
+    try:
+        rows = closed_rows
+        if rows is None:
+            try:
+                rows = db.select("paper_trades", filters={"status": "closed"},
+                                 limit=500)
+            except Exception:
+                rows = []
+        spans: list[float] = []
+        for r in rows or []:
+            c = _parse_dt(r.get("created_at"))
+            x = _parse_dt(r.get("closed_at"))
+            if c and x:
+                spans.append(max(0.0, (x - c).total_seconds() / 86400.0))
+        if spans:
+            return round(sum(spans) / len(spans), 2)
+    except Exception:
+        pass
+    return 4.0
+
+
+# ---------------------------------------------------------------------------
+# Peak equity — SINGLE shared definition (monitor / chat / kill share this)
+# ---------------------------------------------------------------------------
+def peak_equity(db, capital: float, equity: float) -> float:
+    """Historical peak equity — snapshots peak, never just max(capital, equity).
+
+    The old max(capital, equity) zeroed drawdown after a profitable run
+    (e.g. 10k → 12k → 11k showed 0% instead of 8.3% from the 12k peak).
+    Falls back to max(capital, equity) when the table is missing/empty.
+    Never raises.
+    """
+    peak = max(capital, equity)
+    try:
+        if not db or not getattr(db, "available", False):
+            return peak
+        rows = db.select("equity_snapshots", limit=400)
+        for r in rows or []:
+            try:
+                v = float(r.get("equity") or 0)
+                if v > peak:
+                    peak = v
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return peak
+
+
+# ---------------------------------------------------------------------------
+# Kill-switch — SINGLE shared evaluation (gate / guard / monitor share this)
+# ---------------------------------------------------------------------------
+def evaluate_kill(db, s: AppSettings,
+                  broker_connected: bool = True,
+                  market_data_ok: bool = True,
+                  ai_provider_ok: bool = True,
+                  execution_ok: bool = True) -> KillSwitchStatus:
+    """One kill-switch path for the whole platform (fail-safe engaged).
+
+    Wraps _loss_pcts + equity_drawdown_pct + KillSwitchEngine.evaluate so the
+    execution gate, the position-guard emergency exit, the monitor banner,
+    the /kill-switch endpoint and the goal assessment can never drift apart.
+    Never raises — on any error returns engaged
+    (fail-safe: halt trading when safety data is unreadable).
+
+    Infra flags default True (gate/guard/monitor have no live health probe);
+    the /kill-switch endpoint passes the real broker_connected state.
+    """
+    try:
+        capital = float(getattr(s, "capital", 0) or 0)
+        daily, weekly, monthly = _loss_pcts(db, capital)
+        dd = equity_drawdown_pct(db, capital)
+        return KillSwitchEngine(
+            daily_loss_limit=float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0),
+            weekly_loss_limit=float(getattr(s, "kill_weekly_loss_pct", 5.0) or 5.0),
+            monthly_loss_limit=float(getattr(s, "kill_monthly_loss_pct", 8.0) or 8.0),
+            drawdown_limit=float(getattr(s, "max_drawdown_pct", 10.0) or 10.0),
+        ).evaluate(
+            daily_loss_pct=daily, weekly_loss_pct=weekly,
+            monthly_loss_pct=monthly, drawdown_pct=dd,
+            broker_connected=broker_connected, market_data_ok=market_data_ok,
+            ai_provider_ok=ai_provider_ok, execution_ok=execution_ok,
+        )
+    except Exception as exc:
+        return KillSwitchStatus(
+            engaged=True, triggers=[f"kill-switch eval error: {exc}"],
+            message="kill switch unavailable — fail-safe engaged")
+
+
+# ---------------------------------------------------------------------------
 # The gate pipeline
 # ---------------------------------------------------------------------------
 def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
@@ -356,25 +456,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
         rejects.append(f"Trading paused: {pause.reason or 'manual pause'}")
     checks.append(f"pause={'ENGAGED' if pause.paused else 'clear'}")
 
-    # ---- Gate 1: kill switch (loss limits from journal) -------------------
-    ks: KillSwitchStatus
-    try:
-        daily, weekly, monthly = _loss_pcts(db, s.capital)
-        dd = equity_drawdown_pct(db, s.capital)
-        ks = KillSwitchEngine(
-            daily_loss_limit=s.kill_daily_loss_pct,
-            weekly_loss_limit=s.kill_weekly_loss_pct,
-            monthly_loss_limit=s.kill_monthly_loss_pct,
-            drawdown_limit=s.max_drawdown_pct,
-        ).evaluate(
-            daily_loss_pct=daily, weekly_loss_pct=weekly, monthly_loss_pct=monthly,
-            drawdown_pct=dd,
-            broker_connected=True, market_data_ok=True,
-            ai_provider_ok=True, execution_ok=True,
-        )
-    except Exception as exc:
-        ks = KillSwitchStatus(engaged=True, triggers=[f"kill-switch eval error: {exc}"],
-                              message="kill switch unavailable — fail-safe engaged")
+    # ---- Gate 1: kill switch (single shared path — see evaluate_kill) ----
+    ks: KillSwitchStatus = evaluate_kill(db, s)
     if ks.engaged:
         rejects.append(ks.message)
     checks.append(f"kill_switch={'ENGAGED' if ks.engaged else 'clear'}")
@@ -693,6 +776,10 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # today's close would look "pinned" until tomorrow. Failures are NOT
     # silent: they land in feed_status so the UI can warn the user.
     feed_status: Optional["QuoteFeedStatus"] = None
+    # Indicator snapshots fetched ONCE per cycle — the same dict tops up
+    # live marks below AND feeds the Smart Exit block, so the monitor makes
+    # exactly 1 spot batch + 1 snapshot batch (30s/60s caches keep both cheap).
+    feed_snaps: dict[str, dict] = {}
     if open_rows:
         from app.models.schemas import QuoteFeedStatus
         from app.integrations import quotes as quotes_mod
@@ -712,14 +799,15 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         # (better than entry price, and works when Yahoo is down).
         if failures or not prices:
             try:
-                snaps = await quotes_mod.fetch_all_snapshots(
+                feed_snaps = await quotes_mod.fetch_all_snapshots(
                     [a for a in assets if a not in prices])
-                for asset, snap in snaps.items():
-                    price = float(snap.get("price") or 0)
+                for asset, snap in feed_snaps.items():
+                    price = float((snap or {}).get("price") or 0)
                     if price > 0:
                         marks["asset:" + asset] = price
             except Exception as exc:
                 log.warning("monitor: daily-close fallback failed: %s", exc)
+                feed_snaps = {}
 
         now_utc = datetime.now(timezone.utc)
         feed_status = QuoteFeedStatus(
@@ -759,13 +847,20 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     exit_drawdown = 0.0
     smart_on = bool(getattr(s, "smart_exit_enabled", True))
     if smart_on and open_rows:
+        # Reuse feed_snaps from the live-marks block above — only fetch the
+        # assets the spot feed already covered (no second full batch).
+        exit_snaps = dict(feed_snaps or {})
         try:
             from app.integrations import quotes as _quotes_exit
             _exit_assets = sorted({str(r["asset"]).upper() for r in open_rows
                                    if r.get("asset")})
-            exit_snaps = await _quotes_exit.fetch_all_snapshots(_exit_assets)
+            _missing = [a for a in _exit_assets if a not in exit_snaps]
+            if _missing:
+                _fresh = await _quotes_exit.fetch_all_snapshots(_missing)
+                for _a, _snap in (_fresh or {}).items():
+                    exit_snaps[_a] = _snap
         except Exception:
-            exit_snaps = {}
+            pass
         try:
             _nr = _news_risk(db, s)
             exit_news_status = str(getattr(_nr, "status", "SAFE") or "SAFE").upper()
@@ -773,17 +868,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             exit_news_event = str(getattr(_nxt, "event", "") or "") if _nxt else ""
         except Exception:
             exit_news_status, exit_news_event = "SAFE", ""
-        try:
-            _spans: list[float] = []
-            for _cr in closed_rows:
-                _c = _parse_dt(_cr.get("created_at"))
-                _x = _parse_dt(_cr.get("closed_at"))
-                if _c and _x:
-                    _spans.append(max(0.0, (_x - _c).total_seconds() / 86400.0))
-            if _spans:
-                exit_avg_hold = round(sum(_spans) / len(_spans), 2)
-        except Exception:
-            exit_avg_hold = 4.0
+        exit_avg_hold = avg_hold_days(db, closed_rows)
         try:
             exit_drawdown = equity_drawdown_pct(db, float(getattr(s, "capital", 0) or 0))
         except Exception:
@@ -921,19 +1006,8 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     live_pnl = round(stats.pnl_total + unrealized_total, 2)
     live_equity = round(s.capital + live_pnl, 2)
 
-    # ---- kill switch (same math the gate uses) ---------------------------
-    daily, weekly, monthly = _loss_pcts(db, s.capital)
-    kill = KillSwitchEngine(
-        daily_loss_limit=s.kill_daily_loss_pct,
-        weekly_loss_limit=s.kill_weekly_loss_pct,
-        monthly_loss_limit=s.kill_monthly_loss_pct,
-        drawdown_limit=s.max_drawdown_pct,
-    ).evaluate(
-        daily_loss_pct=daily, weekly_loss_pct=weekly, monthly_loss_pct=monthly,
-        drawdown_pct=equity_drawdown_pct(db, s.capital),
-        broker_connected=True, market_data_ok=True,
-        ai_provider_ok=True, execution_ok=True,
-    )
+    # ---- kill switch (single shared path — see evaluate_kill) ------------
+    kill = evaluate_kill(db, s)
 
     return MonitorSnapshot(
         pause=get_pause(db), order_mode=s.order_mode, capital=s.capital,

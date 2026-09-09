@@ -85,20 +85,6 @@ def _position_age_days(pos: Position, db=None) -> float:
     return 0.0
 
 
-async def _smart_exit_snapshot(asset: str) -> dict:
-    """Indicator snapshot for the Smart Exit engine (60s cached, fail-safe {}).
-
-    fetch_all_snapshots is the same feed the scanner scores from, so exit
-    analysis sees the same EMA/ADX/RSI/MACD/ATR the entry saw.
-    """
-    try:
-        snaps = await quotes.fetch_all_snapshots([asset])
-        return dict(snaps.get(asset) or {})
-    except Exception as exc:
-        log.debug("smart-exit snapshot unavailable for %s: %s", asset, exc)
-        return {}
-
-
 async def _smart_exit_news(db, s) -> tuple[str, str]:
     """(status, event) for the Smart Exit engine — reuses the entry news gate.
 
@@ -115,34 +101,16 @@ async def _smart_exit_news(db, s) -> tuple[str, str]:
 
 
 def _avg_hold_days(db) -> float:
-    """Mean holding time (days) of closed trades — NO POSITION LEFT BEHIND clock.
+    """Mean holding time (days) — thin alias of execution.avg_hold_days.
 
-    Falls back to 4.0 (spec default) when there is no history yet.
+    Kept for backward-compat (tests import this name); the SINGLE shared
+    definition lives in execution.avg_hold_days so guard / monitor can
+    never drift apart. Never raises.
     """
     try:
-        rows = db.select("paper_trades", filters={"status": "closed"}, limit=200)
+        return execution.avg_hold_days(db)
     except Exception:
         return 4.0
-    spans: list[float] = []
-    for r in rows or []:
-        try:
-            from datetime import datetime
-            c = r.get("created_at")
-            x = r.get("closed_at")
-            if not c or not x:
-                continue
-            dc = datetime.fromisoformat(str(c).replace("Z", "+00:00"))
-            dx = datetime.fromisoformat(str(x).replace("Z", "+00:00"))
-            if dc.tzinfo is None:
-                from datetime import timezone
-                dc = dc.replace(tzinfo=timezone.utc)
-            if dx.tzinfo is None:
-                from datetime import timezone
-                dx = dx.replace(tzinfo=timezone.utc)
-            spans.append(max(0.0, (dx - dc).total_seconds() / 86400.0))
-        except Exception:
-            continue
-    return round(sum(spans) / len(spans), 2) if spans else 4.0
 
 
 async def _apply_smart_exit(db, broker, pos: Position, price: float,
@@ -401,6 +369,18 @@ async def guard_once(db, broker, notifier: NotificationService,
     drawdown_pct = 0.0
     kill_engaged = False
     kill_triggers: list[str] = []
+    # Priority 1 — Emergency Exit runs even when Smart Exit is OFF: the kill
+    # switch is a safety path, not an AI feature. Single shared path
+    # (execution.evaluate_kill) — same math as the entry gate and the
+    # monitor banner, can never drift apart.
+    if positions:
+        try:
+            ks = execution.evaluate_kill(db, s)
+            kill_engaged = bool(getattr(ks, "engaged", False))
+            kill_triggers = list(getattr(ks, "triggers", []) or [])
+        except Exception as exc:
+            log.debug("emergency kill check failed: %s", exc)
+            kill_engaged = False
     if smart_on and positions:
         try:
             assets = sorted({str(p.asset or "").upper() for p in positions})
@@ -421,26 +401,11 @@ async def guard_once(db, broker, notifier: NotificationService,
                 db, float(getattr(s, "capital", 0) or 0))
         except Exception:
             drawdown_pct = 0.0
-        # Priority 1 — Emergency Exit: kill switch engaged → close everything.
-        try:
-            from app.models.schemas import KillSwitchEngine
-            daily, weekly, monthly = execution._loss_pcts(
-                db, float(getattr(s, "capital", 0) or 0))
-            ks = KillSwitchEngine(
-                daily_loss_limit=float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0),
-                weekly_loss_limit=float(getattr(s, "kill_weekly_loss_pct", 5.0) or 5.0),
-                monthly_loss_limit=float(getattr(s, "kill_monthly_loss_pct", 8.0) or 8.0),
-                drawdown_limit=float(getattr(s, "max_drawdown_pct", 10.0) or 10.0),
-            ).evaluate(
-                daily_loss_pct=daily, weekly_loss_pct=weekly,
-                monthly_loss_pct=monthly, drawdown_pct=drawdown_pct,
-                broker_connected=True, market_data_ok=True,
-                ai_provider_ok=True, execution_ok=True)
-            kill_engaged = bool(getattr(ks, "engaged", False))
-            kill_triggers = list(getattr(ks, "triggers", []) or [])
-        except Exception as exc:
-            log.debug("smart-exit kill check failed: %s", exc)
-            kill_engaged = False
+    # Emergency closes aggregate into ONE LINE message after the loop
+    # (per-close journal + signal_log stay per-ticket for the audit trail).
+    emergency_lines: list[str] = []
+    emergency_pnl = 0.0
+    emergency_user = ""
 
     for pos in positions:
         # refresh mark price: live feed first, then broker-native, then book
@@ -461,6 +426,7 @@ async def guard_once(db, broker, notifier: NotificationService,
 
         # ---- Priority 1: Emergency Exit (kill switch engaged) ------------
         # Closes EVERYTHING immediately — skips management/SL/TP/smart/time.
+        # Notify is aggregated AFTER the loop (one LINE message per cycle).
         if kill_engaged:
             try:
                 result = await broker.close_position(pos.ticket)
@@ -483,17 +449,11 @@ async def guard_once(db, broker, notifier: NotificationService,
                        + f") — ปิดที่ {price:g}")
             emergency_closed += 1
             closed += 1
-            try:
-                await notifier.notify(
-                    pos.user_id, "trade_closed",
-                    f"🚨 Emergency Exit (KILL SWITCH)\n"
-                    f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
-                    f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
-                    f"PnL: {pnl:+,.2f}\n"
-                    + ("; ".join(kill_triggers)[:200] or "kill switch engaged"),
-                )
-            except Exception as exc:
-                log.error("emergency notify failed: %s", exc)
+            emergency_pnl += float(pnl or 0)
+            emergency_user = emergency_user or str(getattr(pos, "user_id", "") or "")
+            emergency_lines.append(
+                f"• {pos.asset} {pos.direction} "
+                f"{pos.entry_price:g}→{price:g} PnL {pnl:+,.2f}")
             continue
 
         # ---- management pass: breakeven / trailing / partial (TP1) ----
@@ -614,6 +574,23 @@ async def guard_once(db, broker, notifier: NotificationService,
             )
         except Exception as exc:
             log.error("close notify failed: %s", exc)
+
+    # Single aggregated emergency message (journal + signal_log already
+    # recorded per-ticket above — the audit trail stays granular).
+    if emergency_closed:
+        try:
+            body = "\n".join(emergency_lines[:10])
+            if len(emergency_lines) > 10:
+                body += f"\n…และอีก {len(emergency_lines) - 10} ไม้"
+            await notifier.notify(
+                emergency_user, "trade_closed",
+                f"🚨 Emergency Exit (KILL SWITCH) — ปิด {emergency_closed} ไม้\n"
+                + body + "\n"
+                f"รวม PnL {emergency_pnl:+,.2f}\n"
+                + ("; ".join(kill_triggers)[:200] or "kill switch engaged"),
+            )
+        except Exception as exc:
+            log.error("emergency notify failed: %s", exc)
 
     return {"checked": len(positions), "closed": closed,
             "moved_sl": moved, "partial_closed": partials,

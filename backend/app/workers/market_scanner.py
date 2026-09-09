@@ -31,6 +31,13 @@ log = logging.getLogger(__name__)
 
 SCAN_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
 
+# Per-cycle preloaded feeds (set by scan_once, read by _snapshot_for/_spot_for).
+# Globals — not params — so existing unit-test monkeypatches of _snapshot_for
+# keep working: tests bypass the batch path entirely, prod uses the batch.
+_PRELOADED_SNAPS: dict[str, dict] = {}
+_PRELOADED_SPOT: dict[str, float] = {}
+_HIGH_IMPACT_EVENT: bool = False
+
 
 def _scan_assets(settings) -> list[str]:
     """FULL analysis universe: every priceable pair (SUPPORTED_ASSETS).
@@ -57,6 +64,7 @@ def _tradable_assets(settings) -> set[str]:
 
 async def scan_once(db: Database) -> list[dict]:
     """One scan cycle. Live quotes when available, demo feed otherwise."""
+    global _PRELOADED_SNAPS, _PRELOADED_SPOT, _HIGH_IMPACT_EVENT
     engine = StrategyEngine()
     results: list[dict] = []
     news_by_asset = _news_sentiment_by_asset(db)
@@ -65,8 +73,42 @@ async def scan_once(db: Database) -> list[dict]:
     # gate below needs them BEFORE the emit block.
     settings = get_app_settings(db)
     tradable = _tradable_assets(settings)
+    universe = _scan_assets(settings)
 
-    for asset in _scan_assets(settings):
+    # ---- One batched quote fetch per cycle (was 28× fetch_all + N× spot) --
+    # Snapshot batch covers the FULL analysis universe; spot batch covers the
+    # tradable whitelist for the emit re-anchor. 30s/60s feed caches keep
+    # both cheap; _snapshot_for/_spot_for read these globals first and only
+    # single-fetch on cache miss (keeps unit-test monkeypatches working).
+    _HIGH_IMPACT_EVENT = _calendar_high_impact(db, settings)
+    try:
+        _PRELOADED_SNAPS = await quotes.fetch_all_snapshots(universe)
+    except Exception as exc:
+        log.warning("scanner snapshot batch failed: %s — demo feed", exc)
+        _PRELOADED_SNAPS = {}
+    try:
+        _spot_all, _spot_fail = await quotes.fetch_spot_prices(sorted(tradable))
+        _PRELOADED_SPOT = dict(_spot_all or {})
+    except Exception as exc:
+        log.warning("scanner spot batch failed: %s", exc)
+        _PRELOADED_SPOT = {}
+
+    # ---- Hoisted per-cycle guards (were re-queried per strong asset) -----
+    _market_is_closed = _market_closed()
+    try:
+        _all_signals = db.select("signals", limit=200)
+    except Exception:
+        _all_signals = []
+    pending_assets = {
+        str(r.get("asset") or "").upper()
+        for r in _all_signals
+        if str(r.get("approval") or "") == "pending"
+    }
+    _today = datetime.now(timezone.utc).date().isoformat()
+    _today_count = len([r for r in _all_signals
+                        if str(r.get("created_at", ""))[:10] == _today])
+
+    for asset in universe:
         ind = await _snapshot_for(asset, news_by_asset.get(asset, 0.0))
         if ind.source == "live":
             live_used += 1
@@ -115,7 +157,8 @@ async def scan_once(db: Database) -> list[dict]:
             # Market-closed guard — FX/gold trade Sun 21:00 UTC → Fri 21:00
             # UTC. Emitting signals into a closed market would pin entries at
             # Friday's close for the whole weekend (the "ราคาเก่า" complaint).
-            if _market_closed():
+            # Hoisted per-cycle (_market_is_closed) — was re-evaluated per asset.
+            if _market_is_closed:
                 results[-1]["market_closed"] = True
                 continue
 
@@ -126,11 +169,7 @@ async def scan_once(db: Database) -> list[dict]:
             # NOTE: an OPEN position does NOT suppress signals — the user
             # wants the page to keep generating all day; the auto-trader's
             # open-position gate is what prevents duplicate orders.
-            pending_assets = {
-                str(r.get("asset") or "").upper()
-                for r in db.select("signals", filters={"approval": "pending"},
-                                   limit=200)
-            }
+            # Hoisted per-cycle (pending_assets) — was re-queried per asset.
             if asset in pending_assets:
                 log.info("Signal for %s skipped: pending signal already "
                          "awaiting action for this asset", asset)
@@ -141,9 +180,9 @@ async def scan_once(db: Database) -> list[dict]:
             # Limits come from the user's saved settings (Settings page) — NOT the
             # hardcoded moderate profile. Bug (2026-09-04): user raised max_trades_daily
             # to 20 but the scanner kept throttling at the profile default 6/day.
-            today = datetime.now(timezone.utc).date().isoformat()
-            todays = db.select("signals", limit=200)
-            today_count = len([r for r in todays if str(r.get("created_at", ""))[:10] == today])
+            # Hoisted per-cycle (_today_count) — was re-queried per asset;
+            # incremented below on every insert so intra-cycle emits count.
+            today_count = _today_count
             freq = FrequencyEngine(
                 settings.risk_profile,
                 limits_override=TradeLimits(
@@ -184,12 +223,15 @@ async def scan_once(db: Database) -> list[dict]:
             # at 20:00 ("ราคาเก่า" on the signals page). The intraday spot
             # feed (Yahoo) is the freshest price we have; when it fails we
             # keep the snapshot price rather than guessing.
-            try:
-                spot, _spot_fail = await quotes.fetch_spot_prices([asset])
-                live_price = float(spot.get(asset) or 0)
-            except Exception as exc:
-                log.warning("spot re-anchor failed for %s: %s", asset, exc)
-                live_price = 0.0
+            # Preloaded batch first (_spot_for) — single-fetch only on miss.
+            live_price = _spot_for(asset)
+            if not live_price:
+                try:
+                    spot, _spot_fail = await quotes.fetch_spot_prices([asset])
+                    live_price = float((spot or {}).get(asset) or 0)
+                except Exception as exc:
+                    log.warning("spot re-anchor failed for %s: %s", asset, exc)
+                    live_price = 0.0
             if live_price > 0 and live_price != ind.price:
                 shift = live_price / ind.price
                 proposal = proposal.model_copy(update={
@@ -215,6 +257,10 @@ async def scan_once(db: Database) -> list[dict]:
                 "take_profit": proposal.take_profit, "expected_rr": proposal.expected_rr,
                 "approval": "pending", "explanation": " | ".join(proposal.reason[:4]),
             })
+            # Intra-cycle count: today's tally grows with every emit so the
+            # frequency note on later cards in the SAME cycle stays honest.
+            _today_count += 1
+            pending_assets.add(asset.upper())
             # Lifecycle log: the signal was created (survives 7 days even after
             # the signals row itself expires/approves — audit trail).
             signal_log.log_event(
@@ -239,22 +285,73 @@ def _market_closed(now: datetime | None = None) -> bool:
     return is_market_closed(now)
 
 
-async def _snapshot_for(asset: str, news_sentiment: float) -> IndicatorSnapshot:
-    """Live snapshot from the quote feed; random-walk demo as fallback."""
-    try:
-        snaps = await quotes.fetch_all_snapshots([asset])
-    except Exception as exc:  # defensive — never kill the scan
-        log.warning("Quote fetch crashed for %s: %s — demo feed", asset, exc)
-        snaps = {}
+def _calendar_high_impact(db, settings) -> bool:
+    """True when a high-impact event is near (calendar → news gate).
 
-    snap = snaps.get(asset)
-    if snap is None:
+    Was hardcoded False — the scanner never saw news risk, so the
+    news_driven_market regime and the -5 score penalty never fired.
+    Single shared math: EconomicCalendarEngine.news_risk over the
+    economic_calendar rows (same table the execution gate reads).
+    Fail-safe False (no calendar → trade as usual).
+    """
+    try:
+        from app.models.schemas import EconomicCalendarEngine, EconomicEvent
+        rows = db.select("economic_calendar", limit=50)
+        events: list[EconomicEvent] = []
+        for r in rows or []:
+            t = r.get("event_time")
+            if isinstance(t, str):
+                try:
+                    t = datetime.fromisoformat(t.replace("Z", "+00:00"))
+                except ValueError:
+                    t = None
+            if isinstance(t, datetime) and t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            try:
+                events.append(EconomicEvent(
+                    event=r.get("event") or "event",
+                    currency=r.get("currency", "USD"),
+                    time_utc=t, impact=r.get("impact", "high")))
+            except Exception:
+                continue
+        block_min = float(getattr(settings, "news_block_minutes", 30) or 30)
+        status = EconomicCalendarEngine(
+            block_minutes=block_min).news_risk(events)
+        return str(getattr(status, "status", "SAFE")) != "SAFE"
+    except Exception:
+        return False
+
+
+async def _snapshot_for(asset: str, news_sentiment: float) -> IndicatorSnapshot:
+    """Live snapshot from the quote feed; random-walk demo as fallback.
+
+    Reads the per-cycle batch (_PRELOADED_SNAPS) first — only single-fetches
+    on cache miss (cold start / unit-test direct calls without scan_once).
+    """
+    snap = dict(_PRELOADED_SNAPS.get(asset) or {})
+    if not snap:
+        try:
+            snaps = await quotes.fetch_all_snapshots([asset])
+        except Exception as exc:  # defensive — never kill the scan
+            log.warning("Quote fetch crashed for %s: %s — demo feed", asset, exc)
+            snaps = {}
+        snap = dict(snaps.get(asset) or {})
+
+    if not snap:
         return _random_walk_snapshot(asset, news_sentiment)
 
     snap["source"] = "live"
     snap["news_sentiment"] = news_sentiment
-    snap["high_impact_event"] = False
+    snap["high_impact_event"] = bool(_HIGH_IMPACT_EVENT)
     return IndicatorSnapshot(**snap)
+
+
+def _spot_for(asset: str) -> float:
+    """Preloaded intraday spot for the emit re-anchor (0.0 on miss)."""
+    try:
+        return float(_PRELOADED_SPOT.get(asset) or 0)
+    except Exception:
+        return 0.0
 
 
 def _news_sentiment_by_asset(db: Database) -> dict[str, float]:
