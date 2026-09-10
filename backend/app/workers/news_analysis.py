@@ -1,8 +1,9 @@
 """Worker #2 — News Analysis (every 15 min).
 
-Fetches the latest real headline per event type (Yahoo News RSS), then asks
-the AI to produce a sentiment score + analysis of the REAL headline.
-Without a headline or an AI key it degrades to a clearly-labelled heuristic.
+Fetches the latest real headline per event type (Google News RSS, Yahoo
+fallback), then asks the AI to produce a sentiment score + analysis of the
+REAL headline. Without a headline or an AI key it degrades to a
+clearly-labelled heuristic.
 """
 from __future__ import annotations
 
@@ -27,7 +28,12 @@ SEARCH_QUERY = {
     "FOMC": "FOMC Fed interest rate decision",
     "Geopolitical": "geopolitics oil market impact",
 }
-HEADLINES_URL = "https://news.search.yahoo.com/rss/search?p={query}&ei=UTF-8"
+HEADLINES_URL = "https://news.search.yahoo.com/rss/search"
+HEADLINES_PARAMS = {"ei": "UTF-8"}
+# Google News RSS — primary feed (Yahoo News RSS returns HTTP 500 since
+# at least 2026-09-10 for every query; kept only as a fallback).
+GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
+GOOGLE_NEWS_PARAMS = {"hl": "en-US", "gl": "US", "ceid": "US:en"}
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -37,17 +43,43 @@ def _clean(tag: str, block: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _parse_rss_item(body: str) -> tuple[str, str]:
+    """First <item> in an RSS body → (title, pubDate). Empty on no match."""
+    item = re.search(r"<item>(.*?)</item>", body, re.S)
+    if not item:
+        return "", ""
+    return _clean("title", item.group(1)), _clean("pubDate", item.group(1))[:22]
+
+
+async def _fetch_rss(url: str, params: dict) -> str:
+    """GET an RSS feed → raw body. Raises httpx.HTTPError on failure."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, params=params,
+                                headers={"User-Agent": UA}, timeout=15.0)
+        resp.raise_for_status()
+        return resp.text
+
+
 async def _latest_headline(event: str) -> tuple[str, str]:
-    """Most recent Yahoo News headline for the event → (title, pubDate)."""
+    """Most recent headline for the event → (title, pubDate).
+
+    Google News RSS first, Yahoo News RSS as fallback. Returns ("", "")
+    when both feeds fail (caller degrades to a labelled heuristic).
+    """
+    query = SEARCH_QUERY[event]
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(HEADLINES_URL.format(query=SEARCH_QUERY[event]),
-                                    headers={"User-Agent": UA}, timeout=15.0)
-            resp.raise_for_status()
-        item = re.search(r"<item>(.*?)</item>", resp.text, re.S)
-        if not item:
-            return "", ""
-        return _clean("title", item.group(1)), _clean("pubDate", item.group(1))[:22]
+        body = await _fetch_rss(GOOGLE_NEWS_URL,
+                                {"q": query, **GOOGLE_NEWS_PARAMS})
+        title, date = _parse_rss_item(body)
+        if title:
+            return title, date
+        log.warning("Google News RSS empty for %s — trying Yahoo", event)
+    except httpx.HTTPError as exc:
+        log.warning("Google News fetch failed for %s: %s — trying Yahoo", event, exc)
+    try:
+        body = await _fetch_rss(HEADLINES_URL,
+                                {"p": query, **HEADLINES_PARAMS})
+        return _parse_rss_item(body)
     except httpx.HTTPError as exc:
         log.warning("Headline fetch failed for %s: %s", event, exc)
         return "", ""
