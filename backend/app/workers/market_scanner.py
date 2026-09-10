@@ -129,6 +129,14 @@ async def scan_once(db: Database) -> list[dict]:
         db.insert("market_analysis", row)
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})
 
+        # No mockup signals: snapshots from the random-walk demo feed (live
+        # feed down) may still write market_analysis for the Confidence %
+        # display, but must NEVER emit tradeable signals — demo prices never
+        # passed any real market gate and look like real cards on /signals.
+        if ind.source != "live":
+            results[-1]["demo_no_signal"] = True
+            continue
+
         # Only allowed_assets TRADE — every other pair is analysis-only
         # (Confidence % display). Everything below this guard is signal
         # generation, which must stay confined to the user's whitelist.
@@ -255,7 +263,9 @@ async def scan_once(db: Database) -> list[dict]:
                 "confidence": proposal.confidence, "opportunity_score": opp.score,
                 "entry": proposal.entry, "stop_loss": proposal.stop_loss,
                 "take_profit": proposal.take_profit, "expected_rr": proposal.expected_rr,
-                "approval": "pending", "explanation": " | ".join(proposal.reason[:4]),
+                # เก็บเหตุผลครบทุกข้อ (build_proposal ให้สูงสุด 6) — หน้า
+                # signals แตกกลับเป็นรายข้อเพื่อจัดหมวด (เดิมตัด [:4])
+                "approval": "pending", "explanation": " | ".join(proposal.reason),
             })
             # Intra-cycle count: today's tally grows with every emit so the
             # frequency note on later cards in the SAME cycle stays honest.

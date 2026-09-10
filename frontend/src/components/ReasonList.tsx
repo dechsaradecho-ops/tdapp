@@ -29,8 +29,10 @@ const CATEGORY_ORDER: Category[] = ["score", "trend", "momentum", "volatility", 
 function classify(reason: string): Category {
   const r = reason.toLowerCase();
   if (r.includes("opportunity score")) return "score";
+  // momentum ก่อน trend: เหตุผล RSI/Supertrend ผสม ("RSI ... + Supertrend ... ในเทรนด์...")
+  // มี keyword ทั้งสองฝั่ง — ต้องลงโมเมนตัมก่อน ไม่งั้นเทรนด์กวาดไปหมดเหลือหมวดเดียว
+  if (r.includes("rsi") || r.includes("macd") || r.includes("โมเมนตัม") || r.includes("pullback") || r.includes("chase") || r.includes("overbought") || r.includes("oversold") || r.includes("breakout") || r.includes("retest")) return "momentum";
   if (r.includes("ema") || r.includes("adx") || r.includes("เทรนด์") || r.includes("supertrend")) return "trend";
-  if (r.includes("rsi") || r.includes("macd") || r.includes("โมเมนตัม")) return "momentum";
   if (r.includes("atr") || r.includes("ผันผวน") || r.includes("volatility")) return "volatility";
   if (r.includes("ข่าว") || r.includes("impact") || r.includes("sentiment") || r.includes("เซนติเมนต์")) return "news";
   return "other";

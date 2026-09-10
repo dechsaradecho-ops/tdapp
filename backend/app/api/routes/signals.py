@@ -6,11 +6,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
+from app.engine.strategy_engine import StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal,
                                 contract_value_for, effective_min_lot,
-                                effective_spread, is_market_closed,
+                                effective_spread,
                                 risk_to_lot_for)
 from app.services import execution
 from app.services import signal_log
@@ -21,7 +21,6 @@ from app.services.execution import (
 )
 from app.services.notification_service import NotificationService
 
-from app.api.routes.market import DEMO, _market_assets
 from app.api.routes.settings import get_app_settings
 
 router = APIRouter()
@@ -30,29 +29,6 @@ router = APIRouter()
 class ApprovalRequest(BaseModel):
     signal_id: str
     approve: bool
-
-
-async def _feed_status_for(assets: list[str]) -> QuoteFeedStatus | None:
-    """Probe the intraday spot feed for the signal assets — never raises.
-
-    Failures (timeout/HTTP/missing data) surface on the signals page so the
-    user can see WHY an entry price may be stale instead of trusting a
-    silently-fallen-back number.
-    """
-    if not assets:
-        return None
-    try:
-        _prices, failures = await quotes.fetch_spot_prices(assets)
-    except Exception as exc:  # fetch_spot_prices isolates per-asset errors;
-        # this guard is for anything unexpected above it
-        failures = {a: str(exc) for a in assets}
-    return QuoteFeedStatus(
-        state="ok" if not failures else "error",
-        source="exchangerate+yahoo",
-        fetched_at=datetime.now(timezone.utc),
-        failed_assets=sorted(failures),
-        message="; ".join(failures[a] for a in sorted(failures))[:300],
-    )
 
 
 async def _live_prices(assets: list[str]) -> tuple[dict[str, float], QuoteFeedStatus | None]:
@@ -77,7 +53,6 @@ async def _live_prices(assets: list[str]) -> tuple[dict[str, float], QuoteFeedSt
 async def latest_signals(request: Request) -> list[SignalProposal]:
     """Build explainable proposals from the latest opportunity snapshot."""
     db = request.app.state.db
-    engine = StrategyEngine()
     proposals: list[SignalProposal] = []
     # One settings load per request — risk sizing must follow the user's
     # saved risk_per_trade_pct, not a hardcoded 0.5.
@@ -253,7 +228,10 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 stop_loss=stop_loss, take_profit=float(r["take_profit"] or 0),
                 expected_rr=float(r["expected_rr"] or 2.0),
                 risk_per_trade_pct=s.risk_per_trade_pct,
-                reason=[r.get("explanation", "")],
+                # explanation เก็บแบบ " | "-joined — แตกกลับเป็นรายข้อเพื่อให้
+                # การ์ดจัดหมวด เทรนด์/โมเมนตัม/ผันผวน/ข่าว ได้ (เดิมห่อทั้งก้อน
+                # เป็นข้อเดียว classify เลยเทลงหมวดเดียวหมด)
+                reason=[p.strip() for p in str(r.get("explanation") or "").split(" | ") if p.strip()],
                 recommendation=FinalDecision.trade,
                 limit_levels=ladder,
                 sltp_levels=StrategyEngine.sltp_preview(
@@ -281,39 +259,10 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     proposals[-1].expires_min_left = round(max(left, 0.0), 1)
         return proposals
 
-    # No stored signals → analyze live quotes right now (demo only as last
-    # resort). During the weekend close the fallback is SKIPPED: demo/live
-    # cards built from Friday's close would look like fresh advice — the UI
-    # shows the "ตลาดปิด" banner instead (empty list + market_closed flag).
-    if is_market_closed():
-        return proposals
-    try:
-        snaps = await quotes.fetch_all_snapshots(_market_assets(db))
-    except Exception:
-        snaps = {}
-    live_feed = await _feed_status_for(sorted(snaps.keys()))
-    for asset, snap in snaps.items():
-        ind = IndicatorSnapshot(**{**snap, "source": "live"})
-        opp = engine.opportunity_score(ind)
-        proposals.append(engine.build_proposal(
-            ind, opp, s.risk_per_trade_pct, ind.ema_fast > ind.ema_slow,
-            sl_min_pct=s.sl_distance_min_pct,
-            sl_max_pct=s.sl_distance_max_pct))
-    if proposals:
-        for p in proposals:
-            p.feed_status = live_feed
-        return proposals
-
-    demo_feed = await _feed_status_for(list(DEMO.keys()))
-    for asset, ind in DEMO.items():
-        opp = engine.opportunity_score(ind)
-        bullish = ind.ema_fast > ind.ema_slow
-        proposals.append(engine.build_proposal(
-            ind, opp, s.risk_per_trade_pct, bullish,
-            sl_min_pct=s.sl_distance_min_pct,
-            sl_max_pct=s.sl_distance_max_pct))
-    for p in proposals:
-        p.feed_status = demo_feed
+    # No stored signals → empty queue. No live/demo fallback: on-the-fly
+    # cards built from live quotes or DEMO constants never passed the
+    # scanner gates (min confidence / dedup / breakout) and look like real
+    # tradeable signals — the UI shows "ยังไม่มีสัญญาณ — รอ Market Scanner".
     return proposals
 
 

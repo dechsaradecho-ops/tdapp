@@ -1,12 +1,11 @@
-"""API route tests — the 3-tier data flow (DB rows → live quotes → DEMO).
+"""API route tests — DB rows win; empty queue stays empty (no mock fallback).
 
 Uses httpx ASGITransport with manually-populated app.state (lifespan is not
 run by the transport), so each test controls what the "database" contains.
 
-Tier contract asserted here:
+Contract asserted here:
   1. market_analysis/signals rows in DB win and are served as-is
-  2. with no rows, live Yahoo quotes are computed per-request
-  3. with no rows AND no network, deterministic DEMO data is served
+  2. with no rows, /api/signals/latest returns [] (scanner-only cards)
 
 Run from backend/: C:/Python314/python.exe -m pytest tests/test_api_routes.py -v
 """
@@ -207,40 +206,26 @@ class TestSignalsLatestTiers:
         assert body[0]["reason"] == ["db row"]
 
     @pytest.mark.asyncio
-    async def test_tier2_live_quotes_when_no_rows(self, monkeypatch):
+    async def test_no_rows_returns_empty_queue(self, monkeypatch):
+        """No DB rows → empty list. No live/demo fallback: on-the-fly cards
+        never passed the scanner gates and look like real tradeable signals."""
         from app.api.routes import signals as signals_route
-        from app.engine.strategy_engine import IndicatorSnapshot
         set_state(FakeDatabase())
-        # The closed-market guard sits before the live-quote tier too.
-        monkeypatch.setattr(signals_route, "is_market_closed",
-                            lambda now=None: False)
-        snap = IndicatorSnapshot(
-            asset="EURUSD", price=1.10, ema_fast=1.105, ema_slow=1.09,
-            adx=40.0, supertrend_dir=1, rsi=60.0, macd_hist=1.0,
-            atr_pct=0.6, volatility_index=10.0, news_sentiment=0.0,
-            high_impact_event=False, source="live")
 
-        async def fake_fetch(assets):
-            return {a: asdict(snap) for a in assets}
-        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots", fake_fetch)
+        async def boom(assets):
+            raise AssertionError("live fetch must not run for an empty queue")
+        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots", boom)
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+                            boom)
         body = (await call("GET", "/api/signals/latest")).json()
-        assert len(body) == 5
-        assert all(s["recommendation"] in ("TRADE", "WAIT", "REDUCE RISK", "INCREASE CASH")
-                   for s in body)
+        assert body == []
 
     @pytest.mark.asyncio
-    async def test_tier3_demo_when_offline(self, monkeypatch):
-        from app.api.routes import signals as signals_route
-        from app.models.schemas import is_market_closed
+    async def test_no_rows_empty_when_offline(self, monkeypatch):
         set_state(FakeDatabase())
-        # The demo fallback is skipped during the weekend close — force open.
-        monkeypatch.setattr(signals_route, "is_market_closed",
-                            lambda now=None: False)
-        async def boom(assets):
-            raise RuntimeError("offline")
-        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots", boom)
+        # Empty queue regardless of market hours — no demo fallback ever.
         body = (await call("GET", "/api/signals/latest")).json()
-        assert len(body) == 5  # DEMO proposals
+        assert body == []
 
     @pytest.mark.asyncio
     async def test_direction_uppercased_from_db(self):
