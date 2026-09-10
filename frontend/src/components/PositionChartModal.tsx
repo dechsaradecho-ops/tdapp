@@ -6,32 +6,12 @@ import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { MarketCandle, MonitorOpenPosition } from "@/lib/types";
 
-/** Built-in spreads (mirror of backend DEFAULT_SPREADS + settings page) —
- *  ใช้เมื่อไม่มี override รายสัญลักษณ์ใน settings */
-const DEFAULT_SPREADS: Record<string, number> = {
-  EURUSD: 0.00010, GBPUSD: 0.00015, USDJPY: 0.015,
-  AUDUSD: 0.00015, NZDUSD: 0.00020, USDCAD: 0.00020, USDCHF: 0.00015,
-  EURGBP: 0.00020, EURJPY: 0.020, EURAUD: 0.00025, EURNZD: 0.00035,
-  EURCAD: 0.00025, EURCHF: 0.00020,
-  GBPJPY: 0.030, GBPAUD: 0.00035, GBPNZD: 0.00045, GBPCAD: 0.00035,
-  GBPCHF: 0.00030,
-  AUDJPY: 0.025, AUDNZD: 0.00035, AUDCAD: 0.00025, AUDCHF: 0.00025,
-  NZDJPY: 0.025, NZDCAD: 0.00030,
-  CADJPY: 0.030, CADCHF: 0.00030, CHFJPY: 0.030,
-  XAUUSD: 0.30,
-};
-
 /** จำนวนทศนิยมตามสเกลราคา (ทอง 2, JPY 3, FX 5) */
 function priceDigits(p: number): number {
   const a = Math.abs(p);
   if (a >= 100) return 2;
   if (a >= 10) return 3;
   return 5;
-}
-
-function fmtP(p: number | null | undefined): string {
-  if (typeof p !== "number" || !Number.isFinite(p)) return "-";
-  return fmtNum(p, priceDigits(p));
 }
 
 /** กราฟแท่งเทียน SVG (วาดเอง — ไม่เพิ่ม dependency):
@@ -43,8 +23,8 @@ function CandleChart({ candles, entry, sl, tp, current }: {
   tp: number | null;
   current: number;
 }) {
-  const W = 800, H = 400;
-  const padL = 56, padR = 78, padT = 10, padB = 18;
+  const W = 900, H = 540;
+  const padL = 72, padR = 112, padT = 12, padB = 22;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const data = candles.slice(-60);
   const n = data.length;
@@ -81,8 +61,8 @@ function CandleChart({ candles, entry, sl, tp, current }: {
         <g key={i}>
           <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)}
             stroke="#334155" strokeOpacity={0.5} strokeWidth={1} />
-          <text x={padL - 4} y={y(t) + 3} textAnchor="end" fontSize={10}
-            fill="#64748b">{fmtNum(t, digits)}</text>
+          <text x={padL - 6} y={y(t) + 5} textAnchor="end" fontSize={14}
+            fill="#94a3b8">{fmtNum(t, digits)}</text>
         </g>
       ))}
       {data.map((c, i) => {
@@ -103,12 +83,12 @@ function CandleChart({ candles, entry, sl, tp, current }: {
       {levels.map((l, i) => (
         <g key={i}>
           <line x1={padL} x2={W - padR} y1={y(l.v)} y2={y(l.v)}
-            stroke={l.color} strokeWidth={1.4} strokeDasharray={l.dash || undefined} />
-          <text x={W - padR + 4} y={y(l.v) + 3} fontSize={10} fontWeight={700}
+            stroke={l.color} strokeWidth={2} strokeDasharray={l.dash || undefined} />
+          <text x={W - padR + 6} y={y(l.v) + 5} fontSize={14} fontWeight={700}
             fill={l.color}>{l.label} {fmtNum(l.v, digits)}</text>
         </g>
       ))}
-      <text x={padL} y={H - 4} fontSize={10} fill="#64748b">
+      <text x={padL} y={H - 5} fontSize={12} fill="#94a3b8">
         Daily · {n} แท่งย้อนหลัง (Yahoo/สำรอง)
       </text>
     </svg>
@@ -117,7 +97,7 @@ function CandleChart({ candles, entry, sl, tp, current }: {
 
 /**
  * Popup กราฟไม้เปิดค้าง (กดแถวในตาราง Paper) —
- * กราฟแท่งเทียนใหญ่ + เส้น Entry/SL/TP/ราคาปัจจุบัน + ราคา/spread/buy-sell
+ * กราฟแท่งเทียนเต็ม popup + เส้น Entry/SL/TP/ราคาปัจจุบัน
  * (แพทเทิร์นเดียวกับ CloseSingleModal: fixed overlay กลางจอ, render ที่ page root)
  */
 export default function PositionChartModal({ position, onClose }: {
@@ -126,35 +106,22 @@ export default function PositionChartModal({ position, onClose }: {
 }) {
   const [candles, setCandles] = useState<MarketCandle[] | null>(null);
   const [candleErr, setCandleErr] = useState("");
-  const [spread, setSpread] = useState<number | null>(null);
 
   useEffect(() => {
     if (!position) return;
     setCandles(null);
     setCandleErr("");
-    setSpread(null);
     let alive = true;
     (async () => {
-      // กราฟ + spread โหลดพร้อมกัน (settings ให้ effective spread)
-      const [c, s] = await Promise.allSettled([
-        api.marketCandles(position.asset, 60),
-        api.getSettings(),
-      ]);
-      if (!alive) return;
-      if (c.status === "fulfilled") {
-        setCandles(c.value.candles ?? []);
-        if ((c.value.candles ?? []).length === 0 && c.value.error)
-          setCandleErr(c.value.error);
-      } else {
-        setCandleErr(c.reason instanceof Error ? c.reason.message : String(c.reason));
-      }
-      if (s.status === "fulfilled") {
-        const a = position.asset.toUpperCase();
-        const ov = s.value.spread_overrides?.[a];
-        const eff = (typeof ov === "number" && Number.isFinite(ov))
-          ? ov
-          : (DEFAULT_SPREADS[a] ?? s.value.paper_spread ?? 0);
-        setSpread(Math.max(0, eff));
+      try {
+        const c = await api.marketCandles(position.asset, 60);
+        if (!alive) return;
+        setCandles(c.candles ?? []);
+        if ((c.candles ?? []).length === 0 && c.error)
+          setCandleErr(c.error);
+      } catch (e) {
+        if (!alive) return;
+        setCandleErr(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => { alive = false; };
@@ -163,12 +130,6 @@ export default function PositionChartModal({ position, onClose }: {
   if (!position) return null;
   const p = position;
   const win = p.unrealized_pnl >= 0;
-  const bid = spread != null ? p.current_price - spread / 2 : null;
-  const ask = spread != null ? p.current_price + spread / 2 : null;
-  const srcLabel = p.price_source === "spot" ? "spot สด"
-    : p.price_source === "daily" ? "daily close"
-    : p.price_source === "broker" ? "broker"
-    : p.price_source === "entry" ? "entry (ไม่มี feed)" : (p.price_source || "-");
 
   return (
     <div
@@ -177,7 +138,7 @@ export default function PositionChartModal({ position, onClose }: {
       onClick={onClose}
     >
       <div
-        className="panel w-full max-w-4xl space-y-3 animate-pop max-h-[94vh] overflow-y-auto"
+        className="panel w-full max-w-5xl space-y-2 animate-pop max-h-[96vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* ---------- header ---------- */}
@@ -202,8 +163,8 @@ export default function PositionChartModal({ position, onClose }: {
           </p>
         </div>
 
-        {/* ---------- กราฟ ---------- */}
-        <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+        {/* ---------- กราฟเต็ม popup ---------- */}
+        <div className="rounded-xl border border-white/10 bg-black/30 p-1 sm:p-2">
           {candles === null && (
             <div className="flex items-center justify-center gap-2 py-16 text-slate-400 text-sm">
               <Icon n="spinner" size={16} className="animate-spin" /> กำลังโหลดกราฟ…
@@ -213,7 +174,7 @@ export default function PositionChartModal({ position, onClose }: {
             <>
               <CandleChart candles={candles} entry={p.entry_price}
                 sl={p.stop_loss} tp={p.take_profit} current={p.current_price} />
-              <div className="flex flex-wrap gap-x-3 gap-y-1 px-1 pb-1 text-[11px] text-slate-400">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 px-1 pb-1 text-sm text-slate-300">
                 <span><span className="text-[#38bdf8] font-bold">—</span> Entry</span>
                 <span><span className="text-loss font-bold">- -</span> SL</span>
                 <span><span className="text-profit font-bold">- -</span> TP</span>
@@ -228,20 +189,7 @@ export default function PositionChartModal({ position, onClose }: {
           )}
         </div>
 
-        {/* ---------- ราคา / spread / buy-sell ---------- */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm">
-          <div><p className="text-xs text-slate-500">Entry</p><p className="font-bold">{fmtP(p.entry_price)}</p></div>
-          <div><p className="text-xs text-slate-500">ราคาปัจจุบัน ({srcLabel})</p><p className="font-bold">{fmtP(p.current_price)}</p></div>
-          <div><p className="text-xs text-slate-500">SL / TP</p><p className="font-bold text-xs">{fmtP(p.stop_loss)} / {fmtP(p.take_profit)}</p></div>
-          <div><p className="text-xs text-slate-500">Spread (bid-ask เต็ม)</p><p className="font-bold">{spread == null ? "…" : fmtNum(spread, priceDigits(spread) === 2 ? 2 : 5)}</p></div>
-          <div><p className="text-xs text-slate-500">Buy (ask)</p><p className="font-bold text-profit">{bid != null && ask != null ? fmtP(ask) : "-"}</p></div>
-          <div><p className="text-xs text-slate-500">Sell (bid)</p><p className="font-bold text-loss">{bid != null && ask != null ? fmtP(bid) : "-"}</p></div>
-          <div><p className="text-xs text-slate-500">Ticket</p><p className="font-mono text-xs break-all">{p.ticket || "-"}</p></div>
-          <div><p className="text-xs text-slate-500">ที่มา</p><p className="font-bold">{p.source === "auto" ? "Auto" : "Approve"}</p></div>
-          <div><p className="text-xs text-slate-500">เปิดเมื่อ</p><p className="font-bold text-xs">{p.created_at ? new Date(p.created_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-"}</p></div>
-        </div>
-
-        <p className="text-[11px] text-slate-600 text-center">แตะนอกกรอบเพื่อปิด · ราคา bid/ask = mid ± spread/2</p>
+        <p className="text-[11px] text-slate-600 text-center">แตะนอกกรอบเพื่อปิด</p>
       </div>
     </div>
   );
