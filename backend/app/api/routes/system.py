@@ -166,6 +166,78 @@ async def scan_now(request: Request) -> dict:
     return out
 
 
+@router.post("/guard-now")
+async def guard_now(request: Request) -> dict:
+    """Run ONE position-guard cycle inline and report the outcome.
+
+    Answers 'why didn't the SL move?' — runs the same guard_once the
+    scheduler runs every 1 min, but inline, and surfaces: broker book
+    tickets vs DB open rows (empty book = guard blind), per-position
+    R vs breakeven trigger, and whether any SL moved. Never raises —
+    failures are reported, matching the scheduler's silent-failure path.
+    """
+    app = request.app
+    db: Database = app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    from app.workers import position_guard
+
+    # Pre-state: what does the guard actually see?
+    try:
+        book = await app.state.broker.all_positions()
+        out["book_tickets"] = [
+            {"ticket": p.ticket, "asset": p.asset,
+             "direction": p.direction, "entry": p.entry_price,
+             "sl": p.stop_loss}
+            for p in book
+        ]
+    except Exception as exc:
+        out["book_error"] = f"{exc.__class__.__name__}: {exc}"
+        out["book_tickets"] = []
+    open_rows = db.select("paper_trades", filters={"status": "open"}, limit=50)
+    out["db_open"] = [
+        {"ticket": r.get("ticket"), "asset": r.get("asset"),
+         "direction": r.get("direction")}
+        for r in open_rows
+    ]
+    try:
+        s = execution.get_app_settings(db)
+        out["settings"] = {
+            "breakeven_trigger_r": s.breakeven_trigger_r,
+            "trail_atr_mult": s.trail_atr_mult,
+            "trailing_ladder": s.trailing_ladder,
+            "partial_close_pct": s.partial_close_pct,
+            "partial_trigger_r": s.partial_trigger_r,
+        }
+    except Exception as exc:
+        out["settings_error"] = f"{exc.__class__.__name__}: {exc}"
+
+    from app.services.notification_service import NotificationService
+    try:
+        out["guard_once"] = await position_guard.guard_once(
+            db, app.state.broker, NotificationService(db, app.state.line))
+    except Exception as exc:  # surface anything the worker swallowed
+        out["verdict"] = "fail"
+        out["error"] = f"{exc.__class__.__name__}: {exc}"
+        return out
+
+    # Post-state: did any SL actually move in the DB?
+    moved = db.select("paper_trades", filters={"status": "open"}, limit=50)
+    out["post_sl"] = [
+        {"ticket": r.get("ticket"), "asset": r.get("asset"),
+         "stop_loss": r.get("stop_loss"),
+         "sl_moved_at": r.get("sl_moved_at"),
+         "sl_move_reason": r.get("sl_move_reason")}
+        for r in moved
+    ]
+    out["verdict"] = "ok"
+    return out
+
+
 @router.post("/autotrader-dry-run")
 async def autotrader_dry_run(request: Request) -> dict:
     """Run ONE auto-trader cycle inline and report every gate verdict.
