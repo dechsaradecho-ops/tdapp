@@ -115,6 +115,22 @@ const SL_MODES = [
   { value: "medium", label: "กลาง ×1.5 ATR — ตามสัญญาณ (ค่าเริ่มต้น)" },
   { value: "long", label: "ยาว ×2.0 ATR — SL กว้าง ทนผันผวน" },
 ];
+const INDICATOR_OPTIONS = [
+  { value: "EMA", label: "EMA — ตามเทรนด์ (ค่าเริ่มต้น)" },
+  { value: "RSI", label: "RSI — โมเมนตัม overbought/oversold" },
+  { value: "MACD", label: "MACD — จุดตัดเทรนด์" },
+  { value: "ADX", label: "ADX — ความแข็งแรงเทรนด์" },
+  { value: "ATR", label: "ATR — breakout ตามความผันผวน" },
+  { value: "SuperTrend", label: "SuperTrend — ตามเทรนด์พร้อม trailing" },
+  { value: "PriceAction", label: "PriceAction — แท่งเทียนล้วน" },
+];
+const REFRESH_OPTIONS = [
+  { value: "0", label: "ปิด — รีเฟรชด้วยมือ" },
+  { value: "10", label: "10 วิ — ถี่สุด (ค่าเริ่มต้น monitor)" },
+  { value: "30", label: "30 วิ" },
+  { value: "60", label: "1 นาที" },
+  { value: "300", label: "5 นาที — ประหยัดแบต/เน็ต" },
+];
 
 /** Add-pair dropdown options — only pairs the price feeds cover. */
 const ADDABLE_ASSETS = SUPPORTED_ASSETS.filter(
@@ -401,13 +417,19 @@ export default function SettingsPage() {
         <div className="space-y-3">
           <PinManager />
           <NumField label="Capital (USD) — ใช้ทั้งระบบ" value={capital}
-            onChange={(v) => { setCapital(v); set("capital", v); }} />
-          <NumField label="Target Return (%/month)" value={target} onChange={setTarget} step={0.5} />
-          <NumField label="Max Drawdown (%)" value={maxDd} onChange={setMaxDd} step={0.5} />
+            onChange={(v) => { setCapital(v); set("capital", v); }}
+            hint="ทุนเดียวกับระบบเทรด — แก้ตรงนี้แล้วกดบันทึกการตั้งค่าด้านล่างเพื่อลง DB" />
+          <NumField label="Target Return (%/month)" value={target} onChange={setTarget} step={0.5}
+            hint="เป้ากำไรรายเดือน — ใช้คำนวณสัดส่วนพอร์ตแนะนำเท่านั้น ไม่กระทบระบบเทรด" />
+          <NumField label="Max Drawdown (%)" value={maxDd} onChange={setMaxDd} step={0.5}
+            hint="เพดานขาดทุนสำหรับพอร์ตแนะนำเท่านั้น — kill switch จริงตั้งที่การ์ด Kill Switch ด้านล่าง" />
           <label className="block text-sm">
             Risk Profile
             <GlassSelect value={profile} onChange={setProfile} className="mt-1 w-full"
               options={RISK_PROFILES} />
+            <span className="block text-xs text-slate-500 mt-1">
+              โปรไฟล์สำหรับพอร์ตแนะนำเท่านั้น — คุมระบบเทรดจริงต้องกดใช้ preset ที่การ์ด Signal Gates
+            </span>
           </label>
           <button onClick={() => recommend()} disabled={loading}
             aria-busy={loading}
@@ -587,6 +609,9 @@ export default function SettingsPage() {
                 <GlassSelect value={cfg.order_mode}
                   onChange={(v) => set("order_mode", v)} className="mt-1 w-full"
                   options={ORDER_MODES} />
+                <span className="text-xs text-slate-500 mt-1 block">
+                  Auto = ระบบยิง order เอง · Semi-Auto = รอกดยืนยัน · Manual = ออกแค่สัญญาณไม่ยิง
+                </span>
               </label>
               <label className="block text-sm">
                 ระยะ SL/TP ที่ใช้เปิด order (sl_distance_mode)
@@ -634,7 +659,8 @@ export default function SettingsPage() {
                 </span>
               </label>
               <NumField label="Min Confidence (%)" value={cfg.min_confidence}
-                onChange={(v) => set("min_confidence", v)} step={1} />
+                onChange={(v) => set("min_confidence", v)} step={1}
+                hint="คะแนนมั่นใจขั้นต่ำ — ต่ำกว่านี้ scanner ไม่สร้างสัญญาณ (ยิ่งสูงยิ่งน้อยแต่แม่น)" />
               <label className="block text-sm">
                 Min Confidence (gold) (%)
                 <div className="flex items-center gap-2 mt-1">
@@ -659,7 +685,8 @@ export default function SettingsPage() {
                 </span>
               </label>
               <NumField label="Min Opportunity (%)" value={cfg.min_opportunity}
-                onChange={(v) => set("min_opportunity", v)} step={1} />
+                onChange={(v) => set("min_opportunity", v)} step={1}
+                hint="คะแนนโอกาสขั้นต่ำ — กรองสัญญาณที่ upside ไม่คุ้มความเสี่ยง" />
               <div className="flex items-center gap-3 py-1">
                 <div className="flex-1">
                   <p className="text-sm">Gold Breakout Only (XAUUSD)</p>
@@ -677,7 +704,8 @@ export default function SettingsPage() {
                 </button>
               </div>
               <NumField label="Capital (USD)" value={cfg.capital}
-                onChange={(v) => set("capital", v)} step={100} />
+                onChange={(v) => set("capital", v)} step={100}
+                hint="ทุนบัญชีสำหรับคำนวณ lot ตาม %risk — กดบันทึกถึงมีผลทั้งระบบ" />
             </div>
 
             {/* --- Frequency limits --- */}
@@ -686,18 +714,20 @@ export default function SettingsPage() {
                 <Icon n="clock" size={13} /> ลิมิตการเทรด
               </p>
               <NumField label="เทรดสูงสุด/วัน" value={cfg.max_trades_daily}
-                onChange={(v) => set("max_trades_daily", v)} step={1} />
+                onChange={(v) => set("max_trades_daily", v)} step={1}
+                hint="เพดานเปิด order ต่อวัน — ครบแล้วระบบพักถึงเที่ยงคืน UTC (กัน overtrade)" />
               <NumField label="เทรดสูงสุด/สัปดาห์" value={cfg.max_trades_weekly}
-                onChange={(v) => set("max_trades_weekly", v)} step={1} />
+                onChange={(v) => set("max_trades_weekly", v)} step={1}
+                hint="เพดานรายสัปดาห์ — คุมความถี่รวมทั้งพอร์ตช่วงตลาดผันผวน" />
               <NumField label="ไม้ที่เปิดค้างสูงสุด" value={cfg.max_open_positions}
-                onChange={(v) => set("max_open_positions", v)} step={1} />
+                onChange={(v) => set("max_open_positions", v)} step={1}
+                hint="จำนวนไม้พร้อมกันสูงสุด — เกินนี้สัญญาณใหม่โดนบล็อกจนกว่ามีไม้ปิด" />
               <NumField label="Risk ต่อไม้ (%)" value={cfg.risk_per_trade_pct}
-                onChange={(v) => set("risk_per_trade_pct", v)} step={0.1} />
+                onChange={(v) => set("risk_per_trade_pct", v)} step={0.1}
+                hint="ขาดทุนสูงสุดต่อไม้เป็น % ของทุน — ใช้คำนวณ lot ทุก order (หัวใจ money management)" />
               <NumField label="ขนาด Lot ขั้นต่ำ (min_lot)" value={cfg.min_lot}
-                onChange={(v) => set("min_lot", v)} step={0.01} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                ขนาด lot ต่ำสุดของทุกออเดอร์ — ระบบคำนวณจาก Risk ต่อไม้ก่อน แล้วปัดขึ้นเป็นค่านี้ (เช่น 0.02)
-              </span>
+                onChange={(v) => set("min_lot", v)} step={0.01}
+                hint="พื้น lot ทุก order — คำนวณจาก %risk ได้เท่าไรก็ปัดขึ้นไม่ต่ำกว่านี้ (เช่น 0.02 กันไม้จิ๋ว)" />
               <label className="block text-sm">
                 ขนาด Lot ขั้นต่ำ (gold) (min_lot_gold)
                 <div className="flex items-center gap-2 mt-1">
@@ -729,37 +759,26 @@ export default function SettingsPage() {
                 <Icon n="chart" size={13} /> การจัดการไม้ (Position Management)
               </p>
               <NumField label="Breakeven Trigger (×R)" value={cfg.breakeven_trigger_r}
-                onChange={(v) => set("breakeven_trigger_r", v)} step={0.1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                กำไรถึง R กี่เท่า ค่อยย้าย SL ไปที่ราคาเข้า (0 = ปิดการใช้งาน)
-              </span>
+                onChange={(v) => set("breakeven_trigger_r", v)} step={0.1}
+                hint="กำไรถึงกี่เท่า R ถึงย้าย SL มาทุน (เช่น 1.0 = บวก 1R แล้วไม้เหลือแย่สุดคือเท่าทุน)" />
               <NumField label="Trailing Stop (×ATR)" value={cfg.trail_atr_mult}
-                onChange={(v) => set("trail_atr_mult", v)} step={0.1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                ระยะ trailing หลัง breakeven — หน่วยเป็นเท่าของ ATR (0 = ปิด)
-              </span>
+                onChange={(v) => set("trail_atr_mult", v)} step={0.1}
+                hint="หลัง breakeven ให้ SL ไล่ตามราคาห่างกี่เท่า ATR (ยิ่งน้อยยิ่งล็อกกำไรแน่นแต่โดนสะบัดง่าย)" />
               <NumField label="Partial Close (%)" value={cfg.partial_close_pct}
-                onChange={(v) => set("partial_close_pct", v)} step={5} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                ปิดบางส่วนกี่ % เมื่อกำไรถึง Partial Trigger (0 = ปิดการใช้งาน)
-              </span>
+                onChange={(v) => set("partial_close_pct", v)} step={5}
+                hint="ล็อกกำไรบางส่วนกี่ % เมื่อถึงเป้า (เช่น 50 = เก็บครึ่งหนึ่งแล้วปล่อยที่เหลือวิ่ง)" />
               <NumField label="Partial Trigger (×R)" value={cfg.partial_trigger_r}
-                onChange={(v) => set("partial_trigger_r", v)} step={0.1} />
+                onChange={(v) => set("partial_trigger_r", v)} step={0.1}
+                hint="กำไรถึงกี่เท่า R ถึงแบ่งปิด (เช่น 1.0 = บวก 1R เก็บกำไรบางส่วนทันที)" />
               <NumField label="Max Hold Days (วัน)" value={cfg.max_hold_days}
-                onChange={(v) => set("max_hold_days", v)} step={1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                ถือไม้ครบกี่วัน ให้ระบบปิดเอง (0 = ปิดการใช้งาน)
-              </span>
+                onChange={(v) => set("max_hold_days", v)} step={1}
+                hint="time stop — ถือครบกี่วันระบบปิดเองไม่ว่าราคาอยู่ไหน (กันทุนจมกับไม้ไม่วิ่ง)" />
               <NumField label="RR Target (1:X)" value={cfg.rr_target}
-                onChange={(v) => set("rr_target", v)} step={0.1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                กำไรเป้าหมาย = ระยะ SL คูณค่านี้ เช่น 2 → TP อยู่ห่าง 2 เท่าของ SL (ต่ำสุด 0.5)
-              </span>
+                onChange={(v) => set("rr_target", v)} step={0.1}
+                hint="TP ห่างกี่เท่าของ SL (เช่น 2 = เสี่ยง 1 ได้ 2 — win rate 40% ก็ยังกำไร)" />
               <NumField label="Paper Spread (ราคา) — ค่าเดิม (fallback)" value={cfg.paper_spread}
-                onChange={(v) => set("paper_spread", v)} step={0.00001} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                ใช้เฉพาะสัญลักษณ์ที่ไม่มีค่าเริ่มต้น/ค่าที่กำหนดเอง (0 = ไม่มีสเปรด)
-              </span>
+                onChange={(v) => set("paper_spread", v)} step={0.00001}
+                hint="ต้นทุนจำลองต่อไม้ — ใช้เฉพาะคู่ที่ไม่มี spread รายสัญลักษณ์ (0 = ไม่คิดสเปรด)" />
               {/* --- Per-symbol spread overrides --- */}
               <div className="pt-2">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Spread รายสัญลักษณ์</p>
@@ -859,34 +878,26 @@ export default function SettingsPage() {
                 </button>
               </div>
               <NumField label="ปิดเมื่อคะแนนต่ำกว่า" value={cfg.exit_score_close}
-                onChange={(v) => set("exit_score_close", v)} step={1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                คะแนนคุณภาพ 0-100 — ต่ำกว่านี้ระบบปิดหรือแบ่งปิด (ค่าเริ่มต้น 45)
-              </span>
+                onChange={(v) => set("exit_score_close", v)} step={1}
+                hint="คะแนนถือไม้ 0-100 ต่ำกว่านี้ระบบปิด/แบ่งปิดทันที (ยิ่งสูงยิ่งทน ยิ่งต่ำยิ่งตัดไว)" />
               <NumField label="กันกำไรเมื่อถึง (×R)" value={cfg.profit_protect_r}
-                onChange={(v) => set("profit_protect_r", v)} step={0.5} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                กำไรถึง R นี้แต่คุณภาพไม่ใช่ High → แบ่งปิดครึ่งหนึ่ง (0 = ปิด)
-              </span>
+                onChange={(v) => set("profit_protect_r", v)} step={0.5}
+                hint="กำไรถึงเท่านี้แต่คุณภาพไม่ใช่ High → แบ่งปิดครึ่งหนึ่งกันกำไรหาย (0 = ไม่กัน)" />
               <NumField label="เกณฑ์กลับตัว (opportunity)" value={cfg.reversal_opp_min}
-                onChange={(v) => set("reversal_opp_min", v)} step={1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                คะแนนโอกาสฝั่งตรงข้ามต่ำกว่านี้ = สัญญาณกลับตัว 1 เสียง (ต้อง 2/4 เสียงถึงปิด)
-              </span>
+                onChange={(v) => set("reversal_opp_min", v)} step={1}
+                hint="โอกาสฝั่งตรงข้ามต่ำกว่านี้ = ตลาดเริ่มกลับตัว 1 เสียง — ครบ 2/4 เสียงระบบปิด" />
               <NumField label="News Exit ขั้นต่ำ (×R)" value={cfg.news_exit_min_r}
-                onChange={(v) => set("news_exit_min_r", v)} step={0.5} />
+                onChange={(v) => set("news_exit_min_r", v)} step={0.5}
+                hint="กำไรขั้นต่ำที่ยอมปิดหนีข่าว — ต่ำกว่านี้ถือผ่านข่าวต่อ (กันปิดไม้ขาดทุนเพราะข่าว)" />
               <NumField label="Volatility Exit (×ATR%)" value={cfg.volatility_exit_atr}
-                onChange={(v) => set("volatility_exit_atr", v)} step={0.5} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                ATR% เกินค่านี้ + มีกำไร → แบ่งปิด (0 = ปิด)
-              </span>
+                onChange={(v) => set("volatility_exit_atr", v)} step={0.5}
+                hint="ตลาดเหวี่ยงเกินนี้ + มีกำไร → แบ่งปิดล็อกไว้ก่อน (0 = ไม่สนความผันผวน)" />
               <NumField label="No-Behind ขั้นต่ำ (×R)" value={cfg.no_behind_min_r}
-                onChange={(v) => set("no_behind_min_r", v)} step={0.1} />
-              <span className="block text-xs text-slate-500 -mt-2">
-                กำไรต่ำกว่านี้ + ถือนานเกิน = ปิดทิ้ง ไม่ปล่อยค้าง (NO POSITION LEFT BEHIND)
-              </span>
+                onChange={(v) => set("no_behind_min_r", v)} step={0.1}
+                hint="กำไรต่ำกว่านี้ + ถือนานเกิน = ไม้เน่า ตัดทิ้งเอาทุนไปหาโอกาสใหม่" />
               <NumField label="No-Behind ถือเกิน (×เท่าเฉลี่ย)" value={cfg.no_behind_hold_mult}
-                onChange={(v) => set("no_behind_hold_mult", v)} step={0.5} />
+                onChange={(v) => set("no_behind_hold_mult", v)} step={0.5}
+                hint="ถือนานเกินกี่เท่าของค่าเฉลี่ยถึงโดนตัดทิ้ง — คืนทุนไปหาโอกาสที่ดีกว่า" />
             </div>
 
             {/* --- Kill switch / drawdown --- */}
@@ -895,15 +906,20 @@ export default function SettingsPage() {
                 <Icon n="octagon" size={13} /> Kill Switch &amp; Risk
               </p>
               <NumField label="ขาทุนรายวันสูงสุด (%)" value={cfg.kill_daily_loss_pct}
-                onChange={(v) => set("kill_daily_loss_pct", v)} step={0.5} />
+                onChange={(v) => set("kill_daily_loss_pct", v)} step={0.5}
+                hint="ขาดทุนวันเดียวถึงเท่านี้ = หยุดเทรดทั้งวันทันที (circuit breaker กันล้างพอร์ต)" />
               <NumField label="ขาทุนรายสัปดาห์ (%)" value={cfg.kill_weekly_loss_pct}
-                onChange={(v) => set("kill_weekly_loss_pct", v)} step={0.5} />
+                onChange={(v) => set("kill_weekly_loss_pct", v)} step={0.5}
+                hint="ขาดทุนสะสมรายสัปดาห์ถึงเท่านี้ = พักทั้งสัปดาห์ กลับมาเทรดจันทร์ถัดไป" />
               <NumField label="ขาทุนรายเดือน (%)" value={cfg.kill_monthly_loss_pct}
-                onChange={(v) => set("kill_monthly_loss_pct", v)} step={0.5} />
+                onChange={(v) => set("kill_monthly_loss_pct", v)} step={0.5}
+                hint="ขาดทุนสะสมรายเดือนถึงเท่านี้ = พักทั้งเดือน (เบรกใหญ่สุดก่อนพอร์ตพัง)" />
               <NumField label="Max Drawdown — Kill (%)" value={cfg.max_drawdown_pct}
-                onChange={(v) => set("max_drawdown_pct", v)} step={0.5} />
+                onChange={(v) => set("max_drawdown_pct", v)} step={0.5}
+                hint="ยอดดอยจากจุดสูงสุดถึงเท่านี้ = kill switch หยุดทุกอย่างจนกว่ากด resume" />
               <NumField label="DD เริ่มลดความถี่ (%)" value={cfg.drawdown_throttle_pct}
-                onChange={(v) => set("drawdown_throttle_pct", v)} step={0.5} />
+                onChange={(v) => set("drawdown_throttle_pct", v)} step={0.5}
+                hint="เตือนก่อน kill — ถึงระดับนี้ระบบลดความถี่เปิดไม้ลง (soft brake)" />
             </div>
 
             {/* --- News / correlation / order / backtest --- */}
@@ -912,15 +928,66 @@ export default function SettingsPage() {
                 <Icon n="news" size={13} /> ข่าว / Correlation / Backtest
               </p>
               <NumField label="บล็อกข่าวก่อน event (นาที)" value={cfg.news_block_minutes}
-                onChange={(v) => set("news_block_minutes", v)} step={5} />
+                onChange={(v) => set("news_block_minutes", v)} step={5}
+                hint="ข่าวแรง (DANGER) ก่อนถึงกี่นาทีห้ามเปิดไม้ใหม่ — กันโดนสลิปตอนข่าว" />
               <NumField label="ระวังข่าวก่อน event (นาที)" value={cfg.news_caution_minutes}
-                onChange={(v) => set("news_caution_minutes", v)} step={5} />
+                onChange={(v) => set("news_caution_minutes", v)} step={5}
+                hint="กรอบเตือนก่อนข่าว — สัญญาณช่วงนี้โดนตีตรา caution แต่ยังเปิดได้" />
               <NumField label="Correlation Cap (0-100)" value={cfg.correlation_cap}
-                onChange={(v) => set("correlation_cap", v)} step={1} />
+                onChange={(v) => set("correlation_cap", v)} step={1}
+                hint="คะแนนสหสัมพันธ์พอร์ตเกินนี้ = บล็อกไม้ใหม่ (กันเปิดหลายคู่ทางเดียวกันเกินไป)" />
               <NumField label="Paper Capital เสมือน" value={cfg.paper_virtual_capital}
-                onChange={(v) => set("paper_virtual_capital", v)} step={10_000} />
+                onChange={(v) => set("paper_virtual_capital", v)} step={10_000}
+                hint="เงินจำลองสำหรับ paper trading — ใช้คำนวณ lot โหมดกระดาษแยกจากทุนจริง" />
               <NumField label="Backtest: จำนวนวัน" value={cfg.backtest_days}
-                onChange={(v) => set("backtest_days", v)} step={10} />
+                onChange={(v) => set("backtest_days", v)} step={10}
+                hint="ย้อนหลังกี่วันตอนกดรัน backtest กลยุทธ์ indicator (30–365 วัน)" />
+            </div>
+
+            {/* --- ระบบ / หน้าจอ (refresh + backtest defaults) --- */}
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="clock" size={13} /> ระบบ / หน้าจอ
+              </p>
+              <label className="block text-sm">
+                รีเฟรชอัตโนมัติ — หน้ามอนิเตอร์
+                <GlassSelect value={String(cfg.monitor_refresh_sec)}
+                  onChange={(v) => set("monitor_refresh_sec", Number(v))} className="mt-1 w-full"
+                  options={REFRESH_OPTIONS} />
+                <span className="text-xs text-slate-500 mt-1 block">
+                  ดึงข้อมูลมอนิเตอร์ทุกกี่วินาที — เก็บลง DB ตามทุกเครื่อง (ถี่กว่า 10 วิไม่เพิ่มโหลดเพราะ quote cache 30 วิ)
+                </span>
+              </label>
+              <label className="block text-sm">
+                รีเฟรชอัตโนมัติ — หน้าสัญญาณ
+                <GlassSelect value={String(cfg.signals_refresh_sec)}
+                  onChange={(v) => set("signals_refresh_sec", Number(v))} className="mt-1 w-full"
+                  options={REFRESH_OPTIONS} />
+                <span className="text-xs text-slate-500 mt-1 block">
+                  ดึงสัญญาณอัตโนมัติทุกกี่วินาที — 0 = ปิด กดรีเฟรชเอง (ประหยัดแบต)
+                </span>
+              </label>
+              <NumField label="Default Equity (USD)" value={cfg.default_equity}
+                onChange={(v) => set("default_equity", v)} step={1000}
+                hint="ทุนตั้งต้นเวลาคำนวณแผน order/รีวิวความเสี่ยง — ไม่ใช่เงินจริง" />
+              <label className="block text-sm">
+                Backtest: อินดิเคเตอร์
+                <GlassSelect value={cfg.backtest_indicator}
+                  onChange={(v) => set("backtest_indicator", v)} className="mt-1 w-full"
+                  options={INDICATOR_OPTIONS} />
+                <span className="text-xs text-slate-500 mt-1 block">
+                  กลยุทธ์ตั้งต้นตอนกดรัน backtest/walk-forward (ยิง POST /api/trading/backtest)
+                </span>
+              </label>
+              <label className="block text-sm">
+                Backtest: คู่เงิน
+                <GlassSelect value={cfg.backtest_asset}
+                  onChange={(v) => set("backtest_asset", v)} className="mt-1 w-full"
+                  options={SUPPORTED_ASSETS.map((a) => ({ value: a as string, label: a as string }))} />
+                <span className="text-xs text-slate-500 mt-1 block">
+                  คู่เงินตั้งต้นสำหรับ backtest — เปลี่ยนตอนรันจริงได้
+                </span>
+              </label>
             </div>
           </div>
           </>
@@ -1300,14 +1367,15 @@ function CountCard({ label, count, latest }:
   );
 }
 
-function NumField({ label, value, onChange, step = 1 }:
-  { label: string; value: number; onChange: (v: number) => void; step?: number }) {
+function NumField({ label, value, onChange, step = 1, hint }: {
+  label: string; value: number; onChange: (v: number) => void; step?: number; hint?: string }) {
   return (
     <label className="block text-sm">
       {label}
       <input type="number" value={value} step={step}
         onChange={(e) => onChange(Number(e.target.value))}
         className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2" />
+      {hint && <span className="block text-xs text-slate-500 mt-1">{hint}</span>}
     </label>
   );
 }
