@@ -46,8 +46,11 @@ export default function SignalLogsPanel() {
   const [sigTotal, setSigTotal] = useState(0);
   const [sigHasMore, setSigHasMore] = useState(false);
   const filterRef = useRef<string>("all");
+  // หน้าแรกโชว์ 50 แถวพอ — ขอแค่ 50 แถวแรก (summary memo 60s ที่ backend
+  // ทำให้รอบถัดไปไว); chunk ถัดไปค่อยขอ 500 ตอนกดข้ามชุด
   const PAGE_SIZE = 50;
   const SERVER_PAGE = 500;
+  const FIRST_PAGE = 50;
 
   const loadChunk = useCallback(async (flt: string, pg: number) => {
     const offset = (pg - 1) * SERVER_PAGE;
@@ -58,7 +61,8 @@ export default function SignalLogsPanel() {
     setLoading(true);
     try {
       const f = flt ?? filterRef.current;
-      const res = await loadChunk(f, 1);
+      // รอบแรกขอแค่ 50 (FIRST_PAGE) — ไวสุด; เลขหน้ารวมมาจาก total อยู่ดี
+      const res = await api.signalLogs(FIRST_PAGE, 0, f);
       setLogs(res.logs ?? []);
       setSummary(res.summary ?? null);
       setTtlDays(res.ttl_days ?? 7);
@@ -74,7 +78,8 @@ export default function SignalLogsPanel() {
     }
   }, [loadChunk]);
 
-  // เปลี่ยน server chunk (ทุก 10 หน้า UI = 500 แถว) — ดึงชุดถัดไปจาก backend
+  // เปลี่ยน server chunk — หน้า 1 ใช้ของที่โหลดมาแล้ว (50 แถว);
+  // ข้ามไปหน้าอื่นค่อยดึง 500 แถวของชุดนั้นจาก backend
   const gotoServerPage = useCallback(async (pg: number) => {
     setLoading(true);
     try {
@@ -277,6 +282,11 @@ export default function SignalLogsPanel() {
                 </button>
                 <span className="text-xs text-slate-400">{safePage} / {totalPages}</span>
                 <button onClick={() => {
+                    // หน้า 1 มีแค่ 50 แถวแรก — กดถัดไป = ดึง chunk 500 เต็มแล้วไปหน้า 2
+                    if (shown.length <= PAGE_SIZE && safePage === 1 && sigHasMore) {
+                      gotoServerPage(1).then(() => setPage(2));
+                      return;
+                    }
                     if (chunkPage < uiPagesPerChunk && chunkPage * PAGE_SIZE < shown.length) { setPage((p) => Math.min(totalPages, p + 1)); return; }
                     if (!sigHasMore && serverPage >= serverPages) { setPage((p) => Math.min(totalPages, p + 1)); return; }
                     gotoServerPage(serverPage + 1).then(() => setPage(serverPage * uiPagesPerChunk + 1));

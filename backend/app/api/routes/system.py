@@ -16,6 +16,7 @@ Also: GET /api/system/counts → live row counts for the 5 worker tables.
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -289,6 +290,11 @@ async def quote_logs(request: Request, limit: int = 100, offset: int = 0,
 # ---------------------------------------------------------------------------
 # Signal lifecycle log — created/blocked/opened/rejected/expired/closed (7-day)
 # ---------------------------------------------------------------------------
+_SIGLOG_SUMMARY_TS: float = 0.0
+_SIGLOG_SUMMARY_TTL_S = 60.0
+_SIGLOG_SUMMARY_CACHE: dict[str, Any] = {}
+
+
 @router.get("/signal-logs")
 async def signal_logs(request: Request, limit: int = 100, offset: int = 0,
                       event: str = "all") -> dict:
@@ -317,6 +323,18 @@ async def signal_logs(request: Request, limit: int = 100, offset: int = 0,
     filters: dict[str, Any] = {}
     if event in signal_log.EVENTS:
         filters["event"] = event
+    # summary หนักสุด (count=exact หลายรอบ) — memo 60 วิฝั่ง process:
+    # summary ไม่ขึ้นกับ event/offset (นับทั้งหน้าต่าง 7 วันเหมือนกันทุก
+    # filter) จึง reuse ข้าม filter/page-turn ได้
+    global _SIGLOG_SUMMARY_TS, _SIGLOG_SUMMARY_CACHE
+    now_ts = time.monotonic()
+    if (now_ts - _SIGLOG_SUMMARY_TS < _SIGLOG_SUMMARY_TTL_S
+            and _SIGLOG_SUMMARY_CACHE):
+        summary_data: dict[str, Any] = dict(_SIGLOG_SUMMARY_CACHE)
+    else:
+        summary_data = signal_log.summary(db)
+        _SIGLOG_SUMMARY_CACHE = dict(summary_data)
+        _SIGLOG_SUMMARY_TS = now_ts
     rows = db.select(signal_log.TABLE, filters=filters, order="created_at",
                      desc=True, limit=page_size, offset=page_offset)
     out["logs"] = [
@@ -340,7 +358,7 @@ async def signal_logs(request: Request, limit: int = 100, offset: int = 0,
         }
         for r in rows
     ]
-    out["summary"] = signal_log.summary(db)
+    out["summary"] = summary_data
     out["ttl_days"] = signal_log.SIGNAL_LOG_TTL_DAYS
     out["offset"] = page_offset
     out["limit"] = page_size
