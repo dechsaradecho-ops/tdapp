@@ -43,8 +43,8 @@ function CandleChart({ candles, entry, sl, tp, current }: {
   tp: number | null;
   current: number;
 }) {
-  const W = 600, H = 260;
-  const padL = 52, padR = 70, padT = 10, padB = 18;
+  const W = 800, H = 400;
+  const padL = 56, padR = 78, padT = 10, padB = 18;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const data = candles.slice(-60);
   const n = data.length;
@@ -117,7 +117,7 @@ function CandleChart({ candles, entry, sl, tp, current }: {
 
 /**
  * Popup กราฟไม้เปิดค้าง (กดแถวในตาราง Paper) —
- * กราฟแท่งเทียน + เส้น Entry/SL/TP/ราคาปัจจุบัน + spread/buy-sell + รายละเอียดไม้
+ * กราฟแท่งเทียนใหญ่ + เส้น Entry/SL/TP/ราคาปัจจุบัน + ราคา/spread/buy-sell
  * (แพทเทิร์นเดียวกับ CloseSingleModal: fixed overlay กลางจอ, render ที่ page root)
  */
 export default function PositionChartModal({ position, onClose }: {
@@ -163,7 +163,6 @@ export default function PositionChartModal({ position, onClose }: {
   if (!position) return null;
   const p = position;
   const win = p.unrealized_pnl >= 0;
-  const digits = priceDigits(p.current_price || p.entry_price || 1);
   const bid = spread != null ? p.current_price - spread / 2 : null;
   const ask = spread != null ? p.current_price + spread / 2 : null;
   const srcLabel = p.price_source === "spot" ? "spot สด"
@@ -178,7 +177,7 @@ export default function PositionChartModal({ position, onClose }: {
       onClick={onClose}
     >
       <div
-        className="panel w-full max-w-2xl space-y-3 animate-pop max-h-[90vh] overflow-y-auto"
+        className="panel w-full max-w-4xl space-y-3 animate-pop max-h-[94vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* ---------- header ---------- */}
@@ -242,31 +241,6 @@ export default function PositionChartModal({ position, onClose }: {
           <div><p className="text-xs text-slate-500">เปิดเมื่อ</p><p className="font-bold text-xs">{p.created_at ? new Date(p.created_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-"}</p></div>
         </div>
 
-        {/* ---------- Smart Exit / รายละเอียดเพิ่มเติม ---------- */}
-        {p.exit_info && (
-          <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-300">
-            <span className="font-bold">Smart Exit {fmtNum(p.exit_info.exit_score, 0)}/100 ({p.exit_info.quality})</span>
-            <span className="text-slate-500"> · R {fmtNum(p.exit_info.r_multiple, 2)} · อายุ {fmtNum(p.exit_info.position_age_days, 1)} วัน · {p.exit_info.trigger}</span>
-            {p.exit_info.reasoning.length > 0 && (
-              <div className="mt-1 whitespace-pre-line text-slate-400">{p.exit_info.reasoning.join("\n")}</div>
-            )}
-          </div>
-        )}
-        {(p.calc_notes ?? []).length > 0 && (
-          <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
-            <p className="font-bold text-slate-300 mb-0.5">วิธีคำนวณ</p>
-            <ul className="list-disc pl-4 space-y-0.5">
-              {(p.calc_notes ?? []).map((n, i) => <li key={i}>{n}</li>)}
-            </ul>
-          </div>
-        )}
-        {(p.initial_stop_loss != null || p.initial_take_profit != null) && (
-          <p className="text-xs text-slate-500">
-            SL เริ่ม {fmtP(p.initial_stop_loss)} → ปัจจุบัน {fmtP(p.stop_loss)}
-            {p.sl_move_reason ? ` (${p.sl_move_reason})` : ""} · TP เริ่ม {fmtP(p.initial_take_profit)} → ปัจจุบัน {fmtP(p.take_profit)}
-            {p.tp_move_reason ? ` (${p.tp_move_reason})` : ""}
-          </p>
-        )}
         <p className="text-[11px] text-slate-600 text-center">แตะนอกกรอบเพื่อปิด · ราคา bid/ask = mid ± spread/2</p>
       </div>
     </div>
