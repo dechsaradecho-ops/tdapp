@@ -16,22 +16,17 @@ function priceDigits(p: number): number {
 
 /** กราฟแท่งเทียน SVG (วาดเอง — ไม่เพิ่ม dependency):
  *  แท่ง daily ~60 แท่ง + เส้น Entry/SL/TP/ราคาปัจจุบัน */
-function CandleChart({ candles, entry, sl, tp, current, portrait }: {
+function CandleChart({ candles, entry, sl, tp, current }: {
   candles: MarketCandle[];
   entry: number;
   sl: number | null;
   tp: number | null;
   current: number;
-  portrait?: boolean;
 }) {
-  // มือถือ: viewBox แนวตั้ง (แคบ+สูง) + แท่งน้อยลง → ตัวหนังสือไม่หดตาม scale
-  const W = portrait ? 480 : 900, H = portrait ? 640 : 560;
-  const padL = portrait ? 112 : 78, padR = portrait ? 176 : 140;
-  const padT = portrait ? 38 : 26, padB = portrait ? 32 : 26;
-  const fontTick = portrait ? 24 : 17, fontLevel = portrait ? 22 : 17;
-  const fontCap = portrait ? 16 : 14;
+  const W = 900, H = 540;
+  const padL = 72, padR = 112, padT = 12, padB = 22;
   const plotW = W - padL - padR, plotH = H - padT - padB;
-  const data = candles.slice(portrait ? -30 : -60);
+  const data = candles.slice(-60);
   const n = data.length;
   if (n === 0) return null;
 
@@ -65,8 +60,8 @@ function CandleChart({ candles, entry, sl, tp, current, portrait }: {
       {ticks.map((t, i) => (
         <g key={i}>
           <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)}
-            stroke="#334155" strokeOpacity={0.5} strokeWidth={portrait ? 1.6 : 1} />
-          <text x={padL - 8} y={y(t) + 6} textAnchor="end" fontSize={fontTick}
+            stroke="#334155" strokeOpacity={0.5} strokeWidth={1} />
+          <text x={padL - 6} y={y(t) + 5} textAnchor="end" fontSize={14}
             fill="#94a3b8">{fmtNum(t, digits)}</text>
         </g>
       ))}
@@ -79,7 +74,7 @@ function CandleChart({ candles, entry, sl, tp, current, portrait }: {
         return (
           <g key={i}>
             <line x1={x(i)} x2={x(i)} y1={y(c.h)} y2={y(c.l)}
-              stroke={color} strokeWidth={portrait ? 2 : 1.2} />
+              stroke={color} strokeWidth={1.2} />
             <rect x={x(i) - bw / 2} y={top} width={bw} height={hgt}
               fill={color} fillOpacity={up ? 0.9 : 1} />
           </g>
@@ -88,12 +83,12 @@ function CandleChart({ candles, entry, sl, tp, current, portrait }: {
       {levels.map((l, i) => (
         <g key={i}>
           <line x1={padL} x2={W - padR} y1={y(l.v)} y2={y(l.v)}
-            stroke={l.color} strokeWidth={portrait ? 2.6 : 2} strokeDasharray={l.dash || undefined} />
-          <text x={W - padR + 8} y={y(l.v) + 6} fontSize={fontLevel} fontWeight={700}
+            stroke={l.color} strokeWidth={2} strokeDasharray={l.dash || undefined} />
+          <text x={W - padR + 6} y={y(l.v) + 5} fontSize={14} fontWeight={700}
             fill={l.color}>{l.label} {fmtNum(l.v, digits)}</text>
         </g>
       ))}
-      <text x={padL} y={H - 6} fontSize={fontCap} fill="#94a3b8">
+      <text x={padL} y={H - 5} fontSize={12} fill="#94a3b8">
         Daily · {n} แท่งย้อนหลัง (Yahoo/สำรอง)
       </text>
     </svg>
@@ -111,16 +106,6 @@ export default function PositionChartModal({ position, onClose }: {
 }) {
   const [candles, setCandles] = useState<MarketCandle[] | null>(null);
   const [candleErr, setCandleErr] = useState("");
-  const [portrait, setPortrait] = useState(false);
-
-  // จอแคบ (<640px) = portrait chart: viewBox แนวตั้ง + แค่ 30 แท่ง
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 639px)");
-    const sync = () => setPortrait(mq.matches);
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
 
   useEffect(() => {
     if (!position) return;
@@ -149,18 +134,18 @@ export default function PositionChartModal({ position, onClose }: {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex sm:items-center sm:justify-center sm:p-4 animate-fade"
+      className="fixed inset-0 z-50 flex justify-center sm:items-center p-0 sm:p-4 animate-fade"
       style={{ background: "rgba(0,0,0,0.7)", WebkitBackdropFilter: "blur(16px) saturate(140%)", backdropFilter: "blur(16px) saturate(140%)" }}
       onClick={onClose}
     >
       <div
-        className="panel w-full sm:max-w-5xl h-full sm:h-auto max-h-full sm:max-h-[96vh] space-y-2 animate-pop overflow-y-auto !rounded-none sm:!rounded-2xl !border-0 sm:!border"
-        style={{ padding: "0.75rem", paddingTop: "max(0.75rem, env(safe-area-inset-top, 0px))", paddingBottom: "max(0.75rem, env(safe-area-inset-bottom, 0px))" }}
+        className="panel w-full max-w-none sm:max-w-5xl h-[100dvh] sm:h-auto max-h-[100dvh] sm:max-h-[96vh] space-y-2 animate-pop overflow-y-auto !rounded-none sm:!rounded-2xl"
+        style={{ paddingTop: "max(1rem, env(safe-area-inset-top, 0px))", paddingBottom: "max(1rem, env(safe-area-inset-bottom, 0px))" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* ---------- header ---------- */}
         <div className="flex items-center justify-between">
-          <h3 className="panel-title flex items-center gap-1.5 !text-base sm:!text-sm">
+          <h3 className="panel-title flex items-center gap-1.5">
             <Icon n="chart" size={16} className="text-accent" />
             {p.asset} · {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"} · {fmtNum(p.volume, 2)} lots
           </h3>
@@ -172,7 +157,7 @@ export default function PositionChartModal({ position, onClose }: {
 
         {/* ---------- PnL headline ---------- */}
         <div className={`rounded-lg p-3 text-center ${win ? "bg-profit/10" : "bg-loss/10"}`}>
-          <p className={`text-3xl sm:text-2xl font-bold ${win ? "text-profit" : "text-loss"}`}>
+          <p className={`text-2xl font-bold ${win ? "text-profit" : "text-loss"}`}>
             {win ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
           </p>
           <p className="text-xs text-slate-500 mt-0.5">
@@ -190,9 +175,8 @@ export default function PositionChartModal({ position, onClose }: {
           {candles !== null && candles.length > 0 && (
             <>
               <CandleChart candles={candles} entry={p.entry_price}
-                sl={p.stop_loss} tp={p.take_profit} current={p.current_price}
-                portrait={portrait} />
-              <div className="flex flex-wrap gap-x-4 gap-y-1 px-1 pb-1 text-base sm:text-sm text-slate-300">
+                sl={p.stop_loss} tp={p.take_profit} current={p.current_price} />
+              <div className="flex flex-wrap gap-x-4 gap-y-1 px-1 pb-1 text-sm text-slate-300">
                 <span><span className="text-[#38bdf8] font-bold">—</span> Entry</span>
                 <span><span className="text-loss font-bold">- -</span> SL</span>
                 <span><span className="text-profit font-bold">- -</span> TP</span>
