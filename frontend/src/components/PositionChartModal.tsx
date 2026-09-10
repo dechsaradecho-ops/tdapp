@@ -23,8 +23,8 @@ function CandleChart({ candles, entry, sl, tp, current }: {
   tp: number | null;
   current: number;
 }) {
-  const W = 900, H = 540;
-  const padL = 72, padR = 112, padT = 12, padB = 22;
+  const W = 900, H = 700;
+  const padL = 72, padR = 112, padT = 26, padB = 26;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const data = candles.slice(-60);
   const n = data.length;
@@ -133,27 +133,23 @@ export default function PositionChartModal({ position, onClose }: {
   const win = p.unrealized_pnl >= 0;
 
   return (
+    // โครงเดียวกับ ChatWidget: มือถือเต็มจอ, เดสก์ท็อปกล่องลอยขวาล่าง
+    // (กว้างกว่ากล่องแชทเพื่อใส่กราฟแท่งเทียน)
     <div
-      className="fixed inset-0 z-50 flex justify-center sm:items-center p-0 sm:p-4 animate-fade"
-      style={{ background: "rgba(0,0,0,0.7)", WebkitBackdropFilter: "blur(16px) saturate(140%)", backdropFilter: "blur(16px) saturate(140%)" }}
-      onClick={onClose}
+      className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:h-[600px] sm:max-h-[78vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop"
     >
-      <div
-        className="panel w-full max-w-none sm:max-w-5xl h-[100dvh] sm:h-auto max-h-[100dvh] sm:max-h-[96vh] space-y-2 animate-pop overflow-y-auto !rounded-none sm:!rounded-2xl"
-        style={{ paddingTop: "max(1rem, env(safe-area-inset-top, 0px))", paddingBottom: "max(1rem, env(safe-area-inset-bottom, 0px))" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* ---------- header ---------- */}
-        <div className="flex items-center justify-between">
-          <h3 className="panel-title flex items-center gap-1.5">
-            <Icon n="chart" size={16} className="text-accent" />
-            {p.asset} · {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"} · {fmtNum(p.volume, 2)} lots
-          </h3>
-          <button onClick={onClose} aria-label="ปิดหน้าต่าง"
-            className="text-slate-400 hover:text-accent text-lg leading-none min-h-[44px] min-w-[44px]">
-            ✕
-          </button>
-        </div>
+      {/* ---------- header (แบบเดียวกับกล่อง AI chat) ---------- */}
+      <div className="flex items-center justify-between pb-2 border-b border-white/10">
+        <p className="text-sm font-semibold flex items-center gap-1.5">
+          <Icon n="chart" size={15} />
+          {p.asset} · {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"} · {fmtNum(p.volume, 2)} lots
+        </p>
+        <button onClick={onClose}
+          className="w-11 h-11 -mr-2 flex items-center justify-center text-slate-500 hover:text-slate-300 text-lg leading-none active:bg-white/10 rounded-lg"
+          aria-label="ปิดหน้าต่าง">✕</button>
+      </div>
+
+      <div className="flex-1 space-y-2 overflow-y-auto py-3">
 
         {/* ---------- PnL headline ---------- */}
         <div className={`rounded-lg p-3 text-center ${win ? "bg-profit/10" : "bg-loss/10"}`}>
@@ -190,9 +186,6 @@ export default function PositionChartModal({ position, onClose }: {
             </p>
           )}
         </div>
-
-        {/* มือถือเต็มจอ = ไม่มีนอกกรอบให้แตะ → ซ่อนคำใบ้นี้, ใช้ปุ่ม ✕ แทน */}
-        <p className="hidden sm:block text-[11px] text-slate-600 text-center">แตะนอกกรอบเพื่อปิด</p>
       </div>
     </div>
   );
