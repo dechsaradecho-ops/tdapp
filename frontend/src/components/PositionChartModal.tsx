@@ -55,7 +55,8 @@ function CandleChart({ candles, entry, sl, tp, current }: {
   const ticks = [0, 1, 2, 3].map((i) => lo + ((hi - lo) * i) / 3);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" role="img"
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded-lg" role="img"
+      style={{ background: "#05070d" }}
       aria-label={`กราฟแท่งเทียน ${n} แท่ง`}>
       {ticks.map((t, i) => (
         <g key={i}>
@@ -133,14 +134,15 @@ export default function PositionChartModal({ position, onClose }: {
   const win = p.unrealized_pnl >= 0;
 
   return (
-    // มือถือ: เต็มจอ (เหมือนกล่อง AI chat) — เดสก์ท็อป: modal กลางจอ
-    // (overlay มีเฉพาะ sm+; มือถือจอเล็กปิดด้วยปุ่ม ✕)
-    <div className="fixed inset-0 z-50 sm:flex sm:items-center sm:justify-center sm:p-4 animate-fade"
-      style={{ background: "rgba(0,0,0,0.7)" }}
+    // โครงเดียวกับกล่อง AI chat (panel แก้วฝ้า): มือถือเต็มจอ —
+    // เดสก์ท็อปกล่องลอยกลางจอ (overlay ดำจาง + blur);
+    // ทึบเฉพาะตัวกราฟ SVG (พื้น #05070d) ไม่แตะ popup
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 animate-fade"
+      style={{ background: "rgba(0,0,0,0.7)", WebkitBackdropFilter: "blur(16px) saturate(140%)", backdropFilter: "blur(16px) saturate(140%)" }}
       onClick={onClose}
     >
     <div
-      className="panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop w-full h-full sm:h-auto sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:max-h-[92vh]"
+      className="panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop w-full h-[100dvh] sm:h-auto sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:max-h-[92vh] overflow-y-auto"
       onClick={(e) => e.stopPropagation()}
     >
       {/* ---------- header (แบบเดียวกับกล่อง AI chat) ---------- */}
@@ -166,8 +168,8 @@ export default function PositionChartModal({ position, onClose }: {
           </p>
         </div>
 
-        {/* ---------- กราฟเต็ม popup (พื้นทึบ — ไม่ให้เห็น aurora ลอด) ---------- */}
-        <div className="rounded-xl border border-white/10 bg-[#05070d] p-1 sm:p-2">
+        {/* ---------- กราฟเต็ม popup ---------- */}
+        <div className="rounded-xl border border-white/10 bg-black/30 p-1 sm:p-2">
           {candles === null && (
             <div className="flex items-center justify-center gap-2 py-16 text-slate-400 text-sm">
               <Icon n="spinner" size={16} className="animate-spin" /> กำลังโหลดกราฟ…
