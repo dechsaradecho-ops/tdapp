@@ -309,6 +309,52 @@ async def signal_logs(request: Request, limit: int = 100) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# News analysis history — worker #2 output (headline + AI sentiment per event)
+# ---------------------------------------------------------------------------
+@router.get("/news-logs")
+async def news_logs(request: Request, limit: int = 100) -> dict:
+    """Recent news-analysis rows for the Logs page news tab.
+
+    Each row = one worker cycle: event type, AI sentiment (-1..+1),
+    affected assets, Thai analysis (+ real headline when the feed works)
+    and confidence. Read-only over the existing news_analysis table —
+    no new table or migration needed. Never raises.
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    rows = db.select("news_analysis", order="created_at", desc=True,
+                     limit=max(1, min(limit, 500)))
+    logs = [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "event": r.get("event"),
+            "sentiment": r.get("sentiment"),
+            "affected_assets": r.get("affected_assets") or [],
+            "analysis": r.get("analysis"),
+            "confidence": r.get("confidence"),
+        }
+        for r in rows
+    ]
+    by_event: dict[str, int] = {}
+    for r in rows:
+        ev = str(r.get("event") or "?")
+        by_event[ev] = by_event.get(ev, 0) + 1
+    real = sum(1 for r in rows
+               if r.get("analysis") and "heuristic" not in str(r.get("analysis")))
+    out["logs"] = logs
+    out["summary"] = {"total": len(rows), "by_event": by_event,
+                      "real": real, "heuristic": len(rows) - real}
+    out["verdict"] = "ok"
+    return out
+
+
 @router.post("/quote-test")
 async def quote_test(request: Request) -> dict:
     """Force-fetch live prices for ALL assets (bypasses the 30s cache).

@@ -6,6 +6,8 @@ import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
 import LoadingGraphic from "@/components/LoadingGraphic";
 import {
+  NewsLog,
+  NewsLogsResponse,
   QuoteApiLog,
   QuoteLogSummary,
   QuoteTestResult,
@@ -34,8 +36,11 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
+  const [tab, setTab] = useState<"quotes" | "news">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
+  const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
+  const [newsSummary, setNewsSummary] = useState<NewsLogsResponse["summary"] | null>(null);
   const [ttlDays, setTtlDays] = useState(7);
   const [err, setErr] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
@@ -50,10 +55,12 @@ export default function LogsPage() {
     setLoading(true);
     try {
       // API caps limit at 500 — มากสุดที่ดึงได้ต่อครั้ง
-      const res = await api.quoteLogs(500);
-      setLogs(res.logs ?? []);
-      setSummary(res.summary ?? null);
-      setTtlDays(res.ttl_days ?? 7);
+      const [qres, nres] = await Promise.all([api.quoteLogs(500), api.newsLogs(200)]);
+      setLogs(qres.logs ?? []);
+      setSummary(qres.summary ?? null);
+      setTtlDays(qres.ttl_days ?? 7);
+      setNewsLogs(nres.logs ?? []);
+      setNewsSummary(nres.summary ?? null);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       setPage(1);
@@ -91,15 +98,20 @@ export default function LogsPage() {
   const totalPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pageRows = shown.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const newsTotalPages = Math.max(1, Math.ceil(newsLogs.length / PAGE_SIZE));
+  const newsSafePage = Math.min(page, newsTotalPages);
+  const newsPageRows = newsLogs.slice((newsSafePage - 1) * PAGE_SIZE, newsSafePage * PAGE_SIZE);
 
   return (
     <div className="space-y-4">
       {/* ---------- Header + test button ---------- */}
       <section className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold flex items-center gap-2"><Icon n="scroll" size={19} /> Quote API Logs</h2>
+          <h2 className="text-xl font-bold flex items-center gap-2"><Icon n="scroll" size={19} /> Logs</h2>
           <p className="text-xs text-slate-500">
-            บันทึกการดึงราคาทุกครั้งจาก API ภายนอก — เก็บ {ttlDays} วัน ลบเกินอายุอัตโนมัติ
+            {tab === "quotes"
+              ? `บันทึกการดึงราคาทุกครั้งจาก API ภายนอก — เก็บ ${ttlDays} วัน ลบเกินอายุอัตโนมัติ`
+              : "ประวัติการวิเคราะห์ข่าว (worker ทุก 15 นาที) — พาดหัวจริง + sentiment จาก AI"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
@@ -121,6 +133,20 @@ export default function LogsPage() {
           </button>
         </div>
       </section>
+
+      {/* ---------- Tabs: quotes / news ---------- */}
+      <div className="flex gap-2 text-xs">
+        <button
+          onClick={() => { setTab("quotes"); setPage(1); }}
+          className={`px-3 py-1 rounded ${tab === "quotes" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          ราคา (Quote API)
+        </button>
+        <button
+          onClick={() => { setTab("news"); setPage(1); }}
+          className={`px-3 py-1 rounded ${tab === "news" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          ข่าว (News{newsSummary ? ` ${newsSummary.total}` : ""})
+        </button>
+      </div>
 
       {err && <p className="text-loss text-sm">{err}</p>}
 
@@ -151,6 +177,7 @@ export default function LogsPage() {
       )}
 
       {/* ---------- Summary card: forex vs gold ---------- */}
+      {tab === "quotes" && (
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <BucketCard label="ยิงทั้งหมด (7 วัน)" bucket={summary} />
         <BucketCard label="Forex" bucket={summary?.forex} />
@@ -165,9 +192,31 @@ export default function LogsPage() {
           <p className="text-xs text-slate-500 mt-1">success / error</p>
         </div>
       </section>
+      )}
+
+      {/* ---------- News summary ---------- */}
+      {tab === "news" && newsSummary && (
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="panel">
+          <p className="text-xs text-slate-500">วิเคราะห์ทั้งหมด</p>
+          <p className="text-2xl font-bold">{newsSummary.total}</p>
+          <p className="text-xs mt-1">
+            <span className="text-emerald-400">พาดหัวจริง {newsSummary.real}</span>
+            {"  "}
+            <span className="text-amber-400">heuristic {newsSummary.heuristic}</span>
+          </p>
+        </div>
+        {Object.entries(newsSummary.by_event).map(([ev, n]) => (
+          <div key={ev} className="panel">
+            <p className="text-xs text-slate-500">{ev}</p>
+            <p className="text-2xl font-bold">{n}</p>
+          </div>
+        ))}
+      </section>
+      )}
 
       {/* ---------- Provider breakdown ---------- */}
-      {summary && Object.keys(summary.by_provider).length > 0 && (
+      {tab === "quotes" && summary && Object.keys(summary.by_provider).length > 0 && (
         <section className="panel">
           <p className="text-xs text-slate-500 mb-2">แยกตาม Provider</p>
           <div className="flex flex-wrap gap-2 text-xs">
@@ -185,6 +234,7 @@ export default function LogsPage() {
       {/* ---------- Filter + log table ---------- */}
       {/* หมายเหตุ: overflow-x-auto ต้องอยู่ div ลูก ไม่ใช่บน .panel — backdrop-filter
           บนตัว scroll container เองจะพังใน Chromium (blur หายเมื่อตารางโหลด/เลื่อน) */}
+      {tab === "quotes" && (
       <section className="panel">
         <div className="overflow-x-auto">
         <div className="flex gap-2 mb-3 text-xs">
@@ -275,6 +325,93 @@ export default function LogsPage() {
           </div>
         )}
       </section>
+      )}
+
+      {/* ---------- News history table ---------- */}
+      {tab === "news" && (
+      <section className="panel">
+        <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">เวลา</th>
+              <th className="py-2 pr-3">Event</th>
+              <th className="py-2 pr-3">Sentiment</th>
+              <th className="py-2 pr-3">สินทรัพย์</th>
+              <th className="py-2 pr-3">ความมั่นใจ</th>
+              <th className="py-2 pr-3">ที่มา</th>
+              <th className="py-2">บทวิเคราะห์</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && newsLogs.length === 0 && (
+              <tr><td colSpan={7} className="py-6">
+                <LoadingGraphic message="กำลังโหลดประวัติข่าว — Render cold start อาจใช้เวลาสักครู่" compact />
+              </td></tr>
+            )}
+            {!loading && newsLogs.length === 0 && (
+              <tr><td colSpan={7} className="py-6 text-center text-slate-500">
+                ยังไม่มีประวัติข่าว
+              </td></tr>
+            )}
+            {newsPageRows.map((n) => {
+              const isHeuristic = !n.analysis || n.analysis.includes("heuristic");
+              const s = n.sentiment ?? 0;
+              return (
+              <tr key={n.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
+                  {n.created_at ? new Date(n.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
+                </td>
+                <td className="py-2 pr-3 font-bold whitespace-nowrap">{n.event}</td>
+                <td className="py-2 pr-3 whitespace-nowrap">
+                  <span className={s > 0.2 ? "text-emerald-400" : s < -0.2 ? "text-red-400" : "text-slate-400"}>
+                    {s > 0 ? `+${s.toFixed(2)}` : s.toFixed(2)}
+                  </span>
+                </td>
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-300">
+                  {(n.affected_assets ?? []).join(", ") || "—"}
+                </td>
+                <td className="py-2 pr-3 text-slate-300">
+                  {n.confidence != null ? `${Number(n.confidence).toFixed(0)}%` : "—"}
+                </td>
+                <td className="py-2 pr-3 whitespace-nowrap">
+                  <span className={`px-2 py-0.5 rounded ${isHeuristic ? "bg-amber-500/15 text-amber-400" : "bg-emerald-500/15 text-emerald-400"}`}>
+                    {isHeuristic ? "heuristic" : "พาดหัวจริง"}
+                  </span>
+                </td>
+                <td className="py-2 max-w-[420px] text-slate-300" style={{ whiteSpace: "pre-wrap" }}>
+                  {n.analysis || "—"}
+                </td>
+              </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        </div>
+        {newsLogs.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {newsSafePage}/{newsTotalPages} · แสดง {newsPageRows.length} จาก {newsLogs.length} รายการ
+            </p>
+            {newsTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={newsSafePage <= 1}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{newsSafePage} / {newsTotalPages}</span>
+                <button onClick={() => setPage((p) => Math.min(newsTotalPages, p + 1))}
+                  disabled={newsSafePage >= newsTotalPages}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      )}
     </div>
   );
 }

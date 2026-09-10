@@ -16,6 +16,7 @@ import {
   KillSwitch,
   MarketSummary,
   MonitorSnapshot,
+  NewsLogsResponse,
   NewsRisk,
   OrderPlan,
   PaperTrading,
@@ -224,6 +225,10 @@ export const api = {
   quoteLogs: (limit = 100) =>
     get<QuoteLogsResponse>(`/api/system/quote-logs?limit=${limit}`),
   quoteTest: () => post<QuoteTestResult>("/api/system/quote-test", {}),
+
+  // ---------- News analysis history (worker #2 output) ----------
+  newsLogs: (limit = 100) =>
+    get<NewsLogsResponse>(`/api/system/news-logs?limit=${limit}`),
 
   // ---------- Signal lifecycle log (7-day auto-expiry) ----------
   signalLogs: (limit = 100) =>

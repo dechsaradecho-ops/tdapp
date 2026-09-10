@@ -178,6 +178,30 @@ export interface QuoteTestResult {
   error?: string;
 }
 
+// ---------- News analysis history (worker #2 output) ----------
+export interface NewsLog {
+  id: string;
+  created_at: string | null;
+  event: string;
+  sentiment: number | null;
+  affected_assets: string[];
+  analysis: string | null;
+  confidence: number | null;
+}
+
+export interface NewsLogsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  logs: NewsLog[];
+  summary: {
+    total: number;
+    by_event: Record<string, number>;
+    real: number;
+    heuristic: number;
+  };
+}
+
 export interface MarketSummary {
   regime: string;
   confidence: number;
