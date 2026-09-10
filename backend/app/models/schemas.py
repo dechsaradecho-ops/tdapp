@@ -322,6 +322,109 @@ TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
 }
 
 
+# ---------- Full risk presets (Settings → Risk Profile) ---------------------
+# TRADE_LIMITS_TABLE above covers only 4 frequency fields — the Settings page
+# has since grown 30+ risk-related knobs (signal gates, position management,
+# Smart Exit, kill switch, news, correlation) that the profile dropdown never
+# touched, so switching profile changed almost nothing. RISK_PRESETS is the
+# single source of truth: every field the profile owns, per level.
+#
+# Owns (34 fields): frequency ×4, signal gates ×7, position mgmt ×5,
+# Smart Exit ×10, kill/risk/news/correlation ×8.
+# Deliberately EXCLUDED (user identity, not risk appetite): capital,
+# min_confidence_gold / min_lot_gold overrides, min_lot floor, paper_spread /
+# spread_overrides, order_mode, default_equity / paper_virtual_capital,
+# backtest_*, monitor/signals_refresh_sec, notify_*, allowed_assets.
+# The moderate preset is byte-identical to AppSettings field defaults so an
+# empty row keeps behaving exactly like today (locked by test_settings.py).
+RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
+    RiskProfile.conservative: {
+        # frequency — fewer, smaller bets
+        "max_trades_daily": 3, "max_trades_weekly": 15,
+        "max_open_positions": 2, "risk_per_trade_pct": 0.5,
+        # signal gates — demand higher quality, gold breakout only
+        "min_confidence": 75.0, "min_opportunity": 65.0,
+        "gold_breakout_only": True, "sl_distance_mode": "medium",
+        "rr_target": 1.5, "sl_distance_min_pct": 0.0,
+        "sl_distance_max_pct": 0.0,
+        # position mgmt — protect early, hold briefly
+        "breakeven_trigger_r": 0.8, "trail_atr_mult": 1.5,
+        "partial_close_pct": 50.0, "partial_trigger_r": 1.0,
+        "max_hold_days": 3,
+        # smart exit — exit weak holds fast, guard winners tightly
+        "smart_exit_enabled": True, "exit_score_close": 55.0,
+        "profit_protect_r": 1.5, "reversal_opp_min": 55.0,
+        "news_exit_enabled": True, "news_exit_min_r": 0.5,
+        "volatility_exit_atr": 2.0, "no_behind_min_r": 0.3,
+        "no_behind_hold_mult": 3.0, "trailing_ladder": True,
+        # kill / risk / news / correlation — tight leash
+        "max_drawdown_pct": 8.0, "kill_daily_loss_pct": 1.5,
+        "kill_weekly_loss_pct": 4.0, "kill_monthly_loss_pct": 6.0,
+        "drawdown_throttle_pct": 3.0, "correlation_cap": 70.0,
+        "news_block_minutes": 45, "news_caution_minutes": 180,
+    },
+    RiskProfile.moderate: {
+        "max_trades_daily": 6, "max_trades_weekly": 30,
+        "max_open_positions": 4, "risk_per_trade_pct": 1.0,
+        "min_confidence": 70.0, "min_opportunity": 60.0,
+        "gold_breakout_only": True, "sl_distance_mode": "medium",
+        "rr_target": 2.0, "sl_distance_min_pct": 0.0,
+        "sl_distance_max_pct": 0.0,
+        "breakeven_trigger_r": 1.0, "trail_atr_mult": 2.0,
+        "partial_close_pct": 0.0, "partial_trigger_r": 1.0,
+        "max_hold_days": 5,
+        "smart_exit_enabled": True, "exit_score_close": 45.0,
+        "profit_protect_r": 2.0, "reversal_opp_min": 50.0,
+        "news_exit_enabled": True, "news_exit_min_r": 1.0,
+        "volatility_exit_atr": 2.5, "no_behind_min_r": 0.5,
+        "no_behind_hold_mult": 5.0, "trailing_ladder": True,
+        "max_drawdown_pct": 10.0, "kill_daily_loss_pct": 2.0,
+        "kill_weekly_loss_pct": 5.0, "kill_monthly_loss_pct": 8.0,
+        "drawdown_throttle_pct": 5.0, "correlation_cap": 80.0,
+        "news_block_minutes": 30, "news_caution_minutes": 120,
+    },
+    RiskProfile.aggressive: {
+        # frequency — more, bigger bets
+        "max_trades_daily": 10, "max_trades_weekly": 50,
+        "max_open_positions": 8, "risk_per_trade_pct": 2.0,
+        # signal gates — accept lower quality, gold trades every setup
+        "min_confidence": 65.0, "min_opportunity": 55.0,
+        "gold_breakout_only": False, "sl_distance_mode": "long",
+        "rr_target": 3.0, "sl_distance_min_pct": 0.0,
+        "sl_distance_max_pct": 0.0,
+        # position mgmt — let winners run, hold longer
+        "breakeven_trigger_r": 1.5, "trail_atr_mult": 3.0,
+        "partial_close_pct": 0.0, "partial_trigger_r": 2.0,
+        "max_hold_days": 10,
+        # smart exit — tolerate weak holds, exit only when clearly bad
+        "smart_exit_enabled": True, "exit_score_close": 35.0,
+        "profit_protect_r": 3.0, "reversal_opp_min": 40.0,
+        "news_exit_enabled": True, "news_exit_min_r": 2.0,
+        "volatility_exit_atr": 3.5, "no_behind_min_r": 0.2,
+        "no_behind_hold_mult": 8.0, "trailing_ladder": True,
+        # kill / risk / news / correlation — loose leash
+        "max_drawdown_pct": 15.0, "kill_daily_loss_pct": 3.0,
+        "kill_weekly_loss_pct": 7.0, "kill_monthly_loss_pct": 12.0,
+        "drawdown_throttle_pct": 7.0, "correlation_cap": 90.0,
+        "news_block_minutes": 15, "news_caution_minutes": 60,
+    },
+}
+
+#: Fields owned by the risk preset (everything in RISK_PRESETS).
+RISK_PRESET_FIELDS: tuple[str, ...] = tuple(RISK_PRESETS[RiskProfile.moderate].keys())
+
+
+def apply_risk_preset(settings: "AppSettings",
+                      profile: RiskProfile) -> "AppSettings":
+    """Return a copy of `settings` with every preset-owned field set from
+    RISK_PRESETS[profile] (plus risk_profile itself). Non-owned fields
+    (capital, lots, spreads, universe, UI prefs, notifications) pass through
+    untouched so a preset switch never wipes user identity."""
+    patch = dict(RISK_PRESETS[profile])
+    patch["risk_profile"] = profile
+    return AppSettings.model_validate({**settings.model_dump(), **patch})
+
+
 class FrequencyDecision(BaseModel):
     allowed: bool
     reason: str

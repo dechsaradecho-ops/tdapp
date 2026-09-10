@@ -189,6 +189,11 @@ export const api = {
 
   resetSettings: () => post<SettingsSaveResult>("/api/settings/reset", {}),
 
+  riskPresets: () => get<Record<string, Record<string, number | string | boolean>>>("/api/settings/presets"),
+
+  applyRiskPreset: (profile: string) =>
+    post<SettingsSaveResult>(`/api/settings/preset/${profile}`, {}),
+
   // ---------- Execution switch (Phase 1) ----------
   getTradingPause: () => get<PauseStatus>("/api/trading/pause"),
   setTradingPause: (paused: boolean, reason = "") =>

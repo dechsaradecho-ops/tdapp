@@ -623,3 +623,86 @@ async def test_put_settings_missing_column_get_falls_back_cleanly():
     assert body["min_confidence_gold"] == 65
     # missing column → schema default on GET
     assert body["sl_distance_max_pct"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Full risk presets — profile owns 34 risk fields, not just 4 frequency ones
+# ---------------------------------------------------------------------------
+def test_risk_presets_moderate_matches_defaults():
+    """moderate preset must be byte-identical to AppSettings field defaults
+    (otherwise switching profile silently drifts an untouched row)."""
+    from app.models.schemas import RISK_PRESETS, RISK_PRESET_FIELDS, RiskProfile
+    assert set(RISK_PRESETS.keys()) == {
+        RiskProfile.conservative, RiskProfile.moderate, RiskProfile.aggressive}
+    defaults = AppSettings()
+    for field, value in RISK_PRESETS[RiskProfile.moderate].items():
+        assert getattr(defaults, field) == value, field
+    # no default field the preset forgot (except deliberately excluded identity)
+    excluded = {"capital", "min_confidence_gold", "min_lot",
+                "min_lot_gold", "paper_spread", "spread_overrides", "order_mode",
+                "default_equity", "paper_virtual_capital", "backtest_days",
+                "backtest_indicator", "backtest_asset", "monitor_refresh_sec",
+                "signals_refresh_sec", "notify_trade_opened", "notify_trade_closed",
+                "notify_stop_loss", "notify_risk_warning", "notify_daily_digest",
+                "notify_daily_summary", "allowed_assets"}
+    assert set(RISK_PRESET_FIELDS) | excluded == set(
+        AppSettings.model_fields.keys()) - {"risk_profile"}, \
+        set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded
+
+
+def test_apply_risk_preset_only_touches_owned_fields():
+    """Preset switch changes the 34 owned fields, keeps user identity."""
+    from app.models.schemas import RISK_PRESET_FIELDS, apply_risk_preset
+    base = AppSettings(capital=50_000, min_lot=0.05,
+                       allowed_assets=["EURUSD"],
+                       notify_trade_opened=False)
+    out = apply_risk_preset(base, RiskProfile.aggressive)
+    assert out.risk_profile == RiskProfile.aggressive
+    assert out.max_trades_daily == 10 and out.risk_per_trade_pct == 2.0
+    assert out.min_confidence == 65.0 and out.gold_breakout_only is False
+    assert out.exit_score_close == 35.0 and out.kill_daily_loss_pct == 3.0
+    # identity survives
+    assert out.capital == 50_000 and out.min_lot == 0.05
+    assert out.allowed_assets == ["EURUSD"]
+    assert out.notify_trade_opened is False
+    assert len(RISK_PRESET_FIELDS) == 34
+
+
+def test_apply_risk_preset_conservative_is_tighter_than_aggressive():
+    from app.models.schemas import RISK_PRESETS, RiskProfile
+    con = RISK_PRESETS[RiskProfile.conservative]
+    agg = RISK_PRESETS[RiskProfile.aggressive]
+    assert con["risk_per_trade_pct"] < agg["risk_per_trade_pct"]
+    assert con["min_confidence"] > agg["min_confidence"]
+    assert con["kill_daily_loss_pct"] < agg["kill_daily_loss_pct"]
+    assert con["exit_score_close"] > agg["exit_score_close"]
+
+
+@pytest.mark.asyncio
+async def test_get_presets_returns_all_three_levels():
+    set_state(SettingsDatabase(None))
+    res = await call("GET", "/api/settings/presets")
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body.keys()) == {"conservative", "moderate", "aggressive"}
+    assert body["moderate"]["max_trades_daily"] == 6
+    assert body["conservative"]["risk_per_trade_pct"] == 0.5
+    assert body["aggressive"]["risk_per_trade_pct"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_post_preset_applies_and_keeps_identity():
+    row = AppSettings(capital=50_000, min_lot=0.05,
+                      notify_trade_opened=False).model_dump(mode="json")
+    set_state(SettingsDatabase(row))
+    res = await call("POST", "/api/settings/preset/conservative", {})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["risk_profile"] == "conservative"
+    assert body["settings"]["max_trades_daily"] == 3
+    assert body["settings"]["min_confidence"] == 75.0
+    # identity survives the preset switch
+    assert body["settings"]["capital"] == 50_000
+    assert body["settings"]["min_lot"] == 0.05
+    assert body["settings"]["notify_trade_opened"] is False

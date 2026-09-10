@@ -12,7 +12,10 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
-from app.models.schemas import AppSettings, SettingsSaveResult
+from app.models.schemas import (
+    AppSettings, RiskProfile, RISK_PRESETS, SettingsSaveResult,
+    apply_risk_preset,
+)
 
 log = logging.getLogger("settings")
 
@@ -159,3 +162,45 @@ def reset_settings(request: Request) -> SettingsSaveResult:
     except Exception as exc:
         log.error("reset app_settings failed: %s", exc)
     return SettingsSaveResult(ok=True, settings=AppSettings(), message="reset to defaults")
+
+
+@router.get("/presets", response_model=dict[str, dict[str, object]])
+def get_risk_presets() -> dict[str, dict[str, object]]:
+    """GET /api/settings/presets — full risk preset table (read-only preview).
+
+    The Settings page uses this to show what each profile would set before
+    the user applies it. Values mirror RISK_PRESETS in schemas.py."""
+    return {profile.value: dict(values)
+            for profile, values in RISK_PRESETS.items()}
+
+
+@router.post("/preset/{profile}", response_model=SettingsSaveResult)
+def apply_preset(request: Request, profile: RiskProfile) -> SettingsSaveResult:
+    """POST /api/settings/preset/{conservative|moderate|aggressive} — apply a
+    full risk preset onto the stored row (merge-patch semantics: only the 34
+    preset-owned fields + risk_profile change; capital, lots, spreads,
+    universe, notify and UI prefs survive). Reuses the save_settings upsert
+    path (incl. PGRST204 retry) so behaviour is identical to a manual save."""
+    db = request.app.state.db
+    current = _load_settings(db)
+    merged = apply_risk_preset(current, profile)
+
+    if not db or not db.available:
+        return SettingsSaveResult(
+            ok=False, settings=merged,
+            message="DB unavailable — preset not saved")
+
+    try:
+        row = merged.model_dump(mode="json")
+        row["id"] = 1
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        resp = db._client.table(SETTINGS_TABLE).upsert(row).execute()
+        if not resp.data:
+            return SettingsSaveResult(ok=False, settings=merged,
+                                      message="upsert returned no data")
+        return SettingsSaveResult(
+            ok=True, settings=_row_to_settings(resp.data[0]),
+            message=f"ใช้ preset {profile.value} แล้ว")
+    except Exception as exc:
+        log.error("apply preset failed: %s", exc)
+        return SettingsSaveResult(ok=False, settings=merged, message=str(exc))

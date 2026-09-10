@@ -101,9 +101,9 @@ const NOTIFY_CATEGORIES: {
 
 /** GlassSelect option sets (2026-09-07 — custom liquid-glass dropdowns) */
 const RISK_PROFILES = [
-  { value: "conservative", label: "Conservative" },
-  { value: "moderate", label: "Moderate" },
-  { value: "aggressive", label: "Aggressive" },
+  { value: "conservative", label: "Conservative — เสี่ยงต่ำ ออกไว" },
+  { value: "moderate", label: "Moderate — สมดุล (ค่าเริ่มต้น)" },
+  { value: "aggressive", label: "Aggressive — เสี่ยงสูง ปล่อยไหล" },
 ];
 const ORDER_MODES = [
   { value: "auto", label: "Auto — ระบบเทรดเอง" },
@@ -325,6 +325,25 @@ export default function SettingsPage() {
 
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
+
+  // --- risk preset (34 ช่องความเสี่ยงตามโปรไฟล์) — ยิง endpoint แล้วแทน cfg ทั้งก้อน ---
+  const [presetBusy, setPresetBusy] = useState(false);
+  const [presetMsg, setPresetMsg] = useState("");
+
+  const applyPreset = async () => {
+    if (!cfg || presetBusy) return;
+    setPresetBusy(true);
+    setPresetMsg("");
+    try {
+      const res = await api.applyRiskPreset(cfg.risk_profile);
+      setCfg(res.settings);
+      setPresetMsg(res.ok ? res.message : `ไม่สำเร็จ: ${res.message}`);
+    } catch (e) {
+      setPresetMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPresetBusy(false);
+    }
+  };
 
   const recommend = async (allowedOverride?: string[]) => {
     if (!Number.isFinite(capital) || capital <= 0) return;
@@ -587,10 +606,28 @@ export default function SettingsPage() {
               </p>
               <label className="block text-sm">
                 Risk Profile
-                <GlassSelect value={cfg.risk_profile}
-                  onChange={(v) => set("risk_profile", v as RiskProfile)}
-                  className="mt-1 w-full"
-                  options={RISK_PROFILES} />
+                <div className="flex items-center gap-2 mt-1">
+                  <div className="flex-1">
+                    <GlassSelect value={cfg.risk_profile}
+                      onChange={(v) => set("risk_profile", v as RiskProfile)}
+                      className="w-full"
+                      options={RISK_PROFILES} />
+                  </div>
+                  <button type="button" onClick={applyPreset} disabled={presetBusy}
+                    title="ตั้งค่าทั้ง 34 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
+                    className="shrink-0 bg-accent text-white text-xs font-semibold rounded px-3 min-h-[40px] disabled:opacity-50 active:brightness-90">
+                    <span className="inline-flex items-center gap-1.5">
+                      {presetBusy && <Icon n="spinner" size={13} className="animate-spin" />}
+                      {presetBusy ? "กำลังใช้..." : "ใช้ preset"}
+                    </span>
+                  </button>
+                </div>
+                <span className="block text-xs text-slate-500 mt-1">
+                  เปลี่ยน dropdown อย่างเดียว = เปลี่ยนชื่อโปรไฟล์เฉย ๆ — กด “ใช้ preset”
+                  เพื่อตั้งค่าความเสี่ยงทั้ง 34 ช่อง (ลิมิตเทรด, signal gate, จัดการไม้,
+                  Smart Exit, kill switch, ข่าว, correlation) ตามระดับที่เลือก
+                  {presetMsg && <span className="text-accent"> · {presetMsg}</span>}
+                </span>
               </label>
               <NumField label="Min Confidence (%)" value={cfg.min_confidence}
                 onChange={(v) => set("min_confidence", v)} step={1} />
