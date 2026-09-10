@@ -477,19 +477,22 @@ export default function MonitorPage() {
       setSnap(s);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
-      // ไทม์ไลน์ SL/TP: ดึง signal-logs แล้วจัดกลุ่มตาม ticket — เหตุการณ์
-      // order_opened ที่มี reason "SL ย้ายไป..." คือทุกครั้งที่ guard ขยับ
-      // SL/TP (backend log ไว้ทุก move) — ไม่ต้องเพิ่ม endpoint ใหม่
+      // ไทม์ไลน์ SL/TP: ดึง signal-logs แล้วจัดกลุ่มตาม ticket — เฉพาะ
+      // เหตุการณ์ขยับจริง (guard "SL ย้ายไป..." / ปรับด้วยมือ / trailing /
+      // breakeven) + ปิดไม้ — ไม่รวม log "เปิดออเดอร์" ตอนเปิดไม้ครั้งแรก
+      // (มี stop_loss ติดมาด้วยเลยหลุด filter เดิม) — ไม่ต้องเพิ่ม endpoint ใหม่
       try {
         const logs = await api.signalLogs(200);
         const byTicket: Record<string, SignalLog[]> = {};
         for (const l of logs.logs ?? []) {
           if (!l.ticket) continue;
+          const reason = l.reason || "";
+          // เปิดไม้ครั้งแรก — ข้าม (ไม่ใช่การขยับ)
+          if (/^เปิดออเดอร์/.test(reason)) continue;
           const moveLike =
             l.event === "closed" ||
             (l.event === "order_opened" &&
-              (/SL ย้าย|TP ย้าย|breakeven|trailing/i.test(l.reason || "") ||
-                (l.stop_loss != null && l.stop_loss > 0)));
+              /SL ย้าย|TP ย้าย|breakeven|trailing|ปรับด้วยมือ|manual/i.test(reason));
           if (!moveLike) continue;
           (byTicket[l.ticket] ||= []).push(l);
         }
