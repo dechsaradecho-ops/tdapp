@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import BackgroundPicker from "@/components/BackgroundPicker";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -339,6 +339,44 @@ export default function SettingsPage() {
     }
   };
 
+  // --- export/import การตั้งค่าเป็นไฟล์ JSON — โหลดใส่ฟอร์มเฉย ๆ
+  // ยังไม่ลง DB จนกว่าจะกด “บันทึกการตั้งค่า” (แบบเดียวกับ preset) ---
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const exportCfg = () => {
+    if (!cfg) return;
+    const blob = new Blob([JSON.stringify(cfg, null, 2)],
+      { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tdapp-settings-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const importCfg = async (f: File) => {
+    try {
+      const raw = JSON.parse(await f.text());
+      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        throw new Error("ไฟล์ไม่ใช่ JSON การตั้งค่า");
+      const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
+      const patch: Partial<AppSettings> = {};
+      for (const [k, v] of Object.entries(raw))
+        if (allowed.has(k)) (patch as Record<string, unknown>)[k] = v;
+      if (Object.keys(patch).length === 0)
+        throw new Error("ไม่พบฟิลด์การตั้งค่าในไฟล์");
+      setCfg((c) => (c ? { ...c, ...patch } as AppSettings : c));
+      setSaveMsg(`โหลดไฟล์แล้ว (${Object.keys(patch).length} ช่อง) — ตรวจค่าแล้วกด “บันทึกการตั้งค่า” เพื่อลง DB`);
+    } catch (e) {
+      setSaveMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
 
@@ -503,6 +541,26 @@ export default function SettingsPage() {
           <h2 className="panel-title">การตั้งค่าระบบเทรด (ใช้จริงทั้งระบบ)</h2>
           <div className="flex items-center gap-2">
             {saveMsg && <span className="text-xs text-slate-400">{saveMsg}</span>}
+            <button onClick={exportCfg} disabled={saving || !cfg}
+              title="ดาวน์โหลดการตั้งค่าปัจจุบันเป็นไฟล์ JSON"
+              className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[40px] active:bg-slate-800 disabled:opacity-40">
+              <span className="inline-flex items-center gap-1.5">
+                <Icon n="download" size={13} /> Export
+              </span>
+            </button>
+            <button onClick={() => fileRef.current?.click()} disabled={saving || !cfg}
+              title="โหลดค่าจากไฟล์ JSON ใส่ฟอร์ม — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า"
+              className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[40px] active:bg-slate-800 disabled:opacity-40">
+              <span className="inline-flex items-center gap-1.5">
+                <Icon n="upload" size={13} /> Import
+              </span>
+            </button>
+            <input ref={fileRef} type="file" accept="application/json,.json" className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importCfg(f);
+                e.target.value = "";
+              }} />
             <button onClick={reset} disabled={saving || !cfg}
               className="text-xs text-slate-400 border border-slate-700 rounded px-3 min-h-[40px] active:bg-slate-800 disabled:opacity-40">
               ค่าเริ่มต้น

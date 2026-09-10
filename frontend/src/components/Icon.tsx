@@ -11,7 +11,8 @@ export type IconName =
   | "archive" | "scroll" | "news" | "inbox" | "lock"
   | "bulb" | "flask" | "coins" | "clock" | "hourglass"
   | "octagon" | "pause" | "play" | "arrowsH"
-  | "message" | "arrowDown" | "undo" | "shield" | "refresh" | "spinner";
+  | "message" | "arrowDown" | "undo" | "shield" | "refresh" | "spinner"
+  | "download" | "upload";
 
 const PATHS: Record<IconName, React.ReactNode> = {
   bot: (
@@ -225,6 +226,20 @@ const PATHS: Record<IconName, React.ReactNode> = {
     </>
   ),
   shield: <path d="M12 21.5s7.5-3.2 7.5-9.5V5.2L12 2.5 4.5 5.2V12c0 6.3 7.5 9.5 7.5 9.5Z" />,
+  download: (
+    <>
+      <path d="M12 3.5v12" />
+      <path d="M6.5 10 12 15.5 17.5 10" />
+      <path d="M4.5 20.5h15" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M12 15.5v-12" />
+      <path d="M6.5 9 12 3.5 17.5 9" />
+      <path d="M4.5 20.5h15" />
+    </>
+  ),
 };
 
 export default function Icon({
