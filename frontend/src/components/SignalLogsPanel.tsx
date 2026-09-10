@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
@@ -40,28 +40,79 @@ export default function SignalLogsPanel() {
   const [updatedAt, setUpdatedAt] = useState("");
   const [filter, setFilter] = useState<string>("all");
   const [loading, setLoading] = useState(false);
+  // server paging: ขอทีละชุด (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
+  // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ (pattern เดียวกับ logs page)
+  const [page, setPage] = useState(1);
+  const [sigTotal, setSigTotal] = useState(0);
+  const [sigHasMore, setSigHasMore] = useState(false);
+  const filterRef = useRef<string>("all");
+  const PAGE_SIZE = 50;
+  const SERVER_PAGE = 500;
 
-  const load = useCallback(async () => {
+  const loadChunk = useCallback(async (flt: string, pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.signalLogs(SERVER_PAGE, offset, flt);
+  }, []);
+
+  const load = useCallback(async (flt?: string) => {
     setLoading(true);
     try {
-      const res = await api.signalLogs(200);
+      const f = flt ?? filterRef.current;
+      const res = await loadChunk(f, 1);
       setLogs(res.logs ?? []);
       setSummary(res.summary ?? null);
       setTtlDays(res.ttl_days ?? 7);
+      setSigTotal(res.total ?? (res.logs ?? []).length);
+      setSigHasMore(res.has_more ?? false);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+      setPage(1);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadChunk]);
+
+  // เปลี่ยน server chunk (ทุก 10 หน้า UI = 500 แถว) — ดึงชุดถัดไปจาก backend
+  const gotoServerPage = useCallback(async (pg: number) => {
+    setLoading(true);
+    try {
+      const res = await loadChunk(filterRef.current, pg);
+      setLogs(res.logs ?? []);
+      setSigTotal(res.total ?? 0);
+      setSigHasMore(res.has_more ?? false);
+      setErr("");
+      setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+      setPage(1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadChunk]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const shown = filter === "all" ? logs : logs.filter((l) => l.event === filter);
+  const changeFilter = (f: string) => {
+    setFilter(f);
+    filterRef.current = f;
+    setPage(1);
+    load(f);
+  };
+
+  // ตารางคือ server chunk ปัจจุบัน (500 แถว) — filter ทำฝั่ง server แล้ว
+  const shown = logs;
+  // จำนวนหน้าทั้งหมดอ้างจาก total จริง (count=exact) ไม่ใช่ความยาว chunk
+  const totalPages = Math.max(1, Math.ceil((sigTotal || shown.length) / PAGE_SIZE));
+  const uiPagesPerChunk = Math.max(1, Math.ceil(SERVER_PAGE / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const chunkPage = ((safePage - 1) % uiPagesPerChunk) + 1;
+  const pageRows = shown.slice((chunkPage - 1) * PAGE_SIZE, chunkPage * PAGE_SIZE);
+  const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
+  const serverPages = Math.max(1, Math.ceil(totalPages / uiPagesPerChunk));
 
   return (
     <div className="space-y-4">
@@ -74,7 +125,7 @@ export default function SignalLogsPanel() {
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
-        <button onClick={load} disabled={loading}
+        <button onClick={() => load()} disabled={loading}
           aria-busy={loading} aria-live="polite"
           title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
           className="btn-secondary disabled:opacity-50">
@@ -117,7 +168,7 @@ export default function SignalLogsPanel() {
         <div className="overflow-x-auto">
         <div className="flex flex-wrap gap-2 mb-3 text-xs">
           <button
-            onClick={() => setFilter("all")}
+            onClick={() => changeFilter("all")}
             className={`px-3 py-1 rounded ${filter === "all" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
           >
             ทั้งหมด
@@ -125,7 +176,7 @@ export default function SignalLogsPanel() {
           {Object.entries(EVENT_META).map(([ev, meta]) => (
             <button
               key={ev}
-              onClick={() => setFilter(ev)}
+              onClick={() => changeFilter(ev)}
               className={`px-3 py-1 rounded ${filter === ev ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
             >
               {meta.label}
@@ -157,14 +208,14 @@ export default function SignalLogsPanel() {
                 <LoadingGraphic message="กำลังโหลดข้อมูล... (API บน Render อาจใช้เวลาเริ่มต้นสักครู่)" compact />
               </td></tr>
             )}
-            {!loading && shown.length === 0 && (
+            {!loading && pageRows.length === 0 && (
               <tr><td colSpan={14} className="py-6 text-center text-slate-500">
                 {filter === "all"
                   ? "ยังไม่มีบันทึก — สัญญาณใหม่จะถูกบันทึกอัตโนมัติเมื่อ scanner เจอโอกาส"
                   : `ไม่มีรายการ "${EVENT_META[filter]?.label ?? filter}" ในช่วง 7 วันที่เก็บข้อมูล`}
               </td></tr>
             )}
-            {shown.map((l) => {
+            {pageRows.map((l) => {
               const meta = eventMeta(l.event);
               return (
                 <tr key={l.id} className="border-b border-slate-800/50 hover:bg-white/[0.04]">
@@ -208,10 +259,35 @@ export default function SignalLogsPanel() {
           </tbody>
         </table>
         </div>
-        {logs.length > 0 && (
-          <p className="text-xs text-slate-500 mt-2">
-            แสดง {shown.length} รายการล่าสุด (จาก {logs.length}) · เก็บสูงสุด {ttlDays} วัน
-          </p>
+        {(logs.length > 0 || sigTotal > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {safePage}/{totalPages} · แสดง {pageRows.length} จาก {sigTotal.toLocaleString()} รายการ
+              {serverPages > 1 && ` · ชุดที่ ${serverPage}/${serverPages}`} · เก็บสูงสุด {ttlDays} วัน
+            </p>
+            {totalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => {
+                    if (chunkPage > 1 || safePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(serverPage - 1).then(() => setPage((serverPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={safePage <= 1 || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{safePage} / {totalPages}</span>
+                <button onClick={() => {
+                    if (chunkPage < uiPagesPerChunk && chunkPage * PAGE_SIZE < shown.length) { setPage((p) => Math.min(totalPages, p + 1)); return; }
+                    if (!sigHasMore && serverPage >= serverPages) { setPage((p) => Math.min(totalPages, p + 1)); return; }
+                    gotoServerPage(serverPage + 1).then(() => setPage(serverPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={safePage >= totalPages || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </section>
     </div>
