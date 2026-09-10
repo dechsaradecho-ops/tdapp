@@ -121,6 +121,7 @@ export default function PositionChartModal({ position, onClose }: {
           setCandleErr(c.error);
       } catch (e) {
         if (!alive) return;
+        setCandles([]);
         setCandleErr(e instanceof Error ? e.message : String(e));
       }
     })();
