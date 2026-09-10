@@ -144,11 +144,13 @@ const fmtSpread = (v: number) => {
 };
 
 export default function SettingsPage() {
-  const { capital, setCapital } = usePortfolio();
+  const { capital, loaded: portfolioLoaded, setCapital } = usePortfolio();
   const [target, setTarget] = useState(3);
   const [profile, setProfile] = useState("moderate");
   const [maxDd, setMaxDd] = useState(10);
   const [rec, setRec] = useState<PortfolioRecommendation | null>(null);
+  const [recScope, setRecScope] = useState<string[]>([]);
+  const [recError, setRecError] = useState("");
   const [loading, setLoading] = useState(false);
   const [dbCheck, setDbCheck] = useState<DbCheckResult | null>(null);
   const [dbCounts, setDbCounts] = useState<DbCounts | null>(null);
@@ -324,12 +326,21 @@ export default function SettingsPage() {
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
 
-  const recommend = async () => {
+  const recommend = async (allowedOverride?: string[]) => {
+    if (!Number.isFinite(capital) || capital <= 0) return;
+    const scope = allowedOverride
+      ?? (cfg?.allowed_assets?.length ? cfg.allowed_assets : DEFAULT_ASSETS);
     setLoading(true);
+    setRecError("");
     try {
-      setRec(await api.recommendPortfolio({
+      const res = await api.recommendPortfolio({
         capital, target_return_pct: target, max_drawdown_pct: maxDd, risk_profile: profile,
-      }));
+        allowed_assets: scope,
+      });
+      setRec(res);
+      setRecScope(scope);
+    } catch (e) {
+      setRecError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -350,7 +361,19 @@ export default function SettingsPage() {
     }
   };
 
-  useEffect(() => { recommend(); /* eslint-disable-next-line */ }, []);
+  // Auto-load: the old mount-only call fired with capital=0 (before
+  // CapitalSync refresh) so users still had to press the button. Wait for
+  // portfolio store + settings, then refresh (debounced) on any input
+  // that changes the evaluation: capital/target/profile/maxDd/scope.
+  const allowedKey = (cfg?.allowed_assets?.length ? cfg.allowed_assets : DEFAULT_ASSETS).join(",");
+  useEffect(() => {
+    if (!portfolioLoaded) return;
+    if (!Number.isFinite(capital) || capital <= 0) return;
+    if (!cfg) return;
+    const t = setTimeout(() => { recommend(); }, 400);
+    return () => clearTimeout(t);
+    /* eslint-disable-next-line */
+  }, [portfolioLoaded, capital, target, profile, maxDd, cfg, allowedKey]);
 
   return (
     <div className="grid md:grid-cols-2 gap-4">
@@ -367,19 +390,33 @@ export default function SettingsPage() {
             <GlassSelect value={profile} onChange={setProfile} className="mt-1 w-full"
               options={RISK_PROFILES} />
           </label>
-          <button onClick={recommend} disabled={loading}
+          <button onClick={() => recommend()} disabled={loading}
             aria-busy={loading}
             className="w-full bg-accent text-white font-semibold rounded py-2 disabled:opacity-50">
             <span className="inline-flex items-center justify-center gap-1.5">
               {loading && <Icon n="spinner" size={15} className="animate-spin" />}
-              {loading ? "กำลังคำนวณ..." : "ขอ Portfolio Recommendation"}
+              {loading ? "กำลังคำนวณ..." : "รีเฟรชคำแนะนำ"}
             </span>
           </button>
+          <p className="text-xs text-slate-500">
+            โหลดอัตโนมัติเมื่อทุน/การตั้งค่าพร้อม — คำนวณเฉพาะคู่ใน allowed_assets
+            ({(cfg?.allowed_assets?.length ? cfg.allowed_assets : DEFAULT_ASSETS).join(", ")})
+            คะแนนมาจาก Market Scanner (เดียวกับหน้า Home/ Signals)
+          </p>
         </div>
       </div>
 
       <div className="panel">
         <h2 className="panel-title">Portfolio Recommendation</h2>
+        {recError && !rec && (
+          <p className="text-loss text-sm">โหลดคำแนะนำไม่สำเร็จ: {recError}</p>
+        )}
+        {recScope.length > 0 && (
+          <p className="text-xs text-slate-500 mb-2">
+            ประเมิน {recScope.length} คู่ ({recScope.join(", ")}) — คะแนนจาก Market Scanner
+            {recError && <span className="text-loss"> · รีเฟรชล่าสุดล้มเหลว: {recError}</span>}
+          </p>
+        )}
         {rec ? (
           <div className="space-y-4">
             <PortfolioAllocation allocation={rec.allocation} />

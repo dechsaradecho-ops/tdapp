@@ -236,6 +236,9 @@ class PortfolioInput(BaseModel):
     target_return_pct: float = Field(gt=0, le=100)
     max_drawdown_pct: float = Field(gt=0, le=100)
     risk_profile: RiskProfile
+    # Tradable universe for the evaluation (Settings → allowed_assets).
+    # None/empty = legacy behaviour (fixed 4-asset BASE_WEIGHTS universe).
+    allowed_assets: Optional[list[str]] = None
 
 
 class AllocationItem(BaseModel):

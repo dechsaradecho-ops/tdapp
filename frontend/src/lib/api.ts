@@ -118,6 +118,7 @@ export const api = {
     target_return_pct: number;
     max_drawdown_pct: number;
     risk_profile: string;
+    allowed_assets?: string[];
   }) => post<PortfolioRecommendation>("/api/portfolio/recommend", input),
 
   // POST /api/risk/check

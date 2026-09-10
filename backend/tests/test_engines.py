@@ -697,6 +697,36 @@ class TestPortfolioEngine:
         for profile, weights in BASE_WEIGHTS.items():
             assert sum(weights.values()) == 100, f"{profile} weights sum != 100"
 
+    def _input_with_scope(self, profile="moderate", allowed=None):
+        base = self._input(profile).model_dump()
+        base["allowed_assets"] = allowed
+        return PortfolioInput(**base)
+
+    def test_allowed_assets_limits_universe_and_sums_100(self):
+        opps = [make_opp("XAUUSD", 85), make_opp("EURUSD", 70)]
+        rec = self.engine.recommend(
+            self._input_with_scope(allowed=["XAUUSD", "EURUSD"]), opps)
+        weights = {a.asset: a.weight_pct for a in rec.allocation}
+        assert set(weights) <= {"XAUUSD", "EURUSD", "Cash"}
+        assert "GBPUSD" not in weights and "USDJPY" not in weights
+        assert abs(sum(weights.values()) - 100.0) < 0.5
+        # tilt still applies inside the scoped universe
+        assert weights["XAUUSD"] > weights["EURUSD"]
+
+    def test_allowed_assets_newcomer_gets_avg_prior(self):
+        # AUDUSD is outside the legacy 4 → avg prior (35+25+20+10)/4 = 22.5
+        rec = self.engine.recommend(
+            self._input_with_scope(allowed=["AUDUSD"]), [])
+        weights = {a.asset: a.weight_pct for a in rec.allocation}
+        assert weights["AUDUSD"] == pytest.approx(22.5)
+        assert abs(sum(weights.values()) - 100.0) < 0.5
+
+    def test_allowed_assets_empty_falls_back_to_legacy(self):
+        rec = self.engine.recommend(self._input_with_scope(allowed=[]), [])
+        weights = {a.asset: a.weight_pct for a in rec.allocation}
+        assert weights["XAUUSD"] == 35
+        assert weights["Cash"] == 10
+
 
 # ---------------------------------------------------------------------------
 # PaperBroker
