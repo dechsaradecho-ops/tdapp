@@ -134,12 +134,13 @@ export default function PositionChartModal({ position, onClose }: {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade"
+      className="fixed inset-0 z-50 flex justify-center sm:items-center p-0 sm:p-4 animate-fade"
       style={{ background: "rgba(0,0,0,0.7)", WebkitBackdropFilter: "blur(16px) saturate(140%)", backdropFilter: "blur(16px) saturate(140%)" }}
       onClick={onClose}
     >
       <div
-        className="panel w-full max-w-5xl space-y-2 animate-pop max-h-[96vh] overflow-y-auto"
+        className="panel w-full max-w-none sm:max-w-5xl h-[100dvh] sm:h-auto max-h-[100dvh] sm:max-h-[96vh] space-y-2 animate-pop overflow-y-auto !rounded-none sm:!rounded-2xl"
+        style={{ paddingTop: "max(1rem, env(safe-area-inset-top, 0px))", paddingBottom: "max(1rem, env(safe-area-inset-bottom, 0px))" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* ---------- header ---------- */}
@@ -190,7 +191,8 @@ export default function PositionChartModal({ position, onClose }: {
           )}
         </div>
 
-        <p className="text-[11px] text-slate-600 text-center">แตะนอกกรอบเพื่อปิด</p>
+        {/* มือถือเต็มจอ = ไม่มีนอกกรอบให้แตะ → ซ่อนคำใบ้นี้, ใช้ปุ่ม ✕ แทน */}
+        <p className="hidden sm:block text-[11px] text-slate-600 text-center">แตะนอกกรอบเพื่อปิด</p>
       </div>
     </div>
   );
