@@ -183,6 +183,55 @@ class TestMarketSummaryTiers:
 
 
 # ---------------------------------------------------------------------------
+# /api/market/candles — position-chart popup (monitor row click)
+# ---------------------------------------------------------------------------
+class TestMarketCandles:
+    @pytest.mark.asyncio
+    async def test_returns_ohlc_oldest_first(self, monkeypatch):
+        """Endpoint serves fetch_candles OHLC verbatim (oldest-first)."""
+        from app.api.routes import market as market_route
+        from app.integrations import quotes as quotes_mod
+        bars = [quotes_mod.Candle(o=1.0 + i, h=1.1 + i, l=0.9 + i, c=1.05 + i)
+                for i in range(35)]
+        set_state(FakeDatabase())
+
+        async def fake_fetch(asset, client, days=40):
+            assert asset == "EURUSD"
+            return bars
+        monkeypatch.setattr(market_route.quotes, "fetch_candles", fake_fetch)
+        body = (await call("GET", "/api/market/candles?asset=EURUSD&days=60")).json()
+        assert body["asset"] == "EURUSD"
+        assert body["count"] == 35
+        assert body["error"] == ""
+        assert body["candles"][0] == {"o": 1.0, "h": 1.1, "l": 0.9, "c": 1.05}
+        assert body["candles"][-1]["c"] == pytest.approx(1.05 + 34)
+
+    @pytest.mark.asyncio
+    async def test_fail_soft_empty_with_error(self, monkeypatch):
+        """Feed failure → 200 + empty candles + error text (popup still shows
+        entry/SL/TP + details without a chart)."""
+        from app.api.routes import market as market_route
+        from app.integrations.quotes import QuotesUnavailable
+        set_state(FakeDatabase())
+
+        async def boom(asset, client, days=40):
+            raise QuotesUnavailable("feed down")
+        monkeypatch.setattr(market_route.quotes, "fetch_candles", boom)
+        r = await call("GET", "/api/market/candles?asset=XAUUSD")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["candles"] == [] and body["count"] == 0
+        assert "feed down" in body["error"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_asset_rejected(self):
+        set_state(FakeDatabase())
+        body = (await call("GET", "/api/market/candles?asset=FAKE")).json()
+        assert body["candles"] == [] and body["count"] == 0
+        assert "no feed mapping" in body["error"]
+
+
+# ---------------------------------------------------------------------------
 # /api/signals/latest — 3-tier
 # ---------------------------------------------------------------------------
 class TestSignalsLatestTiers:

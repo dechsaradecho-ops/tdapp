@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import CloseSingleModal from "@/components/CloseSingleModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
+import PositionChartModal from "@/components/PositionChartModal";
 import CopyNum from "@/components/CopyNum";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
@@ -403,6 +404,8 @@ export default function MonitorPage() {
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
   // ปิดไม้รายตัว → เปิด popup ยืนยันก่อน (กันกดพลาด — 36bc79c)
   const [confirmPos, setConfirmPos] = useState<MonitorSnapshot["open_positions"][number] | null>(null);
+  // กดแถวไม้เปิดค้าง → popup กราฟแท่งเทียน + จุดเข้า/SL/TP + spread/buy-sell + รายละเอียด
+  const [chartPos, setChartPos] = useState<MonitorSnapshot["open_positions"][number] | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetMsg, setResetMsg] = useState("");
   const [closeAllMsg, setCloseAllMsg] = useState("");
@@ -761,7 +764,9 @@ export default function MonitorPage() {
                   const hasDetail = timeline.length > 0 || movedHint;
                   return (
                   <Fragment key={p.id}>
-                  <tr className="border-t border-slate-800 whitespace-nowrap">
+                  <tr className="border-t border-slate-800 whitespace-nowrap cursor-pointer hover:bg-white/[0.04] active:bg-white/[0.07]"
+                    onClick={() => setChartPos(p)}
+                    title="กดเพื่อดูกราฟแท่งเทียน + รายละเอียดไม้">
                     <td className="py-2 pr-4 font-semibold">{p.asset}</td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.direction === "BUY" ? "text-profit" : "text-loss"}>
@@ -769,7 +774,7 @@ export default function MonitorPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4 font-bold">{fmtNum(p.volume, 2)}</td>
-                    <td className="py-2 pr-4 font-bold"><CopyNum value={p.entry_price} /></td>
+                    <td className="py-2 pr-4 font-bold" onClick={(e) => e.stopPropagation()}><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">
                       {fmtNum(p.current_price, 5)}
                       {p.price_source != null && p.price_source !== "spot" && (
@@ -788,21 +793,21 @@ export default function MonitorPage() {
                         </span>
                       )}
                     </td>
-                    <td className="py-2 pr-4"><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
-                    <td className="py-2 pr-4"><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
+                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
+                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
                       </span>
                     </td>
-                    <td className="py-2 pr-4">
+                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}>
                       <RPriceBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} entry={p.entry_price} current={p.current_price} priceSource={p.price_source ?? null} notes={notes} />
                     </td>
-                    <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
+                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}>{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
                     <td className="py-2 text-xs text-slate-500">{p.ticket || "-"}</td>
                     <td className="py-2">
-                      <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                         {notes.length > 0 && <CalcNotesBadge notes={notes} />}
                         <button
                           onClick={() => setConfirmPos(p)}
@@ -983,6 +988,8 @@ export default function MonitorPage() {
 
       {/* ---------- Popup สรุปผลการปิดไม้ ---------- */}
       <ClosePositionModal result={closeResult} onClose={() => setCloseResult(null)} />
+      {/* ---------- Popup กราฟไม้เปิดค้าง (กดแถวตาราง Paper) ---------- */}
+      <PositionChartModal position={chartPos} onClose={() => setChartPos(null)} />
       {/* ---------- Popup ยืนยันก่อนปิดไม้รายตัว ---------- */}
       <CloseSingleModal
         position={confirmPos}

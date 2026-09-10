@@ -166,3 +166,32 @@ async def market_summary(request: Request) -> MarketSummary:
         min_confidence=settings.min_confidence,
         min_confidence_gold=settings.min_confidence_gold,
     )
+
+
+@router.get("/candles")
+async def market_candles(asset: str, days: int = 60):
+    """Daily OHLC candles for the position-chart popup (monitor row click).
+
+    Reuses quotes.fetch_candles (Yahoo primary → Frankfurter/TwelveData
+    fallback) so the popup shows the SAME price history the scanner trades
+    on. days clamped to 30..120 (fetch_candles needs ≥30 bars for indicators).
+    Fail-soft: feed failure → {"candles": [], "error": reason} with 200 so
+    the popup still shows entry/SL/TP + position details without a chart.
+    """
+    import httpx
+
+    a = str(asset or "").upper()
+    n = max(30, min(int(days or 60), 120))
+    if not quotes.is_supported_asset(a):
+        return {"asset": a, "candles": [], "count": 0,
+                "error": f"no feed mapping for {a}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            bars = await quotes.fetch_candles(a, client, days=n)
+        return {"asset": a,
+                "candles": [{"o": b.o, "h": b.h, "l": b.l, "c": b.c}
+                            for b in bars],
+                "count": len(bars), "error": ""}
+    except Exception as exc:
+        return {"asset": a, "candles": [], "count": 0,
+                "error": f"{a}: {exc}"}

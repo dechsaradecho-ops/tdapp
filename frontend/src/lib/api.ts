@@ -14,6 +14,7 @@ import {
   GoalAssessment,
   JournalAnalysis,
   KillSwitch,
+  MarketCandlesResponse,
   MarketSummary,
   MonitorSnapshot,
   NewsLogsResponse,
@@ -111,6 +112,12 @@ export const api = {
 
   // GET /api/market/summary
   marketSummary: () => get<MarketSummary>("/api/market/summary"),
+
+  // GET /api/market/candles?asset=&days= — แท่งเทียน daily สำหรับ popup
+  // กราฟไม้เปิดค้าง (กดแถวในตาราง Paper) — fail-soft ได้ candles ว่าง
+  marketCandles: (asset: string, days = 60) =>
+    get<MarketCandlesResponse>(
+      `/api/market/candles?asset=${encodeURIComponent(asset)}&days=${days}`),
 
   // POST /api/portfolio/recommend
   recommendPortfolio: (input: {

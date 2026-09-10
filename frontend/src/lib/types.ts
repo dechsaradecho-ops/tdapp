@@ -553,6 +553,24 @@ export interface SettingsSaveResult {
   message: string;
 }
 
+/** Daily OHLC candle from GET /api/market/candles (oldest-first). */
+export interface MarketCandle {
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+}
+
+/** Response of GET /api/market/candles?asset=&days= — fail-soft: feed
+ *  failure → {candles: [], error} with 200 so the popup still shows
+ *  entry/SL/TP + position details without a chart. */
+export interface MarketCandlesResponse {
+  asset: string;
+  candles: MarketCandle[];
+  count: number;
+  error: string;
+}
+
 /** Shared trading kill-switch state (read by auto trader + /approve). */
 export interface PauseStatus {
   paused: boolean;
