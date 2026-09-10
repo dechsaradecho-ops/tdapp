@@ -3,13 +3,12 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
-import CloseSingleModal from "@/components/CloseSingleModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import CopyNum from "@/components/CopyNum";
+import CalcNotes from "@/components/CalcNotes";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
-import LoadingGraphic from "@/components/LoadingGraphic";
 import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
 import { api } from "@/lib/api";
@@ -219,110 +218,6 @@ function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_posi
   );
 }
 
-/** Badge "วิธีคำนวณ" — popup แบบเดียวกับ SmartExitBadge (anchored popover
- *  ต่อปุ่ม ไม่ใช่ modal กลางจอ): แตะ/คลิกที่ +x.xxR หรือ ⓘ แล้วโชว์
- *  R + เสี่ยง$ + รายละเอียดวิธีคำนวณ — portal to body, ปิดเมื่อแตะข้างนอก. */
-function CalcNotesBadge({ asset, direction, rMult, riskUsd, notes, trigger }: {
-  asset: string;
-  direction: string;
-  rMult: number;
-  riskUsd: number;
-  notes: string[];
-  trigger: "r" | "info";
-}) {
-  const [pop, setPop] = useState(false);
-  const btnRef = useRef<HTMLButtonElement | null>(null);
-  const popRef = useRef<HTMLDivElement | null>(null);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
-
-  const place = useCallback(() => {
-    const btn = btnRef.current, popEl = popRef.current;
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    const pw = popEl?.offsetWidth ?? 300;
-    const ph = popEl?.offsetHeight ?? 150;
-    let left = r.left + r.width / 2 - pw / 2;
-    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-    let top = r.top - ph - 8;
-    if (top < 8) top = r.bottom + 8;
-    setPos({ top, left });
-  }, []);
-
-  useEffect(() => {
-    if (!pop) return;
-    place();
-    const close = (e: MouseEvent | TouchEvent) => {
-      const t = e.target as Node | null;
-      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
-      setPop(false);
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("touchstart", close, { passive: true });
-    const onScrollOrResize = () => setPop(false);
-    window.addEventListener("scroll", onScrollOrResize, true);
-    window.addEventListener("resize", onScrollOrResize);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("touchstart", close);
-      window.removeEventListener("scroll", onScrollOrResize, true);
-      window.removeEventListener("resize", onScrollOrResize);
-    };
-  }, [pop, place]);
-
-  const title = notes.length > 0
-    ? `${asset} ${direction} ${rMult >= 0 ? "+" : ""}${fmtNum(rMult, 2)}R · เสี่ยง $${fmtNum(riskUsd, 2)}\n${notes.join("\n")}`
-    : `${asset} ${direction} เสี่ยง $${fmtNum(riskUsd, 2)} — ไม่มีรายละเอียดวิธีคำนวณ`;
-  return (
-    <>
-      {trigger === "r" ? (
-        <button
-          ref={btnRef}
-          type="button"
-          onClick={() => setPop((v) => !v)}
-          title={title}
-          aria-label={title}
-          aria-expanded={pop}
-          className={`font-bold underline decoration-dotted underline-offset-2 cursor-help touch-manipulation ${rMult >= 0 ? "text-profit" : "text-loss"}`}
-        >
-          {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
-        </button>
-      ) : (
-        <button
-          ref={btnRef}
-          type="button"
-          onClick={() => setPop((v) => !v)}
-          title={title}
-          aria-label="วิธีคำนวณ — กดดู popup"
-          aria-expanded={pop}
-          className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-[11px] leading-none text-slate-400 active:bg-white/10 cursor-help touch-manipulation"
-        >
-          ⓘ
-        </button>
-      )}
-      {pop && createPortal(
-        <div
-          ref={popRef}
-          role="tooltip"
-          style={{ position: "fixed", top: pos.top, left: pos.left, maxWidth: "min(320px, calc(100vw - 16px))" }}
-          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed text-slate-200"
-        >
-          <div className="font-bold mb-1">{asset} {direction} {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R · เสี่ยง ${fmtNum(riskUsd, 2)}</div>
-          {notes.length > 0 ? (
-            <ol className="list-decimal list-inside space-y-1 text-slate-300">
-              {notes.map((n, i) => (
-                <li key={i}>{n}</li>
-              ))}
-            </ol>
-          ) : (
-            <p className="text-slate-500">ไม่มีรายละเอียดวิธีคำนวณ</p>
-          )}
-        </div>,
-        document.body
-      )}
-    </>
-  );
-}
-
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
@@ -333,6 +228,7 @@ export default function MonitorPage() {
   // "SL ย้ายไป..." + closed) — โหลดพร้อม snapshot ครั้งเดียว
   const [moveLogs, setMoveLogs] = useState<Record<string, SignalLog[]>>({});
   const [openTimeline, setOpenTimeline] = useState<Record<string, boolean>>({});
+  const [openCalc, setOpenCalc] = useState<Record<string, boolean>>({});
   // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(10);
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
@@ -427,18 +323,13 @@ export default function MonitorPage() {
     }
   };
 
-  // ปิดไม้รายตัวด้วยมือ — เปิด popup ยืนยันก่อนเสมอ แล้วค่อยยิง
-  // (ก่อนหน้านี้ปุ่ม "ปิด" ยิง api.closePosition ทันทีโดยไม่ถาม)
-  const [confirmPos, setConfirmPos] = useState<MonitorSnapshot["open_positions"][number] | null>(null);
-
   // ปิดไม้ด้วยมือ → เด้ง popup สรุปกำไร/ขาดทุน
   const handleClosePosition = async (ticket: string) => {
-    if (!ticket || closingTicket) return;
+    if (!ticket) return;
     setClosingTicket(ticket);
     setCloseError("");
     try {
       const res = await api.closePosition(ticket);
-      setConfirmPos(null);
       if (res.ok) {
         setCloseResult(res);
         await load();
@@ -644,19 +535,16 @@ export default function MonitorPage() {
               {busy ? "..." : snap?.pause.paused ? "Resume" : "Pause"}
             </button>
             <button onClick={load} disabled={loading}
-              aria-busy={loading} aria-live="polite"
-              title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
               className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50">
-              <span className="inline-flex items-center gap-1.5">
-                <Icon n={loading ? "spinner" : "refresh"} size={15} className={loading ? "animate-spin" : ""} />
-                รีเฟรช
-              </span>
+              {loading ? "กำลังโหลด..." : "รีเฟรช"}
             </button>
           </div>
         </div>
         {err && <p className="text-loss text-sm mt-2">โหลดไม่สำเร็จ: {err}</p>}
         {!snap && !err && (
-          <LoadingGraphic message="กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ" />
+          <p className="text-slate-400 text-sm mt-3 animate-pulse">
+            กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ
+          </p>
         )}
         {closeError && (
           <p className="text-loss text-sm mt-2 bg-loss/10 border border-loss/40 rounded px-3 py-2">
@@ -680,7 +568,7 @@ export default function MonitorPage() {
                   <th className="py-2 pr-4">SL</th>
                   <th className="py-2 pr-4">TP</th>
                   <th className="py-2 pr-4">PnL (ยังไม่ปิด)</th>
-                  <th className="py-2 pr-4">R</th>
+                  <th className="py-2 pr-4">R / เสี่ยง</th>
                   <th className="py-2 pr-4">Smart Exit</th>
                   <th className="py-2 pr-4">ที่มา</th>
                   <th className="py-2 pr-4">Ticket</th>
@@ -691,12 +579,16 @@ export default function MonitorPage() {
                 {snap.open_positions.map((p) => {
                   const rMult = p.r_multiple ?? 0;
                   const riskUsd = p.risk_amount ?? 0;
+                  const srcLabel =
+                    p.price_source === "spot" ? "spot สด"
+                    : p.price_source === "daily" ? "daily close"
+                    : p.price_source === "broker" ? "broker"
+                    : p.price_source === "entry" ? "entry (ไม่มี feed)"
+                    : "—";
                   const timeline = p.ticket ? (moveLogs[p.ticket] ?? []) : [];
                   const tlOpen = openTimeline[p.id] ?? false;
+                  const calcOpen = openCalc[p.id] ?? false;
                   const notes = p.calc_notes ?? [];
-                  // แถวรายละเอียด (ไทม์ไลน์/คำใบ้ SL ขยับ) — เรนเดอร์เฉพาะเมื่อมีเนื้อหา
-                  // เพื่อไม่ให้มีแถวเปล่าเพิ่มเส้น/ช่องว่างซ้อนในตาราง
-                  const hasDetail = timeline.length > 0 || p.sl_moved_at != null || p.tp_moved_at != null;
                   return (
                   <Fragment key={p.id}>
                   <tr className="border-t border-slate-800 whitespace-nowrap">
@@ -710,21 +602,18 @@ export default function MonitorPage() {
                     <td className="py-2 pr-4 font-bold"><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">
                       {fmtNum(p.current_price, 5)}
-                      {p.price_source != null && p.price_source !== "spot" && (
-                        <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
-                          p.price_source === "daily" ? "bg-amber-500/20 text-amber-400"
-                          : p.price_source === "entry" ? "bg-loss/20 text-loss"
-                          : "bg-slate-500/20 text-slate-400"}`}
-                          title={p.price_source === "daily" ? "ราคาปิดรายวัน (สำรองตอน spot ล่ม)"
-                            : p.price_source === "broker" ? "ราคาจาก broker book (สำรอง)"
-                            : p.price_source === "entry" ? "ไม่มี feed — ใช้ entry, PnL นิ่ง"
-                            : "ที่มาราคาไม่ทราบ"}>
-                          {p.price_source === "daily" ? "daily close"
-                            : p.price_source === "broker" ? "broker"
-                            : p.price_source === "entry" ? "entry (ไม่มี feed)"
-                            : p.price_source}
-                        </span>
-                      )}
+                      <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                        p.price_source === "spot" ? "bg-profit/20 text-profit"
+                        : p.price_source === "daily" ? "bg-amber-500/20 text-amber-400"
+                        : p.price_source === "entry" ? "bg-loss/20 text-loss"
+                        : "bg-slate-500/20 text-slate-400"}`}
+                        title={p.price_source === "spot" ? "ราคาสดจาก spot feed (Yahoo intraday)"
+                          : p.price_source === "daily" ? "ราคาปิดรายวัน (สำรองตอน spot ล่ม)"
+                          : p.price_source === "broker" ? "ราคาจาก broker book (สำรอง)"
+                          : p.price_source === "entry" ? "ไม่มี feed — ใช้ entry, PnL นิ่ง"
+                          : "ที่มาราคาไม่ทราบ"}>
+                        {srcLabel}
+                      </span>
                     </td>
                     <td className="py-2 pr-4"><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
                     <td className="py-2 pr-4"><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
@@ -734,7 +623,19 @@ export default function MonitorPage() {
                       </span>
                     </td>
                     <td className="py-2 pr-4">
-                      <CalcNotesBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} notes={notes} trigger="r" />
+                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                        <span className={`font-bold ${rMult >= 0 ? "text-profit" : "text-loss"}`}>
+                          {rMult >= 0 ? "+" : ""}{fmtNum(rMult, 2)}R
+                        </span>
+                        <button
+                          onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                          className="rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-xs text-slate-300 active:bg-white/10"
+                          title={notes.length > 0 ? notes.join("\n") : "ดูวิธีคำนวณ"}
+                          aria-expanded={calcOpen}
+                        >
+                          เสี่ยง ${fmtNum(riskUsd, 2)}
+                        </button>
+                      </span>
                     </td>
                     <td className="py-2 pr-4">{p.exit_info ? <SmartExitBadge info={p.exit_info} /> : <span className="text-slate-600 text-xs">-</span>}</td>
                     <td className="py-2 pr-4 text-xs">{p.source === "auto" ? "Auto" : "Approve"}</td>
@@ -742,10 +643,16 @@ export default function MonitorPage() {
                     <td className="py-2">
                       <span className="inline-flex items-center gap-1.5">
                         {notes.length > 0 && (
-                          <CalcNotesBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} notes={notes} trigger="info" />
+                          <button
+                            onClick={() => setOpenCalc((v) => ({ ...v, [p.id]: !v[p.id] }))}
+                            className="rounded-full border border-accent/40 bg-accent/10 px-2 py-1 font-semibold text-accent text-xs min-h-[32px] active:brightness-125"
+                            aria-expanded={calcOpen}
+                          >
+                            วิธีคำนวณ {calcOpen ? "▾" : "▸"}
+                          </button>
                         )}
                         <button
-                          onClick={() => setConfirmPos(p)}
+                          onClick={() => handleClosePosition(p.ticket)}
                           disabled={!p.ticket || closingTicket === p.ticket}
                           className="bg-loss text-white font-semibold rounded px-2.5 py-1.5 text-xs min-h-[32px] disabled:opacity-50 active:brightness-90"
                         >
@@ -754,8 +661,7 @@ export default function MonitorPage() {
                       </span>
                     </td>
                   </tr>
-                  {hasDetail && (
-                  <tr className="whitespace-normal">
+                  <tr className="border-t border-slate-800/50 whitespace-normal">
                     <td colSpan={13} className="py-1 pr-4">
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         {timeline.length > 0 && (
@@ -773,6 +679,11 @@ export default function MonitorPage() {
                           </span>
                         )}
                       </div>
+                      {calcOpen && notes.length > 0 && (
+                        <div className="mt-1 max-w-2xl">
+                          <CalcNotes notes={notes} defaultOpen />
+                        </div>
+                      )}
                       {tlOpen && timeline.length > 0 && (
                         <ol className="mt-1 max-w-2xl space-y-1 border-l-2 border-accent/40 pl-3">
                           {timeline.map((l) => (
@@ -794,7 +705,6 @@ export default function MonitorPage() {
                       )}
                     </td>
                   </tr>
-                  )}
                   </Fragment>
                   );
                 })}
@@ -830,13 +740,9 @@ export default function MonitorPage() {
             ปิดขาดทุน
           </button>
           <button onClick={handleResetStats} disabled={resetting}
-            aria-busy={resetting}
             className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50"
             title="ลบไม้ที่ปิดแล้วทั้งหมด — ไม้ที่เปิดค้างไม่ถูกลบ">
-            <span className="inline-flex items-center gap-1.5">
-              {resetting && <Icon n="spinner" size={14} className="animate-spin" />}
-              {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
-            </span>
+            {resetting ? "กำลังรีเซ็ต..." : "รีเซ็ตสถิติ"}
           </button>
         </div>
         {closeAllMsg && (
@@ -927,13 +833,6 @@ export default function MonitorPage() {
 
       {/* ---------- Popup สรุปผลการปิดไม้ ---------- */}
       <ClosePositionModal result={closeResult} onClose={() => setCloseResult(null)} />
-      {/* ---------- Popup ยืนยันก่อนปิดไม้รายตัว ---------- */}
-      <CloseSingleModal
-        position={confirmPos}
-        busy={closingTicket != null}
-        onConfirm={() => { if (confirmPos?.ticket) handleClosePosition(confirmPos.ticket); }}
-        onClose={() => { if (closingTicket == null) setConfirmPos(null); }}
-      />
       {/* ---------- Popup สรุปก่อนปิดเป็นกลุ่ม (ทั้งหมด/กำไร/ขาดทุน) ---------- */}
       <CloseGroupModal
         mode={groupMode}
