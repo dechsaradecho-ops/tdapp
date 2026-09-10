@@ -134,11 +134,10 @@ export default function PositionChartModal({ position, onClose }: {
   const win = p.unrealized_pnl >= 0;
 
   return (
-    // โครงเดียวกับกล่อง AI chat (panel แก้วฝ้า): มือถือเต็มจอ —
-    // เดสก์ท็อปกล่องลอยกลางจอ (overlay ดำจาง + blur);
-    // ทึบเฉพาะตัวกราฟ SVG (พื้น #05070d) ไม่แตะ popup
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 animate-fade"
-      style={{ background: "rgba(0,0,0,0.7)", WebkitBackdropFilter: "blur(16px) saturate(140%)", backdropFilter: "blur(16px) saturate(140%)" }}
+    // กรอบ liquid glass เดียวกับกล่อง AI chat (class panel ล้วน —
+    // ไม่มี overlay ดำ/blur ทับ เพื่อให้เห็นแก้วฝ้าเหมือนกัน);
+    // มือถือเต็มจอ — เดสก์ท็อปกล่องลอยกลางจอ (แตะนอกกรอบเพื่อปิด)
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4"
       onClick={onClose}
     >
     <div
