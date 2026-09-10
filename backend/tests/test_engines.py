@@ -909,6 +909,49 @@ class TestApiRoutes:
         data = r.json()
         assert "regime" in data and "opportunities" in data
 
+    async def test_market_summary_header_uses_top_asset_score(self, client):
+        """Header confidence/regime must come from the top scorer's own row —
+        not the hardcoded 72.0 / bull_trend fallback (empty live snapshot
+        on prod: DB covers all 28 pairs)."""
+        from app.main import app as fastapi_app
+        from tests.test_workers import FakeDatabase
+
+        db = FakeDatabase()
+        db.insert("market_analysis", {
+            "asset": "EURUSD", "regime": "bear_trend", "sentiment": "bearish",
+            "confidence": 42.5, "explanation": "t",
+            "score_reasons": "EMA50 ต่ำกว่า EMA200 → แนวโน้มขาลง",
+        })
+        db.insert("market_analysis", {
+            "asset": "XAUUSD", "regime": "strong_bull_trend",
+            "sentiment": "bullish", "confidence": 78.0, "explanation": "t",
+            "score_reasons": "EMA50 สูงกว่า EMA200 → แนวโน้มขาขึ้น",
+        })
+        fastapi_app.state.db = db  # ASGITransport skips lifespan → seed manually
+
+        r = await client.get("/api/market/summary")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["confidence"] == 78.0
+        assert data["regime"] == "strong_bull_trend"
+        assert data["sentiment"] == "bullish"
+        assert data["opportunities"][0]["asset"] == "XAUUSD"
+        assert data["confidence"] <= 100.0  # never the unclamped ADX*2 metric
+
+    async def test_market_summary_header_empty_db_uses_demo_score(self, client):
+        """Fresh install (no rows): header must still equal the top demo
+        opportunity score — never a hardcoded constant."""
+        from app.main import app as fastapi_app
+        from tests.test_workers import FakeDatabase
+
+        fastapi_app.state.db = FakeDatabase()
+        r = await client.get("/api/market/summary")
+        assert r.status_code == 200
+        data = r.json()
+        top = max(data["opportunities"], key=lambda o: o["score"])
+        assert data["confidence"] == top["score"]
+        assert data["confidence"] != 72.0 or top["score"] == 72.0
+
     async def test_portfolio_recommend(self, client):
         r = await client.post("/api/portfolio/recommend", json={
             "capital": 100_000, "target_return_pct": 3, "risk_profile": "moderate",

@@ -41,7 +41,13 @@ DEMO: dict[str, IndicatorSnapshot] = {
 }
 
 REGIME_EXPLANATION = {
+    MarketRegime.strong_bull_trend: "EMA50 > EMA200 และ ADX ≥ 35 บนสินทรัพย์นำ — เทรนด์ขาขึ้นแข็งแรง ตามเทรนด์ได้แต่ระวังไล่ราคา",
     MarketRegime.bull_trend: "EMA50 > EMA200 และ ADX ≥ 25 บนสินทรัพย์หลัก ตลาดมีแนวโน้มขาขึ้นแต่ยังไม่ร้อนแรงระดับ Strong Bull",
+    MarketRegime.sideway: "ADX ต่ำกว่า 25 — ตลาดไร้เทรนด์ รอ breakout หรือเทรดในกรอบ",
+    MarketRegime.high_volatility: "ATR สูงเกิน 2.5% — ตลาดผันผวนหนัก ลดขนาดโพซิชันและกว้าง SL",
+    MarketRegime.bear_trend: "EMA50 < EMA200 — ตลาดมีแนวโน้มขาลง เน้นฝั่งขายหรือรอจังหวะกลับตัว",
+    MarketRegime.strong_bear_trend: "EMA50 < EMA200 และ ADX ≥ 35 — เทรนด์ขาลงแข็งแรง หลีกเลี่ยงฝั่งซื้อสวนเทรนด์",
+    MarketRegime.news_driven_market: "มีข่าว impact สูงใกล้ตัว — ตลาดขับเคลื่อนด้วยข่าว รอให้ตลาดนิ่งก่อนเข้าเทรด",
 }
 
 
@@ -61,7 +67,10 @@ async def market_summary(request: Request) -> MarketSummary:
     assets = list(quotes.SUPPORTED_ASSETS)
 
     opportunities: list[AssetOpportunity] = []
-    snapshot_of: dict[str, IndicatorSnapshot] = {}
+    # Header provenance: regime/sentiment per asset from the same source
+    # that produced the score (scanner DB row → live snapshot → demo).
+    regime_by_asset: dict[str, str] = {}
+    sentiment_by_asset: dict[str, str] = {}
 
     # 1) Worker-produced analysis (persisted by the Market Scanner every 5 min)
     # limit=50: one scanner cycle now writes ~28 rows (full universe), so the
@@ -82,6 +91,8 @@ async def market_summary(request: Request) -> MarketSummary:
                 reasons=reasons[:3],
                 score_reasons=reasons,
             ))
+            regime_by_asset[row["asset"]] = str(row.get("regime") or "")
+            sentiment_by_asset[row["asset"]] = str(row.get("sentiment") or "")
 
     # 2) Partial fill: live-fetch ONLY symbols with no worker row yet (e.g.
     # the scanner hasn't cycled since SUPPORTED_ASSETS widened, or a pair is
@@ -93,7 +104,9 @@ async def market_summary(request: Request) -> MarketSummary:
             for asset in assets:
                 if asset in snaps and asset not in have:
                     ind = IndicatorSnapshot(**{**snaps[asset], "source": "live"})
-                    snapshot_of[asset] = ind
+                    regime_by_asset[asset] = regime_of(ind)
+                    sentiment_by_asset[asset] = (
+                        "bullish" if ind.ema_fast > ind.ema_slow else "bearish")
                     opp = engine.opportunity_score(ind)
                     opportunities.append(AssetOpportunity(
                         asset=asset, score=opp.score, band=opp.band,
@@ -111,38 +124,45 @@ async def market_summary(request: Request) -> MarketSummary:
         demo_fill = [a for a in ASSETS if a in DEMO]  # nothing at all → legacy 5
     for a in demo_fill:
         opportunities.append(engine.opportunity_score(DEMO[a]))
+        if a not in regime_by_asset:
+            regime_by_asset[a] = regime_of(DEMO[a])
+            sentiment_by_asset[a] = (
+                "bullish" if DEMO[a].ema_fast > DEMO[a].ema_slow else "bearish")
 
-    top_snapshot = snapshot_of.get(opportunities[0].asset) if opportunities else None
-    if top_snapshot is None:
-        # best-effort: any live snapshot we fetched
-        top_snapshot = next(iter(snapshot_of.values()), None)
-
-    if top_snapshot is not None:
-        regime_str = regime_of(top_snapshot)
+    # Header = the top-scoring asset's own regime/sentiment/score — the same
+    # source that produced its Opportunity Score (DB row → live → demo).
+    # The old code derived the header from a live snapshot that is EMPTY on
+    # prod (DB covers all 28 pairs), so it always fell into the hardcoded
+    # confidence=72.0 branch; the live branch used unclamped ADX*2 (can
+    # exceed 100%) — a different metric from the % shown per symbol.
+    ordered = sorted(opportunities, key=lambda o: -o.score)
+    if ordered:
+        top = ordered[0]
         try:
-            regime = MarketRegime(regime_str)
+            regime = MarketRegime(regime_by_asset.get(top.asset, ""))
         except ValueError:
-            regime = MarketRegime.sideway
-        confidence = round(top_snapshot.adx * 2.0, 1)
-        if top_snapshot.ema_fast > top_snapshot.ema_slow:
-            sentiment = "bullish"
-        elif top_snapshot.adx < 20:
-            sentiment = "neutral"
+            regime = (MarketRegime.bull_trend
+                      if top.score >= 61 else MarketRegime.sideway)
+        raw_sent = str(sentiment_by_asset.get(top.asset, "") or "").lower()
+        if raw_sent in ("bullish", "bearish", "neutral"):
+            sentiment = raw_sent  # type: ignore[assignment]
         else:
-            sentiment = "bearish"
+            sentiment = ("bullish" if top.score >= 61
+                         else "bearish" if top.score < 45 else "neutral")  # type: ignore[assignment]
+        confidence = round(float(top.score), 1)
     else:
-        top = opportunities[0] if opportunities else engine.opportunity_score(DEMO["XAUUSD"])
+        top = engine.opportunity_score(DEMO["XAUUSD"])
         regime = MarketRegime.bull_trend if top.score >= 61 else MarketRegime.sideway
-        confidence = 72.0
-        sentiment = "bullish" if top.score >= 61 else "bearish" if top.score < 45 else "neutral"
+        confidence = round(float(top.score), 1)
+        sentiment = "bullish" if top.score >= 61 else "bearish" if top.score < 45 else "neutral"  # type: ignore[assignment]
 
     return MarketSummary(
         regime=regime,
         confidence=confidence,
         explanation=REGIME_EXPLANATION.get(
             regime, "ตลาดไซด์เวย์ — ADX ต่ำกว่า 25, รอ breakout หรือเทรด range"),
-        sentiment=sentiment,
-        opportunities=sorted(opportunities, key=lambda o: -o.score),
+        sentiment=sentiment,  # type: ignore[arg-type]
+        opportunities=ordered,
         min_confidence=settings.min_confidence,
         min_confidence_gold=settings.min_confidence_gold,
     )
