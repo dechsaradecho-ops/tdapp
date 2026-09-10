@@ -528,8 +528,10 @@ export default function SettingsPage() {
         {cfg && (
           <>
           {/* --- Tradable pairs (allowed_assets) --- */}
-          <div className="mt-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">คู่เงินที่เทรดได้ (allowed_assets)</p>
+          <div className="mt-4 rounded border border-slate-700/60 bg-surface/40 p-3">
+            <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+              <Icon n="coins" size={13} /> คู่เงินที่เทรดได้ (allowed_assets)
+            </p>
             <p className="text-xs text-slate-500 mt-0.5">
               Scanner จะวิเคราะห์เฉพาะคู่ที่เลือก — รายการยึดตามฟีดราคาที่รองรับจริง (Yahoo → Frankfurter/TwelveData → exchangerate)
             </p>
@@ -574,10 +576,12 @@ export default function SettingsPage() {
               </p>
             )}
           </div>
-          <div className="mt-4 grid md:grid-cols-4 gap-4">
+          <div className="mt-4 grid md:grid-cols-2 xl:grid-cols-3 gap-4">
             {/* --- Profile & signal gates --- */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">โปรไฟล์ &amp; Signal Gates</p>
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="bolt" size={13} /> โปรไฟล์ &amp; Signal Gates
+              </p>
               <label className="block text-sm">
                 โหมดเทรด (order_mode)
                 <GlassSelect value={cfg.order_mode}
@@ -677,8 +681,10 @@ export default function SettingsPage() {
             </div>
 
             {/* --- Frequency limits --- */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ลิมิตการเทรด</p>
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="clock" size={13} /> ลิมิตการเทรด
+              </p>
               <NumField label="เทรดสูงสุด/วัน" value={cfg.max_trades_daily}
                 onChange={(v) => set("max_trades_daily", v)} step={1} />
               <NumField label="เทรดสูงสุด/สัปดาห์" value={cfg.max_trades_weekly}
@@ -718,8 +724,10 @@ export default function SettingsPage() {
             </div>
 
             {/* --- Position management (breakeven / trailing / partial) --- */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">การจัดการไม้ (Position Management)</p>
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="chart" size={13} /> การจัดการไม้ (Position Management)
+              </p>
               <NumField label="Breakeven Trigger (×R)" value={cfg.breakeven_trigger_r}
                 onChange={(v) => set("breakeven_trigger_r", v)} step={0.1} />
               <span className="block text-xs text-slate-500 -mt-2">
@@ -798,8 +806,10 @@ export default function SettingsPage() {
             </div>
 
             {/* --- Smart Exit Engine (continuous AI exit evaluation) --- */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Smart Exit Engine</p>
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="bot" size={13} /> Smart Exit Engine
+              </p>
               <div className="flex items-center gap-3 py-1">
                 <div className="flex-1">
                   <p className="text-sm">เปิดใช้ Smart Exit</p>
@@ -880,8 +890,10 @@ export default function SettingsPage() {
             </div>
 
             {/* --- Kill switch / drawdown --- */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Kill Switch &amp; Risk</p>
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="octagon" size={13} /> Kill Switch &amp; Risk
+              </p>
               <NumField label="ขาทุนรายวันสูงสุด (%)" value={cfg.kill_daily_loss_pct}
                 onChange={(v) => set("kill_daily_loss_pct", v)} step={0.5} />
               <NumField label="ขาทุนรายสัปดาห์ (%)" value={cfg.kill_weekly_loss_pct}
@@ -895,8 +907,10 @@ export default function SettingsPage() {
             </div>
 
             {/* --- News / correlation / order / backtest --- */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ข่าว / Correlation / Backtest</p>
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="news" size={13} /> ข่าว / Correlation / Backtest
+              </p>
               <NumField label="บล็อกข่าวก่อน event (นาที)" value={cfg.news_block_minutes}
                 onChange={(v) => set("news_block_minutes", v)} step={5} />
               <NumField label="ระวังข่าวก่อน event (นาที)" value={cfg.news_caution_minutes}
