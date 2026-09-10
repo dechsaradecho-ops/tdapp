@@ -66,11 +66,11 @@ class Database:
 
     def select(self, table: str, filters: Optional[dict] = None,
                order: str = "created_at", desc: bool = True, limit: int = 50,
-               offset: int = 0) -> list[dict]:
+               offset: int = 0, columns: str = "*") -> list[dict]:
         if not self._client:
             return []
         try:
-            q = self._client.table(table).select("*")
+            q = self._client.table(table).select(columns)
             for col, val in (filters or {}).items():
                 q = q.eq(col, val)
             q = q.order(order, desc=desc).limit(limit).offset(offset)
@@ -78,6 +78,41 @@ class Database:
         except Exception as exc:
             log.error("select %s failed: %s", table, exc)
             return []
+
+    def count(self, table: str, filters: Optional[dict] = None,
+              created_after: Optional[str] = None,
+              like: Optional[dict[str, str]] = None,
+              not_like: Optional[dict[str, str]] = None) -> Optional[int]:
+        """Exact row count WITHOUT fetching rows (PostgREST count=exact).
+
+        WHY: summary cards used to `select_paged` up to 20000 full rows into
+        memory on every Logs page open — slow on Render free and silently
+        capped once quote_api_logs (thousands of rows/day, 7-day TTL)
+        grows past max_rows. Counting needs one tiny `limit=1` request per
+        bucket and is exact at any table size.
+
+        `like`/`not_like` values use PostgREST wildcards (`*heuristic*` =
+        substring match). Returns None (never raises) when the client is
+        down or the count header is missing — callers fall back to the
+        legacy scan or zeros.
+        """
+        if not self._client:
+            return None
+        try:
+            q = self._client.table(table).select("id", count="exact")
+            for col, val in (filters or {}).items():
+                q = q.eq(col, val)
+            if created_after:
+                q = q.gte("created_at", created_after)
+            for col, pat in (like or {}).items():
+                q = q.like(col, pat)
+            for col, pat in (not_like or {}).items():
+                q = q.not_.like(col, pat)
+            resp = q.limit(1).execute()
+            return resp.count
+        except Exception as exc:
+            log.warning("count %s failed: %s", table, exc)
+            return None
 
     def select_ex(self, table: str, filters: Optional[dict] = None,
                   order: str = "created_at", desc: bool = True, limit: int = 50,

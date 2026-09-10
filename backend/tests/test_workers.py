@@ -44,11 +44,38 @@ class FakeDatabase:
 
     def select(self, table: str, filters: dict | None = None,
                order: str = "created_at", desc: bool = True, limit: int = 50,
-               offset: int = 0) -> list[dict]:
+               offset: int = 0, columns: str = "*") -> list[dict]:
         rows = list(self.rows.get(table, []))
         for col, val in (filters or {}).items():
             rows = [r for r in rows if r.get(col) == val]
-        return rows[:limit]
+        # offset-aware like the real Database.select (server paging relies
+        # on it; returning rows[:limit] would repeat page 1 forever)
+        return rows[offset:offset + limit]
+
+    def count(self, table: str, filters: dict | None = None,
+              created_after: str | None = None,
+              like: dict | None = None,
+              not_like: dict | None = None) -> int | None:
+        """Same contract as Database.count — in-memory exact count.
+
+        Supports the samecreated_after/like/not_like surface the server
+        paging path exercises: ISO-prefix created_at comparison (all test
+        rows use UTC ISO strings) + SQL LIKE `*sub*` substring semantics.
+        """
+        import re
+        rows = list(self.rows.get(table, []))
+        for col, val in (filters or {}).items():
+            rows = [r for r in rows if r.get(col) == val]
+        if created_after:
+            rows = [r for r in rows
+                    if str(r.get("created_at") or "") >= created_after]
+        for col, pat in (like or {}).items():
+            sub = str(pat).replace("*", "")
+            rows = [r for r in rows if sub in str(r.get(col) or "")]
+        for col, pat in (not_like or {}).items():
+            sub = str(pat).replace("*", "")
+            rows = [r for r in rows if sub not in str(r.get(col) or "")]
+        return len(rows)
 
     def select_paged(self, table: str, filters: dict | None = None,
                      order: str = "created_at", desc: bool = True,
@@ -789,6 +816,43 @@ class TestNewsAnalysis:
                             lambda: SimpleProvider("stub"))
         result = await news_analysis.analyze_once(db)  # must not raise
         assert result["event"] in news_analysis.EVENT_TYPES
+
+
+class TestNewsLogsEndpoint:
+    """Server paging for GET /api/system/news-logs — the Logs news tab."""
+
+    def _news_row(self, event: str, idx: int) -> dict:
+        from datetime import datetime, timezone
+        return {"id": f"n-{idx}", "created_at":
+                datetime.now(timezone.utc).isoformat(),
+                "event": event, "sentiment": 0.3,
+                "affected_assets": ["XAUUSD"],
+                "analysis": f"row {idx} (heuristic)",
+                "confidence": 70.0}
+
+    @pytest.mark.asyncio
+    async def test_news_logs_paging_and_event_filter(self):
+        from app.main import app
+        from tests.test_api_routes import call, set_state
+
+        rows = [self._news_row("CPI" if i % 2 else "FOMC", i)
+                for i in range(7)]
+        db = FakeDatabase(rows={"news_analysis": rows})
+        set_state(db)
+        page1 = (await call("GET", "/api/system/news-logs?limit=5&offset=0")).json()
+        assert page1["verdict"] == "ok"
+        assert len(page1["logs"]) == 5
+        assert page1["total"] == 7
+        assert page1["has_more"] is True
+        page2 = (await call("GET", "/api/system/news-logs?limit=5&offset=5")).json()
+        assert len(page2["logs"]) == 2
+        assert page2["has_more"] is False
+        ids1 = {r["id"] for r in page1["logs"]}
+        ids2 = {r["id"] for r in page2["logs"]}
+        assert not ids1 & ids2, "pages must not repeat rows"
+        cpi = (await call("GET", "/api/system/news-logs?limit=500&event=CPI")).json()
+        assert cpi["total"] == 3
+        assert all(r["event"] == "CPI" for r in cpi["logs"])
 
 
 # ---------------------------------------------------------------------------

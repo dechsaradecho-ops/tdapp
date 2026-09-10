@@ -126,6 +126,10 @@ export interface QuoteLogsResponse {
   logs: QuoteApiLog[];
   summary: QuoteLogSummary;
   ttl_days: number;
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
 }
 
 // ---------- Signal lifecycle log (7-day retention) ----------
@@ -167,6 +171,10 @@ export interface SignalLogsResponse {
   logs: SignalLog[];
   summary: SignalLogSummary;
   ttl_days: number;
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
 }
 
 export interface QuoteTestResult {
@@ -200,6 +208,10 @@ export interface NewsLogsResponse {
     real: number;
     heuristic: number;
   };
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
 }
 
 export interface MarketSummary {

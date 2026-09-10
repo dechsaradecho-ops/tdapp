@@ -209,6 +209,18 @@ class TestSummary:
         assert s["total"] == 1200
         assert s["opened"] == 200 and s["blocked"] == 200
 
+    def test_summary_counts_past_20000_rows(self):
+        """The 20000-row select_paged cap must not truncate the summary —
+        count=exact stays exact at any table size."""
+        events = ["created", "order_opened", "order_blocked",
+                  "rejected", "expired", "closed"]
+        db = FakeDatabase(rows={"signal_logs": [
+            _row(0.1, event=events[i % len(events)])
+            for i in range(21000)]})
+        s = signal_log.summary(db)
+        assert s["total"] == 21000
+        assert s["opened"] == 3500 and s["blocked"] == 3500
+
 
 # ---------------------------------------------------------------------------
 # GET /api/system/signal-logs
@@ -232,6 +244,32 @@ class TestSignalLogsEndpoint:
         assert body["summary"]["total"] == 2
         assert body["summary"]["opened"] == 1
         assert body["ttl_days"] == 7
+        assert body["total"] == 2
+        assert body["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_endpoint_server_paging_and_event_filter(self):
+        from app.main import app
+        from tests.test_api_routes import call, set_state
+
+        rows = [{**_row(0.01, event="created" if i % 2 else "order_opened"),
+                   "id": f"s-{i}"}
+                for i in range(7)]
+        db = FakeDatabase(rows={"signal_logs": rows})
+        set_state(db)
+        page1 = (await call("GET", "/api/system/signal-logs?limit=5&offset=0")).json()
+        assert len(page1["logs"]) == 5
+        assert page1["total"] == 7
+        assert page1["has_more"] is True
+        page2 = (await call("GET", "/api/system/signal-logs?limit=5&offset=5")).json()
+        assert len(page2["logs"]) == 2
+        assert page2["has_more"] is False
+        ids1 = {r["id"] for r in page1["logs"]}
+        ids2 = {r["id"] for r in page2["logs"]}
+        assert not ids1 & ids2, "pages must not repeat rows"
+        blocked = (await call("GET", "/api/system/signal-logs?limit=500&event=created")).json()
+        assert blocked["total"] == 3
+        assert all(r["event"] == "created" for r in blocked["logs"])
 
     @pytest.mark.asyncio
     async def test_endpoint_unavailable_db(self):

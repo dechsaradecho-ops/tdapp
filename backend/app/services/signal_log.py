@@ -120,7 +120,12 @@ def purge_old_logs(db: Any, force: bool = False) -> int:
 
 
 def summary(db: Any) -> dict:
-    """Aggregate the last-7-days rows by event for the log page header."""
+    """Aggregate the last-7-days rows by event for the log page header.
+
+    Counts via Database.count (PostgREST count=exact) — exact at ANY table
+    size. The old select_paged scan capped at 20000 full rows and was both
+    slow and silently wrong once the log grew past the cap.
+    """
     out: dict[str, Any] = {
         "total": 0, "by_event": {}, "by_asset": {},
         "opened": 0, "blocked": 0, "expired": 0, "rejected": 0, "closed": 0,
@@ -128,13 +133,52 @@ def summary(db: Any) -> dict:
     try:
         if db is None or not getattr(db, "available", False):
             return out
-        # paging read — a single select(limit=1000) silently truncates once
-        # the table grows past 1000 rows and the cards undercount
-        rows = db.select_paged(TABLE, filters={}, order="created_at", desc=True)
         cutoff = (datetime.now(timezone.utc)
                   - timedelta(days=SIGNAL_LOG_TTL_DAYS)).isoformat()
-        rows = [r for r in rows
-                if str(r.get("created_at") or "") >= cutoff]
+        count = getattr(db, "count", None)
+        if count is None:
+            # legacy fake without count() — fall back to the capped scan
+            rows = db.select_paged(TABLE, filters={}, order="created_at",
+                                   desc=True)
+            rows = [r for r in rows
+                    if str(r.get("created_at") or "") >= cutoff]
+        else:
+            out["total"] = count(TABLE, created_after=cutoff) or 0
+            # per-event counters — the 5 lifecycle events are a fixed set,
+            # one tiny count request each (exact at any table size)
+            for ev in ("created", "order_opened", "order_blocked",
+                       "rejected", "expired", "closed"):
+                n = count(TABLE, filters={"event": ev},
+                          created_after=cutoff) or 0
+                if n:
+                    out["by_event"][ev] = n
+            out["opened"] = out["by_event"].get("order_opened", 0)
+            out["blocked"] = out["by_event"].get("order_blocked", 0)
+            out["expired"] = out["by_event"].get("expired", 0)
+            out["rejected"] = out["by_event"].get("rejected", 0)
+            out["closed"] = out["by_event"].get("closed", 0)
+            if "created" in out["by_event"]:
+                out["by_event"] = dict(sorted(out["by_event"].items(),
+                                              key=lambda kv: kv[1],
+                                              reverse=True))
+            # assets are open-ended → discover from recent rows, then count
+            try:
+                recent = db.select(TABLE, filters={}, order="created_at",
+                                   desc=True, limit=500, columns="asset")
+            except TypeError:  # older fake select() without `columns`
+                recent = db.select(TABLE, filters={}, order="created_at",
+                                   desc=True, limit=500)
+            # NOTE: the window's full asset set may exceed the newest 500
+            # rows — by_asset is a breakdown nicety (total stays exact).
+            for asset in sorted({str(r.get("asset") or "?")
+                                 for r in recent}):
+                n = count(TABLE, filters={"asset": asset},
+                          created_after=cutoff) or 0
+                if n:
+                    out["by_asset"][asset] = n
+            out["by_asset"] = dict(sorted(out["by_asset"].items(),
+                                          key=lambda kv: kv[1], reverse=True))
+            return out
         out["total"] = len(rows)
         by_event: dict[str, int] = {}
         by_asset: dict[str, int] = {}

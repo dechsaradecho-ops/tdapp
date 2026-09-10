@@ -138,6 +138,11 @@ def summary(db: Any) -> dict[str, Any]:
 
     Returns {total, success, error, forex: {total, success, error},
     gold: {...}, by_provider: {provider: {total, success, error}}}.
+
+    Counts via Database.count (PostgREST count=exact) — exact at ANY table
+    size. The old select_paged scan capped at 20000 full rows and was both
+    slow and silently wrong once quote_api_logs (thousands of rows/day,
+    7-day TTL) grew past the cap.
     """
     out: dict[str, Any] = {
         "total": 0, "success": 0, "error": 0,
@@ -149,32 +154,64 @@ def summary(db: Any) -> dict[str, Any]:
         if db is None or not getattr(db, "available", False):
             return out
         cutoff = (datetime.now(timezone.utc)
-                  - timedelta(days=QUOTE_LOG_TTL_DAYS))
-        # paging read — a single select(limit=1000) silently truncates once
-        # the table grows past 1000 rows and the cards undercount
-        rows = db.select_paged(TABLE, order="created_at", desc=True)
-        for r in rows:
-            created = str(r.get("created_at") or "")
-            try:
-                row_date = datetime(
-                    int(created[0:4]), int(created[5:7]), int(created[8:10]),
-                    tzinfo=timezone.utc)
-            except (ValueError, IndexError):
+                  - timedelta(days=QUOTE_LOG_TTL_DAYS)).isoformat()
+        count = getattr(db, "count", None)
+        if count is None:
+            # legacy fake without count() — fall back to the capped scan
+            rows = db.select_paged(TABLE, order="created_at", desc=True)
+            rows = [r for r in rows
+                    if str(r.get("created_at") or "") >= cutoff[:10]]
+            buckets: dict[str, int] = {}
+            for r in rows:
+                cat = (r.get("category") if r.get("category")
+                       in ("forex", "gold") else "forex")
+                prov = str(r.get("provider") or "unknown")
+                ok = r.get("status") == "success"
+                out["total"] += 1
+                out["success" if ok else "error"] += 1
+                b = out[cat]
+                b["total"] += 1
+                b["success" if ok else "error"] += 1
+                p = out["by_provider"].setdefault(
+                    prov, {"total": 0, "success": 0, "error": 0})
+                p["total"] += 1
+                p["success" if ok else "error"] += 1
+                buckets[prov] = 1
+            return out
+        # 4 core buckets (total/success × forex/gold) — one tiny request each
+        out["total"] = count(TABLE, created_after=cutoff) or 0
+        ok_total = count(TABLE, filters={"status": "success"},
+                         created_after=cutoff) or 0
+        out["success"] = ok_total
+        out["error"] = out["total"] - ok_total
+        for cat in ("forex", "gold"):
+            b = out[cat]
+            b["total"] = count(TABLE, filters={"category": cat},
+                               created_after=cutoff) or 0
+            ok_b = count(TABLE, filters={"category": cat,
+                                         "status": "success"},
+                         created_after=cutoff) or 0
+            b["success"] = ok_b
+            b["error"] = b["total"] - ok_b
+        # provider breakdown — providers are a fixed small set
+        # (exchangerate/yahoo/frankfurter/twelvedata), discovered live from
+        # the newest rows so a future provider shows up without a code change
+        try:
+            recent = db.select(TABLE, order="created_at", desc=True, limit=500,
+                               columns="provider")
+        except TypeError:  # older fake select() without `columns`
+            recent = db.select(TABLE, order="created_at", desc=True, limit=500)
+        providers = sorted({str(r.get("provider") or "unknown") for r in recent})
+        for prov in providers:
+            total_p = count(TABLE, filters={"provider": prov},
+                            created_after=cutoff) or 0
+            if not total_p:
                 continue
-            if row_date.date() < cutoff.date():
-                continue
-            cat = r.get("category") if r.get("category") in ("forex", "gold") else "forex"
-            prov = str(r.get("provider") or "unknown")
-            ok = r.get("status") == "success"
-            out["total"] += 1
-            out["success" if ok else "error"] += 1
-            bucket = out[cat]
-            bucket["total"] += 1
-            bucket["success" if ok else "error"] += 1
-            p = out["by_provider"].setdefault(
-                prov, {"total": 0, "success": 0, "error": 0})
-            p["total"] += 1
-            p["success" if ok else "error"] += 1
+            ok_p = count(TABLE, filters={"provider": prov,
+                                         "status": "success"},
+                         created_after=cutoff) or 0
+            out["by_provider"][prov] = {"total": total_p, "success": ok_p,
+                                        "error": total_p - ok_p}
     except Exception as exc:
         log.debug("quote log summary failed: %s", exc)
     return out

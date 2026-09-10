@@ -123,6 +123,17 @@ class TestSummary:
         assert s["total"] == 1250
         assert s["success"] == 1125 and s["error"] == 125
 
+    def test_summary_counts_past_20000_rows(self):
+        """The 20000-row select_paged cap must not truncate the summary —
+        count=exact stays exact at any table size."""
+        db = FakeDatabase(rows={"quote_api_logs": [
+            _row(0.1, status="success" if i % 10 else "error")
+            for i in range(21000)]})
+        s = quote_log.summary(db)
+        assert s["total"] == 21000
+        assert s["success"] == 18900 and s["error"] == 2100
+        assert s["forex"]["total"] == 21000
+
 
 # ---------------------------------------------------------------------------
 # log_call — never raises, skips when DB down
@@ -179,6 +190,35 @@ class TestQuoteLogEndpoints:
         assert body["summary"]["total"] == 2
         assert body["summary"]["gold"]["total"] == 1
         assert body["ttl_days"] == 7
+        assert body["total"] == 2
+        assert body["has_more"] is False
+        assert body["offset"] == 0
+
+    @pytest.mark.asyncio
+    async def test_quote_logs_endpoint_server_paging(self):
+        """offset walks past the first 500; category filter + total are
+        server-side so paging stays consistent while filtering."""
+        rows = [{**_row(0.01, status="success",
+                          category="gold" if i % 2 else "forex"),
+                   "id": f"q-{i}"}
+                for i in range(7)]
+        db = FakeDatabase(rows={"quote_api_logs": rows})
+        set_state(db)
+        quote_log.set_db(db)
+        page1 = (await call("GET", "/api/system/quote-logs?limit=5&offset=0")).json()
+        assert page1["verdict"] == "ok"
+        assert len(page1["logs"]) == 5
+        assert page1["total"] == 7
+        assert page1["has_more"] is True
+        page2 = (await call("GET", "/api/system/quote-logs?limit=5&offset=5")).json()
+        assert len(page2["logs"]) == 2
+        assert page2["has_more"] is False
+        ids1 = {r["id"] for r in page1["logs"]}
+        ids2 = {r["id"] for r in page2["logs"]}
+        assert not ids1 & ids2, "pages must not repeat rows"
+        gold = (await call("GET", "/api/system/quote-logs?limit=500&category=gold")).json()
+        assert gold["total"] == 3
+        assert all(r["category"] == "gold" for r in gold["logs"])
 
     @pytest.mark.asyncio
     async def test_quote_logs_endpoint_unavailable_db(self):

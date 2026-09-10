@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
@@ -49,18 +49,45 @@ export default function LogsPage() {
   const [testResult, setTestResult] = useState<QuoteTestResult | null>(null);
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
+  // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
+  const tabRef = useRef<"quotes" | "news">("quotes");
+  const filterRef = useRef<"all" | "forex" | "gold">("all");
+  // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
+  // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
+  const [quoteTotal, setQuoteTotal] = useState(0);
+  const [quoteHasMore, setQuoteHasMore] = useState(false);
+  const [newsTotal, setNewsTotal] = useState(0);
+  const [newsHasMore, setNewsHasMore] = useState(false);
   const PAGE_SIZE = 50;
+  const SERVER_PAGE = 500;
 
-  const load = useCallback(async () => {
+  const loadQuotes = useCallback(async (flt: "all" | "forex" | "gold", pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    const qres = await api.quoteLogs(SERVER_PAGE, offset, flt);
+    return qres;
+  }, []);
+
+  const loadNews = useCallback(async (pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.newsLogs(SERVER_PAGE, offset);
+  }, []);
+
+  const load = useCallback(async (flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
-      // API caps limit at 500 — มากสุดที่ดึงได้ต่อครั้ง
-      const [qres, nres] = await Promise.all([api.quoteLogs(500), api.newsLogs(200)]);
+      // summary ฝั่ง backend นับแบบ exact ทั้งหน้าต่าง 7 วัน (ไม่ติด cap 500);
+      // ตารางโหลดแค่ server page แรกของแต่ละแท็บ
+      const f = flt ?? filterRef.current;
+      const [qres, nres] = await Promise.all([loadQuotes(f, 1), loadNews(1)]);
       setLogs(qres.logs ?? []);
       setSummary(qres.summary ?? null);
       setTtlDays(qres.ttl_days ?? 7);
+      setQuoteTotal(qres.total ?? (qres.logs ?? []).length);
+      setQuoteHasMore(qres.has_more ?? false);
       setNewsLogs(nres.logs ?? []);
       setNewsSummary(nres.summary ?? null);
+      setNewsTotal(nres.total ?? (nres.logs ?? []).length);
+      setNewsHasMore(nres.has_more ?? false);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       setPage(1);
@@ -69,7 +96,32 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadNews, loadQuotes]);
+
+  // เปลี่ยน server page (ทุก 10 หน้า UI = 500 แถว) — ดึง chunk ถัดไปจาก backend
+  const gotoServerPage = useCallback(async (pg: number) => {
+    setLoading(true);
+    try {
+      if (tabRef.current === "quotes") {
+        const qres = await loadQuotes(filterRef.current, pg);
+        setLogs(qres.logs ?? []);
+        setQuoteTotal(qres.total ?? 0);
+        setQuoteHasMore(qres.has_more ?? false);
+      } else {
+        const nres = await loadNews(pg);
+        setNewsLogs(nres.logs ?? []);
+        setNewsTotal(nres.total ?? 0);
+        setNewsHasMore(nres.has_more ?? false);
+      }
+      setErr("");
+      setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+      setPage(1);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadNews, loadQuotes]);
 
   useEffect(() => {
     load();
@@ -94,13 +146,23 @@ export default function LogsPage() {
     }
   };
 
-  const shown = filter === "all" ? logs : logs.filter((l) => l.category === filter);
-  const totalPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  // ตารางคือ server page ปัจจุบัน (500 แถว) — filter ราคาทำฝั่ง server แล้ว
+  const shown = logs;
+  // จำนวนหน้าทั้งหมดอ้างจาก total จริง (count=exact) ไม่ใช่ความยาว chunk
+  const totalPages = Math.max(1, Math.ceil((quoteTotal || shown.length) / PAGE_SIZE));
+  const uiPagesPerChunk = Math.max(1, Math.ceil(SERVER_PAGE / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
-  const pageRows = shown.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-  const newsTotalPages = Math.max(1, Math.ceil(newsLogs.length / PAGE_SIZE));
+  const chunkPage = ((safePage - 1) % uiPagesPerChunk) + 1;
+  const pageRows = shown.slice((chunkPage - 1) * PAGE_SIZE, chunkPage * PAGE_SIZE);
+  const newsChunkTotal = newsLogs.length;
+  const newsTotalPages = Math.max(1, Math.ceil((newsTotal || newsChunkTotal) / PAGE_SIZE));
   const newsSafePage = Math.min(page, newsTotalPages);
-  const newsPageRows = newsLogs.slice((newsSafePage - 1) * PAGE_SIZE, newsSafePage * PAGE_SIZE);
+  const newsChunkPage = ((newsSafePage - 1) % uiPagesPerChunk) + 1;
+  const newsPageRows = newsLogs.slice((newsChunkPage - 1) * PAGE_SIZE, newsChunkPage * PAGE_SIZE);
+  const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
+  const newsServerPage = Math.floor((newsSafePage - 1) / uiPagesPerChunk) + 1;
+  const serverPages = Math.max(1, Math.ceil(totalPages / uiPagesPerChunk));
+  const newsServerPages = Math.max(1, Math.ceil(newsTotalPages / uiPagesPerChunk));
 
   return (
     <div className="space-y-4">
@@ -116,7 +178,7 @@ export default function LogsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={load} disabled={loading}
+          <button onClick={() => load()} disabled={loading}
             aria-busy={loading} aria-live="polite"
             title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
             className="btn-secondary disabled:opacity-50">
@@ -137,12 +199,12 @@ export default function LogsPage() {
       {/* ---------- Tabs: quotes / news ---------- */}
       <div className="flex gap-2 text-xs">
         <button
-          onClick={() => { setTab("quotes"); setPage(1); }}
+          onClick={() => { setTab("quotes"); tabRef.current = "quotes"; setPage(1); }}
           className={`px-3 py-1 rounded ${tab === "quotes" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           ราคา (Quote API)
         </button>
         <button
-          onClick={() => { setTab("news"); setPage(1); }}
+          onClick={() => { setTab("news"); tabRef.current = "news"; setPage(1); }}
           className={`px-3 py-1 rounded ${tab === "news" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           ข่าว (News{newsSummary ? ` ${newsSummary.total}` : ""})
         </button>
@@ -241,7 +303,7 @@ export default function LogsPage() {
           {(["all", "forex", "gold"] as const).map((f) => (
             <button
               key={f}
-              onClick={() => { setFilter(f); setPage(1); }}
+              onClick={() => { setFilter(f); filterRef.current = f; setPage(1); load(f); }}
               className={`px-3 py-1 rounded ${filter === f ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
             >
               {f === "all" ? "ทั้งหมด" : f === "forex" ? "Forex" : "Gold"}
@@ -301,22 +363,29 @@ export default function LogsPage() {
           </tbody>
         </table>
         </div>
-        {logs.length > 0 && (
+        {(logs.length > 0 || quoteTotal > 0) && (
           <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
             <p className="text-xs text-slate-500">
-              หน้า {safePage}/{totalPages} · แสดง {pageRows.length} จาก {shown.length} รายการ
-              {filter !== "all" && ` (กรองจาก ${logs.length})`} · เก็บสูงสุด {ttlDays} วัน
+              หน้า {safePage}/{totalPages} · แสดง {pageRows.length} จาก {quoteTotal.toLocaleString()} รายการ
+              {serverPages > 1 && ` · ชุดที่ ${serverPage}/${serverPages}`} · เก็บสูงสุด {ttlDays} วัน
             </p>
             {totalPages > 1 && (
               <div className="flex items-center gap-2">
-                <button onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={safePage <= 1}
+                <button onClick={() => {
+                    if (chunkPage > 1 || safePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(serverPage - 1).then(() => setPage((serverPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={safePage <= 1 || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ก่อนหน้า
                 </button>
                 <span className="text-xs text-slate-400">{safePage} / {totalPages}</span>
-                <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={safePage >= totalPages}
+                <button onClick={() => {
+                    if (chunkPage < uiPagesPerChunk && chunkPage * PAGE_SIZE < shown.length) { setPage((p) => Math.min(totalPages, p + 1)); return; }
+                    if (!quoteHasMore && serverPage >= serverPages) { setPage((p) => Math.min(totalPages, p + 1)); return; }
+                    gotoServerPage(serverPage + 1).then(() => setPage(serverPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={safePage >= totalPages || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ถัดไป
                 </button>
@@ -388,21 +457,29 @@ export default function LogsPage() {
           </tbody>
         </table>
         </div>
-        {newsLogs.length > 0 && (
+        {(newsLogs.length > 0 || newsTotal > 0) && (
           <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
             <p className="text-xs text-slate-500">
-              หน้า {newsSafePage}/{newsTotalPages} · แสดง {newsPageRows.length} จาก {newsLogs.length} รายการ
+              หน้า {newsSafePage}/{newsTotalPages} · แสดง {newsPageRows.length} จาก {newsTotal.toLocaleString()} รายการ
+              {newsServerPages > 1 && ` · ชุดที่ ${newsServerPage}/${newsServerPages}`}
             </p>
             {newsTotalPages > 1 && (
               <div className="flex items-center gap-2">
-                <button onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={newsSafePage <= 1}
+                <button onClick={() => {
+                    if (newsChunkPage > 1 || newsSafePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(newsServerPage - 1).then(() => setPage((newsServerPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={newsSafePage <= 1 || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ก่อนหน้า
                 </button>
                 <span className="text-xs text-slate-400">{newsSafePage} / {newsTotalPages}</span>
-                <button onClick={() => setPage((p) => Math.min(newsTotalPages, p + 1))}
-                  disabled={newsSafePage >= newsTotalPages}
+                <button onClick={() => {
+                    if (newsChunkPage < uiPagesPerChunk && newsChunkPage * PAGE_SIZE < newsChunkTotal) { setPage((p) => Math.min(newsTotalPages, p + 1)); return; }
+                    if (!newsHasMore && newsServerPage >= newsServerPages) { setPage((p) => Math.min(newsTotalPages, p + 1)); return; }
+                    gotoServerPage(newsServerPage + 1).then(() => setPage(newsServerPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={newsSafePage >= newsTotalPages || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ถัดไป
                 </button>

@@ -220,9 +220,15 @@ async def autotrader_dry_run(request: Request) -> dict:
 # Quote API call log — every external price fetch (7-day auto-expiry)
 # ---------------------------------------------------------------------------
 @router.get("/quote-logs")
-async def quote_logs(request: Request, limit: int = 100) -> dict:
+async def quote_logs(request: Request, limit: int = 100, offset: int = 0,
+                     category: str = "all", provider: str = "all") -> dict:
     """Recent quote-API calls + summary card data (forex vs gold).
 
+    Server-side paging: `offset` skips rows so the Logs page can walk the
+    full 7-day window in 500-row chunks — the old fetch-500-recent-only
+    shape hid everything older. `limit` stays capped at 500 per request
+    (one PostgREST round trip, no 20000-row dump). `category`/`provider`
+    filters run server-side so paging stays consistent while filtering.
     Rows older than 7 days are purged automatically (throttled to once per
     5 min; force=True here so opening the page always cleans up).
     """
@@ -235,8 +241,15 @@ async def quote_logs(request: Request, limit: int = 100) -> dict:
 
     from app.services import quote_log
     quote_log.purge_old_logs(db, force=True)
-    rows = db.select(quote_log.TABLE, order="created_at", desc=True,
-                     limit=max(1, min(limit, 500)))
+    page_size = max(1, min(limit, 500))
+    page_offset = max(0, offset)
+    filters: dict[str, Any] = {}
+    if category in ("forex", "gold"):
+        filters["category"] = category
+    if provider and provider != "all":
+        filters["provider"] = provider
+    rows = db.select(quote_log.TABLE, filters=filters, order="created_at",
+                     desc=True, limit=page_size, offset=page_offset)
     out["logs"] = [
         {
             "id": r.get("id"),
@@ -256,6 +269,19 @@ async def quote_logs(request: Request, limit: int = 100) -> dict:
     ]
     out["summary"] = quote_log.summary(db)
     out["ttl_days"] = quote_log.QUOTE_LOG_TTL_DAYS
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    # exact total for the active filter (cheap count=exact, no row fetch)
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=quote_log.QUOTE_LOG_TTL_DAYS)).isoformat()
+        total = db.count(quote_log.TABLE, filters=filters or None,
+                         created_after=cutoff)
+        out["total"] = total if total is not None else len(rows)
+    except Exception:
+        out["total"] = len(rows)
+    out["has_more"] = (page_offset + len(rows)) < (out["total"] or 0)
     out["verdict"] = "ok"
     return out
 
@@ -264,8 +290,14 @@ async def quote_logs(request: Request, limit: int = 100) -> dict:
 # Signal lifecycle log — created/blocked/opened/rejected/expired/closed (7-day)
 # ---------------------------------------------------------------------------
 @router.get("/signal-logs")
-async def signal_logs(request: Request, limit: int = 100) -> dict:
+async def signal_logs(request: Request, limit: int = 100, offset: int = 0,
+                      event: str = "all") -> dict:
     """Recent signal lifecycle events + summary card data.
+
+    Server-side paging like /quote-logs: `offset` skips rows so the signal
+    tab can walk the full 7-day window in 500-row chunks; `limit` capped at
+    500 per request. `event` filters server-side (one of
+    created/order_opened/order_blocked/rejected/expired/closed).
 
     ทุกสัญญาณจะถูกบันทึกตั้งแต่เกิด (created) จนจบชะตา (opened / blocked /
     rejected / expired / closed) เก็บย้อนหลัง 7 วัน — rows เก่าถูก purge
@@ -280,8 +312,13 @@ async def signal_logs(request: Request, limit: int = 100) -> dict:
 
     from app.services import signal_log
     signal_log.purge_old_logs(db, force=True)
-    rows = db.select(signal_log.TABLE, order="created_at", desc=True,
-                     limit=max(1, min(limit, 500)))
+    page_size = max(1, min(limit, 500))
+    page_offset = max(0, offset)
+    filters: dict[str, Any] = {}
+    if event in signal_log.EVENTS:
+        filters["event"] = event
+    rows = db.select(signal_log.TABLE, filters=filters, order="created_at",
+                     desc=True, limit=page_size, offset=page_offset)
     out["logs"] = [
         {
             "id": r.get("id"),
@@ -305,6 +342,18 @@ async def signal_logs(request: Request, limit: int = 100) -> dict:
     ]
     out["summary"] = signal_log.summary(db)
     out["ttl_days"] = signal_log.SIGNAL_LOG_TTL_DAYS
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=signal_log.SIGNAL_LOG_TTL_DAYS)).isoformat()
+        total = db.count(signal_log.TABLE, filters=filters or None,
+                         created_after=cutoff)
+        out["total"] = total if total is not None else len(rows)
+    except Exception:
+        out["total"] = len(rows)
+    out["has_more"] = (page_offset + len(rows)) < (out["total"] or 0)
     out["verdict"] = "ok"
     return out
 
@@ -313,12 +362,15 @@ async def signal_logs(request: Request, limit: int = 100) -> dict:
 # News analysis history — worker #2 output (headline + AI sentiment per event)
 # ---------------------------------------------------------------------------
 @router.get("/news-logs")
-async def news_logs(request: Request, limit: int = 100) -> dict:
+async def news_logs(request: Request, limit: int = 100, offset: int = 0,
+                    event: str = "all") -> dict:
     """Recent news-analysis rows for the Logs page news tab.
 
-    Each row = one worker cycle: event type, AI sentiment (-1..+1),
-    affected assets, Thai analysis (+ real headline when the feed works)
-    and confidence. Read-only over the existing news_analysis table —
+    Server-side paging like /quote-logs: `offset` skips rows, `limit` capped
+    at 500 per request, `event` filters server-side (one of the worker's
+    EVENT_TYPES). Each row = one worker cycle: event type, AI sentiment
+    (-1..+1), affected assets, Thai analysis (+ real headline when the feed
+    works) and confidence. Read-only over the existing news_analysis table —
     no new table or migration needed. Never raises.
     """
     db: Database = request.app.state.db
@@ -328,8 +380,13 @@ async def news_logs(request: Request, limit: int = 100) -> dict:
         out["error"] = db.init_error or "client unavailable"
         return out
 
-    rows = db.select("news_analysis", order="created_at", desc=True,
-                     limit=max(1, min(limit, 500)))
+    page_size = max(1, min(limit, 500))
+    page_offset = max(0, offset)
+    filters: dict[str, Any] = {}
+    if event and event != "all":
+        filters["event"] = event
+    rows = db.select("news_analysis", filters=filters, order="created_at",
+                     desc=True, limit=page_size, offset=page_offset)
     logs = [
         {
             "id": r.get("id"),
@@ -342,14 +399,39 @@ async def news_logs(request: Request, limit: int = 100) -> dict:
         }
         for r in rows
     ]
+    try:
+        total = db.count("news_analysis", filters=filters or None)
+        total_n = total if total is not None else len(rows)
+    except Exception:
+        total_n = len(rows)
+    # window counts for the header cards — fixed 5-event set, one tiny
+    # count request each (exact at any table size, no row fetch)
     by_event: dict[str, int] = {}
-    for r in rows:
-        ev = str(r.get("event") or "?")
-        by_event[ev] = by_event.get(ev, 0) + 1
+    try:
+        from app.workers.news_analysis import EVENT_TYPES
+        for ev in EVENT_TYPES:
+            n = db.count("news_analysis", filters={"event": ev})
+            if n:
+                by_event[ev] = n
+    except Exception:
+        by_event = {}
+        for r in rows:
+            ev = str(r.get("event") or "?")
+            by_event[ev] = by_event.get(ev, 0) + 1
+    if not by_event:
+        for r in rows:
+            ev = str(r.get("event") or "?")
+            by_event[ev] = by_event.get(ev, 0) + 1
+    out["logs"] = logs
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    out["total"] = total_n
+    out["has_more"] = (page_offset + len(rows)) < (total_n or 0)
+    # real-vs-heuristic split is computed over the fetched page only
+    # (legacy shape returned the same window over its ≤500 rows)
     real = sum(1 for r in rows
                if r.get("analysis") and "heuristic" not in str(r.get("analysis")))
-    out["logs"] = logs
-    out["summary"] = {"total": len(rows), "by_event": by_event,
+    out["summary"] = {"total": total_n, "by_event": by_event,
                       "real": real, "heuristic": len(rows) - real}
     out["verdict"] = "ok"
     return out

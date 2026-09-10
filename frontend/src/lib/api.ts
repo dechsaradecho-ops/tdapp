@@ -221,18 +221,27 @@ export const api = {
   signalReport: (days = 30) =>
     get<SignalReport>(`/api/trading/signal-report?days=${days}`),
 
-  // ---------- Quote API call log (7-day auto-expiry) ----------
-  quoteLogs: (limit = 100) =>
-    get<QuoteLogsResponse>(`/api/system/quote-logs?limit=${limit}`),
+  // ---------- Quote API call log (7-day auto-expiry, server paging) ----------
+  quoteLogs: (limit = 100, offset = 0, category = "all", provider = "all") =>
+    get<QuoteLogsResponse>(
+      `/api/system/quote-logs?limit=${limit}&offset=${offset}` +
+      `&category=${encodeURIComponent(category)}&provider=${encodeURIComponent(provider)}`
+    ),
   quoteTest: () => post<QuoteTestResult>("/api/system/quote-test", {}),
 
-  // ---------- News analysis history (worker #2 output) ----------
-  newsLogs: (limit = 100) =>
-    get<NewsLogsResponse>(`/api/system/news-logs?limit=${limit}`),
+  // ---------- News analysis history (worker #2 output, server paging) ----------
+  newsLogs: (limit = 100, offset = 0, event = "all") =>
+    get<NewsLogsResponse>(
+      `/api/system/news-logs?limit=${limit}&offset=${offset}` +
+      `&event=${encodeURIComponent(event)}`
+    ),
 
-  // ---------- Signal lifecycle log (7-day auto-expiry) ----------
-  signalLogs: (limit = 100) =>
-    get<SignalLogsResponse>(`/api/system/signal-logs?limit=${limit}`),
+  // ---------- Signal lifecycle log (7-day auto-expiry, server paging) ----------
+  signalLogs: (limit = 100, offset = 0, event = "all") =>
+    get<SignalLogsResponse>(
+      `/api/system/signal-logs?limit=${limit}&offset=${offset}` +
+      `&event=${encodeURIComponent(event)}`
+    ),
 
   // ---------- LINE: notification targets + test button ----------
   lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),
