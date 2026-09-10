@@ -133,10 +133,15 @@ export default function PositionChartModal({ position, onClose }: {
   const win = p.unrealized_pnl >= 0;
 
   return (
-    // โครงเดียวกับ ChatWidget: มือถือเต็มจอ, เดสก์ท็อปกล่องลอยขวาล่าง
-    // (กว้างกว่ากล่องแชทเพื่อใส่กราฟแท่งเทียน)
+    // มือถือ: เต็มจอ (เหมือนกล่อง AI chat) — เดสก์ท็อป: modal กลางจอ
+    // (overlay มีเฉพาะ sm+; มือถือจอเล็กปิดด้วยปุ่ม ✕)
+    <div className="fixed inset-0 z-50 sm:flex sm:items-center sm:justify-center sm:p-4 animate-fade"
+      style={{ background: "rgba(0,0,0,0.7)" }}
+      onClick={onClose}
+    >
     <div
-      className="fixed inset-0 z-50 sm:inset-auto sm:bottom-24 sm:right-6 sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:h-[600px] sm:max-h-[78vh] panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop"
+      className="panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop w-full h-full sm:h-auto sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:max-h-[92vh]"
+      onClick={(e) => e.stopPropagation()}
     >
       {/* ---------- header (แบบเดียวกับกล่อง AI chat) ---------- */}
       <div className="flex items-center justify-between pb-2 border-b border-white/10">
@@ -161,8 +166,8 @@ export default function PositionChartModal({ position, onClose }: {
           </p>
         </div>
 
-        {/* ---------- กราฟเต็ม popup ---------- */}
-        <div className="rounded-xl border border-white/10 bg-black/30 p-1 sm:p-2">
+        {/* ---------- กราฟเต็ม popup (พื้นทึบ — ไม่ให้เห็น aurora ลอด) ---------- */}
+        <div className="rounded-xl border border-white/10 bg-[#05070d] p-1 sm:p-2">
           {candles === null && (
             <div className="flex items-center justify-center gap-2 py-16 text-slate-400 text-sm">
               <Icon n="spinner" size={16} className="animate-spin" /> กำลังโหลดกราฟ…
@@ -187,6 +192,7 @@ export default function PositionChartModal({ position, onClose }: {
           )}
         </div>
       </div>
+    </div>
     </div>
   );
 }
