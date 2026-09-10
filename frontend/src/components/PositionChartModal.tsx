@@ -136,12 +136,12 @@ export default function PositionChartModal({ position, onClose }: {
   return (
     // กรอบ liquid glass เดียวกับกล่อง AI chat (class panel ล้วน —
     // ไม่มี overlay ดำ/blur ทับ เพื่อให้เห็นแก้วฝ้าเหมือนกัน);
-    // มือถือเต็มจอ — เดสก์ท็อปกล่องลอยกลางจอ (แตะนอกกรอบเพื่อปิด)
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4"
+    // มือถือกล่องพอดีกราฟกลางจอ (h-auto) — เดสก์ท็อปกล่องลอยกลางจอ (แตะนอกกรอบเพื่อปิด)
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-4"
       onClick={onClose}
     >
     <div
-      className="panel flex flex-col shadow-2xl rounded-none sm:rounded-xl safe-top animate-pop w-full h-[100dvh] sm:h-auto sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:max-h-[92vh] overflow-y-auto"
+      className="panel flex flex-col shadow-2xl rounded-xl safe-top animate-pop w-full h-auto max-h-[92dvh] sm:h-auto sm:w-[680px] sm:max-w-[calc(100vw-3rem)] sm:max-h-[92vh] overflow-y-auto"
       onClick={(e) => e.stopPropagation()}
     >
       {/* ---------- header (แบบเดียวกับกล่อง AI chat) ---------- */}
