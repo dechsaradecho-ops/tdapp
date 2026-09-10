@@ -138,6 +138,19 @@ def _yahoo_symbol(asset: str) -> str | None:
 SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps feeds tiny
 _spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
 
+# ---- Timeout budgets (2026-09-11: scheduler-stall hardening) --------------
+# Per-request httpx timeouts (10s/15s) were never the problem — the stall
+# was the LACK of a total budget: fetch_all_snapshots created one
+# AsyncClient PER ASSET (28× TLS handshakes per scanner cycle) and
+# asyncio.gather waited for the SLOWEST asset with no cap, so a single
+# hung feed could block position_guard's 1-min cycle past its deadline
+# (SL never trailed: "เคยขึ้นไป 1R ทำไมไม่ขยับ sl"). These caps bound the
+# whole batch; on expiry callers get cache hits + partials, never a hang.
+_SPOT_PER_ASSET_TIMEOUT = 12.0   # Yahoo 10s + exchangerate fallback margin
+_SPOT_TOTAL_TIMEOUT = 20.0       # whole spot batch (guard 1-min cycle)
+_SNAP_PER_ASSET_TIMEOUT = 30.0   # Yahoo 15s + fallback 15s margin
+_SNAP_TOTAL_TIMEOUT = 35.0       # whole snapshot batch
+
 # exchangerate-api.com state — keys rotate when one exhausts its quota (429)
 EXCHANGERATE_URL = "https://v6.exchangerate-api.com/v6"
 _exchange_key_idx = 0
@@ -153,12 +166,15 @@ def _exchange_pair(asset: str) -> tuple[str, str] | None:
     return None
 
 
-async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
+async def _fetch_spot_exchangerate(
+    asset: str, client: httpx.AsyncClient | None = None,
+) -> tuple[float, str]:
     """Spot price via exchangerate-api.com, rotating through all keys.
 
     /latest/{base} returns conversion rates for every quote currency, so one
     request per key covers all four FX pairs. Returns (price, "") on success
-    or (0.0, reason) when every key fails.
+    or (0.0, reason) when every key fails. Reuses the caller's shared
+    AsyncClient when provided (avoids a new TLS handshake per key).
     """
     global _exchange_key_idx
     pair = _exchange_pair(asset)
@@ -170,6 +186,12 @@ async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
     if not keys:
         return 0.0, "no EXCHANGERATE_API_KEYS configured"
 
+    async def _get(url: str, shared: httpx.AsyncClient | None):
+        if shared is not None:
+            return await shared.get(url, timeout=10.0)
+        async with httpx.AsyncClient(follow_redirects=True) as own:
+            return await own.get(url, timeout=10.0)
+
     last_err = "no keys tried"
     for _ in range(len(keys)):
         key = keys[_exchange_key_idx % len(keys)]
@@ -177,38 +199,37 @@ async def _fetch_spot_exchangerate(asset: str) -> tuple[float, str]:
         url = f"{EXCHANGERATE_URL}/{key}/latest/{base}"
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                resp = await client.get(url, timeout=10.0)
-                dur = int((time.monotonic() - t0) * 1000)
-                if resp.status_code == 429 or resp.status_code >= 400:
-                    last_err = f"exchangerate key #{_exchange_key_idx % len(keys)}: HTTP {resp.status_code}"
-                    quote_log.log_call(
-                        asset=asset, category=quote_log.category_for(asset),
-                        provider="exchangerate", url=url, status="error",
-                        http_status=resp.status_code,
-                        error=f"HTTP {resp.status_code}",
-                        duration_ms=dur,
-                        api_key_hint=quote_log.mask_key(key))
-                    continue  # rotate to the next key
-                payload = resp.json()
-                rate = ((payload.get("conversion_rates") or {}).get(quote))
-                if not rate:
-                    last_err = f"{asset}: no {quote} rate in exchangerate payload"
-                    quote_log.log_call(
-                        asset=asset, category=quote_log.category_for(asset),
-                        provider="exchangerate", url=url, status="error",
-                        http_status=resp.status_code,
-                        error=f"no {quote} rate in payload",
-                        duration_ms=dur,
-                        api_key_hint=quote_log.mask_key(key))
-                    continue
+            resp = await _get(url, client)
+            dur = int((time.monotonic() - t0) * 1000)
+            if resp.status_code == 429 or resp.status_code >= 400:
+                last_err = f"exchangerate key #{_exchange_key_idx % len(keys)}: HTTP {resp.status_code}"
                 quote_log.log_call(
                     asset=asset, category=quote_log.category_for(asset),
-                    provider="exchangerate", url=url, status="success",
-                    http_status=resp.status_code, price=float(rate),
+                    provider="exchangerate", url=url, status="error",
+                    http_status=resp.status_code,
+                    error=f"HTTP {resp.status_code}",
                     duration_ms=dur,
                     api_key_hint=quote_log.mask_key(key))
-                return float(rate), ""
+                continue  # rotate to the next key
+            payload = resp.json()
+            rate = ((payload.get("conversion_rates") or {}).get(quote))
+            if not rate:
+                last_err = f"{asset}: no {quote} rate in exchangerate payload"
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="exchangerate", url=url, status="error",
+                    http_status=resp.status_code,
+                    error=f"no {quote} rate in payload",
+                    duration_ms=dur,
+                    api_key_hint=quote_log.mask_key(key))
+                continue
+            quote_log.log_call(
+                asset=asset, category=quote_log.category_for(asset),
+                provider="exchangerate", url=url, status="success",
+                http_status=resp.status_code, price=float(rate),
+                duration_ms=dur,
+                api_key_hint=quote_log.mask_key(key))
+            return float(rate), ""
         except (httpx.HTTPError, ValueError) as exc:
             dur = int((time.monotonic() - t0) * 1000)
             last_err = f"exchangerate request failed ({exc})"
@@ -675,36 +696,36 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
     if todo:
         headers = {"User-Agent": YAHOO_UA}
 
-        async def _yahoo_one(asset: str) -> tuple[str, float | None, str]:
+        async def _yahoo_one(asset: str, client: httpx.AsyncClient,
+                             ) -> tuple[str, float | None, str]:
             sym = _yahoo_symbol(asset)
             if not sym:
                 return asset, None, f"no spot symbol mapping for {asset}"
             url = f"{YAHOO_CHART_URL}/{sym}"
             t0 = time.monotonic()
             try:
-                async with httpx.AsyncClient(follow_redirects=True) as client:
-                    resp = await client.get(
-                        url,
-                        params={"interval": "1m", "range": "1d"},
-                        headers=headers, timeout=10.0)
-                    dur = int((time.monotonic() - t0) * 1000)
-                    resp.raise_for_status()
-                    meta = ((resp.json().get("chart") or {}).get("result")
-                            or [{}])[0].get("meta", {})
-                    price = meta.get("regularMarketPrice")
-                    if not price:
-                        quote_log.log_call(
-                            asset=asset, category=quote_log.category_for(asset),
-                            provider="yahoo", url=url, status="error",
-                            http_status=resp.status_code,
-                            error="no regularMarketPrice", duration_ms=dur)
-                        return asset, None, f"{asset}: no regularMarketPrice"
+                resp = await client.get(
+                    url,
+                    params={"interval": "1m", "range": "1d"},
+                    headers=headers, timeout=10.0)
+                dur = int((time.monotonic() - t0) * 1000)
+                resp.raise_for_status()
+                meta = ((resp.json().get("chart") or {}).get("result")
+                        or [{}])[0].get("meta", {})
+                price = meta.get("regularMarketPrice")
+                if not price:
                     quote_log.log_call(
                         asset=asset, category=quote_log.category_for(asset),
-                        provider="yahoo", url=url, status="success",
-                        http_status=resp.status_code, price=float(price),
-                        duration_ms=dur)
-                    return asset, float(price), ""
+                        provider="yahoo", url=url, status="error",
+                        http_status=resp.status_code,
+                        error="no regularMarketPrice", duration_ms=dur)
+                    return asset, None, f"{asset}: no regularMarketPrice"
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="yahoo", url=url, status="success",
+                    http_status=resp.status_code, price=float(price),
+                    duration_ms=dur)
+                return asset, float(price), ""
             except httpx.TimeoutException:
                 quote_log.log_call(
                     asset=asset, category=quote_log.category_for(asset),
@@ -720,18 +741,60 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                     duration_ms=int((time.monotonic() - t0) * 1000))
                 return asset, None, f"{asset}: spot feed error ({exc})"
 
-        async def _one(asset: str) -> tuple[str, float | None, str]:
+        async def _one(asset: str, client: httpx.AsyncClient,
+                       ) -> tuple[str, float | None, str]:
+            # Per-asset cap: a hung feed resolves to a failure row, never
+            # blocks the batch past _SPOT_PER_ASSET_TIMEOUT.
+            try:
+                return await asyncio.wait_for(
+                    _one_inner(asset, client),
+                    timeout=_SPOT_PER_ASSET_TIMEOUT)
+            except asyncio.TimeoutError:
+                return asset, None, f"{asset}: spot batch timeout"
+
+        async def _one_inner(asset: str, client: httpx.AsyncClient,
+                             ) -> tuple[str, float | None, str]:
             # 1) Yahoo chart API first (real intraday spots; only XAUUSD source)
-            asset_y, y_price, y_err = await _yahoo_one(asset)
+            asset_y, y_price, y_err = await _yahoo_one(asset, client)
             if y_price:
                 return asset, y_price, ""
             # 2) exchangerate-api.com fallback (6 rotating keys — FX pairs only)
-            price, err = await _fetch_spot_exchangerate(asset)
+            price, err = await _fetch_spot_exchangerate(asset, client)
             if price:
                 return asset, price, ""
             return asset, None, f"{y_err}; {err}"
 
-        results = await asyncio.gather(*[_one(a) for a in todo])
+        # ONE shared client for the whole batch (was: one AsyncClient per
+        # asset → 28× TLS handshakes per scanner cycle). Total budget caps
+        # the batch so the guard's 1-min cycle can never stall on feeds;
+        # completed partials are kept on expiry (not discarded).
+        results: list[tuple[str, float | None, str]] = []
+        try:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                tasks = {asyncio.create_task(_one(a, client)): a
+                         for a in todo}
+                done, pending = await asyncio.wait(
+                    tasks.keys(), timeout=_SPOT_TOTAL_TIMEOUT)
+                for t in done:
+                    try:
+                        results.append(t.result())
+                    except Exception as exc:  # defensive — record, don't crash
+                        results.append((tasks[t], None, f"spot error ({exc})"))
+                if pending:
+                    log.warning("spot batch timed out after %.0fs "
+                                "(%d/%d assets done) — returning cache hits + "
+                                "partials", _SPOT_TOTAL_TIMEOUT,
+                                len(done), len(todo))
+                    for t in pending:
+                        t.cancel()
+                    # Mark unfinished assets as timeout failures so callers
+                    # see them in `failures` instead of silently dropping.
+                    finished = {r[0] for r in results}
+                    for t, a in tasks.items():
+                        if a not in finished:
+                            results.append((a, None, f"{a}: spot batch timeout"))
+        except Exception as exc:
+            log.warning("spot batch failed (%s) — returning cache hits", exc)
         now = time.monotonic()
         for asset, price, err in results:
             if price is not None:
@@ -776,19 +839,51 @@ async def fetch_all_snapshots(assets: list[str], concurrency: int = 5,
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(asset: str) -> tuple[str, dict | None]:
+    async def _one(asset: str, client: httpx.AsyncClient,
+                   ) -> tuple[str, dict | None]:
+        # Per-asset cap: a hung feed resolves to a miss, never blocks the
+        # batch (and therefore never the guard's 1-min cycle).
         async with sem:
-            async with httpx.AsyncClient() as client:
-                try:
-                    return asset, await fetch_snapshot(asset, client)
-                except QuotesUnavailable as exc:
-                    log.warning("Live quote unavailable for %s: %s", asset, exc)
-                    return asset, None
-                except Exception as exc:  # unexpected — don't kill the scan
-                    log.exception("Unexpected quote error for %s", asset)
-                    return asset, None
+            try:
+                snap = await asyncio.wait_for(
+                    fetch_snapshot(asset, client),
+                    timeout=_SNAP_PER_ASSET_TIMEOUT)
+                return asset, snap
+            except asyncio.TimeoutError:
+                log.warning("snapshot %s timed out after %.0fs",
+                            asset, _SNAP_PER_ASSET_TIMEOUT)
+                return asset, None
+            except QuotesUnavailable as exc:
+                log.warning("Live quote unavailable for %s: %s", asset, exc)
+                return asset, None
+            except Exception:  # unexpected — don't kill the scan
+                log.exception("Unexpected quote error for %s", asset)
+                return asset, None
 
-    pairs = await asyncio.gather(*[_one(a) for a in missing])
+    # ONE shared client for the whole batch (was: one AsyncClient per
+    # asset). Total budget caps the batch so scheduler cycles return
+    # cache hits + partials instead of hanging on a dead feed.
+    pairs: list[tuple[str, dict | None]] = []
+    try:
+        async with httpx.AsyncClient() as client:
+            tasks = {asyncio.create_task(_one(a, client)): a
+                     for a in missing}
+            done, pending = await asyncio.wait(
+                tasks.keys(), timeout=_SNAP_TOTAL_TIMEOUT)
+            for t in done:
+                try:
+                    pairs.append(t.result())
+                except Exception:  # defensive — skip, don't crash the batch
+                    log.exception("snapshot task failed for %s", tasks[t])
+            if pending:
+                log.warning("snapshot batch timed out after %.0fs "
+                            "(%d/%d assets done) — returning cache hits + "
+                            "partials", _SNAP_TOTAL_TIMEOUT,
+                            len(done), len(missing))
+                for t in pending:
+                    t.cancel()
+    except Exception as exc:
+        log.warning("snapshot batch failed (%s) — returning cache hits", exc)
     fetched = {a: s for a, s in pairs if s is not None}
     now = time.monotonic()
     for a, s in fetched.items():

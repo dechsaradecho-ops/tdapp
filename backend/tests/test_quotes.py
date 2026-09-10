@@ -656,18 +656,102 @@ class TestFetchAllSnapshots:
     @pytest.mark.asyncio
     async def test_failed_assets_are_absent_not_none(self):
         """Assets whose fetch fails are omitted from the result dict."""
-        client = httpx.AsyncClient()
-        calls = {"n": 0}
-
-        async def fake_get(*a, **kw):
-            calls["n"] += 1
-            if calls["n"] <= 2:
-                return _resp({}, status=500)  # first two fail
-            return _resp(_fx_payload([100.0 + i for i in range(40)]))
-        client.get = fake_get
+        quotes._quote_cache.clear()
         try:
             result = await quotes.fetch_all_snapshots(["EURUSD", "GBPUSD", "AUDUSD"])
         finally:
-            await client.aclose()
+            quotes._quote_cache.clear()
         assert isinstance(result, dict)
         assert all(v is not None for v in result.values())
+
+
+# ---------------------------------------------------------------------------
+# Batch hardening — shared client + per-asset/total timeouts (2026-09-11)
+# A hung feed must resolve to a miss/failure row, never stall the 1-min
+# position-guard cycle ("เคยขึ้นไป 1R ทำไมไม่ขยับ sl").
+# ---------------------------------------------------------------------------
+class TestBatchTimeouts:
+    @pytest.fixture(autouse=True)
+    def _reset_batch_state(self):
+        quotes._spot_cache.clear()
+        quotes._quote_cache.clear()
+        yield
+        quotes._spot_cache.clear()
+        quotes._quote_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_spot_batch_uses_single_shared_client(self, monkeypatch):
+        """One AsyncClient for the whole spot batch (was: one per asset)."""
+        import asyncio  # noqa: F401 (keeps the batch event-loop contract explicit)
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [_yahoo_payload(1.15), _yahoo_payload(4540.2)]
+        FakeCls = _fake_client_factory(calls, responses)
+        constructed = {"n": 0}
+        _orig_init = FakeCls.__init__
+
+        def _counting_init(self, *a, **kw):
+            constructed["n"] += 1
+            _orig_init(self, *a, **kw)
+        FakeCls.__init__ = _counting_init
+        monkeypatch.setattr(quotes.httpx, "AsyncClient", FakeCls)
+        prices, failures = await quotes.fetch_spot_prices(["EURUSD", "XAUUSD"])
+        assert prices == {"EURUSD": 1.15, "XAUUSD": 4540.2}
+        assert failures == {}
+        assert constructed["n"] == 1  # shared client, not per-asset
+
+    @pytest.mark.asyncio
+    async def test_snapshot_hung_asset_isolated(self, monkeypatch):
+        """One hung snapshot resolves to a miss; fast assets still return."""
+        import asyncio
+        import time
+        monkeypatch.setattr(quotes, "_SNAP_PER_ASSET_TIMEOUT", 0.1, raising=False)
+        monkeypatch.setattr(quotes, "_SNAP_TOTAL_TIMEOUT", 2.0, raising=False)
+
+        async def fake_fetch(asset, client):
+            if asset == "HANGUSD":
+                await asyncio.sleep(10.0)
+                return {"asset": asset}
+            return {"asset": asset, "price": 1.0}
+        monkeypatch.setattr(quotes, "fetch_snapshot", fake_fetch, raising=False)
+        t0 = time.monotonic()
+        result = await quotes.fetch_all_snapshots(
+            ["EURUSD", "HANGUSD", "GBPUSD"], ttl=0)
+        elapsed = time.monotonic() - t0
+        assert "EURUSD" in result and "GBPUSD" in result
+        assert "HANGUSD" not in result
+        assert elapsed < 2.0  # bounded by the total budget, not the hang
+
+    @pytest.mark.asyncio
+    async def test_spot_hung_asset_times_out(self, monkeypatch):
+        """One hung spot resolves to a failure row; others still price."""
+        import asyncio
+        import time
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "", raising=False)
+        monkeypatch.setattr(quotes, "_SPOT_PER_ASSET_TIMEOUT", 0.1, raising=False)
+        monkeypatch.setattr(quotes, "_SPOT_TOTAL_TIMEOUT", 2.0, raising=False)
+
+        class _HangingClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, **kw):
+                if "EURUSD" in url:
+                    await asyncio.sleep(10.0)  # hung feed
+                    raise AssertionError("cancelled hang should time out first")
+                return _yahoo_payload(1.35)
+        monkeypatch.setattr(quotes.httpx, "AsyncClient", _HangingClient)
+        t0 = time.monotonic()
+        prices, failures = await quotes.fetch_spot_prices(["EURUSD", "GBPUSD"])
+        elapsed = time.monotonic() - t0
+        assert prices.get("GBPUSD") == 1.35
+        assert "EURUSD" in failures and "timeout" in failures["EURUSD"]
+        assert elapsed < 2.0
