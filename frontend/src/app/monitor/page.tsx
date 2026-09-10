@@ -27,100 +27,8 @@ const REFRESH_OPTIONS = [
   { label: "5 นาที", value: 300 },
 ];
 
-/** Badge "ระดับถูกขยับ" ข้างค่า SL/TP ในตารางไม้เปิด — hover หรือแตะเพื่อดู
- *  รายละเอียด: ค่าเริ่มต้น → ค่าปัจจุบัน, เวลาที่ขยับ และเหตุผล
- *  (breakeven = ทุนคืน, trailing = trailing stop, manual = ปรับด้วยมือ).
- *  PC: hover แสดง native title + คลิกเปิด popover ได้ / มือถือ: แตะเปิด popover —
- *  popover แบบ glass ใช้ position: fixed ตามตำแหน่งป้าย ใช้งานเหมือนกันทุกอุปกรณ์. */
-function LevelMovedBadge({ moved, initial, current, movedAt, reason, level }: {
-  moved: boolean;
-  initial: number | null;
-  current: number | null;
-  movedAt: string | null;
-  reason: string;
-  level: "SL" | "TP";
-}) {
-  const [pop, setPop] = useState(false);
-  const btnRef = useRef<HTMLButtonElement | null>(null);
-  const popRef = useRef<HTMLDivElement | null>(null);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
-
-  const place = useCallback(() => {
-    const btn = btnRef.current, popEl = popRef.current;
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    const pw = popEl?.offsetWidth ?? 260;
-    const ph = popEl?.offsetHeight ?? 100;
-    let left = r.left + r.width / 2 - pw / 2;
-    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-    let top = r.top - ph - 8;                 // เหนือป้ายเป็นค่าเริ่มต้น
-    if (top < 8) top = r.bottom + 8;          // พื้นที่บนไม่พอ → แสดงใต้ป้ายแทน
-    setPos({ top, left });
-  }, []);
-
-  useEffect(() => {
-    if (!pop) return;
-    place();
-    const close = (e: MouseEvent | TouchEvent) => {
-      const t = e.target as Node | null;
-      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
-      setPop(false);
-    };
-    // touchstart จับก่อน click เพื่อไม่ให้การแตะนอกลูกบิดปิด-เปิดซ้ำ
-    document.addEventListener("mousedown", close);
-    document.addEventListener("touchstart", close, { passive: true });
-    const onScrollOrResize = () => setPop(false);
-    window.addEventListener("scroll", onScrollOrResize, true);
-    window.addEventListener("resize", onScrollOrResize);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("touchstart", close);
-      window.removeEventListener("scroll", onScrollOrResize, true);
-      window.removeEventListener("resize", onScrollOrResize);
-    };
-  }, [pop, place]);
-
-  if (!moved) return null;
-  const reasonLabel =
-    reason === "breakeven" ? "ทุนคืน (Breakeven)"
-    : reason === "trailing" ? "Trailing Stop"
-    : reason.startsWith("manual") ? "ปรับด้วยมือ"
-    : reason || "-";
-  const when = movedAt
-    ? new Date(movedAt).toLocaleString("th-TH",
-        { dateStyle: "short", timeStyle: "short" })
-    : "-";
-  const title = `${level} ถูกขยับ: ${initial != null ? fmtNum(initial, 5) : "-"} → ${current != null ? fmtNum(current, 5) : "-"}\nเมื่อ: ${when}\nเหตุผล: ${reasonLabel}`;
-  return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => setPop((v) => !v)}
-        title={title}
-        aria-label={title}
-        aria-expanded={pop}
-        className="ml-1 inline-flex cursor-help align-middle p-1 -m-1 touch-manipulation"
-      >
-        <Icon n="arrowsH" size={12} className="text-accent" />
-      </button>
-      {pop && createPortal(
-        <div
-          ref={popRef}
-          role="tooltip"
-          style={{ position: "fixed", top: pos.top, left: pos.left, maxWidth: "min(280px, calc(100vw - 16px))" }}
-          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed whitespace-pre-line text-slate-200"
-        >
-          {title}
-        </div>,
-        document.body
-      )}
-    </>
-  );
-}
-
 /** Badge "Smart Exit" — คะแนนคุณภาพการถือไม้ (0-100) + คำแนะนำ
- *  แตะ/คลิกเพื่อดู 9 ปัจจัย + เหตุผลภาษาไทย (portal to body เหมือน LevelMovedBadge). */
+ *  แตะ/คลิกเพื่อดู 9 ปัจจัย + เหตุผลภาษาไทย (portal to body). */
 function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_positions"][number]["exit_info"]> }) {
   const [pop, setPop] = useState(false);
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -387,6 +295,148 @@ function CalcNotesBadge({ notes }: { notes: string[] }) {
   );
 }
 
+/** แปลง reason ดิบจาก backend เป็นป้าย + คำอธิบายว่าทำไมถึงขยับ */
+function describeMoveReason(reason: string): { label: string; why: string } {
+  const r = (reason || "").toLowerCase();
+  if (r.includes("breakeven"))
+    return { label: "ทุนคืน (Breakeven)", why: "กำไรถึงจุดคุ้มทุน ระบบย้าย SL มาที่ทุนเพื่อกันไม้ขาดทุน" };
+  if (r.includes("trailing"))
+    return { label: "Trailing Stop", why: "ราคาไปต่อ ระบบเลื่อน SL ตามเพื่อล็อกกำไรไว้" };
+  if (r.includes("ladder"))
+    return { label: "R-Ladder", why: "กำไรถึงขั้นบันได R ระบบยกระดับ SL ล็อกกำไรตามขั้น" };
+  if (r.startsWith("manual"))
+    return { label: "ปรับด้วยมือ", why: "ผู้ใช้ปรับระดับเองจากหน้าจอมอนิเตอร์" };
+  if (!reason) return { label: "-", why: "" };
+  return { label: reason, why: "" };
+}
+
+/** ไอคอนนาฬิกาไทม์ไลน์ SL/TP ในคอลัมน์ราคาปัจจุบัน — กดเปิด popup
+ *  ประวัติการขยับ (ค่าเริ่ม→ปัจจุบัน, เวลา, เหตุผล+ทำไมถึงขยับ) + ไทม์ไลน์
+ *  จาก signal-logs (portal to body สไตล์เดียวกับ SmartExitBadge). */
+function MoveTimelineBadge({ pos, timeline }: {
+  pos: MonitorSnapshot["open_positions"][number];
+  timeline: SignalLog[];
+}) {
+  const [pop, setPop] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pps, setPps] = useState({ top: 0, left: 0 });
+
+  const place = useCallback(() => {
+    const btn = btnRef.current, popEl = popRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pw = popEl?.offsetWidth ?? 320;
+    const ph = popEl?.offsetHeight ?? 220;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    let top = r.top - ph - 8;
+    if (top < 8) top = r.bottom + 8;
+    setPps({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!pop) return;
+    place();
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onScrollOrResize = () => setPop(false);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [pop, place]);
+
+  const slMoved = pos.sl_moved_at != null ||
+    (pos.initial_stop_loss != null && pos.stop_loss != null &&
+      Math.abs(pos.stop_loss - pos.initial_stop_loss) > 1e-9);
+  const tpMoved = pos.tp_moved_at != null ||
+    (pos.initial_take_profit != null && pos.take_profit != null &&
+      Math.abs(pos.take_profit - pos.initial_take_profit) > 1e-9);
+  if (!slMoved && !tpMoved && timeline.length === 0) return null;
+  const slInfo = describeMoveReason(pos.sl_move_reason);
+  const tpInfo = describeMoveReason(pos.tp_move_reason);
+  const fmtWhen = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-";
+  const title = `ประวัติ SL/TP (${timeline.length}) — กดดูรายละเอียด`;
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setPop((v) => !v); }}
+        title={title}
+        aria-label={title}
+        aria-expanded={pop}
+        className="ml-1.5 inline-flex items-center gap-0.5 rounded-full border border-white/15 bg-white/[0.04] px-1.5 py-0.5 text-[11px] leading-none font-semibold text-slate-300 cursor-help touch-manipulation active:brightness-125 align-middle"
+      >
+        <Icon n="clock" size={12} className="text-slate-400" />
+        {timeline.length > 0 && <span className="tabular-nums">({timeline.length})</span>}
+      </button>
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label={title}
+          style={{ position: "fixed", top: pps.top, left: pps.left, maxWidth: "min(340px, calc(100vw - 16px))" }}
+          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed text-slate-200"
+        >
+          <div className="font-bold mb-1">ประวัติ SL/TP — {pos.asset} {pos.direction}</div>
+          {slMoved && (
+            <div className="mb-1.5">
+              <span className="font-semibold text-loss">SL</span>{" "}
+              {pos.initial_stop_loss != null ? fmtNum(pos.initial_stop_loss, 5) : "-"} →{" "}
+              {pos.stop_loss != null ? fmtNum(pos.stop_loss, 5) : "-"}
+              <div className="text-slate-400">เมื่อ {fmtWhen(pos.sl_moved_at)} · {slInfo.label}</div>
+              {slInfo.why && <div className="text-slate-300">เหตุผล: {slInfo.why}</div>}
+            </div>
+          )}
+          {tpMoved && (
+            <div className="mb-1.5">
+              <span className="font-semibold text-profit">TP</span>{" "}
+              {pos.initial_take_profit != null ? fmtNum(pos.initial_take_profit, 5) : "-"} →{" "}
+              {pos.take_profit != null ? fmtNum(pos.take_profit, 5) : "-"}
+              <div className="text-slate-400">เมื่อ {fmtWhen(pos.tp_moved_at)} · {tpInfo.label}</div>
+              {tpInfo.why && <div className="text-slate-300">เหตุผล: {tpInfo.why}</div>}
+            </div>
+          )}
+          {timeline.length > 0 ? (
+            <ol className="mt-1 max-w-2xl space-y-1 border-l-2 border-accent/40 pl-3">
+              {timeline.map((l) => (
+                <li key={l.id} className="text-xs text-slate-300">
+                  <span className="text-slate-500">
+                    {l.created_at ? new Date(l.created_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-"}
+                  </span>
+                  {" · "}
+                  <span className="font-semibold">
+                    {l.event === "closed" ? "ปิดไม้" : "SL/TP ขยับ"}
+                  </span>
+                  {l.stop_loss != null && l.stop_loss > 0 && (
+                    <> — SL {fmtNum(l.stop_loss, 5)}</>
+                  )}
+                  {l.reason && <span className="text-slate-400"> — {l.reason}</span>}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-slate-500">ยังไม่มีไทม์ไลน์จาก signal-logs</p>
+          )}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
 export default function MonitorPage() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [err, setErr] = useState("");
@@ -396,7 +446,6 @@ export default function MonitorPage() {
   // ไทม์ไลน์ SL/TP ต่อไม้: ticket → events จาก signal-logs (order_opened
   // "SL ย้ายไป..." + closed) — โหลดพร้อม snapshot ครั้งเดียว
   const [moveLogs, setMoveLogs] = useState<Record<string, SignalLog[]>>({});
-  const [openTimeline, setOpenTimeline] = useState<Record<string, boolean>>({});
   // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(10);
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
@@ -758,10 +807,7 @@ export default function MonitorPage() {
                   const rMult = p.r_multiple ?? 0;
                   const riskUsd = p.risk_amount ?? 0;
                   const timeline = p.ticket ? (moveLogs[p.ticket] ?? []) : [];
-                  const tlOpen = openTimeline[p.id] ?? false;
                   const notes = p.calc_notes ?? [];
-                  const movedHint = p.sl_moved_at != null || p.tp_moved_at != null;
-                  const hasDetail = timeline.length > 0 || movedHint;
                   return (
                   <Fragment key={p.id}>
                   <tr className="border-t border-slate-800 whitespace-nowrap cursor-pointer hover:bg-white/[0.04] active:bg-white/[0.07]"
@@ -777,6 +823,7 @@ export default function MonitorPage() {
                     <td className="py-2 pr-4 font-bold" onClick={(e) => e.stopPropagation()}><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">
                       {fmtNum(p.current_price, 5)}
+                      <MoveTimelineBadge pos={p} timeline={timeline} />
                       {p.price_source != null && p.price_source !== "spot" && (
                         <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
                           p.price_source === "daily" ? "bg-amber-500/20 text-amber-400"
@@ -793,8 +840,8 @@ export default function MonitorPage() {
                         </span>
                       )}
                     </td>
-                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.stop_loss} className="font-bold text-loss" /><LevelMovedBadge moved={p.sl_moved_at != null || (p.initial_stop_loss != null && p.stop_loss != null && Math.abs(p.stop_loss - p.initial_stop_loss) > 1e-9)} initial={p.initial_stop_loss} current={p.stop_loss} movedAt={p.sl_moved_at} reason={p.sl_move_reason} level="SL" /></td>
-                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.take_profit} className="font-bold text-profit" /><LevelMovedBadge moved={p.tp_moved_at != null || (p.initial_take_profit != null && p.take_profit != null && Math.abs(p.take_profit - p.initial_take_profit) > 1e-9)} initial={p.initial_take_profit} current={p.take_profit} movedAt={p.tp_moved_at} reason={p.tp_move_reason} level="TP" /></td>
+                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.stop_loss} className="font-bold text-loss" /></td>
+                    <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.take_profit} className="font-bold text-profit" /></td>
                     <td className="py-2 pr-4 font-bold">
                       <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
                         {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
@@ -819,47 +866,6 @@ export default function MonitorPage() {
                       </span>
                     </td>
                   </tr>
-                  {hasDetail && (
-                  <tr className="whitespace-normal">
-                    <td colSpan={13} className="pt-0 pb-2 pr-4">
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        {timeline.length > 0 && (
-                          <button
-                            onClick={() => setOpenTimeline((v) => ({ ...v, [p.id]: !v[p.id] }))}
-                            className="rounded-full border border-white/15 bg-white/[0.04] px-2 py-0.5 font-semibold text-slate-300"
-                            aria-expanded={tlOpen}
-                          >
-                            ไทม์ไลน์ SL/TP ({timeline.length}) {tlOpen ? "▾" : "▸"}
-                          </button>
-                        )}
-                        {timeline.length === 0 && movedHint && (
-                          <span className="text-slate-500">
-                            SL/TP ถูกขยับ — ดูรายละเอียดที่ป้าย ↔ ข้างค่า SL/TP
-                          </span>
-                        )}
-                      </div>
-                      {tlOpen && timeline.length > 0 && (
-                        <ol className="mt-1 max-w-2xl space-y-1 border-l-2 border-accent/40 pl-3">
-                          {timeline.map((l) => (
-                            <li key={l.id} className="text-xs text-slate-300">
-                              <span className="text-slate-500">
-                                {l.created_at ? new Date(l.created_at).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-"}
-                              </span>
-                              {" · "}
-                              <span className="font-semibold">
-                                {l.event === "closed" ? "ปิดไม้" : "SL/TP ขยับ"}
-                              </span>
-                              {l.stop_loss != null && l.stop_loss > 0 && (
-                                <> — SL {fmtNum(l.stop_loss, 5)}</>
-                              )}
-                              {l.reason && <span className="text-slate-400"> — {l.reason}</span>}
-                            </li>
-                          ))}
-                        </ol>
-                      )}
-                    </td>
-                  </tr>
-                  )}
                   </Fragment>
                   );
                 })}
