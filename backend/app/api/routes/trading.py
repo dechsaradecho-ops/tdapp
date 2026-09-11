@@ -69,7 +69,58 @@ def _journal_from_rows(rows: list[dict]) -> list[JournalEntry]:
         ai_explanation=r.get("ai_explanation", ""),
         closed_at=r.get("closed_at"),
         created_at=r.get("created_at"),
-    ) for r in rows]
+    ) for r in rows if r.get("asset")]
+
+
+def _journal_entries_from_paper_trades(rows: list[dict]) -> list[JournalEntry]:
+    """Map CLOSED paper_trades rows (the live journal) → JournalEntry.
+
+    paper_trades has no rr_ratio/holding_time columns — both are derived:
+    RR = signed exit move ÷ entry→SL distance, holding = closed_at −
+    created_at. Rows without an exit pnl are skipped (open/rejected).
+    """
+    out: list[JournalEntry] = []
+    for r in rows:
+        if r.get("status") != "closed" or r.get("pnl") is None:
+            continue
+        try:
+            direction = str(r.get("direction") or "BUY").upper()
+            entry = float(r.get("entry_price") or 0)
+            exit_px = float(r.get("exit_price")) if r.get("exit_price") is not None else None
+            sl = float(r["stop_loss"]) if r.get("stop_loss") is not None else None
+            rr: float | None = None
+            if entry and sl and abs(entry - sl) > 1e-9 and exit_px is not None:
+                sign = 1.0 if direction == "BUY" else -1.0
+                rr = round(sign * (exit_px - entry) / abs(entry - sl), 2)
+            holding: float | None = None
+            try:
+                from datetime import datetime as _dt
+                c_raw, x_raw = r.get("created_at"), r.get("closed_at")
+                if c_raw and x_raw:
+                    c = _dt.fromisoformat(str(c_raw).replace("Z", "+00:00"))
+                    x = _dt.fromisoformat(str(x_raw).replace("Z", "+00:00"))
+                    if c.tzinfo is None:
+                        from datetime import timezone as _tz
+                        c = c.replace(tzinfo=_tz.utc)
+                    if x.tzinfo is None:
+                        from datetime import timezone as _tz
+                        x = x.replace(tzinfo=_tz.utc)
+                    holding = round((x - c).total_seconds() / 60, 1)
+            except (ValueError, TypeError):
+                holding = None
+            out.append(JournalEntry(
+                id=r.get("id"), asset=str(r.get("asset") or ""),
+                direction=direction,  # type: ignore[arg-type]
+                entry_price=entry, exit_price=exit_px,
+                holding_time_min=holding,
+                pnl=float(r.get("pnl") or 0), rr_ratio=rr,
+                market_regime="", opportunity_score=0.0,
+                ai_explanation=str(r.get("close_reason") or ""),
+                closed_at=r.get("closed_at"), created_at=r.get("created_at"),
+            ))
+        except (ValueError, TypeError, KeyError):
+            continue
+    return out
 
 
 # ---------------------------------------------------------------- frequency
@@ -147,15 +198,24 @@ async def build_order_plan(payload: PlanOrderRequest) -> OrderPlan:
 # ------------------------------------------------------------- correlation
 @router.get("/correlation")
 async def get_correlation(request: Request) -> dict:
-    """Portfolio correlation (0-100) + per-currency exposure breakdown."""
+    """Portfolio correlation (0-100) + per-currency exposure breakdown.
+
+    Reads OPEN paper_trades (the live journal) — the old version read the
+    legacy `trades` table (migration 001, never written by the live path),
+    so it always reported a dead EURUSD/0/[] card while real positions were
+    open. Fail-safe: a broken read degrades to empty, never raises.
+    """
     db = request.app.state.db
-    trades = db.select("trades", filters={"status": "open"}, limit=50)
-    assets = sorted({t["asset"] for t in trades}) or ["EURUSD"]
+    try:
+        trades = db.select("paper_trades", filters={"status": "open"}, limit=100)
+    except Exception:
+        trades = []
+    assets = sorted({str(t.get("asset") or "") for t in trades if t.get("asset")})
     corr = CorrelationEngine().portfolio_correlation(assets)
     exposure = ExposureEngine().analyze([
-        {"asset": t["asset"], "direction": t["direction"],
+        {"asset": t["asset"], "direction": t.get("direction", ""),
          "volume": float(t.get("volume") or 0), "price": float(t.get("entry_price") or 1)}
-        for t in trades
+        for t in trades if t.get("asset")
     ])
     return {
         "assets": assets,
@@ -955,8 +1015,14 @@ async def equity_curve(request: Request, days: int = 90) -> dict:
 async def signal_report(request: Request, days: int = 30) -> dict:
     """Signal quality report: join signal_logs (created) ↔ paper_trades.
 
-    Win rate by asset, by confidence band, and by market regime — the
-    feedback loop that tells you WHICH signals to keep or drop.
+    Joins on signal_id (paper_trades.signal_id = signal_logs.signal_id) —
+    the old version joined on ticket, but `created` rows NEVER carry a
+    ticket (the scanner logs created before any order exists; the ticket
+    only appears on order_opened). So matched_trades was always 0. Ticket
+    is kept as a legacy fallback for rows predating signal_id logging.
+
+    Regime comes from the `signals` row linked by signal_id (paper_trades
+    and signal_logs have no regime column); unknown when the row expired.
     """
     db = request.app.state.db
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -969,8 +1035,29 @@ async def signal_report(request: Request, days: int = 30) -> dict:
     try:
         trades = db.select_paged("paper_trades")
     except Exception:
-        trades = []
-    by_ticket = {str(t.get("ticket") or ""): t for t in trades if t.get("ticket")}
+        try:
+            trades = db.select("paper_trades", limit=500)
+        except Exception:
+            trades = []
+    closed = [t for t in trades if t.get("status") == "closed"]
+    by_signal_id: dict[str, dict] = {}
+    for t in closed:
+        sid = str(t.get("signal_id") or "")
+        if sid and sid not in by_signal_id:
+            by_signal_id[sid] = t
+    by_ticket = {str(t.get("ticket") or ""): t for t in closed if t.get("ticket")}
+    # regime lookup: latest market_analysis row per asset (neither
+    # paper_trades nor signal_logs stores a regime column; the old code
+    # read t.regime/l.regime which never exist → always "unknown")
+    try:
+        market_rows = db.select("market_analysis", limit=200)
+    except Exception:
+        market_rows = []
+    regime_by_asset: dict[str, str] = {}
+    for r in market_rows:
+        asset_key = str(r.get("asset") or "").upper()
+        if asset_key and asset_key not in regime_by_asset:
+            regime_by_asset[asset_key] = str(r.get("regime") or "")
 
     def band(conf: float) -> str:
         if conf >= 90:
@@ -986,15 +1073,21 @@ async def signal_report(request: Request, days: int = 30) -> dict:
     by_regime: dict[str, list[dict]] = {}
     matched = 0
     for l in logs:
-        ticket = str(l.get("ticket") or "")
-        t = by_ticket.get(ticket)
-        if not t or t.get("status") != "closed":
+        # Primary join: signal_id (durable — logged by both scanner and
+        # execution). Legacy fallback: ticket, for rows predating it.
+        sid = str(l.get("signal_id") or "")
+        t = by_signal_id.get(sid) if sid else None
+        if t is None:
+            ticket = str(l.get("ticket") or "")
+            t = by_ticket.get(ticket) if ticket else None
+        if not t:
             continue
         matched += 1
+        asset = str(t.get("asset") or l.get("asset") or "")
         pnl = float(t.get("pnl") or 0)
-        rec = {"asset": str(l.get("asset") or ""), "pnl": pnl,
+        rec = {"asset": asset, "pnl": pnl,
                "confidence": float(l.get("confidence") or 0),
-               "regime": str(t.get("regime") or l.get("regime") or "")}
+               "regime": regime_by_asset.get(asset.upper(), "")}
         by_asset.setdefault(rec["asset"], []).append(rec)
         by_band.setdefault(band(rec["confidence"]), []).append(rec)
         by_regime.setdefault(rec["regime"] or "unknown", []).append(rec)
@@ -1036,14 +1129,28 @@ class JournalCreateRequest(BaseModel):
 
 @router.get("/journal", response_model=JournalAnalysis)
 async def journal_analysis(request: Request, days: int = 30) -> JournalAnalysis:
-    """7/30/90-day performance: win rate, profit factor, avg RR, best/worst setup."""
+    """7/30/90-day performance: win rate, profit factor, avg RR, best/worst setup.
+
+    Reads CLOSED paper_trades rows (the live journal) — the old version read
+    the legacy manual trading_journal table (migration 005, only written by
+    POST /journal), so it always reported 0 while real orders closed through
+    paper_trades. RR/holding are derived (paper_trades has no such columns).
+    POST /journal still writes the manual table for hand-logged trades.
+    """
     db = request.app.state.db
-    rows = db.select(JOURNAL_TABLE, limit=500)
-    entries = _journal_from_rows(rows)
+    try:
+        rows = db.select_paged("paper_trades", filters={"status": "closed"})
+    except Exception:
+        try:
+            rows = db.select("paper_trades", filters={"status": "closed"},
+                             limit=500)
+        except Exception:
+            rows = []
+    entries = _journal_entries_from_paper_trades(rows)
     if days > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
         entries = [e for e in entries
-                   if str(e.created_at or e.closed_at or "")[:10] >= cutoff]
+                   if str(e.closed_at or e.created_at or "")[:10] >= cutoff]
     return analyze_journal(entries, period_days=days)
 
 
@@ -1098,10 +1205,34 @@ async def walk_forward_route(config: BacktestConfig) -> WalkForwardResult:
 # ----------------------------------------------------------- paper trading
 @router.get("/paper-trading", response_model=PaperTradingStatus)
 async def paper_trading(request: Request) -> PaperTradingStatus:
-    """Virtual capital status + AI coaching + live readiness score."""
+    """Virtual capital status + AI coaching + live readiness score.
+
+    DB-backed: PnL/open counts come from paper_trades (durable) — the old
+    version read the in-memory PaperBroker book (closed_trades/_positions),
+    so every Render redeploy wiped the history and readiness reset to 0
+    even though the journal rows were still in the DB. Falls back to the
+    broker book only when the DB read fails.
+    """
+    from types import SimpleNamespace
+
+    db = request.app.state.db
     broker = request.app.state.broker
     s = _settings(request)
-    return paper_trading_status(broker, virtual_capital=s.paper_virtual_capital)
+    try:
+        try:
+            rows = db.select_paged("paper_trades")
+        except Exception:
+            rows = db.select("paper_trades", limit=500)
+        closed_pnls = [float(r.get("pnl") or 0) for r in rows
+                       if r.get("status") == "closed" and r.get("pnl") is not None]
+        open_count = len([r for r in rows if r.get("status") == "open"])
+        book = SimpleNamespace(
+            closed_trades=[{"pnl": p} for p in closed_pnls],
+            _positions={f"DB-{i}": 1 for i in range(open_count)},
+        )
+        return paper_trading_status(book, virtual_capital=s.paper_virtual_capital)
+    except Exception:
+        return paper_trading_status(broker, virtual_capital=s.paper_virtual_capital)
 
 
 # -------------------------------------------------- extended analysis (11 sections)
@@ -1142,7 +1273,7 @@ async def extended_analysis(request: Request) -> dict:
     plan = OrderStrategyEngine().build_plan(
         asset=asset, direction="BUY", entry=1.0, stop_loss=0.99,
         take_profit=1.02, regime=regime, atr_pct=0.8,
-        equity=s.default_equity,
+        equity=s.capital,
         risk_per_trade_pct=freq.limits.risk_per_trade_pct if freq.limits else 1.0)
 
     return {

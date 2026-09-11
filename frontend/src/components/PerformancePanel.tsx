@@ -18,11 +18,14 @@ import {
   PaperTrading,
   SessionStatus,
   SignalReport,
+  SUPPORTED_ASSETS,
   WalkForwardResult,
 } from "@/lib/types";
 
 const INDICATORS = ["EMA", "RSI", "MACD", "ADX", "ATR", "SuperTrend", "PriceAction"] as const;
-const ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"];
+/* Backtest universe = same feed coverage as Settings (28 pairs). Defaults
+ * seed from saved settings (allowed_assets → backtest_asset) below. */
+const ASSETS: readonly string[] = SUPPORTED_ASSETS;
 
 type Badge = "ok" | "warn" | "danger";
 
@@ -165,7 +168,15 @@ export default function PerformancePanel() {
         <div className="panel">
           <h2 className="panel-title">Economic Calendar / News Risk</h2>
           <p className="text-sm text-slate-300">{news?.reason ?? "ยังไม่มีข้อมูลปฏิทิน"}</p>
-          <h3 className="text-sm font-semibold mt-3 text-slate-400">Exposure</h3>
+          <h3 className="text-sm font-semibold mt-3 text-slate-400">
+            Exposure
+            <span className="font-normal text-slate-500"> — จากไม้ที่เปิดอยู่ (paper_trades)</span>
+          </h3>
+          {!!corr?.assets?.length && (
+            <p className="text-xs text-slate-500 pb-1">
+              เปิดอยู่: {corr.assets.join(", ")}
+            </p>
+          )}
           <ul className="text-sm space-y-1">
             {(corr?.exposure ?? []).map((e) => (
               <li key={e.currency} className="flex justify-between">
@@ -179,14 +190,26 @@ export default function PerformancePanel() {
 
         <div className="panel">
           <h2 className="panel-title">Journal Insight (30d)</h2>
-          {journal ? (
+          {journal && journal.total_trades > 0 ? (
             <div className="text-sm space-y-1">
-              <div className="flex justify-between"><span>Trades</span><span>{journal.total_trades}</span></div>
+              <div className="flex justify-between"><span>Trades (ไม้ที่ปิดแล้ว)</span><span>{journal.total_trades}</span></div>
               <div className="flex justify-between"><span>Win Rate</span><span className="text-profit">{journal.win_rate_pct}%</span></div>
               <div className="flex justify-between"><span>Profit Factor</span><span>{journal.profit_factor}</span></div>
               <div className="flex justify-between"><span>Average RR</span><span>{journal.average_rr}</span></div>
+              {journal.best_setup && (
+                <div className="flex justify-between text-xs text-slate-400 pt-1">
+                  <span>ดีสุด {journal.best_setup.asset}</span>
+                  <span className="text-profit">+{(journal.best_setup.pnl ?? 0).toFixed(2)}</span>
+                </div>
+              )}
+              {journal.worst_setup && (
+                <div className="flex justify-between text-xs text-slate-400">
+                  <span>แย่สุด {journal.worst_setup.asset}</span>
+                  <span className="text-loss">{(journal.worst_setup.pnl ?? 0).toFixed(2)}</span>
+                </div>
+              )}
             </div>
-          ) : <p className="text-sm text-slate-500">ยังไม่มีบันทึกเทรด</p>}
+          ) : <p className="text-sm text-slate-500">ยังไม่มีไม้ที่ปิดแล้ว (paper_trades)</p>}
         </div>
 
         <div className="panel">
@@ -195,7 +218,7 @@ export default function PerformancePanel() {
             <div className="text-sm space-y-1">
               <div className="flex justify-between"><span>Virtual Capital</span><span>${paper.virtual_capital.toLocaleString()}</span></div>
               <div className="flex justify-between">
-                <span>Virtual PnL</span>
+                <span>Virtual PnL (paper_trades)</span>
                 <span className={paper.virtual_pnl >= 0 ? "text-profit" : "text-loss"}>${paper.virtual_pnl}</span>
               </div>
               <div className="flex justify-between"><span>Open Orders</span><span>{paper.open_virtual_orders}</span></div>

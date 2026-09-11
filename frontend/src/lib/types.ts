@@ -418,12 +418,31 @@ export interface KillSwitch {
   message: string;
 }
 
+export interface JournalEntry {
+  id?: string | null;
+  asset: string;
+  direction: "BUY" | "SELL";
+  entry_price: number;
+  exit_price: number | null;
+  holding_time_min: number | null;
+  pnl: number | null;
+  rr_ratio: number | null;
+  market_regime: string;
+  opportunity_score: number;
+  ai_explanation: string;
+  closed_at: string | null;
+  created_at: string | null;
+}
+
 export interface JournalAnalysis {
   period_days: number;
   total_trades: number;
   win_rate_pct: number;
   profit_factor: number;
   average_rr: number;
+  /** Best/worst closed trade in the window (null when no closed trades). */
+  best_setup: JournalEntry | null;
+  worst_setup: JournalEntry | null;
 }
 
 export interface PaperTrading {

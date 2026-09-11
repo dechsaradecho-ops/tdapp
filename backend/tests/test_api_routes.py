@@ -1388,3 +1388,124 @@ class TestGroupNotificationPush:
             db, NotificationService(db, line))  # type: ignore[arg-type]
         assert sent == 1
         assert ("C-group", "📈 signal") in line.pushed
+
+
+# ---------------------------------------------------------------------------
+# Performance dashboard — must read the LIVE system, not legacy/demo tables
+# ---------------------------------------------------------------------------
+class TestPerformanceSources:
+    """Regression (2026-09-11, "Performance Dashboard update ให้ตรงกับระบบ
+    ในปัจจุบัน"): four cards drifted off the live system —
+      /correlation read legacy `trades` (migration 001, never written) → dead
+      /journal read manual trading_journal (only POST /journal writes) → 0
+      /paper-trading read the in-memory broker book → reset every redeploy
+      /signal-report joined created.ticket (created rows never carry one) → 0
+    """
+
+    def _closed(self, rid: str, asset: str, pnl: float, sig: str,
+                entry: float = 1.08000, sl: float = 1.07000,
+                exit_px: float = 1.09000) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        return {
+            "id": rid, "ticket": f"PAPER-{rid}", "signal_id": sig,
+            "asset": asset, "direction": "buy", "volume": 0.01,
+            "entry_price": entry, "stop_loss": sl,
+            "exit_price": exit_px, "pnl": pnl,
+            "status": "closed", "source": "auto", "close_reason": "tp",
+            "created_at": now, "closed_at": now,
+        }
+
+    @pytest.mark.asyncio
+    async def test_correlation_reads_open_paper_trades(self):
+        """Two open paper rows → both assets, nonzero forex/forex score."""
+        now = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "o1", "ticket": "PAPER-o1", "asset": "EURUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.08,
+             "status": "open", "created_at": now},
+            {"id": "o2", "ticket": "PAPER-o2", "asset": "GBPUSD",
+             "direction": "sell", "volume": 0.02, "entry_price": 1.26,
+             "status": "open", "created_at": now},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/trading/correlation")).json()
+        assert body["assets"] == ["EURUSD", "GBPUSD"]
+        assert body["portfolio_correlation"] == 55.0  # forex/forex prior
+        currencies = {e["currency"] for e in body["exposure"]}
+        assert {"USD", "EUR", "GBP"} <= currencies
+
+    @pytest.mark.asyncio
+    async def test_correlation_empty_is_honest(self):
+        """No open positions → empty assets/exposure (not a fake EURUSD/0)."""
+        set_state(FakeDatabase(rows={"paper_trades": []}))
+        body = (await call("GET", "/api/trading/correlation")).json()
+        assert body["assets"] == []
+        assert body["portfolio_correlation"] == 0.0
+        assert body["exposure"] == []
+
+    @pytest.mark.asyncio
+    async def test_journal_reads_closed_paper_trades(self):
+        """Closed paper rows (incl. an open decoy) → win rate / PF / RR."""
+        db = FakeDatabase(rows={"paper_trades": [
+            self._closed("c1", "EURUSD", 10.0, "sig-1"),  # RR +1.0
+            self._closed("c2", "GBPUSD", -5.0, "sig-2",
+                         entry=1.26000, sl=1.25000, exit_px=1.25500),  # RR -0.5
+            {"id": "o1", "ticket": "PAPER-o1", "asset": "EURUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.08,
+             "status": "open",
+             "created_at": datetime.now(timezone.utc).isoformat()},
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/trading/journal?days=30")).json()
+        assert body["total_trades"] == 2
+        assert body["win_rate_pct"] == 50.0
+        assert body["profit_factor"] == 2.0
+        assert body["average_rr"] == 0.25
+        assert body["best_setup"]["pnl"] == 10.0
+        assert body["worst_setup"]["pnl"] == -5.0
+
+    @pytest.mark.asyncio
+    async def test_paper_trading_survives_restart(self):
+        """Broker book is EMPTY (fresh redeploy) — DB rows still drive PnL."""
+        db = FakeDatabase(rows={"paper_trades": [
+            self._closed("c1", "EURUSD", 10.0, "sig-1"),
+            self._closed("c2", "GBPUSD", -4.0, "sig-2"),
+            {"id": "o1", "ticket": "PAPER-o1", "asset": "XAUUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 2400.0,
+             "status": "open",
+             "created_at": datetime.now(timezone.utc).isoformat()},
+        ]})
+        set_state(db)  # FakeBroker book: closed_trades=[] — proves DB sourcing
+        body = (await call("GET", "/api/trading/paper-trading")).json()
+        assert body["virtual_pnl"] == 6.0
+        assert body["open_virtual_orders"] == 1
+        assert body["live_readiness_score"] > 0
+
+    @pytest.mark.asyncio
+    async def test_signal_report_joins_on_signal_id(self):
+        """created row carries NO ticket (scanner reality) — signal_id joins."""
+        now = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={
+            "signal_logs": [{
+                "id": "l1", "signal_id": "sig-1", "asset": "EURUSD",
+                "direction": "buy", "event": "created", "confidence": 85.0,
+                "ticket": "", "created_at": now}],
+            "paper_trades": [self._closed("c1", "EURUSD", 12.0, "sig-1")],
+            "market_analysis": [{
+                "id": "m1", "asset": "EURUSD", "regime": "bull_trend",
+                "sentiment": "bullish", "confidence": 85.0,
+                "created_at": now}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/trading/signal-report?days=30")).json()
+        assert body["signals"] == 1
+        assert body["matched_trades"] == 1
+        assert body["by_asset"] == [{
+            "key": "EURUSD", "trades": 1,
+            "win_rate_pct": 100.0, "total_pnl": 12.0}]
+        assert body["by_confidence_band"] == [{
+            "key": "80-89", "trades": 1,
+            "win_rate_pct": 100.0, "total_pnl": 12.0}]
+        assert body["by_regime"] == [{
+            "key": "bull_trend", "trades": 1,
+            "win_rate_pct": 100.0, "total_pnl": 12.0}]
