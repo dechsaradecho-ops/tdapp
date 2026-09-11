@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
@@ -262,13 +264,37 @@ async def health() -> dict:
     db: Database = app.state.db
     provider = get_ai_provider()
     scheduler = getattr(app.state, "scheduler", None)
+    # Scheduler forensics: a job whose tick never returns holds its
+    # max_instances=1 slot forever and is then SKIPPED on every later tick,
+    # so it never completes-and-logs (prod 2026-09-11: position_guard wrote
+    # zero scheduler_runs rows while the table/RLS were perfectly fine).
+    # `job_running` exposes the executor's live instance counts, `job_next`
+    # the next fire time — together they name the stuck job from /health
+    # without needing Render log access. Private attrs are read defensively.
+    job_next: dict[str, Any] = {}
+    job_running: dict[str, int] = {}
+    if scheduler is not None:
+        try:
+            job_next = {j.id: (j.next_run_time.isoformat()
+                               if j.next_run_time else None)
+                        for j in scheduler.get_jobs()}
+            executor = (scheduler._executors or {}).get("default")
+            job_running = dict(getattr(executor, "_instances", {}) or {})
+        except Exception:                    # diagnostics must never 500
+            log.debug("health scheduler probe failed", exc_info=True)
     return {
         "status": "ok",
         "platform": "AI Wealth & Trading Advisor",
         "deployment": "render",
+        # Deploy marker: Render injects RENDER_GIT_COMMIT into every build, so
+        # `curl /health | jq .commit` proves WHICH commit is actually live —
+        # never compare local vs prod hashes by hand (see tdapp-deploy memory).
+        "commit": (os.environ.get("RENDER_GIT_COMMIT") or "local")[:7],
         "workers": ("running" if scheduler is not None
                     else ("enabled" if get_settings().enable_workers else "disabled")),
         "jobs": [j.id for j in scheduler.get_jobs()] if scheduler is not None else [],
+        "job_next": job_next,
+        "job_running": job_running,
         "db": "ok" if db.available else "unavailable",
         "db_detail": (db.init_error or "connected"),
         "ai": provider.name,
