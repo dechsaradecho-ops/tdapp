@@ -94,7 +94,15 @@ function explain(t: MonitorTrade, rules?: MonitorExitRules | null): string[] {
     );
     if (rTxt) out.push(`กำไรตอนปิด ${rTxt} — ต่ำกว่าเกณฑ์ ${fmtNum(minR, 1)}R`);
     if (heldTxt && thr > 0) {
-      out.push(`ถือมา ${heldTxt} — เกินเกณฑ์ ${fmtNum(thr, 1)} วัน`);
+      // เกณฑ์ที่แสดงคือค่าปัจจุบัน ไม่ใช่ค่าที่ใช้ตอนปิด (ไม่ได้เก็บไว้ต่อไม้)
+      // ถ้าอายุไม้ "ไม่ถึง" เกณฑ์แสดงว่า เทสต์ผ่านเพราะเกณฑ์ถูกเปลี่ยนทีหลัง
+      const over = held !== null && held >= thr;
+      out.push(
+        over
+          ? `ถือมา ${heldTxt} — เกินเกณฑ์ ${fmtNum(thr, 1)} วัน`
+          : `ถือมา ${heldTxt} · เกณฑ์ปัจจุบัน ${fmtNum(thr, 1)} วัน` +
+            ` (ไม้เก่านี้ปิดตอนที่เกณฑ์ยังเป็นค่าอื่น — ไม่ได้เก็บเกณฑ์ของรอบนั้นไว้)`
+      );
       if (avg > 0 && mult > 0) {
         out.push(
           `เกณฑ์ = ${fmtNum(mult, 2)} × ค่าเฉลี่ยเวลาถือ (${fmtNum(avg, 1)} วัน)` +
@@ -147,7 +155,17 @@ function explain(t: MonitorTrade, rules?: MonitorExitRules | null): string[] {
   if (reason === "time") {
     const maxHold = rules?.max_hold_days ?? 0;
     const minR = rules?.time_stop_min_r ?? 0;
-    if (heldTxt) out.push(`ถือมา ${heldTxt}${maxHold > 0 ? ` เกินเพดาน ${maxHold} วัน` : ""}`);
+    if (heldTxt) {
+      const over = maxHold > 0 && held !== null && held >= maxHold;
+      out.push(
+        over
+          ? `ถือมา ${heldTxt} เกินเพดาน ${maxHold} วัน`
+          : `ถือมา ${heldTxt}` +
+            (maxHold > 0
+              ? ` · เพดานปัจจุบัน ${maxHold} วัน (ไม้เก่านี้ปิดตอนที่ค่าตั้งยังต่างจากนี้)`
+              : "")
+      );
+    }
     if (rTxt && minR > 0) {
       out.push(
         `กำไรตอนปิด ${rTxt} — ต่ำกว่าเกณฑ์ยกเว้น ${fmtNum(minR, 1)}R ` +
