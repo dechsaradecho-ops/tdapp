@@ -13,6 +13,8 @@ import {
   QuoteTestResult,
   SchedulerLog,
   SchedulerLogsResponse,
+  SignalLog,
+  SignalLogsResponse,
 } from "@/lib/types";
 
 /** สีของ badge ตามสถานะ call */
@@ -50,7 +52,7 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
@@ -66,7 +68,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -80,6 +82,14 @@ export default function LogsPage() {
   const [guardLogs, setGuardLogs] = useState<SchedulerLog[]>([]);
   const [guardTotal, setGuardTotal] = useState(0);
   const [guardHasMore, setGuardHasMore] = useState(false);
+  // แท็บ Gate = signal_logs ฝั่ง execution gate (order_blocked = gate ปัดตก,
+  // order_opened = gate ผ่าน) — server filter ด้วย event
+  const [gateLogs, setGateLogs] = useState<SignalLog[]>([]);
+  const [gateSummary, setGateSummary] = useState<SignalLogsResponse["summary"] | null>(null);
+  const [gateTotal, setGateTotal] = useState(0);
+  const [gateHasMore, setGateHasMore] = useState(false);
+  const [gateFilter, setGateFilter] = useState<"order_blocked" | "order_opened" | "all">("order_blocked");
+  const gateFilterRef = useRef<"order_blocked" | "order_opened" | "all">("order_blocked");
   const PAGE_SIZE = 50;
   const SERVER_PAGE = 500;
 
@@ -104,13 +114,18 @@ export default function LogsPage() {
     return api.schedulerLogs(SERVER_PAGE, offset, "position_guard");
   }, []);
 
+  const loadGate = useCallback(async (pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.signalLogs(SERVER_PAGE, offset, gateFilterRef.current);
+  }, []);
+
   const load = useCallback(async (flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       // summary ฝั่ง backend นับแบบ exact ทั้งหน้าต่าง 7 วัน (ไม่ติด cap 500);
       // ตารางโหลดแค่ server page แรกของแต่ละแท็บ
       const f = flt ?? filterRef.current;
-      const [qres, nres, sres, gres] = await Promise.all([loadQuotes(f, 1), loadNews(1), loadSched(1), loadGuard(1)]);
+      const [qres, nres, sres, gres, gates] = await Promise.all([loadQuotes(f, 1), loadNews(1), loadSched(1), loadGuard(1), loadGate(1)]);
       setLogs(qres.logs ?? []);
       setSummary(qres.summary ?? null);
       setTtlDays(qres.ttl_days ?? 7);
@@ -127,6 +142,10 @@ export default function LogsPage() {
       setGuardLogs(gres.logs ?? []);
       setGuardTotal(gres.total ?? (gres.logs ?? []).length);
       setGuardHasMore(gres.has_more ?? false);
+      setGateLogs(gates.logs ?? []);
+      setGateSummary(gates.summary ?? null);
+      setGateTotal(gates.total ?? (gates.logs ?? []).length);
+      setGateHasMore(gates.has_more ?? false);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       setPage(1);
@@ -135,7 +154,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadGuard, loadNews, loadQuotes, loadSched]);
+  }, [loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
 
   // เปลี่ยน server page (ทุก 10 หน้า UI = 500 แถว) — ดึง chunk ถัดไปจาก backend
   const gotoServerPage = useCallback(async (pg: number) => {
@@ -156,6 +175,11 @@ export default function LogsPage() {
         setGuardLogs(gres.logs ?? []);
         setGuardTotal(gres.total ?? 0);
         setGuardHasMore(gres.has_more ?? false);
+      } else if (tabRef.current === "gate") {
+        const gates = await loadGate(pg);
+        setGateLogs(gates.logs ?? []);
+        setGateTotal(gates.total ?? 0);
+        setGateHasMore(gates.has_more ?? false);
       } else {
         const sres = await loadSched(pg);
         setSchedLogs(sres.logs ?? []);
@@ -170,7 +194,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadGuard, loadNews, loadQuotes, loadSched]);
+  }, [loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
 
   useEffect(() => {
     load();
@@ -221,6 +245,14 @@ export default function LogsPage() {
   const guardPageRows = guardLogs.slice((guardChunkPage - 1) * PAGE_SIZE, guardChunkPage * PAGE_SIZE);
   const guardServerPage = Math.floor((guardSafePage - 1) / uiPagesPerChunk) + 1;
   const guardServerPages = Math.max(1, Math.ceil(guardTotalPages / uiPagesPerChunk));
+  // แท็บ Gate ใช้ chunk ตัวเอง (server filter event แล้ว)
+  const gateChunkTotal = gateLogs.length;
+  const gateTotalPages = Math.max(1, Math.ceil((gateTotal || gateChunkTotal) / PAGE_SIZE));
+  const gateSafePage = Math.min(page, gateTotalPages);
+  const gateChunkPage = ((gateSafePage - 1) % uiPagesPerChunk) + 1;
+  const gatePageRows = gateLogs.slice((gateChunkPage - 1) * PAGE_SIZE, gateChunkPage * PAGE_SIZE);
+  const gateServerPage = Math.floor((gateSafePage - 1) / uiPagesPerChunk) + 1;
+  const gateServerPages = Math.max(1, Math.ceil(gateTotalPages / uiPagesPerChunk));
   const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
   const newsServerPage = Math.floor((newsSafePage - 1) / uiPagesPerChunk) + 1;
   const schedServerPage = Math.floor((schedSafePage - 1) / uiPagesPerChunk) + 1;
@@ -241,7 +273,9 @@ export default function LogsPage() {
                 ? "ประวัติการวิเคราะห์ข่าว (worker ทุก 15 นาที) — พาดหัวจริง + sentiment จาก AI"
                 : tab === "guard"
                   ? "การทำงานของ Guard ทุกรอบ (ทุก 1 นาที) — เช็ค SL/TP, ขยับ SL, ปิดไม้ (เก็บ 7 วัน)"
-                  : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
+                  : tab === "gate"
+                    ? "Gate อนุมัติ/ปัดตกออเดอร์ — เหตุผลทุกครั้งที่เปิดหรือบล็อก (เก็บ 7 วัน)"
+                    : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
@@ -285,6 +319,11 @@ export default function LogsPage() {
           onClick={() => { setTab("guard"); tabRef.current = "guard"; setPage(1); }}
           className={`px-3 py-1 rounded ${tab === "guard" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Guard{schedSummary?.by_job?.position_guard ? ` ${schedSummary.by_job.position_guard.total}` : guardTotal ? ` ${guardTotal}` : ""}
+        </button>
+        <button
+          onClick={() => { setTab("gate"); tabRef.current = "gate"; setPage(1); }}
+          className={`px-3 py-1 rounded ${tab === "gate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          Gate{gateSummary ? ` ${gateSummary.blocked + gateSummary.opened}` : gateTotal ? ` ${gateTotal}` : ""}
         </button>
       </div>
 
@@ -421,6 +460,32 @@ export default function LogsPage() {
         </section>
         );
       })()}
+
+      {/* ---------- Gate summary (order_blocked vs order_opened) ---------- */}
+      {tab === "gate" && gateSummary && (
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="panel">
+          <p className="text-xs text-slate-500">Gate ปัดตก (7 วัน)</p>
+          <p className="text-2xl font-bold text-amber-400">{gateSummary.blocked.toLocaleString()}</p>
+          <p className="text-xs text-slate-500 mt-1">order_blocked — pause/limit/news/corr/heat</p>
+        </div>
+        <div className="panel">
+          <p className="text-xs text-slate-500">Gate ผ่าน (7 วัน)</p>
+          <p className="text-2xl font-bold text-emerald-400">{gateSummary.opened.toLocaleString()}</p>
+          <p className="text-xs text-slate-500 mt-1">order_opened — เปิดออเดอร์จริง</p>
+        </div>
+        <div className="panel">
+          <p className="text-xs text-slate-500">หมดอายุ (7 วัน)</p>
+          <p className="text-2xl font-bold">{gateSummary.expired.toLocaleString()}</p>
+          <p className="text-xs text-slate-500 mt-1">expired — pending เกิน 30 นาที</p>
+        </div>
+        <div className="panel">
+          <p className="text-xs text-slate-500">ปิดไม้ (7 วัน)</p>
+          <p className="text-2xl font-bold">{gateSummary.closed.toLocaleString()}</p>
+          <p className="text-xs text-slate-500 mt-1">closed — SL/TP/manual</p>
+        </div>
+      </section>
+      )}
 
       {/* ---------- Provider breakdown ---------- */}
       {tab === "quotes" && summary && Object.keys(summary.by_provider).length > 0 && (
@@ -701,6 +766,111 @@ export default function LogsPage() {
                     gotoServerPage(schedServerPage + 1).then(() => setPage(schedServerPage * uiPagesPerChunk + 1));
                   }}
                   disabled={schedSafePage >= schedTotalPages || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      )}
+
+      {/* ---------- Gate run table (order_blocked / order_opened) ---------- */}
+      {tab === "gate" && (
+      <section className="panel">
+        <div className="overflow-x-auto">
+        <div className="flex gap-2 mb-3 text-xs">
+          {(["order_blocked", "order_opened", "all"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={async () => {
+                setGateFilter(f); gateFilterRef.current = f; setPage(1);
+                setLoading(true);
+                try {
+                  const res = await api.signalLogs(SERVER_PAGE, 0, f);
+                  setGateLogs(res.logs ?? []);
+                  setGateTotal(res.total ?? (res.logs ?? []).length);
+                  setGateHasMore(res.has_more ?? false);
+                  if (res.summary) setGateSummary(res.summary);
+                } finally { setLoading(false); }
+              }}
+              className={`px-3 py-1 rounded ${gateFilter === f ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+              {f === "all" ? "ทั้งหมด" : f === "order_blocked" ? "ปัดตก" : "ผ่าน"}
+            </button>
+          ))}
+        </div>
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">เวลา</th>
+              <th className="py-2 pr-3">Asset</th>
+              <th className="py-2 pr-3">ทิศ</th>
+              <th className="py-2 pr-3">ผล</th>
+              <th className="py-2 pr-3">Conf</th>
+              <th className="py-2 pr-3">Entry</th>
+              <th className="py-2 pr-3">เหตุผล gate</th>
+              <th className="py-2">Ticket</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && gateLogs.length === 0 && (
+              <tr><td colSpan={8} className="py-6">
+                <LoadingGraphic message="กำลังโหลดประวัติ gate — Render cold start อาจใช้เวลาสักครู่" compact />
+              </td></tr>
+            )}
+            {!loading && gateLogs.length === 0 && (
+              <tr><td colSpan={8} className="py-6 text-center text-slate-500">
+                ยังไม่มีประวัติ gate ในช่วงนี้
+              </td></tr>
+            )}
+            {gatePageRows.map((g) => {
+              const blocked = g.event === "order_blocked";
+              return (
+              <tr key={g.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
+                  {g.created_at ? new Date(g.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
+                </td>
+                <td className="py-2 pr-3 font-bold whitespace-nowrap">{g.asset || "—"}</td>
+                <td className="py-2 pr-3 whitespace-nowrap">{(g.direction || "—").toUpperCase()}</td>
+                <td className="py-2 pr-3">
+                  <span className={`px-2 py-0.5 rounded whitespace-nowrap ${blocked ? "bg-amber-500/15 text-amber-400" : "bg-emerald-500/15 text-emerald-400"}`}>
+                    {blocked ? "ปัดตก" : g.event === "order_opened" ? "ผ่าน" : g.event}
+                  </span>
+                </td>
+                <td className="py-2 pr-3 text-slate-300">{g.confidence != null ? `${Number(g.confidence).toFixed(0)}` : "—"}</td>
+                <td className="py-2 pr-3 font-mono text-slate-300">{g.entry != null ? fmtNum(g.entry, 4) : "—"}</td>
+                <td className="py-2 pr-3 max-w-[420px] text-slate-300" style={{ whiteSpace: "pre-wrap" }} title={g.reason || ""}>{g.reason || "—"}</td>
+                <td className="py-2 font-mono text-slate-500">{g.ticket || "—"}</td>
+              </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        </div>
+        {(gateLogs.length > 0 || gateTotal > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {gateSafePage}/{gateTotalPages} · แสดง {gatePageRows.length} จาก {gateTotal.toLocaleString()} รายการ
+              {gateServerPages > 1 && ` · ชุดที่ ${gateServerPage}/${gateServerPages}`} · เก็บสูงสุด {ttlDays} วัน
+            </p>
+            {gateTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => {
+                    if (gateChunkPage > 1 || gateSafePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(gateServerPage - 1).then(() => setPage((gateServerPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={gateSafePage <= 1 || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{gateSafePage} / {gateTotalPages}</span>
+                <button onClick={() => {
+                    if (gateChunkPage < uiPagesPerChunk && gateChunkPage * PAGE_SIZE < gateChunkTotal) { setPage((p) => Math.min(gateTotalPages, p + 1)); return; }
+                    if (!gateHasMore && gateServerPage >= gateServerPages) { setPage((p) => Math.min(gateTotalPages, p + 1)); return; }
+                    gotoServerPage(gateServerPage + 1).then(() => setPage(gateServerPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={gateSafePage >= gateTotalPages || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ถัดไป
                 </button>
