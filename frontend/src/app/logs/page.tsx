@@ -25,16 +25,211 @@ function statusBadge(status: string) {
     : "bg-red-500/15 text-red-400";
 }
 
-/** แยกตัวเลขจาก guard detail "checked=2, closed=0, moved_sl=1, ..." (never throws) */
+/**
+ * แยก "k=v, k=v" ทั้งบรรทัดของ guard detail เป็น map ของข้อความดิบ
+ *
+ * ทำไมไม่ split(",") ตรง ๆ: ตัวนับเป็นคู่ k=v แต่ list ของ symbol
+ * (sl_assets / closed_assets / skip_assets) เป็นข้อความยาวที่อาจมีอะไรก็ได้
+ * จึงใช้ lookahead หา ", key=" เป็นตัวคั่นจริงเท่านั้น → ค่าที่มี comma
+ * ข้างในยังอยู่ครบ (never throws)
+ */
+function splitGuardDetail(detail: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const re = /([a-z_]+)\s*=\s*(.*?)(?=,\s*[a-z_]+\s*=|$)/gi;
+    const s = String(detail || "");
+    let m: RegExpExecArray | null;
+    // exec loop (ไม่ใช้ matchAll: target ของโปรเจกต์ตํ่ากว่า es2015)
+    while ((m = re.exec(s)) !== null) {
+      out[m[1].toLowerCase()] = m[2].trim();
+      if (m.index === re.lastIndex) re.lastIndex += 1; // กัน loop ค้างบน match ว่าง
+    }
+  } catch { /* never throws */ }
+  return out;
+}
+
+/** ตัวเลขจาก guard detail "checked=2, closed=0, moved_sl=1, ..." (never throws) */
 function parseGuardDetail(detail: string): Record<string, number> {
   const out: Record<string, number> = {};
-  try {
-    for (const part of String(detail || "").split(",")) {
-      const m = part.trim().match(/^([a-z_]+)\s*=\s*(-?\d+)/i);
-      if (m) out[m[1]] = parseInt(m[2], 10) || 0;
-    }
-  } catch { /* ignore */ }
+  for (const [k, v] of Object.entries(splitGuardDetail(detail))) {
+    if (/^-?\d+$/.test(v)) out[k] = parseInt(v, 10) || 0;
+  }
   return out;
+}
+
+/**
+ * ความหมายของตัวนับแต่ละตัวใน scheduler_runs.detail ของ position_guard
+ *
+ * เดิมหน้า Guard โชว์สตริงดิบ "checked=4, closed=0, moved_sl=2, ..." ทำให้
+ * "moved_sl=2" ไม่สื่อว่า 2 คืออะไร ใครขยับ และทำไม closed เป็น 0
+ */
+const GUARD_FIELDS: { label: string; key: string; hint: string }[] = [
+  { label: "ตรวจไม้", key: "checked", hint: "จำนวนไม้เปิดที่ guard ไล่ตรวจในรอบนี้" },
+  { label: "ขยับ SL", key: "moved_sl", hint: "เลื่อน stop กระชับขึ้นสำเร็จ: breakeven / trailing / R-ladder" },
+  { label: "ปิดไม้", key: "closed", hint: "รวมทุกสาเหตุ: SL · TP · Smart Exit · time stop · kill switch" },
+  { label: "ปิดบางส่วน TP1", key: "partial_closed", hint: "ปิดบางส่วนตาม partial_trigger_r แล้วที่เหลือปล่อย trailing" },
+  { label: "smart ปิด", key: "smart_closed", hint: "Smart Exit สั่ง CLOSE แล้วปิดสำเร็จจริง" },
+  { label: "smart แบ่งปิด", key: "smart_partials", hint: "Smart Exit สั่ง PARTIAL_25/50 แล้วแบ่งปิดสำเร็จ" },
+  { label: "smart ข้าม", key: "smart_skipped", hint: "engine สั่งปิดแต่ทำไม่ได้ (ไม่มีราคา / broker ปฏิเสธ / TP1 ทำแล้ว) — ไม่ใช่การไม่ทำอะไรเงียบ ๆ" },
+  { label: "ฉุกเฉิน", key: "emergency_closed", hint: "kill switch เข้าเงื่อนไข → ปิดไม้ทันที" },
+  { label: "ข้ามทั้งรอบ", key: "skipped_prev_running", hint: "รอบก่อนยังไม่จบ → รอบนี้ถูกข้าม ไม่ได้ตรวจอะไรเลย (รอบไม่หายไปแล้ว)" },
+];
+
+/** token เหตุผลการปิดไม้ (ส่วนหลัง ":") → ภาษาไทย */
+const GUARD_CLOSE_REASONS: Record<string, string> = {
+  sl: "ตัดขาดทุน (SL)",
+  tp: "ปิดกำไร (TP)",
+  tp1: "ปิดบางส่วน TP1",
+  smart: "Smart Exit ปิดทั้งไม้",
+  smart25: "Smart Exit แบ่งปิด 25%",
+  smart50: "Smart Exit แบ่งปิด 50%",
+  time: "ครบกำหนดถือ (time stop)",
+  kill: "kill switch (ฉุกเฉิน)",
+};
+
+/** token เหตุผลที่ข้าม → ภาษาไทย */
+const GUARD_SKIP_REASONS: Record<string, string> = {
+  no_snapshot: "ไม่มีราคา (blind HOLD)",
+  not_applied: "สั่งปิดแล้วไม่สำเร็จ",
+  eval_error: "ประเมินไม่สำเร็จ",
+};
+
+/** "EURCHF@0.94337" → "EURCHF → SL 0.94337" */
+function guardSlLabel(raw: string): string {
+  const [asset, sl] = String(raw).split("@");
+  return sl ? `${asset} → SL ${sl}` : asset;
+}
+
+/** "EURCHF:sl@1.2345" → "EURCHF · ตัดขาดทุน (SL) @1.2345" */
+function guardClosedLabel(raw: string): string {
+  const s = String(raw);
+  const cut = s.indexOf(":");
+  const asset = cut >= 0 ? s.slice(0, cut) : s;
+  const rest = cut >= 0 ? s.slice(cut + 1) : "";
+  const [reason, price] = rest.split("@");
+  const th = GUARD_CLOSE_REASONS[reason] || reason || "ปิดไม้";
+  return price ? `${asset} · ${th} @${price}` : `${asset} · ${th}`;
+}
+
+/** "GBPCHF:no_snapshot" → "GBPCHF · ข้าม: ไม่มีราคา (blind HOLD)" */
+function guardSkipLabel(raw: string): string {
+  const s = String(raw);
+  const cut = s.indexOf(":");
+  const asset = cut >= 0 ? s.slice(0, cut) : s;
+  const reason = cut >= 0 ? s.slice(cut + 1) : "";
+  return `${asset} · ข้าม: ${GUARD_SKIP_REASONS[reason] || reason || "ไม่ทราบสาเหตุ"}`;
+}
+
+/** ชิปดอกจิกของ symbol ในช่องรายละเอียด guard */
+function GuardChips({ items, tone }: { items: string[]; tone: string }) {
+  if (!items.length) return null;
+  return (
+    <span className="flex flex-wrap gap-1">
+      {items.map((it, i) => (
+        <span key={i} className={`text-[11px] px-1.5 py-0.5 rounded border ${tone}`}>
+          {it}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * ช่อง "รายละเอียด" ของตาราง guard — แปลง "checked=4, moved_sl=2, ..."
+ * ให้เป็นประโยคไทยที่อ่านรู้เรื่อง + บอกว่าไม้ตัวไหนถูกขยับ/ปิด/ข้าม
+ * พร้อมโชว์ค่าดิบไว้ด้านล่างสำหรับ debug
+ */
+function GuardDetailCell({ detail, status }: { detail: string | null; status: string }) {
+  const raw = String(detail || "");
+  const kv = splitGuardDetail(raw);
+  const num = (k: string) => {
+    const v = parseInt(kv[k] || "0", 10);
+    return Number.isFinite(v) ? v : 0;
+  };
+
+  if (num("skipped_prev_running") > 0) {
+    return (
+      <div className="text-xs space-y-0.5">
+        <p className="text-amber-300 font-medium">ถูกข้าม — รอบก่อนยังไม่จบ</p>
+        <p className="text-slate-500">รอบนี้ไม่ได้ตรวจไม้เลย (จำนวนรอบยังนับครบ ไม่หายไป)</p>
+        <p className="text-[10px] text-slate-600 font-mono break-all">{raw}</p>
+      </div>
+    );
+  }
+
+  if (status === "error" || (!raw.trim() && status === "error")) {
+    return (
+      <div className="text-xs space-y-0.5">
+        <p className="text-red-300 font-medium">รอบนี้ล้มเหลว — ดูช่อง Error</p>
+        {raw.trim() ? (
+          <p className="text-[10px] text-slate-600 font-mono break-all">{raw}</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  // รอบที่ถูกยกเลิก/หมดเวลาก่อนเขียน log (เช่น watchdog 50 วิ)
+  if (!raw.trim()) {
+    return (
+      <div className="text-xs space-y-0.5">
+        <p className="text-slate-400">ไม่มีรายละเอียด</p>
+        <p className="text-slate-500">รอบนี้ถูกยกเลิก/หมดเวลาก่อนบันทึกผล — ดู heartbeat ด้านบน</p>
+      </div>
+    );
+  }
+
+  const slMoves = (kv.sl_assets || "").split(";").filter(Boolean);
+  const closedList = (kv.closed_assets || "").split(";").filter(Boolean);
+  const skipList = (kv.skip_assets || "").split(";").filter(Boolean);
+
+  const extra: string[] = [];
+  if (num("partial_closed") > 0) extra.push(`ปิดบางส่วน TP1 ${num("partial_closed")}`);
+  if (num("smart_closed") > 0) extra.push(`smart ปิด ${num("smart_closed")}`);
+  if (num("smart_partials") > 0) extra.push(`smart แบ่งปิด ${num("smart_partials")}`);
+  if (num("smart_skipped") > 0) extra.push(`smart ข้าม ${num("smart_skipped")}`);
+  if (num("emergency_closed") > 0) extra.push(`⚠ ฉุกเฉิน ${num("emergency_closed")}`);
+
+  return (
+    <div className="text-xs space-y-1">
+      <p className="text-slate-200">
+        ตรวจ <b>{num("checked")}</b> ไม้
+        <span className="text-slate-500"> · </span>
+        ขยับ SL{" "}
+        <b className={num("moved_sl") > 0 ? "text-amber-300" : "text-slate-400"}>
+          {num("moved_sl")}
+        </b>
+        <span className="text-slate-500"> · </span>
+        ปิดไม้{" "}
+        <b className={num("closed") > 0 ? "text-sky-300" : "text-slate-400"}>
+          {num("closed")}
+        </b>
+        {extra.length > 0 && (
+          <span className="text-slate-400"> · {extra.join(" · ")}</span>
+        )}
+      </p>
+      {slMoves.length > 0 && (
+        <GuardChips
+          items={slMoves.map(guardSlLabel)}
+          tone="border-amber-400/30 bg-amber-500/10 text-amber-200"
+        />
+      )}
+      {closedList.length > 0 && (
+        <GuardChips
+          items={closedList.map(guardClosedLabel)}
+          tone="border-sky-400/30 bg-sky-500/10 text-sky-200"
+        />
+      )}
+      {skipList.length > 0 && (
+        <GuardChips
+          items={skipList.map(guardSkipLabel)}
+          tone="border-slate-500/30 bg-slate-500/10 text-slate-300"
+        />
+      )}
+      <p className="text-[10px] text-slate-600 font-mono break-all" title="ค่าดิบจาก scheduler_runs.detail">
+        {raw}
+      </p>
+    </div>
+  );
 }
 
 /**
@@ -473,6 +668,9 @@ export default function LogsPage() {
         const b = schedSummary?.by_job?.position_guard;
         const latest = guardLogs[0];
         const latestKv = parseGuardDetail(latest?.detail ?? "");
+        // map ของ "key -> ข้อความดิบ" สำหรับ list ชื่อคู่เงิน (parseGuardDetail
+        // ให้แต่ตัวเลข จึงต้องใช้ map ดิบสำหรับ sl_assets / closed_assets)
+        const latestRaw = splitGuardDetail(latest?.detail ?? "");
         let moved500 = 0;
         let closed500 = 0;
         let skipped500 = 0;
@@ -508,11 +706,26 @@ export default function LogsPage() {
                 ? "รอบนี้ถูกข้าม — รอบก่อนยังไม่จบ (ดู heartbeat ด้านล่าง)"
                 : `ตรวจ ${latestKv.checked ?? "—"} ไม้ · ขยับ SL ${latestKv.moved_sl ?? 0} · ปิด ${latestKv.closed ?? 0}`}
             </p>
+            {!latestKv.skipped_prev_running && (latestRaw.sl_assets || latestRaw.closed_assets) && (
+              <p className="text-[11px] mt-1 text-slate-500 break-words">
+                {latestRaw.sl_assets && (
+                  <span className="text-amber-200/80">
+                    ขยับ: {latestRaw.sl_assets.split(";").filter(Boolean).map(guardSlLabel).join(" · ")}
+                  </span>
+                )}
+                {latestRaw.sl_assets && latestRaw.closed_assets && " · "}
+                {latestRaw.closed_assets && (
+                  <span className="text-sky-200/80">
+                    ปิด: {latestRaw.closed_assets.split(";").filter(Boolean).map(guardClosedLabel).join(" · ")}
+                  </span>
+                )}
+              </p>
+            )}
           </div>
           <div className="panel">
             <p className="text-xs text-slate-500">ขยับ SL (500 รอบล่าสุด)</p>
             <p className="text-2xl font-bold text-amber-400">{moved500}</p>
-            <p className="text-xs text-slate-500 mt-1">ครั้งที่ guard เลื่อน stop</p>
+            <p className="text-xs text-slate-500 mt-1">ครั้งที่ guard เลื่อน stop กระชับขึ้น</p>
           </div>
           <div className="panel">
             <p className="text-xs text-slate-500">ปิดไม้ (500 รอบล่าสุด)</p>
@@ -543,6 +756,39 @@ export default function LogsPage() {
               )}
             </div>
           )}
+          <div className="panel col-span-2 md:col-span-4">
+            <details>
+              <summary className="text-xs text-slate-400 cursor-pointer select-none">
+                ตัวเลขในคอลัมน์ &quot;รายละเอียด&quot; หมายถึงอะไร (กดเพื่อเปิด)
+              </summary>
+              <div className="mt-2 grid gap-1.5 md:grid-cols-2">
+                {GUARD_FIELDS.map((f) => (
+                  <p key={f.key} className="text-xs text-slate-400">
+                    <span className="text-slate-200 font-medium">{f.label}</span>
+                    <span className="text-slate-600 font-mono"> ({f.key})</span>
+                    {" — "}
+                    {f.hint}
+                  </p>
+                ))}
+              </div>
+              <div className="mt-2 text-xs text-slate-500 space-y-0.5">
+                <p>
+                  ต่อท้ายด้วยรายชื่อคู่เงินของรอบนั้น:{" "}
+                  <span className="text-amber-200/90 font-mono">sl_assets</span> = ไม้ที่ถูกขยับ SL ·{" "}
+                  <span className="text-sky-200/90 font-mono">closed_assets</span> = ไม้ที่ถูกปิด/แบ่งปิด (พร้อมสาเหตุ) ·{" "}
+                  <span className="text-slate-300 font-mono">skip_assets</span> = ไม้ที่ Smart Exit สั่งแล้วข้าม
+                </p>
+                <p>
+                  ประโยคอ่านแบบ:{" "}
+                  <span className="text-slate-300">
+                    ตรวจ 4 ไม้ · ขยับ SL 2 · ปิดไม้ 0
+                  </span>{" "}
+                  หมายถึง guard ไล่ครบ 4 ไม้ เลื่อน stop สำเร็จ 2 ไม้ และไม่ปิดไม้ใดเลย (ปกติ — guard
+                  ส่วนใหญ่แค่ขยับ stop แล้วปล่อยให้ SL/TP ทำงานเอง)
+                </p>
+              </div>
+            </details>
+          </div>
         </section>
         );
       })()}
@@ -976,22 +1222,19 @@ export default function LogsPage() {
             <tr className="text-slate-500 text-left border-b border-slate-800">
               <th className="py-2 pr-3">เวลา</th>
               <th className="py-2 pr-3">สถานะ</th>
-              <th className="py-2 pr-3">ตรวจ</th>
-              <th className="py-2 pr-3">ขยับ SL</th>
-              <th className="py-2 pr-3">ปิดไม้</th>
               <th className="py-2 pr-3">ms</th>
-              <th className="py-2 pr-3">รายละเอียด</th>
+              <th className="py-2 pr-3">รายละเอียดรอบนี้</th>
               <th className="py-2">Error</th>
             </tr>
           </thead>
           <tbody>
             {loading && guardLogs.length === 0 && (
-              <tr><td colSpan={8} className="py-6">
+              <tr><td colSpan={5} className="py-6">
                 <LoadingGraphic message="กำลังโหลดประวัติ guard — Render cold start อาจใช้เวลาสักครู่" compact />
               </td></tr>
             )}
             {!loading && guardLogs.length === 0 && (
-              <tr><td colSpan={8} className="py-6 text-center text-slate-500">
+              <tr><td colSpan={5} className="py-6 text-center text-slate-500">
                 {schedulerEmptyMessage("guard", schedSummary)}
                 {jobStats?.position_guard && (
                   <div className="pt-2 text-xs text-slate-400">
@@ -1003,29 +1246,23 @@ export default function LogsPage() {
               </td></tr>
             )}
             {guardPageRows.map((g) => {
-              const kv = parseGuardDetail(g.detail ?? "");
-              const moved = kv.moved_sl ?? 0;
-              const closed = kv.closed ?? 0;
-              const skipped = kv.skipped_prev_running ?? 0;
+              // รอบที่ถูกข้าม: "ตรวจ/ขยับ SL/ปิดไม้" เป็น 0 หมด จึงแสดง badge
+              // "ข้าม" แทนสถานะ ok เพื่อไม่ให้เข้าใจว่า guard ทำงานแล้วได้ 0
+              const skipped = (parseGuardDetail(g.detail ?? "").skipped_prev_running ?? 0) > 0;
               return (
               <tr key={g.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
                 <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
                   {g.created_at ? new Date(g.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
                 </td>
                 <td className="py-2 pr-3">
-                  {skipped > 0
+                  {skipped
                     ? <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-400" title="รอบก่อนยังไม่จบ — รอบนี้ถูกข้าม">ข้าม</span>
                     : <span className={`px-2 py-0.5 rounded ${g.status === "ok" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{g.status}</span>}
                 </td>
-                <td className="py-2 pr-3 text-slate-300">{skipped > 0 ? "—" : (kv.checked ?? "—")}</td>
-                <td className="py-2 pr-3 font-bold">
-                  {moved > 0 ? <span className="text-amber-400">{moved}</span> : <span className="text-slate-500">0</span>}
-                </td>
-                <td className="py-2 pr-3">
-                  {closed > 0 ? <span className="text-sky-400 font-bold">{closed}</span> : <span className="text-slate-500">0</span>}
-                </td>
                 <td className="py-2 pr-3 text-slate-400">{g.duration_ms ?? "—"}</td>
-                <td className="py-2 pr-3 max-w-[320px] truncate text-slate-300" title={g.detail || ""}>{g.detail || "—"}</td>
+                <td className="py-2 pr-3 min-w-[260px] max-w-[420px]">
+                  <GuardDetailCell detail={g.detail} status={g.status} />
+                </td>
                 <td className="py-2 max-w-[280px] truncate" title={g.error || ""}><span className="text-loss">{g.error || "—"}</span></td>
               </tr>
               );

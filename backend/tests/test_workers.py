@@ -970,6 +970,34 @@ class TestPositionGuard:
              "take_profit": 1.2000}]})
         summary = await position_guard.guard_once(db, broker, Notifier())
         assert summary["closed"] == 1 and closed == ["T1"]
+        # closed_assets ต้องบอกสาเหตุ+ราคาที่ปิด ไม่ใช่แค่ตัวนับ
+        assert summary["closed_assets"] == "EURUSD:tp@1.25"
+
+    @pytest.mark.asyncio
+    async def test_sl_close_audit_records_reason_and_price(self):
+        """ไม้ที่ถูกตัดขาดทุนต้องขึ้นใน closed_assets ว่า "sl" (ไม่ใช่ tp)
+
+        Logs > Guard อ่านคอลัมน์รายละเอียดจากฟิลด์นี้ — ถ้าติดป้ายผิด
+        ผู้ใช้จะเข้าใจว่ากำไรทั้งที่โดน SL
+        """
+        from app.workers import position_guard
+
+        closed: list[str] = []
+
+        class Notifier:
+            async def notify(self, *a, **k):
+                return None
+
+        # BUY entry 1.1000, SL 1.3000, live 1.2500 → price <= SL → ตัดขาดทุน
+        broker = self._broker_with(entry=1.1000, sl=1.3000)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.1000,
+             "stop_loss": 1.3000}]})
+        summary = await position_guard.guard_once(db, broker, Notifier())
+        assert summary["closed"] == 1 and closed == ["T1"]
+        assert summary["closed_assets"] == "EURUSD:sl@1.25"
 
     @pytest.mark.asyncio
     async def test_rehydrate_seeds_entry_price(self):
@@ -1110,6 +1138,28 @@ class TestPositionGuardManagement:
         assert partials == [pytest.approx(0.02)]  # 50% of 0.04
         # journal row marked so it never fires twice
         assert db.rows["paper_trades"][0]["partial_done"] is True
+        # audit list: บอกชื่อคู่เงิน + เหตุผล (หน้า Guard ใช้โชว์ chip)
+        assert summary["closed_assets"] == "EURUSD:tp1"
+
+    @pytest.mark.asyncio
+    async def test_breakeven_audit_names_symbol_and_new_sl(self):
+        """"moved_sl=2" ต้องรู้ว่าคู่ไหนถูกขยับ ไปที่ราคาเท่าไร
+
+        Prod 2026-09-11: monitor บอก "SL 0.93624 → 0.94337" แต่หน้า Guard
+        โชว์แค่ตัวนับ → เติม sl_assets ใน summary เพื่อให้อ่านรู้เรื่อง
+        """
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        summary = await position_guard.guard_once(
+            self._db(), broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
+        assert summary["moved_sl"] == 1
+        assert summary["sl_assets"] == "EURUSD@1.1"
+        # ไม่มีการปิด/ข้ามในรอบนี้ → list ว่าง (หน้าเว็บไม่โชว์ chip)
+        assert summary["closed_assets"] == ""
+        assert summary["skip_assets"] == ""
 
     @pytest.mark.asyncio
     async def test_partial_close_not_repeated(self, monkeypatch):

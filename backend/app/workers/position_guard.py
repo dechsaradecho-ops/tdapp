@@ -290,10 +290,12 @@ async def _manage_position(db, broker, pos: Position, price: float,
                            s, notifier: NotificationService) -> dict:
     """Breakeven / trailing / partial-close pass for ONE position.
 
-    Returns {"moved_sl": bool, "partial_closed": bool} for the summary.
-    Never raises — a failed broker call just skips the action this cycle.
+    Returns {"moved_sl": bool, "partial_closed": bool, "new_sl": float}
+    for the summary. Never raises — a failed broker call just skips the
+    action this cycle.
     """
-    out = {"moved_sl": False, "partial_closed": False}
+    out = {"moved_sl": False, "partial_closed": False,
+           "new_sl": None, "partial_volume": None}
     if pos.stop_loss is None or pos.entry_price <= 0:
         return out
 
@@ -318,6 +320,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
                 result = await broker.partial_close(pos.ticket, slice_vol)
                 if result.ok:
                     out["partial_closed"] = True
+                    out["partial_volume"] = slice_vol
                     pos.partial_done = True  # type: ignore[attr-defined]
                     # persist the flag — otherwise a restart re-fires TP1
                     try:
@@ -392,6 +395,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
                 if result.ok:
                     pos.stop_loss = round(new_sl, 5)
                     out["moved_sl"] = True
+                    out["new_sl"] = pos.stop_loss
                     move_kind = ("breakeven"
                                  if abs(pos.stop_loss - pos.entry_price) < 1e-9
                                  else "trailing")
@@ -426,7 +430,14 @@ async def _manage_position(db, broker, pos: Position, price: float,
 
 async def guard_once(db, broker, notifier: NotificationService,
                      settings=None) -> dict:
-    """One guard cycle. Returns a small summary for logs/tests."""
+    """One guard cycle. Returns a small summary for logs/tests.
+
+    Besides the aggregate counters the summary carries three symbol lists
+    (``sl_assets`` / ``closed_assets`` / ``skip_assets``) written into
+    ``scheduler_runs.detail``: counters alone left the Logs > Guard tab
+    unreadable ("moved_sl=2" with no idea WHICH pair moved), which is
+    exactly the complaint that started this change.
+    """
     closed = 0
     moved = 0
     partials = 0
@@ -434,13 +445,18 @@ async def guard_once(db, broker, notifier: NotificationService,
     smart_partials = 0
     emergency_closed = 0
     smart_skipped = 0
+    # symbol-level audit for this round (capped when rendered)
+    sl_assets: list[str] = []
+    closed_assets: list[str] = []
+    skip_assets: list[str] = []
     try:
         positions = await broker.all_positions()
     except Exception as exc:
         log.error("position guard cannot list positions: %s", exc)
         return {"checked": 0, "closed": 0, "moved_sl": 0, "partial_closed": 0,
                 "smart_closed": 0, "smart_partials": 0,
-                "smart_skipped": 0, "emergency_closed": 0}
+                "smart_skipped": 0, "emergency_closed": 0,
+                "sl_assets": "", "closed_assets": "", "skip_assets": ""}
 
     # Settings once per cycle (breakeven/trailing/partial knobs). Falls back
     # to schema defaults when the DB is unavailable.
@@ -555,6 +571,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                        + f") — ปิดที่ {price:g}")
             emergency_closed += 1
             closed += 1
+            closed_assets.append(f"{pos.asset}:kill")
             emergency_pnl += float(pnl or 0)
             emergency_user = emergency_user or str(getattr(pos, "user_id", "") or "")
             emergency_lines.append(
@@ -565,8 +582,15 @@ async def guard_once(db, broker, notifier: NotificationService,
         # ---- management pass: breakeven / trailing / partial (TP1) ----
         try:
             mgmt = await _manage_position(db, broker, pos, price, s, notifier)
-            moved += 1 if mgmt.get("moved_sl") else 0
-            partials += 1 if mgmt.get("partial_closed") else 0
+            if mgmt.get("moved_sl"):
+                moved += 1
+                _new = mgmt.get("new_sl")
+                sl_assets.append(
+                    f"{pos.asset}@{_new:g}" if _new is not None
+                    else str(pos.asset or ""))
+            if mgmt.get("partial_closed"):
+                partials += 1
+                closed_assets.append(f"{pos.asset}:tp1")
         except Exception as exc:
             log.warning("manage %s failed: %s", pos.ticket, exc)
 
@@ -608,25 +632,33 @@ async def guard_once(db, broker, notifier: NotificationService,
                         if applied.get("closed"):
                             closed += 1
                             smart_closed += 1
+                            closed_assets.append(f"{pos.asset}:smart")
                             continue  # fully closed — skip SL/TP + time stop
                         if applied.get("partial_closed"):
                             partials += 1
                             smart_partials += 1
+                            closed_assets.append(
+                                f"{pos.asset}:"
+                                + ("smart25" if rec == "PARTIAL_25"
+                                   else "smart50"))
                             # remainder falls through to SL/TP + time-stop
                         else:
                             # Engine fired but nothing executed (broker reject
                             # or TP1 already done) — NOT a silent no-op.
                             smart_skipped += 1
+                            skip_assets.append(f"{pos.asset}:not_applied")
                             log.warning(
                                 "smart-exit %s fired %s (%s) but not applied",
                                 pos.ticket, rec,
                                 getattr(decision, "trigger", ""))
                 else:
                     smart_skipped += 1
+                    skip_assets.append(f"{pos.asset}:no_snapshot")
                     log.debug("smart-exit skip %s: no snapshot (blind HOLD)",
                               pos.ticket)
             except Exception as exc:
                 smart_skipped += 1
+                skip_assets.append(f"{pos.asset}:eval_error")
                 log.warning("smart-exit eval %s failed: %s", pos.ticket, exc)
 
         if not (hit_sl or hit_tp):
@@ -665,6 +697,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                                f"เกิน {max_hold} วัน และกำไร {r_now:+.2f}R "
                                f"< {ts_min_r:g}R — ปิดที่ {price:g}")
                     closed += 1
+                    closed_assets.append(f"{pos.asset}:time")
                     try:
                         await notifier.notify(
                             pos.user_id, "trade_closed",
@@ -698,6 +731,8 @@ async def guard_once(db, broker, notifier: NotificationService,
             reason=("ตัดขาดทุน (SL) ที่ " if hit_sl else "ปิดกำไร (TP) ที่ ")
             + f"{price:g}")
         closed += 1
+        closed_assets.append(
+            f"{pos.asset}:{'sl' if hit_sl else 'tp'}@{price:g}")
         try:
             emoji = "🛑" if hit_sl else "🎯"
             await notifier.notify(
@@ -731,7 +766,17 @@ async def guard_once(db, broker, notifier: NotificationService,
             "moved_sl": moved, "partial_closed": partials,
             "smart_closed": smart_closed, "smart_partials": smart_partials,
             "smart_skipped": smart_skipped,
-            "emergency_closed": emergency_closed}
+            "emergency_closed": emergency_closed,
+            # symbol-level audit — see docstring. Format of one item:
+            #   sl_assets     "EURCHF@0.94337"          (asset@new SL)
+            #   closed_assets "EURCHF:sl@1.2345"        (asset:reason[@exit])
+            #   skip_assets   "GBPCHF:no_snapshot"
+            # ";" separates items (values never contain a comma, so the
+            # "k=v, k=v" line stays unambiguous for readers and regexes).
+            # Capped at 6 each so the line still fits the 500-char column.
+            "sl_assets": ";".join(sl_assets[:6]),
+            "closed_assets": ";".join(closed_assets[:6]),
+            "skip_assets": ";".join(skip_assets[:6])}
 
 
 def run_guard_blocking(db, broker, notifier) -> dict:

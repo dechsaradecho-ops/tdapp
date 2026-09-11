@@ -33,8 +33,15 @@ _last_purge = 0.0
 TABLE = "scheduler_runs"
 
 
-def _summarize(result: Any, limit: int = 300) -> str:
-    """Compact one-line summary of a job return value (never raises)."""
+def _summarize(result: Any, limit: int = 480) -> str:
+    """Compact one-line summary of a job return value (never raises).
+
+    ``limit`` mirrors the 500-char cap in ``log_run``: guard_once now also
+    returns symbol lists (sl_assets / closed_assets / skip_assets) so the
+    Logs > Guard tab can name WHICH pair moved its stop, not just how many.
+    A 300-char cap silently dropped those lists off the end — the counters
+    are short, the audit lists are not.
+    """
     try:
         if result is None:
             return ""

@@ -56,6 +56,27 @@ class TestLogRun:
     def test_summarize_none(self):
         assert scheduler_log._summarize(None) == ""
 
+    def test_summarize_keeps_symbol_audit_lists(self):
+        """sl_assets/closed_assets ต้องรอดจากการตัดความยาว
+
+        เดิม limit=300 และ guard detail ยาวกว่านั้น ทำให้ list ชื่อคู่เงิน
+        (ซึ่งอยู่ท้ายสุด) หายไป → หน้า Logs > Guard ไม่รู้ว่าคู่ไหนถูกขยับ
+        """
+        row = {
+            "checked": 4, "closed": 1, "moved_sl": 2, "partial_closed": 0,
+            "smart_closed": 1, "smart_partials": 0, "smart_skipped": 0,
+            "emergency_closed": 0,
+            "sl_assets": "EURCHF@0.94337;AUDNZD@1.0821",
+            "closed_assets": "XAUUSD:tp@4463.2",
+            "skip_assets": "GBPCHF:no_snapshot",
+        }
+        s = scheduler_log._summarize(row)
+        assert "sl_assets=EURCHF@0.94337;AUDNZD@1.0821" in s
+        assert "closed_assets=XAUUSD:tp@4463.2" in s
+        assert "skip_assets=GBPCHF:no_snapshot" in s
+        # ยังต้องอยู่ในเพดานคอลัมน์ 500 ตัวอักษร
+        assert len(s) <= 500
+
 
 class TestPurge:
     def test_purge_deletes_rows_older_than_7_days(self):
