@@ -1591,6 +1591,56 @@ class TestExtendedAnalysisSync:
         assert body["final_decision"]
 
     @pytest.mark.asyncio
+    async def test_extended_asset_param_forces_selected_symbol(self, monkeypatch):
+        """?asset=XXX = ประเมินคู่ที่ผู้ใช้เลือกเอง — ทุกตัวใน SUPPORTED_ASSETS
+        (dropdown ORDER STRATEGY) but only real feed symbols; an unknown or
+        empty value falls back to the top scorer so the box can never show a
+        pair the engine cannot price."""
+        import json
+        from app.integrations import quotes as quotes_mod
+        db = FakeDatabase(rows={"market_analysis": []})
+        # newest-first inserts: XAUUSD ends up newest → top scorer = XAUUSD
+        db.insert("market_analysis", {
+            "asset": "EURUSD", "regime": "sideway", "sentiment": "neutral",
+            "confidence": 42.5, "explanation": "t",
+        })
+        db.insert("market_analysis", {
+            "asset": "XAUUSD", "regime": "strong_bull_trend",
+            "sentiment": "bullish", "confidence": 78.0, "explanation": "t",
+        })
+        set_state(db)
+
+        async def fake_snaps(assets, **_kw):
+            return {a: dict(self._snap(a)) for a in assets}
+        async def fake_spot(assets, **_kw):
+            return {a: 100.0 for a in assets}, {}
+        async def fake_candles(asset, client, days=120):
+            return self._bars(max(30, days))
+        monkeypatch.setattr(quotes_mod, "fetch_all_snapshots", fake_snaps)
+        monkeypatch.setattr(quotes_mod, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(quotes_mod, "fetch_candles", fake_candles)
+
+        body = (await call("GET",
+                           "/api/trading/extended-analysis?asset=gbpusd")).json()
+        assert body["asset"] == "GBPUSD"
+        assert body["asset_source"] == "selected"
+        plan = json.loads(body["order_strategy"])
+        assert plan["asset"] == "GBPUSD"
+        # universe = ทุกคู่ที่มีคะแนนรอบล่าสุด (ให้ dropdown ติดคะแนน)
+        assert {u["asset"] for u in body["universe"]} >= {"XAUUSD", "EURUSD"}
+
+        # สัญลักษณ์ที่ไม่ใช้ (ไม่อยู่ใน SUPPORTED_ASSETS) → ถอยไป top scorer
+        bad = (await call("GET",
+                          "/api/trading/extended-analysis?asset=NOPE")).json()
+        assert bad["asset"] == "XAUUSD"
+        assert bad["asset_source"] == "top_scorer"
+
+        # ไม่ส่ง asset เลย = พฤติกรรมเดิม (top scorer)
+        auto = (await call("GET", "/api/trading/extended-analysis")).json()
+        assert auto["asset"] == "XAUUSD"
+        assert auto["asset_source"] == "top_scorer"
+
+    @pytest.mark.asyncio
     async def test_extended_offline_stays_fail_soft(self, monkeypatch):
         """No rows + dead feeds → honest EURUSD defaults, never raises."""
         from app.integrations import quotes as quotes_mod

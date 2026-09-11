@@ -168,6 +168,65 @@ class TestSafeJob:
         assert db.inserted[0][1]["status"] == "error"
         assert "watchdog" in db.inserted[0][1]["error"]
 
+    @pytest.mark.asyncio
+    async def test_overlapping_tick_logs_visible_skip(self):
+        """A tick that arrives while the previous one is still running must
+        write a VISIBLE "skipped_prev_running=1" row.
+
+        Prod 2026-09-11: max_instances=1 made APScheduler drop those ticks
+        with nothing but a warning, so the Guard tab stayed empty even though
+        the guard was demonstrably moving SLs all day. Invisible skips are
+        the bug — the skip itself is acceptable.
+        """
+        import asyncio as _asyncio
+
+        from app import main as main_mod
+
+        db = FakeDatabase()
+        gate = _asyncio.Event()
+
+        async def slow():
+            await gate.wait()
+            return {"checked": 3}
+
+        task = _asyncio.ensure_future(
+            main_mod._safe_job(slow(), db, "position_guard"))
+        await _asyncio.sleep(0)              # let the first tick enter flight
+        assert "position_guard" in main_mod._JOB_IN_FLIGHT
+
+        async def never_runs():
+            raise AssertionError("overlapping tick must not be awaited")
+
+        await main_mod._safe_job(never_runs(), db, "position_guard")
+
+        gate.set()
+        await task
+        assert len(db.inserted) == 2
+        skip_row = db.inserted[0][1]
+        assert skip_row["status"] == "ok"
+        assert "skipped_prev_running=1" in skip_row["detail"]
+        # the real tick still logged its own result afterwards
+        assert "checked=3" in db.inserted[1][1]["detail"]
+        assert not main_mod._JOB_IN_FLIGHT
+
+    @pytest.mark.asyncio
+    async def test_job_stats_heartbeat(self):
+        """job_stats() must prove invocation even when rows exist elsewhere."""
+        from app import main as main_mod
+
+        main_mod._JOB_STATS.pop("heartbeat_probe", None)
+        db = FakeDatabase()
+
+        async def ok():
+            return {"checked": 1}
+
+        await main_mod._safe_job(ok(), db, "heartbeat_probe")
+        st = main_mod.job_stats()["heartbeat_probe"]
+        assert st["ticks"] == 1 and st["ok"] == 1 and st["error"] == 0
+        assert st["last_status"] == "ok" and "checked=1" in st["last_detail"]
+        assert st["running_s"] is None     # not left marked as running
+        main_mod._JOB_STATS.pop("heartbeat_probe", None)
+
 
 class TestEndpoint:
     @pytest.mark.asyncio

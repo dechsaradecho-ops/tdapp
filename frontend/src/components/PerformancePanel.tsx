@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -63,14 +63,18 @@ export default function PerformancePanel() {
   const [sigReport, setSigReport] = useState<SignalReport | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [btAsset, setBtAsset] = useState<string>("EURUSD");
-  const [btIndicator, setBtIndicator] = useState<(typeof INDICATORS)[number]>("EMA");
+  const [btAsset, setBtAsset] = useState<string>("EURUSD");  const [btIndicator, setBtIndicator] = useState<(typeof INDICATORS)[number]>("EMA");
   const [btDays, setBtDays] = useState(120);
   const [btCapital, setBtCapital] = useState(10_000);
   const [btRiskPct, setBtRiskPct] = useState(1.0);
   const [bt, setBt] = useState<BacktestResult | null>(null);
   const [wf, setWf] = useState<WalkForwardResult | null>(null);
   const [btLoading, setBtLoading] = useState(false);
+  // สัญลักษณ์ของ ORDER STRATEGY: "" = ให้ระบบเลือก top scorer เอง,
+  // อย่างอื่น = บังคับประเมินคู่นั้น (dropdown ทุกคู่ใน SUPPORTED_ASSETS)
+  const [extAsset, setExtAsset] = useState<string>("");
+  const extAssetRef = useRef<string>("");
+  const [extLoading, setExtLoading] = useState(false);
   // เปิดออเดอร์จาก ORDER STRATEGY — เฉพาะขา market แรก, FINAL WAIT ล็อกปุ่ม
   const [confirmPlan, setConfirmPlan] = useState<ExtendedPlanView | null>(null);
   const [openBusy, setOpenBusy] = useState(false);
@@ -83,7 +87,8 @@ export default function PerformancePanel() {
       const [f, n, s, c, k, j, p, x, eq, sr] = await Promise.all([
         api.tradingFrequency(), api.tradingCalendar(), api.tradingSession(),
         api.tradingCorrelation(), api.tradingKillSwitch(),
-        api.tradingJournal(30), api.tradingPaper(), api.extendedAnalysis(),
+        api.tradingJournal(30), api.tradingPaper(),
+        api.extendedAnalysis(extAssetRef.current || undefined),
         api.equityCurve(90), api.signalReport(30),
       ]);
       setFreq(f); setNews(n); setSession(s); setCorr(c);
@@ -93,6 +98,19 @@ export default function PerformancePanel() {
       /* endpoints unreachable — badges stay null */
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  // เลือกสัญลักษณ์ใน ORDER STRATEGY — โหลดใหม่เฉพาะ Extended (ไม่ยิง 10
+  // endpoint ซ้ำ) เพื่อให้ AI ประเมินคู่ที่ผู้ใช้เลือกได้ทุกตัว
+  const loadExtended = useCallback(async (asset: string) => {
+    setExtLoading(true);
+    try {
+      setExtended(await api.extendedAnalysis(asset || undefined));
+    } catch {
+      /* endpoint unreachable — keep the previous view */
+    } finally {
+      setExtLoading(false);
     }
   }, []);
 
@@ -134,12 +152,28 @@ export default function PerformancePanel() {
   const killBadge: Badge = kill?.engaged ? "danger" : "ok";
   const freqBadge: Badge = freq?.allowed ? "ok" : "warn";
 
+  /* ORDER STRATEGY symbol dropdown — ทุกคู่ใน SUPPORTED_ASSETS (28 ตัว)
+   * เติมคะแนน/regime จาก universe ที่ API ส่งกลับ (รอบสแกนล่าสุด) เพื่อให้
+   * เห็นว่า AI มองคู่ไหนน่าสนใจ; ไม่มีข้อมูล = ยังไม่ถูกรอบสแกนนี้เห็น */
+  const uni = new Map((extended?.universe ?? []).map((u) => [u.asset, u]));
+  const extOptions: { value: string; label: string; plainLabel?: string }[] = [
+    { value: "", label: "อัตโนมัติ — เลือกตัวที่คะแนนสูงสุดให้", plainLabel: "อัตโนมัติ (คะแนนสูงสุด)" },
+    ...ASSETS.map((a) => {
+      const u = uni.get(a);
+      return {
+        value: a,
+        label: u ? `${a} · ${Math.round(u.confidence)}/100 · ${u.regime}` : `${a} · ยังไม่ถูกสแกน`,
+        plainLabel: a,
+      };
+    }),
+  ];
+
   const confirmExtendedOpen = async () => {
     if (openBusy) return;
     setOpenBusy(true);
     setOpenError("");
     try {
-      const res = await api.extendedOpen();
+      const res = await api.extendedOpen(extAssetRef.current || undefined);
       setConfirmPlan(null);
       setOpenResult(res);
       await loadAll();
@@ -417,6 +451,48 @@ export default function PerformancePanel() {
       {extended && (
         <div className="panel">
           <h2 className="panel-title">Extended Output Format</h2>
+          {/* เลือกสัญลักษณ์ให้ AI ประเมิน — ทุกตัวใน SUPPORTED_ASSETS;
+              ค่า "" = ปล่อยให้ระบบเลือก top scorer ของรอบสแกนล่าสุด */}
+          <div className="flex flex-wrap items-end gap-3 pb-3">
+            <div className="w-full sm:w-64">
+              <label className="text-xs text-slate-400">สัญลักษณ์ที่ให้ AI ประเมิน</label>
+              <GlassSelect
+                value={extAsset}
+                onChange={(v) => {
+                  setExtAsset(v);
+                  extAssetRef.current = v;
+                  void loadExtended(v);
+                }}
+                options={extOptions}
+                className="mt-1 w-full text-sm"
+                ariaLabel="สัญลักษณ์ที่ให้ AI ประเมิน"
+              />
+            </div>
+            <button
+              onClick={() => void loadExtended(extAsset)}
+              disabled={extLoading}
+              aria-busy={extLoading}
+              title={extLoading ? "กำลังประเมิน..." : "ประเมินสัญลักษณ์ที่เลือกตอนนี้"}
+              className="bg-accent text-white text-sm font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-40 active:brightness-90"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                {extLoading && <Icon n="spinner" size={15} className="animate-spin" />}
+                ให้ AI ประเมิน
+              </span>
+            </button>
+          </div>
+          <p className="text-xs text-slate-500 pb-2">
+            กำลังประเมิน:{" "}
+            <span className="text-slate-300 font-semibold">{extended.asset ?? "—"}</span>
+            {extended.asset_source === "selected"
+              ? " (คู่ที่เลือกเอง)"
+              : extended.asset_source === "top_scorer"
+                ? " (คะแนนสูงสุดจากรอบสแกน)"
+                : ""}
+            {typeof extended.confidence === "number" &&
+              ` · confidence ${Math.round(extended.confidence)}/100`}
+            {extended.regime ? ` · regime ${extended.regime}` : ""}
+          </p>
           <div className="text-sm space-y-2">
             <p><span className="text-slate-400">FINAL DECISION:</span> <span className="font-bold">{extended.final_decision}</span></p>
             {(() => {

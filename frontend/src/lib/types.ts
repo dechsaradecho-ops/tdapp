@@ -233,6 +233,19 @@ export interface NewsLogsResponse {
 }
 
 // ---------- Scheduler run log (7-day auto-expiry) ----------
+export interface SchedulerJobStat {
+  ticks: number;
+  ok: number;
+  error: number;
+  skipped: number;
+  last_started: number | null;
+  last_ms: number | null;
+  running_s: number | null;
+  last_status: "ok" | "error" | "";
+  last_detail: string;
+  last_error: string;
+}
+
 export interface SchedulerLog {
   id: string;
   created_at: string | null;
@@ -254,6 +267,10 @@ export interface SchedulerLogsResponse {
     error: number;
     by_job: Record<string, { total: number; ok: number; error: number }>;
   };
+  /** heartbeat จาก scheduler ในโปรเซส (ticks/ok/error/skipped/running_s)
+   *  — ต่างจาก summary ที่นับ row: อันนี้พิสูจน์ว่า job "ถูกเรียก" จริง
+   *  แม้ row จะถูกข้าม/ไม่ถูกเขียน */
+  job_stats?: Record<string, SchedulerJobStat>;
   ttl_days: number;
   offset: number;
   limit: number;
@@ -500,6 +517,15 @@ export interface WalkForwardResult {
 }
 
 export interface ExtendedAnalysis {
+  /** สัญลักษณ์ที่ถูกประเมิน (top scorer หรือตัวที่เลือกเอง) */
+  asset?: string;
+  /** "selected" = ผู้ใช้เลือกราก dropdown | "top_scorer" = ระบบเลือกให้ */
+  asset_source?: "selected" | "top_scorer";
+  /** ทุกสัญลักษณ์ที่รอบสแกนล่าสุดเห็น + คะแนน/regime (ให้ dropdown ติดคะแนน) */
+  universe?: { asset: string; confidence: number; regime: string }[];
+  confidence?: number;
+  direction?: string;
+  regime?: string;
   news_calendar: string;
   session_analysis: string;
   correlation_analysis: string;

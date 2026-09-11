@@ -35,32 +35,40 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler()
 
+    # misfire_grace_time: APScheduler 3.10 defaults to ONE second, so a tick
+    # whose fire time slipped (busy event loop) was discarded with only a log
+    # line and NO scheduler_runs row — the tick looked like it never existed.
+    # coalesce avoids a burst of catch-up runs. NOTE: this standalone runner
+    # keeps max_instances=1 (it has no in-flight lock like app.main._safe_job,
+    # which records an explicit "skipped" row instead of dropping the tick).
+    common = {"misfire_grace_time": 120, "coalesce": True,
+              "max_instances": 1}
     scheduler.add_job(_safe(lambda: market_scanner.scan_once(db),
                             db, "market_scanner"),
-                      "interval", minutes=5, id="market_scanner", max_instances=1)
+                      "interval", minutes=5, id="market_scanner", **common)
     scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db),
                             db, "news_analysis"),
-                      "interval", minutes=15, id="news_analysis", max_instances=1)
+                      "interval", minutes=15, id="news_analysis", **common)
     scheduler.add_job(_safe(lambda:
         asyncio.to_thread(portfolio_monitor.monitor_once, db, broker, notifier),
         db, "portfolio_monitor"),
-        "interval", minutes=1, id="portfolio_monitor", max_instances=1)
+        "interval", minutes=1, id="portfolio_monitor", **common)
     scheduler.add_job(_safe(lambda: notification_worker.dispatch_pending(db, notifier),
                             db, "notifications"),
-                      "interval", minutes=1, id="notifications", max_instances=1)
+                      "interval", minutes=1, id="notifications", **common)
     scheduler.add_job(_safe(lambda: auto_trader.trade_once(db, broker, notifier),
                             db, "auto_trader"),
-                      "interval", minutes=1, id="auto_trader", max_instances=1)
+                      "interval", minutes=1, id="auto_trader", **common)
     scheduler.add_job(_safe(lambda: position_guard.guard_once(db, broker, notifier),
                             db, "position_guard", timeout_s=50),
-                      "interval", minutes=1, id="position_guard", max_instances=1)
+                      "interval", minutes=1, id="position_guard", **common)
     scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db),
                             db, "calendar_sync"),
-                      "interval", hours=6, id="calendar_sync", max_instances=1)
+                      "interval", hours=6, id="calendar_sync", **common)
     scheduler.add_job(_safe(lambda:
         daily_digest.send_digest_once(db, notifier),
         db, "daily_digest"),
-        "interval", minutes=60, id="daily_digest", max_instances=1)
+        "interval", minutes=60, id="daily_digest", **common)
 
     scheduler.start()
     log.info("Workers started: scanner(5m) news(15m) monitor(1m) notify(1m) "

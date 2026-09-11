@@ -29,33 +29,113 @@ from app.workers import (auto_trader, calendar_sync, daily_digest,
 
 log = logging.getLogger(__name__)
 
+# --- scheduler observability ------------------------------------------------
+# A tick can end WITHOUT a scheduler_runs row for reasons that are all SILENT
+# in APScheduler 3.10 with its defaults:
+#   1. max_instances reached → submit_job raises MaxInstancesReachedError
+#      inside Scheduler._process_jobs; it only logs a warning, no row.
+#   2. misfire_grace_time defaults to ONE second → the executor's job runner
+#      logs "Run time of job ... was missed by ..." and skips the tick, again
+#      without a row, while job.next_run_time still advances (so /health's
+#      job_next looked perfectly healthy).
+#   3. the coroutine is cancelled (loop shutdown / wait_for) → CancelledError
+#      is a BaseException, escaped the old ``except Exception`` and skipped
+#      the log call entirely.
+# Prod 2026-09-11: position_guard produced ZERO rows all day while SL moves
+# really happened and /guard-now finished in 9s — the Guard tab was "empty"
+# for days of invisible skips. The fix: never depend on APScheduler's silent
+# skipping. Jobs are registered with max_instances=2 + misfire_grace_time, and
+# a plain in-process lock turns every overlap/cancel into a VISIBLE row.
+_JOB_STATS: dict[str, dict[str, Any]] = {}
+_JOB_IN_FLIGHT: set[str] = set()
+_SKIP_DETAIL = ("checked=0, closed=0, moved_sl=0, "
+                "partial_closed=0, smart_closed=0, smart_partials=0, "
+                "smart_skipped=0, emergency_closed=0, skipped_prev_running=1")
+
+
+def _stats(job_id: str) -> dict[str, Any]:
+    return _JOB_STATS.setdefault(job_id, {
+        "ticks": 0, "ok": 0, "error": 0, "skipped": 0,
+        "last_started": None, "last_ms": None, "running_since": None,
+        "last_status": "", "last_detail": "", "last_error": "",
+    })
+
+
+def job_stats() -> dict[str, dict[str, Any]]:
+    """Per-job heartbeat for /health — proves a job is being INVOKED at all.
+
+    scheduler_runs can only show finished ticks; this shows the scheduler's
+    own view (ticks/ok/error/skipped + running_since) so a stuck or
+    never-submitted job is distinguishable without Render log access.
+    """
+    import time as _t
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in _JOB_STATS.items():
+        d = dict(v)
+        rs = d.get("running_since")
+        d["running_s"] = round(_t.monotonic() - rs, 1) if rs else None
+        out[k] = d
+    return out
+
 
 async def _safe_job(coro, db=None, job_id: str = "",
                     timeout_s: float = 0.0) -> None:
     """Run a scheduled coroutine, logging failures instead of crashing the app.
 
-    Each tick also writes ONE row to scheduler_runs (migration 030) so the
-    Logs page can prove the scheduler is alive — status ok/error, wall time
-    in ms, and a compact summary of the job's return value. Fail-soft: the
-    run log must never break the job itself.
+    Each tick writes EXACTLY ONE row to scheduler_runs (migration 030) so the
+    Logs page can prove the scheduler is alive — status ok/error, wall time in
+    ms, and a compact summary of the job's return value. Fail-soft: the run
+    log must never break the job itself.
 
-    `timeout_s` (>0) is a watchdog on the whole tick. APScheduler runs every
-    1-min job with max_instances=1, so a job that overruns its interval gets
-    SKIPPED forever after and never completes-and-logs (prod 2026-09-11:
-    position_guard ~55s/cycle → zero rows → the Logs page looked empty and
-    wrongly blamed migration 030). Bounding wall time guarantees the tick
-    ends, writes a row, and frees the slot for the next run.
+    `timeout_s` (>0) is a watchdog on the whole tick: a job that overruns its
+    interval must still end and free its slot.
+
+    A tick is never silently dropped: if the previous tick of the same job is
+    still running we log a ``skipped_prev_running=1`` row instead of letting
+    APScheduler skip it invisibly.
     """
     import time as _time
     import traceback as _tb
+    st = _stats(job_id) if job_id else None
+    if job_id and job_id in _JOB_IN_FLIGHT:
+        age = 0
+        if st is not None and st.get("running_since"):
+            age = int(_time.monotonic() - st["running_since"])
+        log.warning("Worker job %s skipped — previous tick still running (%ss)",
+                    job_id, age)
+        try:
+            coro.close()                      # never await → avoid a warning
+        except Exception:
+            pass
+        if st is not None:
+            st["skipped"] += 1
+            st["last_status"] = "ok"
+            st["last_detail"] = _SKIP_DETAIL
+            st["last_error"] = ""
+        if db is not None and job_id:
+            try:
+                scheduler_log.log_run(db=db, job_id=job_id, status="ok",
+                                      duration_ms=0, detail=_SKIP_DETAIL)
+            except Exception:
+                log.debug("scheduler skip log failed: %s", job_id)
+        return
+
     started = _time.monotonic()
+    if job_id:
+        _JOB_IN_FLIGHT.add(job_id)
+    if st is not None:
+        st["ticks"] += 1
+        st["last_started"] = _time.time()
+        st["running_since"] = started
     err: str | None = None
     result = None
+    done = False
     try:
         if timeout_s and timeout_s > 0:
             result = await asyncio.wait_for(coro, timeout=timeout_s)
         else:
             result = await coro
+        done = True
     except asyncio.TimeoutError:
         # Distinguish OUR watchdog from an inner timeout the job raised: only
         # report a watchdog trip when we actually ran out the clock.
@@ -69,22 +149,41 @@ async def _safe_job(coro, db=None, job_id: str = "",
     except Exception:
         log.exception("Worker job failed")
         err = _tb.format_exc(limit=3)[-500:]
-
-    if db is None or not job_id:
-        return
-    try:
-        if err is None:
-            scheduler_log.log_run(
-                db=db, job_id=job_id, status="ok",
-                duration_ms=int((_time.monotonic() - started) * 1000),
-                detail=scheduler_log._summarize(result))
-        else:
-            scheduler_log.log_run(
-                db=db, job_id=job_id, status="error",
-                duration_ms=int((_time.monotonic() - started) * 1000),
-                error=err)
-    except Exception:
-        log.debug("scheduler run log failed: %s", job_id)
+    finally:
+        # Runs for BaseException too (CancelledError on shutdown): a missing
+        # row is indistinguishable from "the scheduler never fired this job",
+        # which is exactly what made the empty Guard tab so hard to explain.
+        if job_id:
+            _JOB_IN_FLIGHT.discard(job_id)
+        if st is not None:
+            st["running_since"] = None
+        ms = int((_time.monotonic() - started) * 1000)
+        if err is None and not done:
+            err = "tick cancelled before completion"
+        if st is not None:
+            st["last_ms"] = ms
+            if err is None:
+                st["ok"] += 1
+                st["last_status"] = "ok"
+                st["last_detail"] = scheduler_log._summarize(result)
+                st["last_error"] = ""
+            else:
+                st["error"] += 1
+                st["last_status"] = "error"
+                st["last_detail"] = ""
+                st["last_error"] = err
+        if db is not None and job_id:
+            try:
+                if err is None:
+                    scheduler_log.log_run(
+                        db=db, job_id=job_id, status="ok", duration_ms=ms,
+                        detail=scheduler_log._summarize(result))
+                else:
+                    scheduler_log.log_run(
+                        db=db, job_id=job_id, status="error", duration_ms=ms,
+                        error=err)
+            except Exception:
+                log.debug("scheduler run log failed: %s", job_id)
 
 
 def _safe(factory, db=None, job_id: str = "", timeout_s: float = 0.0):
@@ -130,35 +229,44 @@ async def lifespan(app: FastAPI):
         scheduler = AsyncIOScheduler()
         db = app.state.db
         notifier = NotificationService(db, app.state.line)
+
+        # max_instances=2 (not 1) + coalesce + a generous misfire window: the
+        # in-process lock in _safe_job now records an explicit "skipped" row,
+        # whereas APScheduler's own max_instances=1 / misfire_grace_time=1
+        # dropped overdue ticks silently (job_next still advanced, so /health
+        # looked healthy while nothing ran). coalesce avoids a burst of
+        # catch-up ticks after the loop was busy.
+        common = {"misfire_grace_time": 120, "coalesce": True,
+                  "max_instances": 2}
         scheduler.add_job(_safe(lambda: market_scanner.scan_once(db),
                                    db, "market_scanner"),
-                          "interval", minutes=5, id="market_scanner", max_instances=1)
+                          "interval", minutes=5, id="market_scanner", **common)
         scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db),
                                    db, "news_analysis"),
-                          "interval", minutes=15, id="news_analysis", max_instances=1)
+                          "interval", minutes=15, id="news_analysis", **common)
         scheduler.add_job(_safe(lambda: asyncio.to_thread(
             portfolio_monitor.monitor_once, db, app.state.broker, notifier),
             db, "portfolio_monitor"),
-            "interval", minutes=1, id="portfolio_monitor", max_instances=1)
+            "interval", minutes=1, id="portfolio_monitor", **common)
         scheduler.add_job(_safe(lambda:
             notification_worker.dispatch_pending(db, notifier),
             db, "notifications"),
-            "interval", minutes=1, id="notifications", max_instances=1)
+            "interval", minutes=1, id="notifications", **common)
         scheduler.add_job(_safe(lambda:
             auto_trader.trade_once(db, app.state.broker, notifier),
             db, "auto_trader"),
-            "interval", minutes=1, id="auto_trader", max_instances=1)
+            "interval", minutes=1, id="auto_trader", **common)
         scheduler.add_job(_safe(lambda:
             position_guard.guard_once(db, app.state.broker, notifier),
             db, "position_guard", timeout_s=50),
-            "interval", minutes=1, id="position_guard", max_instances=1)
+            "interval", minutes=1, id="position_guard", **common)
         scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db),
                                    db, "calendar_sync"),
-                          "interval", hours=6, id="calendar_sync", max_instances=1)
+                          "interval", hours=6, id="calendar_sync", **common)
         scheduler.add_job(_safe(lambda:
             daily_digest.send_digest_once(db, notifier),
             db, "daily_digest"),
-            "interval", minutes=60, id="daily_digest", max_instances=1)
+            "interval", minutes=60, id="daily_digest", **common)
         scheduler.start()
         app.state.scheduler = scheduler
         log.info("In-app workers ENABLED: scanner(5m) news(15m) monitor(1m) "
@@ -295,6 +403,10 @@ async def health() -> dict:
         "jobs": [j.id for j in scheduler.get_jobs()] if scheduler is not None else [],
         "job_next": job_next,
         "job_running": job_running,
+        # Invocation heartbeat (ticks/ok/error/skipped + running_s): unlike
+        # scheduler_runs this proves the scheduler actually CALLED the job,
+        # so a silently skipped tick is visible even if no row was written.
+        "job_stats": job_stats(),
         "db": "ok" if db.available else "unavailable",
         "db_detail": (db.init_error or "connected"),
         "ai": provider.name,

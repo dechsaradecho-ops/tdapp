@@ -188,12 +188,19 @@ export const api = {
 
   tradingPaper: () => get<PaperTrading>("/api/trading/paper-trading"),
 
-  extendedAnalysis: () => get<ExtendedAnalysis>("/api/trading/extended-analysis"),
+  // GET /api/trading/extended-analysis?asset=XXX — ไม่ส่ง asset = ให้ระบบเลือก
+  // top scorer เอง; ส่ง asset = บังคับประเมินสัญลักษณ์นั้น (dropdown ทุกตัว)
+  extendedAnalysis: (asset?: string) =>
+    get<ExtendedAnalysis>(
+      `/api/trading/extended-analysis${asset ? `?asset=${encodeURIComponent(asset)}` : ""}`,
+    ),
 
   // POST /api/trading/extended-open — เปิดเฉพาะขา market แรกของ ORDER STRATEGY
-  // (confirm=true required; FINAL WAIT → blocked)
-  extendedOpen: () =>
-    post<ExtendedOpenResult>("/api/trading/extended-open", { confirm: true }),
+  // (confirm=true required; FINAL WAIT → blocked) — ส่ง asset เดียวกับที่หน้าจอ
+  // แสดง เพื่อไม่ให้เปิดคู่ที่ต่างจากที่ผู้ใช้เห็น
+  extendedOpen: (asset?: string) =>
+    post<ExtendedOpenResult>("/api/trading/extended-open",
+      { confirm: true, ...(asset ? { asset } : {}) }),
 
   // ---------- Settings ----------
   getSettings: () => get<AppSettings>("/api/settings"),

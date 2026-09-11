@@ -13,6 +13,7 @@ import {
   QuoteTestResult,
   SchedulerLog,
   SchedulerLogsResponse,
+  SchedulerJobStat,
   SignalLog,
   SignalLogsResponse,
 } from "@/lib/types";
@@ -103,6 +104,9 @@ export default function LogsPage() {
   const [guardLogs, setGuardLogs] = useState<SchedulerLog[]>([]);
   const [guardTotal, setGuardTotal] = useState(0);
   const [guardHasMore, setGuardHasMore] = useState(false);
+  // heartbeat ของ scheduler ในโปรเซส (app.main._JOB_STATS ผ่าน /scheduler-logs)
+  // — พิสูจน์ว่า job "ถูกเรียก" ต่างจาก row ที่อาจถูกข้าม/ไม่ถูกเขียน
+  const [jobStats, setJobStats] = useState<Record<string, SchedulerJobStat> | null>(null);
   // แท็บ Gate = signal_logs ฝั่ง execution gate (order_blocked = gate ปัดตก,
   // order_opened = gate ผ่าน) — server filter ด้วย event
   const [gateLogs, setGateLogs] = useState<SignalLog[]>([]);
@@ -165,6 +169,7 @@ export default function LogsPage() {
         setGuardLogs(gres.logs ?? []);
         setGuardTotal(gres.total ?? (gres.logs ?? []).length);
         setGuardHasMore(gres.has_more ?? false);
+        setJobStats(gres.job_stats ?? null);
         // summary guard อาศัย schedSummary — โหลด scheduler summary แบบเบา (limit 1) ครั้งเดียว
         if (!loadedRef.current.has("scheduler")) {
           try {
@@ -215,6 +220,7 @@ export default function LogsPage() {
         setGuardLogs(gres.logs ?? []);
         setGuardTotal(gres.total ?? 0);
         setGuardHasMore(gres.has_more ?? false);
+        setJobStats(gres.job_stats ?? null);
       } else if (tabRef.current === "gate") {
         const gates = await loadGate(pg);
         setGateLogs(gates.logs ?? []);
@@ -469,11 +475,21 @@ export default function LogsPage() {
         const latestKv = parseGuardDetail(latest?.detail ?? "");
         let moved500 = 0;
         let closed500 = 0;
+        let skipped500 = 0;
         for (const g of guardLogs) {
           const kv = parseGuardDetail(g.detail ?? "");
           moved500 += kv.moved_sl ?? 0;
           closed500 += kv.closed ?? 0;
+          skipped500 += kv.skipped_prev_running ?? 0;
         }
+        // heartbeat จาก scheduler ในโปรเซส (ไม่ใช่ row) — อันนี้คือหลักฐานว่า
+        // job "ถูกเรียก" จริง ก่อนหน้านี้ APScheduler ข้ามรอบแบบเงียบ (misfire/
+        // max_instances) ทำให้ไม่มี row เลย และหน้า Guard ว่างทั้งที่ guard ทำงานอยู่
+        const hb = jobStats?.position_guard;
+        const lagS = hb?.last_started ? Math.max(0, Math.round(Date.now() / 1000 - hb.last_started)) : null;
+        const heartbeatProblem =
+          !!hb && hb.running_s !== null && hb.running_s !== undefined;
+        const tickRowMismatch = !!hb && !!b && hb.ticks > 0 && b.total < hb.ticks - 1;
         return (
         <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="panel">
@@ -481,13 +497,16 @@ export default function LogsPage() {
             <p className="text-2xl font-bold">{b ? b.total.toLocaleString() : guardTotal.toLocaleString()}</p>
             <p className="text-xs mt-1">
               {b ? (<><span className="text-emerald-400">ok {b.ok}</span>{"  "}<span className="text-red-400">error {b.error}</span></>) : (<span className="text-slate-500">ทุก 1 นาที/รอบ</span>)}
+              {skipped500 > 0 && <span className="text-amber-400">{"  "}ข้าม {skipped500}</span>}
             </p>
           </div>
           <div className="panel">
             <p className="text-xs text-slate-500">รอบล่าสุด</p>
             <p className="text-sm font-bold mt-1">{latest?.created_at ? new Date(latest.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}</p>
             <p className="text-xs mt-1 text-slate-400">
-              ตรวจ {latestKv.checked ?? "—"} ไม้ · ขยับ SL {latestKv.moved_sl ?? 0} · ปิด {latestKv.closed ?? 0}
+              {latestKv.skipped_prev_running
+                ? "รอบนี้ถูกข้าม — รอบก่อนยังไม่จบ (ดู heartbeat ด้านล่าง)"
+                : `ตรวจ ${latestKv.checked ?? "—"} ไม้ · ขยับ SL ${latestKv.moved_sl ?? 0} · ปิด ${latestKv.closed ?? 0}`}
             </p>
           </div>
           <div className="panel">
@@ -500,6 +519,30 @@ export default function LogsPage() {
             <p className="text-2xl font-bold">{closed500}</p>
             <p className="text-xs text-slate-500 mt-1">SL/TP + smart + time-stop</p>
           </div>
+          {hb && (
+            <div className="panel col-span-2 md:col-span-4">
+              <p className="text-xs text-slate-500">Heartbeat ของ scheduler (ในโปรเซส — ไม่ใช่ row ใน DB)</p>
+              <p className="text-xs mt-1 text-slate-300">
+                เรียก guard {hb.ticks} ครั้ง · ok {hb.ok} · error {hb.error} · ข้าม {hb.skipped}
+                {lagS !== null && ` · รอบล่าสุด ${lagS} วินาทีที่แล้ว`}
+                {hb.last_ms !== null && hb.last_ms !== undefined && ` · ใช้ ${hb.last_ms} ms`}
+                {hb.last_status && ` · สถานะ ${hb.last_status}`}
+              </p>
+              {heartbeatProblem && (
+                <p className="text-xs mt-1 text-amber-400">
+                  รอบปัจจุบันยังรันอยู่ {hb.running_s} วินาที — ถ้าค้างนานกว่านี้ รอบถัดไปจะถูกบันทึกเป็น &quot;ข้าม&quot; (ยังเห็นเป็น row ไม่หายไปแล้ว)
+                </p>
+              )}
+              {tickRowMismatch && (
+                <p className="text-xs mt-1 text-amber-400">
+                  scheduler เรียกรวม {hb.ticks} ครั้ง แต่ใน 7 วันมีแค่ {b?.total ?? 0} row — ส่วนต่างคือรอบที่ถูกข้าม/เขียน log ไม่สำเร็จ
+                </p>
+              )}
+              {hb.last_error && (
+                <p className="text-xs mt-1 text-red-400">error ล่าสุด: {hb.last_error}</p>
+              )}
+            </div>
+          )}
         </section>
         );
       })()}
@@ -950,21 +993,31 @@ export default function LogsPage() {
             {!loading && guardLogs.length === 0 && (
               <tr><td colSpan={8} className="py-6 text-center text-slate-500">
                 {schedulerEmptyMessage("guard", schedSummary)}
+                {jobStats?.position_guard && (
+                  <div className="pt-2 text-xs text-slate-400">
+                    heartbeat: scheduler เรียก guard {jobStats.position_guard.ticks} ครั้ง · ok {jobStats.position_guard.ok} ·
+                    error {jobStats.position_guard.error} · ข้าม {jobStats.position_guard.skipped}
+                    {jobStats.position_guard.last_error && ` · error ล่าสุด: ${jobStats.position_guard.last_error}`}
+                  </div>
+                )}
               </td></tr>
             )}
             {guardPageRows.map((g) => {
               const kv = parseGuardDetail(g.detail ?? "");
               const moved = kv.moved_sl ?? 0;
               const closed = kv.closed ?? 0;
+              const skipped = kv.skipped_prev_running ?? 0;
               return (
               <tr key={g.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
                 <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
                   {g.created_at ? new Date(g.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
                 </td>
                 <td className="py-2 pr-3">
-                  <span className={`px-2 py-0.5 rounded ${g.status === "ok" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{g.status}</span>
+                  {skipped > 0
+                    ? <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-400" title="รอบก่อนยังไม่จบ — รอบนี้ถูกข้าม">ข้าม</span>
+                    : <span className={`px-2 py-0.5 rounded ${g.status === "ok" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{g.status}</span>}
                 </td>
-                <td className="py-2 pr-3 text-slate-300">{kv.checked ?? "—"}</td>
+                <td className="py-2 pr-3 text-slate-300">{skipped > 0 ? "—" : (kv.checked ?? "—")}</td>
                 <td className="py-2 pr-3 font-bold">
                   {moved > 0 ? <span className="text-amber-400">{moved}</span> : <span className="text-slate-500">0</span>}
                 </td>

@@ -228,6 +228,9 @@ async def build_order_plan(payload: PlanOrderRequest) -> OrderPlan:
 
 class ExtendedOpenRequest(BaseModel):
     confirm: bool = False
+    # สัญลักษณ์ที่ผู้ใช้เลือกใน dropdown ของ ORDER STRATEGY — ต้องเป็นตัวเดียว
+    # กับที่หน้าจอโชว์ ไม่งั้นปุ่มจะเปิดแผนของ top scorer แทน (แยกจากกัน = อันตราย)
+    asset: str | None = None
 
 
 @router.post("/extended-open")
@@ -243,6 +246,9 @@ async def extended_open(payload: ExtendedOpenRequest,
       - Same single execution path as /approve + auto-trader
         (execute_signal: live re-anchor → gates → sizing → journal +
         signal_logs + LINE notify). No custom duplicate notify/log here.
+      - `asset` (optional) re-evaluates the plan for the symbol the user
+        actually selected in the panel, so the button can never open a
+        different pair than the one displayed.
     """
     import json as _json
 
@@ -255,7 +261,7 @@ async def extended_open(payload: ExtendedOpenRequest,
 
     # Reuse the live Extended computation (top scorer + real proposal +
     # officer + final decision) so the button can never drift from the box.
-    body = await extended_analysis(request)
+    body = await extended_analysis(request, asset=payload.asset)
     final = str(body.get("final_decision") or "")
     if final.startswith("WAIT"):
         signal_log.log_event(
@@ -1417,14 +1423,26 @@ async def paper_trading(request: Request) -> PaperTradingStatus:
 
 # -------------------------------------------------- extended analysis (11 sections)
 @router.get("/extended-analysis")
-async def extended_analysis(request: Request) -> dict:
-    """The full EXTENDED OUTPUT FORMAT — every section computed live."""
+async def extended_analysis(request: Request, asset: str | None = None) -> dict:
+    """The full EXTENDED OUTPUT FORMAT — every section computed live.
+
+    `asset` (query, optional) forces the evaluation onto ONE symbol so the
+    ORDER STRATEGY dropdown can ask the AI about any pair in the feed
+    universe — not just the scanner's top scorer. Omitted/unknown → the top
+    scorer wins (the historical behaviour every other surface shares).
+    """
     from app.api.routes.chat import _build_context
     from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
 
     db = request.app.state.db
     engine = StrategyEngine()
     s = _settings(request)
+
+    # explicit symbol request (ORDER STRATEGY dropdown) — capture BEFORE the
+    # top-scorer block below rebinds `asset`, otherwise the request would be
+    # silently thrown away and the panel would always show the top scorer.
+    requested = str(asset or "").strip().upper()
+    asset_source = "top_scorer"
 
     ctx = await _build_context(db)
 
@@ -1454,6 +1472,23 @@ async def extended_analysis(request: Request) -> dict:
         confidence = float(_conf or 0)
     else:
         asset, regime, confidence = "EURUSD", "sideway", 0.0
+
+    # --- explicit symbol request (ORDER STRATEGY dropdown) ---------------
+    # Validated against the feed universe so a typo can never inject an
+    # arbitrary table key into the downstream snapshot/backtest calls.
+    if requested:
+        from app.integrations.quotes import SUPPORTED_ASSETS as _UNIVERSE
+        if requested in _UNIVERSE:
+            asset = requested
+            asset_source = "selected"
+            # scanner row for this symbol (if the cycle covered it)
+            _hit = _per_asset.get(requested)
+            if _hit is not None:
+                confidence, regime = float(_hit[0] or 0), str(_hit[1] or regime)
+            else:
+                # not in the last scan cycle — the live snapshot below
+                # overwrites both confidence and regime anyway.
+                confidence, regime = 0.0, "sideway"
 
     # Frequency aligned with the execution gate (same counting + bull_trend
     # bypass + per-asset quality bar) so FINAL can reach TRADE on a clean
@@ -1590,6 +1625,14 @@ async def extended_analysis(request: Request) -> dict:
 
     return {
         "asset": asset,
+        "asset_source": asset_source,
+        # ทุกสัญลักษณ์ที่รอบสแกนล่าสุดเห็น (+ คะแนน/regime) — ให้ dropdown
+        # ORDER STRATEGY ติดคะแนนข้างชื่อให้เลือกได้โดยไม่ต้องยิงซ้ำ
+        "universe": [
+            {"asset": _a, "confidence": _v[0], "regime": _v[1]}
+            for _a, _v in sorted(_per_asset.items(),
+                                 key=lambda kv: kv[1][0], reverse=True)
+        ],
         "confidence": confidence,
         "direction": _direction,
         "regime": regime,

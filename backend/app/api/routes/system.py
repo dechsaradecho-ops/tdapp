@@ -603,6 +603,15 @@ async def scheduler_logs(request: Request, limit: int = 100, offset: int = 0,
         for r in rows
     ]
     out["summary"] = scheduler_log.summary(db)
+    # Invocation heartbeat from the scheduler itself (app.main._JOB_STATS):
+    # ticks/ok/error/skipped + running_s per job. Answers "the job IS being
+    # called but stayed silent" vs "the job is never submitted", which the
+    # table alone cannot distinguish (prod 2026-09-11 guard tab was empty).
+    try:
+        from app.main import job_stats
+        out["job_stats"] = job_stats()
+    except Exception:
+        out["job_stats"] = {}
     out["ttl_days"] = scheduler_log.SCHEDULER_LOG_TTL_DAYS
     out["offset"] = page_offset
     out["limit"] = page_size
