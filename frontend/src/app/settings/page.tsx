@@ -382,7 +382,7 @@ export default function SettingsPage() {
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
 
-  // --- risk preset (34 ช่องความเสี่ยงตามโปรไฟล์) — ดึงค่ามาใส่ฟอร์มเฉย ๆ
+  // --- risk preset (36 ช่องความเสี่ยงตามโปรไฟล์) — ดึงค่ามาใส่ฟอร์มเฉย ๆ
   // ยังไม่บันทึกลง DB จนกว่าจะกด “บันทึกการตั้งค่า” (กันเผลอกดแล้วค่าเปลี่ยนทันที) ---
   const [presetBusy, setPresetBusy] = useState(false);
   const [presetMsg, setPresetMsg] = useState("");
@@ -710,7 +710,7 @@ export default function SettingsPage() {
                       options={RISK_PROFILES} />
                   </div>
                   <button type="button" onClick={applyPreset} disabled={presetBusy}
-                    title="ใส่ค่า 34 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
+                    title="ใส่ค่า 36 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
                     className="shrink-0 bg-accent text-white text-xs font-semibold rounded px-3 min-h-[40px] disabled:opacity-50 active:brightness-90">
                     <span className="inline-flex items-center gap-1.5">
                       {presetBusy && <Icon n="spinner" size={13} className="animate-spin" />}
@@ -720,7 +720,7 @@ export default function SettingsPage() {
                 </div>
                 <span className="block text-xs text-slate-500 mt-1">
                   เปลี่ยน dropdown อย่างเดียว = เปลี่ยนชื่อโปรไฟล์เฉย ๆ — กด “ใช้ preset”
-                  เพื่อใส่ค่าความเสี่ยงทั้ง 34 ช่องลงฟอร์ม (ลิมิตเทรด, signal gate, จัดการไม้,
+                  เพื่อใส่ค่าความเสี่ยงทั้ง 36 ช่องลงฟอร์ม (ลิมิตเทรด, signal gate, จัดการไม้,
                   Smart Exit, kill switch, ข่าว, correlation) แล้วกด “บันทึกการตั้งค่า” เพื่อลง DB
                   {presetMsg && <span className="text-accent"> · {presetMsg}</span>}
                 </span>
