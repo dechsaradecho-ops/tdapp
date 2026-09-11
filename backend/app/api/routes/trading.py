@@ -305,11 +305,23 @@ async def extended_open(payload: ExtendedOpenRequest,
     # execute_signal so the placed volume can never exceed the plan (prod
     # 2026-09-11: the plan showed lot 0.01 for the market leg but the order
     # opened 0.04 — execute_signal had re-sized for the FULL risk budget
-    # instead of leg#1's 50% share). 0/absent → normal risk sizing.
+    # instead of leg#1's 50% share).
     try:
         plan_volume = float(first.get("lot") or 0)
     except (TypeError, ValueError):
         plan_volume = 0.0
+    if plan_volume <= 0:
+        # A 0-lot leg is a PLAN defect (risk budget too small for 2dp lots).
+        # It must block: falling back to risk sizing here is exactly the bug
+        # the user hit — the panel shows 0, the order opens 0.04.
+        reason = ("แผนแสดง lot 0 สำหรับขา Market (ทุน/ความเสี่ยงเล็กเกินไปสำหรับ "
+                  "ทศนิยม 2 ตำแหน่ง) — ปรับทุนหรือ risk_per_trade_pct ก่อน "
+                  "เพื่อไม่ให้ออเดอร์เปิดใหญ่กว่าที่แผนแสดง")
+        signal_log.log_event(
+            db=db, event="order_blocked", asset=asset, direction=direction,
+            source="extended", reason=reason)
+        return {"ok": False, "status": "blocked", "final_decision": final,
+                "rejects": [reason], "message": f"ไม่เปิดออเดอร์ — {reason}"}
 
     # Confidence for the gate = the SAME proposal confidence FINAL used
     # (extended_analysis recomputed it from the live snapshot; the scanner

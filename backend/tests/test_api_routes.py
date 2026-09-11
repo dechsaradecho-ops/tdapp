@@ -1750,6 +1750,38 @@ class TestExtendedOpen:
             float(first["lot"]))
 
     @pytest.mark.asyncio
+    async def test_zero_lot_plan_blocks_instead_of_re_sizing(self, monkeypatch):
+        """A plan leg of 0 lots must BLOCK, never silently re-size.
+
+        Falling back to risk sizing here is exactly the reported bug: the
+        panel showed lot 0 (risk budget too small for 2dp) and the order
+        opened 0.04 for the full risk budget.
+        """
+        self._patch(monkeypatch, self._trend_snap())
+        from app.models import schemas as _schemas
+        _real = _schemas.OrderStrategyEngine.build_plan
+
+        def _zero_leg(engine_self, **kw):
+            p = _real(engine_self, **kw)
+            p.entries[0].lot = 0.0
+            return p
+
+        monkeypatch.setattr(_schemas.OrderStrategyEngine, "build_plan", _zero_leg)
+        db = FakeDatabase(rows={"market_analysis": [
+            {"asset": "EURUSD", "regime": "bull_trend", "sentiment": "bullish",
+             "confidence": 78.0, "explanation": "t"},
+        ]})
+        set_state(db)
+        body = (await call("POST", "/api/trading/extended-open",
+                           {"confirm": True})).json()
+        assert body["ok"] is False and body["status"] == "blocked"
+        assert any("lot 0" in str(r) for r in body.get("rejects", []))
+        assert db.rows.get("paper_trades", []) == []
+        logs = db.rows.get("signal_logs", [])
+        assert any(r.get("event") == "order_blocked"
+                   and r.get("source") == "extended" for r in logs)
+
+    @pytest.mark.asyncio
     async def test_wait_blocks_and_logs(self, monkeypatch):
         # choppy snapshot -> opportunity ~55 < 70 -> FINAL WAIT, never executes
         snap = dict(self._trend_snap(), ema_fast=1.1004, ema_slow=1.0996,
