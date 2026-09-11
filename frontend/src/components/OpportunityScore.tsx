@@ -23,16 +23,31 @@ const BAND_LABEL: Record<string, string> = {
 const RISK_CHIP: Record<string, { label: string; cls: string }> = {
   high: { label: "เสี่ยงซ้ำ", cls: "border-rose-400/40 bg-rose-500/15 text-rose-200" },
   medium: { label: "เฝ้าระวัง", cls: "border-amber-400/30 bg-amber-500/10 text-amber-200" },
-  low: { label: "ต่ำ", cls: "border-white/10 bg-white/[0.06] text-slate-300" },
 };
 
+/** คู่นี้ทับความเสี่ยงกับไม้ที่เปิดอยู่จริงไหม
+ *  none = ไม่มีอะไรร่วมเลย / low = สัมพันธ์กันแต่พอร์ตยังห่างเพดานมาก
+ *  → ทั้งสองกรณี "ไม่เสี่ยง" จึงไม่ต้องแสดงอะไรบนแถวเลย (ตาม request) */
+function isRisky(risk: CorrelationSymbolRisk | null | undefined): boolean {
+  return !!risk && (risk.duplicate || risk.level === "high" || risk.level === "medium");
+}
+
 function riskChip(risk: CorrelationSymbolRisk | null | undefined) {
-  if (!risk) return null;
+  if (!risk || !isRisky(risk)) return null;
   // เปิดคู่นี้อยู่แล้ว = ความเสี่ยงซ้ำชัดเจนที่สุด (auto-trader บล็อกไม้ซ้ำ)
   if (risk.duplicate) {
     return { label: "เปิดอยู่แล้ว", cls: "border-sky-400/40 bg-sky-500/15 text-sky-200" };
   }
-  return RISK_CHIP[risk.level] ?? null; // none = ไม่ซ้ำกับไม้ไหน → ไม่มีป้าย
+  return RISK_CHIP[risk.level] ?? null;
+}
+
+/** ชื่อไม้เปิดที่ทับความเสี่ยง (ตัดท้ายเมื่อยาวเกิน) */
+function linkedNames(items: CorrelationLinkedPosition[], max = 3): string {
+  const names = items.map((p) => p.asset);
+  if (!names.length) return "—";
+  return names.length <= max
+    ? names.join(", ")
+    : `${names.slice(0, max).join(", ")} +${names.length - max}`;
 }
 
 /** บรรทัดอธิบายไม้เปิดหนึ่งไม้ที่เกี่ยวข้องกับสัญลักษณ์ที่กำลังดู */
@@ -108,12 +123,14 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
 
   const passes = gate != null && o.score >= gate;
   const details = (o.score_reasons?.length ? o.score_reasons : o.reasons).filter(Boolean);
+  // เช็คความเสี่ยงของ "คู่นี้" ก่อน แล้วโชว์ทุกอย่างเฉพาะเมื่อเสี่ยงจริง
+  const risky = isRisky(risk);
   const chip = riskChip(risk);
-  const riskItems = risk?.with ?? [];
-  const riskBearing = !!chip || riskItems.length > 0;
-  const capPct = risk && cap && cap > 0
+  const riskItems = risky ? risk?.with ?? [] : [];
+  const capPct = risky && risk && cap && cap > 0
     ? Math.round((risk.projected / cap) * 100)
     : null;
+  const overCap = risky && !!risk?.over_cap;
 
   return (
     <div
@@ -174,6 +191,22 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
         </span>
         <span>{o.reasons[0]?.slice(0, 60) ?? ""}</span>
       </div>
+      {/* ความเสี่ยงเป็นรายคู่เงิน — โผล่เฉพาะคู่ที่ทับไม้เปิดจริง ไม่เสี่ยง = ไม่มีบรรทัดนี้ */}
+      {risky && risk && (
+        <p className={`mt-1 text-[11px] ${overCap ? "text-rose-300" : "text-amber-300/90"}`}>
+          {risk.duplicate ? (
+            "เปิดไม้คู่นี้อยู่แล้ว — ระบบกันไม้ซ้ำ ไม่เปิดเพิ่ม"
+          ) : (
+            <>
+              ซ้ำกับ {linkedNames(riskItems)}
+              {" — ถ้าเปิดเพิ่มพอร์ตจะเป็น "}
+              <b>{risk.projected.toFixed(0)}%</b>
+              {capPct != null && ` (${capPct}% ของเพดาน)`}
+              {overCap ? " เกินเพดาน จะถูกบล็อก" : ""}
+            </>
+          )}
+        </p>
+      )}
       {pop && createPortal(
         <div
           ref={popRef}
@@ -200,7 +233,7 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
               <span className="block text-slate-500 mt-0.5">อยู่นอก allowed_assets — วิเคราะห์อย่างเดียว ไม่เข้าระบบเทรด</span>
             )}
           </div>
-          {riskBearing && risk && (
+          {risky && risk && (
             <>
               <div className="border-t border-slate-800 my-2" />
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
@@ -323,6 +356,15 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
     : null;
   const overCap = !!(corr && cap && corr.portfolio_correlation > cap);
   const nearCap = capPct != null && !overCap && capPct >= 60;
+  // "รายตัว" = คู่ที่สแกนเจอและทับความเสี่ยงกับไม้เปิดจริงเท่านั้น
+  // (คู่ที่ไม่เสี่ยงไม่ถูกใส่ในลิสต์เลย — ตาม request)
+  const riskyRows: { asset: string; risk: CorrelationSymbolRisk }[] = [];
+  if (riskMap) {
+    for (const o of opportunities) {
+      const r = riskMap[o.asset];
+      if (isRisky(r)) riskyRows.push({ asset: o.asset, risk: r });
+    }
+  }
   return (
     <div>
     {book.length > 0 && corr && (
@@ -340,15 +382,38 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
             style={{ width: `${capPct ?? 0}%` }}
           />
         </div>
-        <p className="mt-1 text-[11px] text-slate-500">
-          ไม้เปิด {book.length} ไม้: {book.map((p) => `${p.asset} ${p.direction}`).join(" · ")}
-        </p>
+        {riskyRows.length > 0 ? (
+          <>
+            <p className="mt-1.5 text-[11px] font-semibold text-slate-500">
+              คู่ที่สแกนเจอและทับความเสี่ยงไม้เปิด ({riskyRows.length}/{opportunities.length})
+            </p>
+            <ul className="mt-0.5 space-y-0.5">
+              {riskyRows.slice(0, 6).map(({ asset, risk }) => (
+                <li key={asset} className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="font-medium text-slate-300">{asset}</span>
+                  <span className={risk.over_cap ? "text-rose-300" : "text-amber-300"}>
+                    {risk.duplicate
+                      ? "เปิดไม้นี้อยู่แล้ว"
+                      : `ถ้าเปิดเพิ่ม → พอร์ต ${risk.projected.toFixed(0)}% · ทับ ${risk.with.length} ไม้`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {riskyRows.length > 6 && (
+              <p className="mt-0.5 text-[11px] text-slate-600">+ อีก {riskyRows.length - 6} คู่</p>
+            )}
+          </>
+        ) : (
+          <p className="mt-1.5 text-[11px] text-slate-500">
+            ไม่มีคู่ที่สแกนเจอทับความเสี่ยงกับไม้เปิด {book.length} ไม้
+          </p>
+        )}
         <p className={`mt-0.5 text-[11px] ${overCap ? "text-rose-300" : nearCap ? "text-amber-300" : "text-slate-500"}`}>
           {overCap
             ? "เกินเพดาน — ระบบจะไม่เปิดไม้เพิ่มจนกว่าจะปิดบางส่วน"
             : nearCap
               ? "ใกล้เพดาน — เปิดคู่ที่สัมพันธ์กันอีกไม่กี่ไม้จะติดเพดาน"
-              : "ยังห่างเพดาน — ป้ายบนแต่ละแถวบอกว่าคู่นั้นซ้ำไม้เปิดหรือไม่"}
+              : "ยังห่างเพดาน — รายการด้านบนคือคู่ที่ยังทับไม้เปิดอยู่"}
         </p>
       </div>
     )}
