@@ -388,6 +388,19 @@ def equity_drawdown_pct(db, capital: float) -> float:
 # ---------------------------------------------------------------------------
 # Avg hold — SINGLE shared definition (guard Smart Exit + monitor share this)
 # ---------------------------------------------------------------------------
+# Sample hygiene (2026-09-11). WHY it exists: this average is multiplied by
+# no_behind_hold_mult to build the NO-POSITION-LEFT-BEHIND threshold, so a
+# tiny or degenerate sample does not just skew a display — it mass-closes
+# live positions. Prod incident: only 2 trades had ever closed, one of them
+# held 60 SECONDS (a stats-reset artifact), so the average came out 0.43
+# days → floored to 0.5 → threshold 2.5 days → the three 2.8-day-old
+# positions were all closed in ONE guard cycle. Dropping that 60s row gives
+# 0.87 → threshold 4.35 days → none of them would have closed.
+_AVG_HOLD_MIN_SPAN_DAYS = 0.05   # ~72 min — shorter = artifact, not a hold
+_AVG_HOLD_MIN_SAMPLE = 3         # fewer usable rows than this = not a sample
+_AVG_HOLD_FALLBACK_DAYS = 4.0    # neutral default while the sample is thin
+
+
 def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
     """Mean open→close span in days from closed paper_trades (4.0 fallback).
 
@@ -396,6 +409,10 @@ def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
     left_behind threshold can never drift apart. Rows without a realized
     pnl are ignored on every path: the monitor pre-filters them and the
     guard's own query cannot express IS NOT NULL, so the filter lives here.
+
+    Spans below _AVG_HOLD_MIN_SPAN_DAYS are dropped and fewer than
+    _AVG_HOLD_MIN_SAMPLE usable rows returns the neutral fallback, so a
+    thin/degenerate sample can never shrink the left_behind threshold.
     Never raises.
     """
     try:
@@ -413,12 +430,77 @@ def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
             c = _parse_dt(r.get("created_at"))
             x = _parse_dt(r.get("closed_at"))
             if c and x:
-                spans.append(max(0.0, (x - c).total_seconds() / 86400.0))
-        if spans:
+                span = max(0.0, (x - c).total_seconds() / 86400.0)
+                if span >= _AVG_HOLD_MIN_SPAN_DAYS:
+                    spans.append(span)
+        if len(spans) >= _AVG_HOLD_MIN_SAMPLE:
             return round(sum(spans) / len(spans), 2)
     except Exception:
         pass
-    return 4.0
+    return _AVG_HOLD_FALLBACK_DAYS
+
+
+# ---------------------------------------------------------------------------
+# Realized stats — SINGLE shared definition (monitor + stats-reset share this)
+# ---------------------------------------------------------------------------
+def realized_stats(rows: list[dict],
+                   closed_rows: list[dict] | None = None) -> dict:
+    """MonitorStats fields describing REALIZED performance, in one place.
+
+    WHY (2026-09-11): these used to be computed from `created_at` — the day a
+    trade was OPENED — in two hand-kept copies (execution.monitor_snapshot and
+    trading._fresh_stats). A position closed today but opened last week landed
+    in no window at all, so the monitor showed "PnL วันนี้ $0.00" right after
+    three trades realized −6.26 USD. Now every window is measured at
+    `closed_at`, which is what the labels promise:
+      เทรดวันนี้   = trades CLOSED today      PnL วันนี้ = realized today
+      เทรด 7 วัน   = trades closed in 7 days   PnL 7 วัน  = realized in 7 days
+      PnL รวม      = realized over all closed rows
+    The panel sits next to "ไม้ที่ปิดแล้ว" + Win Rate (both realized), so the
+    whole card now shares one basis.
+
+    NOTE: the frequency gate's own `trades_today` (max_trades_daily) is a
+    different counter and still counts trades OPENED today — do not unify it
+    with this one.
+
+    `closed_rows` may be passed pre-filtered (monitor already has it); rows
+    without a realized pnl are always excluded so wins/win-rate stay honest.
+    Never raises.
+    """
+    closed = [r for r in (closed_rows if closed_rows is not None else rows)
+              if r.get("status") == "closed" and r.get("pnl") is not None]
+    try:
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        week_ago = now - timedelta(days=7)
+
+        def closed_at(r: dict) -> Optional[datetime]:
+            return _parse_dt(r.get("closed_at"))
+
+        today_rows = [r for r in closed
+                      if (c := closed_at(r)) and c.date() == today]
+        week_rows = [r for r in closed
+                     if (c := closed_at(r)) and c >= week_ago]
+        wins = [r for r in closed if float(r.get("pnl") or 0) > 0]
+
+        def pnl(items: list[dict]) -> float:
+            return round(sum(float(r.get("pnl") or 0) for r in items), 2)
+
+        return {
+            "trades_today": len(today_rows),
+            "trades_week": len(week_rows),
+            "closed_count": len(closed),
+            "win_rate": (round(len(wins) / len(closed) * 100, 1)
+                         if closed else 0.0),
+            "pnl_today": pnl(today_rows),
+            "pnl_week": pnl(week_rows),
+            "pnl_total": pnl(closed),
+        }
+    except Exception as exc:
+        log.error("realized_stats failed: %s", exc)
+        return {"trades_today": 0, "trades_week": 0, "closed_count": 0,
+                "win_rate": 0.0, "pnl_today": 0.0, "pnl_week": 0.0,
+                "pnl_total": 0.0}
 
 
 # ---------------------------------------------------------------------------
@@ -969,7 +1051,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # no indicator snapshot → None (blind HOLD, same rule as the guard).
     exit_snaps: dict[str, dict] = {}
     exit_news_status, exit_news_event = "SAFE", ""
-    exit_avg_hold = 4.0
+    exit_avg_hold = _AVG_HOLD_FALLBACK_DAYS
     exit_drawdown = 0.0
     smart_on = bool(getattr(s, "smart_exit_enabled", True))
     if smart_on and open_rows:
@@ -1169,27 +1251,11 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     ) for r in sorted(
         rows, key=lambda r: str(r.get("created_at") or ""), reverse=True)[:50]]
 
-    # ---- stats -----------------------------------------------------------
+    # ---- stats (realized basis — see realized_stats) ----------------------
     now = datetime.now(timezone.utc)
-    today = now.date().isoformat()
-    week_ago = now - timedelta(days=7)
-
-    def created(r: dict) -> Optional[datetime]:
-        return _parse_dt(r.get("created_at"))
-
-    today_rows = [r for r in rows if (created(r) and created(r).date().isoformat() == today)]
-    week_rows = [r for r in rows if (created(r) and created(r) >= week_ago)
-                 and r.get("status") != "rejected"]
-    wins = [r for r in closed_rows if float(r.get("pnl") or 0) > 0]
+    st = realized_stats(rows, closed_rows)
     stats = MonitorStats(
-        trades_today=len(today_rows),
-        trades_week=len(week_rows),
-        open_positions=len(open_rows),
-        closed_count=len(closed_rows),
-        win_rate=round(len(wins) / len(closed_rows) * 100, 1) if closed_rows else 0.0,
-        pnl_today=round(sum(float(r.get("pnl") or 0) for r in today_rows), 2),
-        pnl_week=round(sum(float(r.get("pnl") or 0) for r in week_rows), 2),
-        pnl_total=round(sum(float(r.get("pnl") or 0) for r in closed_rows), 2),
+        open_positions=len(open_rows), **st,
     )
 
     # ---- live portfolio value (home page Current Equity / Current PnL) ----

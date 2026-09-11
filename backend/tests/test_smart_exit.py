@@ -205,15 +205,53 @@ def test_avg_hold_ignores_null_pnl_rows():
 
     Regression for the GBPUSD left_behind mismatch: rows without a realized
     pnl must never drag the average, whichever caller path computes it.
+    The 30-day legacy row would push the mean to 8.25 if it leaked in.
     """
     from app.services import execution
     rows = [_closed(10, 0.5, 10.0), _closed(9, 0.5, -5.0),
-            _closed(8, 30.0, None)]  # open/legacy row, no realized pnl
+            _closed(8, 30.0, None),  # open/legacy row, no realized pnl
+            _closed(7, 2.0, 3.0)]
     db = _FakeDb(rows)
     via_guard = execution.avg_hold_days(db)
     via_monitor = execution.avg_hold_days(
         db, [r for r in rows if r.get("pnl") is not None])
-    assert via_guard == via_monitor == 0.5
+    assert via_guard == via_monitor == 1.0  # (0.5 + 0.5 + 2.0) / 3
+
+
+def test_avg_hold_thin_sample_uses_neutral_fallback():
+    """Fewer than 3 usable holds → neutral 4.0 instead of a 1-2 trade guess.
+
+    Regression (prod 2026-09-11): with only 2 closed trades ever, the mean
+    was 0.43d → multiplied by no_behind_hold_mult=5 → a 2.5-day left_behind
+    threshold, which closed THREE 2.8-day-old positions in one guard cycle.
+    """
+    from app.services import execution
+    assert execution.avg_hold_days(_FakeDb([])) == 4.0
+    assert execution.avg_hold_days(_FakeDb([_closed(10, 0.5, 5.0)])) == 4.0
+    assert execution.avg_hold_days(
+        _FakeDb([_closed(10, 0.5, 5.0), _closed(9, 0.5, -1.0)])) == 4.0
+    # a third hold flips it over to the real mean
+    assert execution.avg_hold_days(
+        _FakeDb([_closed(10, 0.5, 5.0), _closed(9, 0.5, -1.0),
+                 _closed(8, 1.0, 1.0)])) == 0.67
+
+
+def test_avg_hold_ignores_degenerate_instant_spans():
+    """A ~60-second hold is a stats artifact, not a holding period."""
+    from app.services import execution
+    instant = _closed(6, 0.0007, 0.10)   # 60 s — must be dropped
+    rows = [instant, _closed(10, 2.0, 5.0), _closed(9, 3.0, -1.0),
+            _closed(8, 4.0, 1.0)]
+    assert execution.avg_hold_days(_FakeDb(rows)) == 3.0  # (2+3+4)/3
+
+
+def test_avg_hold_fallback_keeps_left_behind_dormant():
+    """Threshold = avg × no_behind_hold_mult must stay above max_hold_days
+    while the sample is thin, so the time stop expires positions first."""
+    from app.services import execution
+    s = AppSettings()
+    avg = execution.avg_hold_days(_FakeDb([]))
+    assert avg * s.no_behind_hold_mult > s.max_hold_days
 
 
 def test_position_age_prefers_journal_created_at():

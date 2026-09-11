@@ -648,14 +648,14 @@ async def close_position(payload: ClosePositionRequest,
         warnings.append(f"notify failed: {exc}")
 
     # ---- portfolio summary for the popup ----------------------------------
+    # Same shared realized_stats as /monitor + the reset response, so the
+    # popup can't quote a different "PnL วันนี้" than the card behind it.
     all_rows = db.select("paper_trades", limit=500)
     closed = [r for r in all_rows
               if r.get("status") == "closed" and r.get("pnl") is not None]
     open_count = len([r for r in all_rows if r.get("status") == "open"])
-    now = datetime.now(timezone.utc)
-    today = now.date().isoformat()
-    pnl_today = round(sum(float(r.get("pnl") or 0) for r in closed
-                          if str(r.get("closed_at") or r.get("created_at") or "")[:10] == today), 2)
+    st = execution.realized_stats(all_rows, closed)
+    pnl_today = st["pnl_today"]
     wins = len([r for r in closed if float(r.get("pnl") or 0) > 0])
     losses = len([r for r in closed if float(r.get("pnl") or 0) < 0])
 
@@ -866,43 +866,22 @@ async def reset_stats(payload: StatsResetRequest,
 def _fresh_stats(db) -> dict:
     """Recompute MonitorStats from the remaining rows (post-reset snapshot).
 
-    Mirrors execution.monitor_snapshot's stats block so the numbers the UI
-    shows right after the reset match the next /monitor refresh exactly.
+    Uses the SAME shared `realized_stats` as execution.monitor_snapshot, so
+    the numbers the UI shows right after a reset match the next /monitor
+    refresh exactly. (Before 2026-09-11 this was a hand-kept COPY of that
+    block — and both copies keyed "PnL วันนี้" off `created_at`, the day a
+    trade was opened, so a position closed today but opened earlier never
+    showed up in it.)
     """
     from app.models.schemas import MonitorStats
+    from app.services.execution import realized_stats
 
     rows = db.select("paper_trades", limit=500)
     closed_rows = [r for r in rows
                    if r.get("status") == "closed" and r.get("pnl") is not None]
-    now = datetime.now(timezone.utc)
-    today = now.date().isoformat()
-    week_ago = now - timedelta(days=7)
-
-    def created(r: dict):
-        raw = r.get("created_at")
-        if not raw:
-            return None
-        try:
-            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-
-    today_rows = [r for r in rows
-                  if (c := created(r)) and c.date().isoformat() == today]
-    week_rows = [r for r in rows
-                 if (c := created(r)) and c >= week_ago
-                 and r.get("status") != "rejected"]
-    wins = [r for r in closed_rows if float(r.get("pnl") or 0) > 0]
     stats = MonitorStats(
-        trades_today=len(today_rows),
-        trades_week=len(week_rows),
         open_positions=len([r for r in rows if r.get("status") == "open"]),
-        closed_count=len(closed_rows),
-        win_rate=round(len(wins) / len(closed_rows) * 100, 1) if closed_rows else 0.0,
-        pnl_today=round(sum(float(r.get("pnl") or 0) for r in today_rows), 2),
-        pnl_week=round(sum(float(r.get("pnl") or 0) for r in week_rows), 2),
-        pnl_total=round(sum(float(r.get("pnl") or 0) for r in closed_rows), 2),
+        **realized_stats(rows, closed_rows),
     )
     return stats.model_dump()
 
