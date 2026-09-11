@@ -159,17 +159,52 @@ def set_pause(db, paused: bool, reason: str = "") -> PauseStatus:
 # ---------------------------------------------------------------------------
 # Paper trade journal
 # ---------------------------------------------------------------------------
-def record_trade(db, trade: dict[str, Any]) -> None:
-    """Insert one execution row into paper_trades (never raises)."""
+# paper_trades.source CHECK (migration 007) only allowed 'auto' / 'approved'
+# until migration 031 widened it to include 'extended'. When the widened check
+# is not deployed yet, retry with the schema-safe label so an Extended order is
+# NEVER lost from the journal (signal_logs keeps source='extended' for audit).
+_JOURNAL_SOURCE_FALLBACK = {"extended": "approved"}
+
+
+def record_trade(db, trade: dict[str, Any]) -> Optional[str]:
+    """Insert one execution row into paper_trades. Returns the error (None = ok).
+
+    WHY it returns the error: `Database.insert` swallows everything into a log
+    line, so a rejected journal write used to be invisible — the order existed
+    in the broker book + signal_logs + LINE, but NOT in paper_trades, and the
+    /monitor page (which builds itself from paper_trades) never showed it.
+    Prod 2026-09-11: `source='extended'` violated paper_trades_source_check
+    (23514) so ticket PAPER-000041 (AUDCHF) never appeared on the monitor.
+    """
     # Snapshot the levels the position was OPENED with — the monitor page
     # compares current SL/TP against these to badge moved levels (migration
     # 021). Missing keys (legacy callers/tests) just stay None.
     trade.setdefault("initial_stop_loss", trade.get("stop_loss"))
     trade.setdefault("initial_take_profit", trade.get("take_profit"))
-    try:
-        db.insert("paper_trades", trade)
-    except Exception as exc:  # pragma: no cover — Database.insert already swallows
-        log.error("record_trade failed: %s", exc)
+
+    raw = getattr(db, "insert_raw", None)
+    if not callable(raw):  # very old fakes: no raw-error surface
+        try:
+            db.insert("paper_trades", trade)
+        except Exception as exc:  # pragma: no cover
+            log.error("record_trade failed: %s", exc)
+            return str(exc)
+        return None
+
+    _row, err = raw("paper_trades", trade)
+    if err and "paper_trades_source_check" in err:
+        alt = _JOURNAL_SOURCE_FALLBACK.get(str(trade.get("source") or ""))
+        if alt:
+            log.warning(
+                "paper_trades.source CHECK rejected '%s' — journaling as '%s' "
+                "instead (run migration 031 to keep the exact label)",
+                trade.get("source"), alt)
+            _row, err = raw("paper_trades", {**trade, "source": alt})
+    if err:
+        log.error("record_trade FAILED for ticket %s — the position exists on "
+                  "the broker but NOT in the journal (monitor will miss it): %s",
+                  trade.get("ticket"), err)
+    return err
 
 
 def persist_sl_move(db, ticket: str, new_sl: float, reason: str) -> None:
@@ -653,8 +688,18 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          entry: float, stop_loss: Optional[float],
                          take_profit: Optional[float], confidence: float,
                          opportunity: float, signal_id: Optional[str],
-                         source: str) -> GateReport:
-    """Gate → size → place order → journal → notify. The single execution path."""
+                         source: str,
+                         volume: Optional[float] = None) -> GateReport:
+    """Gate → size → place order → journal → notify. The single execution path.
+
+    volume: caller-supplied lot that OVERRIDES risk sizing. Used by
+    /trading/extended-open, which forwards the lot of the plan leg the user
+    reviewed and confirmed — the order must never open bigger than the plan
+    showed (prod 2026-09-11: plan leg #1 said 0.01, the trade opened 0.04
+    because the size was recomputed for the FULL risk budget instead of
+    leg#1's 50% share at a tighter SL). Auto-trader / approve pass nothing
+    and keep the risk_to_lot sizing + min_lot floor.
+    """
     # ---- Live-price re-anchor (2026-09-08) --------------------------------
     # The stored signal row can be up to SIGNAL_TTL_MIN (30 min) old, so its
     # entry price may no longer be the market price when the order actually
@@ -711,7 +756,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             source=source, reason="; ".join(report.rejects[:2]) or "gate blocked")
         return report
 
-    lots = size_position(s, entry, stop_loss, asset=asset)
+    lots = (round(float(volume), 2) if volume and float(volume) > 0
+            else size_position(s, entry, stop_loss, asset=asset))
     if lots <= 0:
         report.allowed = False
         report.rejects.append("Position sizing returned 0 lots (bad entry/SL)")
@@ -743,12 +789,18 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             source=source, reason=report.rejects[-1])
         return report
 
-    record_trade(db, {
+    journal_err = record_trade(db, {
         "user_id": user_id, "signal_id": signal_id, "asset": asset,
         "direction": direction, "volume": lots, "entry_price": fill_price,
         "stop_loss": stop_loss, "take_profit": take_profit,
         "status": "open", "source": source, "ticket": result.broker_order_id,
     })
+    if journal_err:
+        # The order IS on the broker; only the journal row failed. Surface it
+        # instead of letting the position vanish from /monitor silently.
+        report.warnings.append(
+            "เปิดออเดอร์แล้วแต่บันทึก paper_trades ไม่สำเร็จ — position อาจไม่ "
+            f"ขึ้นหน้า monitor: {str(journal_err)[:160]}")
     # Lifecycle log: the order actually opened (ticket + volume recorded).
     signal_log.log_event(
         db=db, event="order_opened", signal_id=str(signal_id or ""),

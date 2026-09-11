@@ -87,7 +87,7 @@ export function ExtendedOpenConfirmModal({
 
         <p className="text-xs text-slate-500">
           FINAL: <span className="text-slate-300 font-semibold">{finalDecision}</span>
-          {" · "}ระบบยิงผ่าน gate เดียวกับปุ่มอนุมัติ (re-anchor ราคาจริง + sizing + แจ้ง LINE + เก็บ log)
+          {" · "}ยิงผ่าน gate เดียวกับปุ่มอนุมัติ (re-anchor ราคาจริง + ใช้ lot ตามแผนขาแรก + แจ้ง LINE + เก็บ log)
         </p>
         {errorMsg && <p className="text-xs text-loss">{errorMsg}</p>}
 
@@ -158,6 +158,16 @@ export function ExtendedOpenResultModal({
           </div>
         )}
 
+        {!!result.warnings?.length && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 space-y-1">
+            {result.warnings.map((w, i) => (
+              <p key={i} className="text-xs text-amber-300 flex items-start gap-1.5">
+                <Icon n="warning" size={13} className="mt-0.5 shrink-0" />
+                <span>{w}</span>
+              </p>
+            ))}
+          </div>
+        )}
         {!!result.rejects?.length && (
           <ul className="text-xs text-loss list-disc pl-4 space-y-1">
             {result.rejects.map((r, i) => <li key={i}>{r}</li>)}

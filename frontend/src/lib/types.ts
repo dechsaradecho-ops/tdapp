@@ -525,6 +525,7 @@ export interface ExtendedOpenResult {
   volume?: number;
   checks?: string[];
   rejects?: string[];
+  warnings?: string[];
   remaining_legs?: number;
   message: string;
 }

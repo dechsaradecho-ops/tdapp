@@ -1711,15 +1711,43 @@ class TestExtendedOpen:
         assert body["asset"] == "EURUSD"
         assert body["final_decision"].startswith("TRADE")
         assert body["ticket"] == "TCK-123"
-        assert body["volume"] == pytest.approx(0.076, abs=0.02)
+        # volume = the FIRST LEG's planned lot (base × 0.5 weight), NOT a
+        # re-sized full-risk lot. Prod 2026-09-11: the panel showed the leg at
+        # 0.01 but the order opened 0.04 because execute_signal recomputed the
+        # size from the full risk budget at a tighter SL instead of using the
+        # lot the user reviewed and confirmed.
+        assert body["volume"] == pytest.approx(0.04, abs=0.001)
         assert body["remaining_legs"] == 2
         opens = db.rows.get("paper_trades", [])
         assert len(opens) == 1 and opens[0]["source"] == "extended"
+        assert opens[0]["volume"] == pytest.approx(body["volume"])
+        assert body.get("warnings") == []
         logs = db.rows.get("signal_logs", [])
         assert any(r.get("event") == "order_opened"
                    and r.get("source") == "extended" for r in logs)
         notes = db.rows.get("notifications", [])
         assert any(r.get("type") == "trade_opened" for r in notes)
+
+    @pytest.mark.asyncio
+    async def test_opened_volume_equals_plan_leg_lot(self, monkeypatch):
+        """The executed lot must equal the lot of the leg the panel showed."""
+        import json as _json
+        self._patch(monkeypatch, self._trend_snap())
+        db = FakeDatabase(rows={"market_analysis": [
+            {"asset": "EURUSD", "regime": "bull_trend", "sentiment": "bullish",
+             "confidence": 78.0, "explanation": "t"},
+        ]})
+        set_state(db)
+        plan_body = (await call("GET", "/api/trading/extended-analysis")).json()
+        plan = _json.loads(str(plan_body.get("order_strategy") or "{}"))
+        first = dict(plan["entries"][0])
+        assert first["order_type"] == "market"
+        body = (await call("POST", "/api/trading/extended-open",
+                           {"confirm": True})).json()
+        assert body["ok"] is True, body
+        assert body["volume"] == pytest.approx(float(first["lot"]), abs=1e-6)
+        assert db.rows["paper_trades"][0]["volume"] == pytest.approx(
+            float(first["lot"]))
 
     @pytest.mark.asyncio
     async def test_wait_blocks_and_logs(self, monkeypatch):

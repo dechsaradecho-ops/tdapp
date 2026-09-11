@@ -1366,12 +1366,18 @@ class GateReport(BaseModel):
       size_lots    — risk-based volume from risk_to_lot (0 when blocked)
       rejects      — human-readable failure reasons, in gate order
       pause        — live trading_pause state the gate evaluated against
+      warnings     — the order DID fire but something after the fill broke
+                     (e.g. the paper_trades journal write failed). The UI
+                     must show these: prod 2026-09-11 the journal row was
+                     rejected by a CHECK constraint and the open position
+                     silently vanished from /monitor.
     """
     allowed: bool
     size_lots: float = 0.0
     rejects: list[str] = Field(default_factory=list)
     pause: "PauseStatus"
     checks: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PauseStatus(BaseModel):

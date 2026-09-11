@@ -301,6 +301,15 @@ async def extended_open(payload: ExtendedOpenRequest,
         take_profit = float((plan or {}).get("take_profit") or 0) or None
     except (TypeError, ValueError):
         take_profit = None
+    # The lot of the leg the user REVIEWED and confirmed. Forwarded to
+    # execute_signal so the placed volume can never exceed the plan (prod
+    # 2026-09-11: the plan showed lot 0.01 for the market leg but the order
+    # opened 0.04 — execute_signal had re-sized for the FULL risk budget
+    # instead of leg#1's 50% share). 0/absent → normal risk sizing.
+    try:
+        plan_volume = float(first.get("lot") or 0)
+    except (TypeError, ValueError):
+        plan_volume = 0.0
 
     # Confidence for the gate = the SAME proposal confidence FINAL used
     # (extended_analysis recomputed it from the live snapshot; the scanner
@@ -336,7 +345,7 @@ async def extended_open(payload: ExtendedOpenRequest,
         asset=asset, direction=direction,  # type: ignore[arg-type]
         entry=entry, stop_loss=stop_loss, take_profit=take_profit,
         confidence=confidence, opportunity=confidence,
-        signal_id=None, source="extended",
+        signal_id=None, source="extended", volume=plan_volume,
     )
     if not report.allowed:
         return {"ok": False, "status": "blocked", "final_decision": final,
@@ -362,6 +371,7 @@ async def extended_open(payload: ExtendedOpenRequest,
     return {"ok": True, "status": "executed", "final_decision": final,
             "asset": asset, "direction": direction, "ticket": ticket,
             "volume": report.size_lots, "checks": report.checks,
+            "warnings": report.warnings,
             "remaining_legs": len(legs) - 1,
             "message": (f"เปิดขา Market แล้ว {direction} {asset} "
                         f"{report.size_lots:g} lots"
