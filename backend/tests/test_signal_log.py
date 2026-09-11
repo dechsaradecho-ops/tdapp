@@ -68,6 +68,30 @@ class TestLogEvent:
         signal_log.log_event(db=db, event="nonsense")
         assert db.inserted[0][1]["event"] == "created"
 
+    def test_sl_moved_is_a_first_class_event(self):
+        """The guard's SL moves must NOT masquerade as `order_opened`.
+
+        Prod (7 days, audit 2026-09-11) showed 44 `order_opened` rows while
+        only 27 orders were really filled — the other 16 were SL moves plus
+        one manual monitor-page move. `sl_moved` was added so the "ไม้ที่เปิด"
+        counter and the closed-trade count stay comparable.
+        """
+        db = FakeDatabase()
+        signal_log.log_event(db=db, event="sl_moved", ticket="PAPER-1",
+                             asset="GBPCHF", direction="BUY",
+                             entry=1.16, stop_loss=1.155, source="auto",
+                             reason="SL ย้ายไป 1.155 (trailing) จาก 1.1551")
+        row = db.inserted[0][1]
+        assert row["event"] == "sl_moved"
+        assert row["ticket"] == "PAPER-1"
+
+    def test_sl_move_reason_prefix_kept_for_monitor_page(self):
+        """monitor/page.tsx classifies SL/TP move lines by regex on reason."""
+        db = FakeDatabase()
+        signal_log.log_event(db=db, event="sl_moved", ticket="PAPER-1",
+                             reason="SL ย้ายไป 1.155 (breakeven) จาก 1.1500")
+        assert "SL ย้ายไป" in db.inserted[0][1]["reason"]
+
     def test_reason_truncated_to_500(self):
         db = FakeDatabase()
         signal_log.log_event(db=db, event="created", reason="x" * 900)
@@ -192,6 +216,24 @@ class TestSummary:
     def test_summary_ignores_rows_older_than_7_days(self):
         db = FakeDatabase(rows={"signal_logs": [_row(9)]})
         assert signal_log.summary(db)["total"] == 0
+
+    def test_summary_sl_moved_not_counted_as_opened(self):
+        """Regression for the prod counter mismatch: SL moves used to be
+        written as `order_opened`, inflating ไม้ที่เปิด (and looking like 44
+        fills where only 27 orders existed)."""
+        db = FakeDatabase(rows={"signal_logs": (
+            [_row(0.1, event="order_opened") for _ in range(27)]
+            + [_row(0.1, event="sl_moved") for _ in range(16)]
+        )})
+        s = signal_log.summary(db)
+        assert s["opened"] == 27
+        assert s["sl_moved"] == 16
+        assert s["by_event"]["sl_moved"] == 16
+        assert s["total"] == 43
+
+    def test_summary_empty_db_has_sl_moved_key(self):
+        s = signal_log.summary(FakeDatabase())
+        assert s["sl_moved"] == 0
 
     def test_summary_empty_db(self):
         s = signal_log.summary(FakeDatabase())

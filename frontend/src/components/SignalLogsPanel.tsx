@@ -14,6 +14,7 @@ const EVENT_META: Record<string, { label: string; cls: string }> = {
   order_blocked: { label: "ไม่เปิดออเดอร์", cls: "bg-amber-500/15 text-amber-400" },
   rejected: { label: "ถูกปฏิเสธ", cls: "bg-red-500/15 text-red-400" },
   expired: { label: "หมดอายุ", cls: "bg-slate-500/20 text-slate-300" },
+  sl_moved: { label: "ย้าย SL", cls: "bg-cyan-500/15 text-cyan-300" },
   closed: { label: "ปิดไม้", cls: "bg-violet-500/15 text-violet-300" },
 };
 
@@ -144,11 +145,12 @@ export default function SignalLogsPanel() {
       {err && <p className="text-loss text-sm">{err}</p>}
 
       {/* ---------- Summary cards ---------- */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <StatCard label="เหตุการณ์ทั้งหมด (7 วัน)" value={summary?.total ?? null} />
         <StatCard label="เปิดออเดอร์" value={summary?.opened ?? null} cls="text-emerald-400" />
         <StatCard label="ไม่เปิดออเดอร์" value={summary?.blocked ?? null} cls="text-amber-400" />
         <StatCard label="หมดอายุ" value={summary?.expired ?? null} />
+        <StatCard label="ย้าย SL" value={summary?.sl_moved ?? null} cls="text-cyan-300" />
         <StatCard label="ปิดไม้" value={summary?.closed ?? null} cls="text-violet-300" />
       </section>
 

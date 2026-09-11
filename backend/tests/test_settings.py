@@ -644,7 +644,10 @@ def test_risk_presets_moderate_matches_defaults():
                 "backtest_indicator", "backtest_asset", "monitor_refresh_sec",
                 "signals_refresh_sec", "notify_trade_opened", "notify_trade_closed",
                 "notify_stop_loss", "notify_risk_warning", "notify_daily_digest",
-                "notify_daily_summary", "allowed_assets"}
+                "notify_daily_summary", "allowed_assets",
+                # exit-side simulation cost (migration 033) — a realism knob,
+                # not a risk-profile field
+                "paper_exit_spread_mult", "paper_commission_per_lot"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

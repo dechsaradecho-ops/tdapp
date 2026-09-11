@@ -24,8 +24,9 @@ from app.services import scheduler_log
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
 from app.workers import (auto_trader, calendar_sync, daily_digest,
-                         market_scanner, news_analysis, notification_worker,
-                         portfolio_monitor, position_guard)
+                         log_maintenance, market_scanner, news_analysis,
+                         notification_worker, portfolio_monitor,
+                         position_guard)
 
 log = logging.getLogger(__name__)
 
@@ -267,11 +268,19 @@ async def lifespan(app: FastAPI):
             daily_digest.send_digest_once(db, notifier),
             db, "daily_digest"),
             "interval", minutes=60, id="daily_digest", **common)
+        # Retention + quote-error watchdog (audit 2026-09-11): without this,
+        # quote_api_logs/scheduler_runs/market_analysis were only trimmed when
+        # the user happened to open the page that triggers the purge inline.
+        scheduler.add_job(_safe(lambda:
+            log_maintenance.run_once(db, notifier),
+            db, "log_maintenance"),
+            "interval", minutes=10, id="log_maintenance", **common)
         scheduler.start()
         app.state.scheduler = scheduler
         log.info("In-app workers ENABLED: scanner(5m) news(15m) monitor(1m) "
                  "notify(1m) auto_trader(1m) position_guard(1m) "
-                 "calendar_sync(6h) daily_digest(1h, idempotent)")
+                 "calendar_sync(6h) daily_digest(1h, idempotent) "
+                 "log_maintenance(10m)")
     else:
         app.state.scheduler = None
         log.info("In-app workers disabled (ENABLE_WORKERS not set)")

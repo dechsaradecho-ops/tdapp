@@ -10,6 +10,8 @@ service logs each lifecycle event to `signal_logs` (migration 013):
                    broker rejection, bad sizing) — reason stored
     rejected       user pressed ปฏิเสธ (semi-auto)
     expired        pending past the 30-min TTL
+    sl_moved       guard moved an OPEN position's stop-loss (breakeven /
+                   trailing / manual from the monitor page) — new SL stored
     closed         position closed (SL/TP/manual) — exit price + PnL
 
 RETENTION: rows older than SIGNAL_LOG_TTL_DAYS (7) are deleted automatically.
@@ -31,7 +33,12 @@ _last_purge = 0.0
 
 TABLE = "signal_logs"
 
-EVENTS = ("created", "order_opened", "order_blocked", "rejected", "expired", "closed")
+# NOTE: `sl_moved` was added 2026-09-11. Before that the guard logged its SL
+# moves as `order_opened`, so the 7-day `opened` counter mixed 27 real fills
+# with 16-17 stop moves on prod. Unknown event names degrade to `created`
+# (see log_event), so old callers stay compatible either way.
+EVENTS = ("created", "order_opened", "order_blocked", "rejected", "expired",
+          "sl_moved", "closed")
 
 
 def log_event(*, event: str, signal_id: str = "", asset: str = "",
@@ -128,7 +135,8 @@ def summary(db: Any) -> dict:
     """
     out: dict[str, Any] = {
         "total": 0, "by_event": {}, "by_asset": {},
-        "opened": 0, "blocked": 0, "expired": 0, "rejected": 0, "closed": 0,
+        "opened": 0, "blocked": 0, "expired": 0, "rejected": 0,
+        "sl_moved": 0, "closed": 0,
     }
     try:
         if db is None or not getattr(db, "available", False):
@@ -147,7 +155,7 @@ def summary(db: Any) -> dict:
             # per-event counters — the 5 lifecycle events are a fixed set,
             # one tiny count request each (exact at any table size)
             for ev in ("created", "order_opened", "order_blocked",
-                       "rejected", "expired", "closed"):
+                       "rejected", "expired", "sl_moved", "closed"):
                 n = count(TABLE, filters={"event": ev},
                           created_after=cutoff) or 0
                 if n:
@@ -156,6 +164,7 @@ def summary(db: Any) -> dict:
             out["blocked"] = out["by_event"].get("order_blocked", 0)
             out["expired"] = out["by_event"].get("expired", 0)
             out["rejected"] = out["by_event"].get("rejected", 0)
+            out["sl_moved"] = out["by_event"].get("sl_moved", 0)
             out["closed"] = out["by_event"].get("closed", 0)
             if "created" in out["by_event"]:
                 out["by_event"] = dict(sorted(out["by_event"].items(),
@@ -195,6 +204,8 @@ def summary(db: Any) -> dict:
                 out["expired"] += 1
             elif ev == "rejected":
                 out["rejected"] += 1
+            elif ev == "sl_moved":
+                out["sl_moved"] += 1
             elif ev == "closed":
                 out["closed"] += 1
         out["by_event"] = dict(sorted(by_event.items(),

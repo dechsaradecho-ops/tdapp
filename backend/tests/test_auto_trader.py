@@ -861,8 +861,14 @@ class TestPositionGuard:
         assert broker.closed == ["PAPER-000001"]
         row = db.rows["paper_trades"][0]
         assert row["status"] == "closed" and row["close_reason"] == "sl"
-        assert row["pnl"] == pytest.approx(-600.0, abs=0.01)  # 1 lot XAUUSD = 100 oz
+        # -600 gross (1 lot XAUUSD = 100 oz × 6.00) − 22.00 exit-side cost
+        # (0.5 × 0.30 spread × 1 lot × 100 oz = 15 + 3.5 × 2 commission)
+        assert row["pnl"] == pytest.approx(-622.0, abs=0.01)
         assert notifier.sent and notifier.sent[0][0] == "stop_loss"
+        # never-moved stop → the log keeps the plain loss wording
+        closed = [r for _, r in db.inserted
+                  if r.get("event") == "closed"][0]
+        assert closed["reason"].startswith("ตัดขาดทุน (SL) ที่")
 
     @pytest.mark.asyncio
     async def test_take_profit_closes_sell(self, notifier, _fake_live_marks):
@@ -877,7 +883,8 @@ class TestPositionGuard:
         assert out["closed"] == 1
         row = db.rows["paper_trades"][0]
         assert row["close_reason"] == "tp"
-        assert row["pnl"] == pytest.approx(1100.0, abs=0.01)  # 1 lot XAUUSD = 100 oz
+        # 1100 gross − 22.00 round-trip exit cost (see test_stop_loss_closes_buy)
+        assert row["pnl"] == pytest.approx(1078.0, abs=0.01)
         assert notifier.sent[0][0] == "trade_closed"
 
     @pytest.mark.asyncio
@@ -896,6 +903,67 @@ class TestPositionGuard:
         _fake_live_marks["XAUUSD"] = 50.0
         out = await position_guard.guard_once(db, broker, notifier)
         assert out["closed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_trailed_stop_that_books_a_win_is_labelled_a_win(
+            self, notifier, _fake_live_marks):
+        """Prod GBPCHF booked +10.5 through reason "sl" while the log said
+        ตัดขาดทุน (SL) — the row contradicting its own PnL. The label must
+        follow the journal's sl_move_reason."""
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "pt1", "ticket": "PAPER-000001", "asset": "XAUUSD",
+             "direction": "BUY", "volume": 0.01, "entry_price": 100.0,
+             "stop_loss": 101.0, "initial_stop_loss": 95.0,
+             "sl_moved_at": "2026-09-11T00:00:00+00:00",
+             "sl_move_reason": "trailing", "status": "open", "source": "auto"}]})
+        # stop trailed ABOVE entry; price trades back down into it
+        broker = GuardBroker([make_pos(direction="BUY", entry=100.0,
+                                       sl=101.0, tp=120.0, price=100.5)])
+        _fake_live_marks["XAUUSD"] = 100.5
+        out = await position_guard.guard_once(db, broker, notifier)
+        assert out["closed"] == 1
+        row = db.rows["paper_trades"][0]
+        assert row["close_reason"] == "sl"      # badge stays SL
+        assert row["pnl"] > 0                   # …but the trade WON
+        closed = [r for _, r in db.inserted if r.get("event") == "closed"][0]
+        assert closed["reason"].startswith("ปิดทำกำไรที่จุดกันทุน (trailing SL) ที่")
+
+    @pytest.mark.asyncio
+    async def test_breakeven_stop_out_is_not_called_a_loss(
+            self, notifier, _fake_live_marks):
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "pt1", "ticket": "PAPER-000001", "asset": "XAUUSD",
+             "direction": "BUY", "volume": 0.01, "entry_price": 100.0,
+             "stop_loss": 100.0, "initial_stop_loss": 95.0,
+             "sl_moved_at": "2026-09-11T00:00:00+00:00",
+             "sl_move_reason": "breakeven", "status": "open", "source": "auto"}]})
+        broker = GuardBroker([make_pos(direction="BUY", entry=100.0,
+                                       sl=100.0, tp=120.0, price=99.9)])
+        _fake_live_marks["XAUUSD"] = 99.9
+        out = await position_guard.guard_once(db, broker, notifier)
+        assert out["closed"] == 1
+        closed = [r for _, r in db.inserted if r.get("event") == "closed"][0]
+        assert closed["reason"].startswith("ปิดเสมอตัวที่จุดกันทุน (breakeven) ที่")
+
+    @pytest.mark.asyncio
+    async def test_sl_move_kind_falls_back_to_initial_stop_loss(self):
+        """Rows written before sl_move_reason existed still label correctly."""
+        row = {"id": "pt1", "ticket": "PAPER-000001", "asset": "XAUUSD",
+               "direction": "BUY", "volume": 0.01, "entry_price": 100.0,
+               "stop_loss": 101.0, "initial_stop_loss": 95.0,
+               "status": "open", "source": "auto"}
+        db = FakeDatabase(rows={"paper_trades": [dict(row)]})
+        pos = make_pos(direction="BUY", entry=100.0, sl=101.0)
+        assert position_guard._sl_move_kind(pos, db) == "trailing"
+        # never moved → empty string (caller falls back to plain SL wording)
+        db2 = FakeDatabase(rows={"paper_trades": [
+            {**row, "stop_loss": 95.0, "initial_stop_loss": 95.0}]})
+        assert position_guard._sl_move_kind(make_pos(sl=95.0), db2) == ""
+        # no row / no db / no ticket must never raise
+        assert position_guard._sl_move_kind(pos, FakeDatabase()) == ""
+        assert position_guard._sl_move_kind(pos, None) == ""
+        assert position_guard._sl_move_kind(
+            SimpleNamespace(ticket="", stop_loss=1.0), db) == ""
 
     @pytest.mark.asyncio
     async def test_stale_mark_but_live_tp_breach_closes(self, notifier, _fake_live_marks):

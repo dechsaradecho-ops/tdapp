@@ -158,7 +158,7 @@ export interface SignalLog {
   asset: string;
   direction: string;
   event: "created" | "order_opened" | "order_blocked" | "rejected"
-    | "expired" | "closed";
+    | "expired" | "sl_moved" | "closed";
   confidence: number | null;
   entry: number | null;
   stop_loss: number | null;
@@ -179,6 +179,8 @@ export interface SignalLogSummary {
   blocked: number;
   expired: number;
   rejected: number;
+  /** ย้าย SL ของไม้ที่เปิดอยู่ (breakeven / trailing / ปรับมือ) */
+  sl_moved: number;
   closed: number;
 }
 
@@ -519,6 +521,11 @@ export interface PaperTrading {
   open_virtual_orders: number;
   ai_coaching: string;
   live_readiness_score: number;
+  /** false = ยังปิดไม่ครบ 30 ไม้ → live_readiness_score ถูกระงับ (0) */
+  readiness_ready: boolean;
+  /** จำนวนไม้ที่ปิดแล้วซึ่งใช้คำนวณคะแนน */
+  readiness_sample: number;
+  readiness_min_sample: number;
 }
 
 export interface BacktestConfig {
@@ -648,6 +655,12 @@ export interface AppSettings {
   /** Per-symbol spread overrides (asset → spread in price units) — null =
    *  built-in realistic defaults; symbols without an entry use defaults */
   spread_overrides: Record<string, number> | null;
+  /** Exit-side spread multiplier charged on closing a paper trade (migration
+   *  033) — half the entry spread by default (spread is typically quoted
+   *  once), 0 = charge no exit spread (pre-2026-09-11 behaviour) */
+  paper_exit_spread_mult: number;
+  /** Round-turn commission per lot charged to paper PnL (USD/lot; 0 = off) */
+  paper_commission_per_lot: number;
   max_drawdown_pct: number;
   kill_daily_loss_pct: number;
   kill_weekly_loss_pct: number;

@@ -151,6 +151,11 @@ export default function PerformancePanel() {
   const newsBadge: Badge = news?.status === "SAFE" ? "ok" : news?.status === "CAUTION" ? "warn" : "danger";
   const killBadge: Badge = kill?.engaged ? "danger" : "ok";
   const freqBadge: Badge = freq?.allowed ? "ok" : "warn";
+  /* Live Readiness — backend คืน 0 + readiness_ready=false เมื่อยังปิดไม้
+   * ไม่ครบ 30 ไม้ (audit 2026-09-11: prod โชว์ 68.1/100 ทั้งที่ปิดไปแค่ 7 ไม้
+   * ข้าง coaching กลับบอกว่า "ยังไม่มีสถิติเพียงพอ") — ตัวเลขที่ยังไม่น่าเชื่อถือ
+   * ต้องไม่ถูกโชว์เป็นคะแนน (readiness_ready ?? true = ทน backend เวอร์ชันเก่า) */
+  const readinessReady = paper ? paper.readiness_ready ?? true : false;
 
   /* ORDER STRATEGY symbol dropdown — ทุกคู่ใน SUPPORTED_ASSETS (28 ตัว)
    * เติมคะแนน/regime จาก universe ที่ API ส่งกลับ (รอบสแกนล่าสุด) เพื่อให้
@@ -220,8 +225,11 @@ export default function PerformancePanel() {
         <StatusBadge label="Profit Factor"
           status={journal && journal.total_trades >= 30 ? "ok" : "warn"}
           text={journal ? `${journal.profit_factor} (n=${journal.total_trades})` : "—"} />
-        <StatusBadge label="Live Readiness" status={paper && paper.live_readiness_score >= 70 ? "ok" : "warn"}
-          text={paper ? `${paper.live_readiness_score}/100` : "—"} />
+        <StatusBadge label="Live Readiness"
+          status={readinessReady && paper && paper.live_readiness_score >= 70 ? "ok" : "warn"}
+          text={!paper ? "—"
+            : readinessReady ? `${paper.live_readiness_score}/100`
+              : `รอสถิติ ${paper.readiness_sample}/${paper.readiness_min_sample} ไม้`} />
       </div>
 
       {/* Detail panels */}
@@ -283,6 +291,13 @@ export default function PerformancePanel() {
                 <span className={paper.virtual_pnl >= 0 ? "text-profit" : "text-loss"}>${paper.virtual_pnl}</span>
               </div>
               <div className="flex justify-between"><span>Open Orders</span><span>{paper.open_virtual_orders}</span></div>
+              <div className="flex justify-between">
+                <span>ไม้ที่ปิดแล้ว (ใช้คิดคะแนน)</span>
+                <span className={readinessReady ? "text-profit" : "text-amber-400"}>
+                  {paper.readiness_sample ?? 0}/{paper.readiness_min_sample ?? 30}
+                  {readinessReady ? "" : " — ยังไม่พอคิดคะแนน"}
+                </span>
+              </div>
               <p className="text-slate-400 pt-2 flex items-start gap-1.5"><Icon n="bot" size={14} className="mt-0.5" /><span>{paper.ai_coaching}</span></p>
             </div>
           ) : <p className="text-sm text-slate-500">—</p>}

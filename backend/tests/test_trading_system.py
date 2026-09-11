@@ -458,10 +458,23 @@ class FakeBroker:
 
 
 def test_paper_trading_readiness_scores():
-    good = paper_trading_status(FakeBroker([50, 60, -20, 40, 30, 55, -10, 45, 25, 35]))
+    # Below the 30-trade gate the score is WITHHELD: a confidence-graded
+    # number printed next to "not enough stats yet" was the audit finding.
+    small = paper_trading_status(FakeBroker([50, 60, -20, 40, 30, 55, -10, 45, 25, 35]))
+    assert small.live_readiness_score == 0.0
+    assert small.readiness_ready is False
+    assert small.readiness_sample == 10
+    assert small.readiness_min_sample == 30
+
+    good = paper_trading_status(FakeBroker(list(range(-30, 40)) * 2 + [10] * 8))
+    assert good.readiness_ready is True
     assert good.live_readiness_score > 50
+
     empty = paper_trading_status(FakeBroker([]))
-    assert "10 ไม้" in empty.ai_coaching
+    assert empty.live_readiness_score == 0.0
+    assert empty.readiness_ready is False
+    assert "0/30" in empty.ai_coaching
+    assert "30 ไม้" in empty.ai_coaching
 
 
 # ------------------------------------------------- scanner integration (fake db)

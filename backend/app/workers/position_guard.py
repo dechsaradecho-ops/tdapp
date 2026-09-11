@@ -135,6 +135,41 @@ def _r_multiple_at(pos: Position, price: float, db=None) -> float:
         return 0.0
 
 
+def _sl_move_kind(pos: Position, db=None) -> str:
+    """'breakeven' / 'trailing' when this position's stop was moved, else ''.
+
+    `sl_move_reason` is written by persist_sl_move on EVERY guard move, so
+    the journal row is the source of truth. Fallback: when the column is
+    empty but `initial_stop_loss` differs from the current SL, the stop WAS
+    moved (manual move from the monitor page, or a pre-migration-021 row).
+
+    Used to label the close line: a stop-out at a trailed SL above entry is a
+    WIN, and logging it as "ตัดขาดทุน (SL)" made prod read like a loss
+    (GBPCHF booked +10.5 with the reason "sl").
+
+    Never raises.
+    """
+    try:
+        ticket = str(getattr(pos, "ticket", "") or "")
+        if db is None or not ticket:
+            return ""
+        rows = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
+        if not rows:
+            return ""
+        kind = str(rows[0].get("sl_move_reason") or "").strip().lower()
+        if kind in ("breakeven", "trailing"):
+            return kind
+        if rows[0].get("sl_moved_at"):
+            return "trailing"
+        initial = rows[0].get("initial_stop_loss")
+        current = getattr(pos, "stop_loss", None)
+        if initial is None or current is None:
+            return ""
+        return "trailing" if abs(float(current) - float(initial)) > 1e-9 else ""
+    except Exception:
+        return ""
+
+
 def _position_age_days(pos: Position, db=None) -> float:
     """Age of a position in days — journal created_at first, opened_at fallback.
 
@@ -267,7 +302,7 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
                     getattr(result, "message", ""))
         return out
     out["closed"] = True
-    pnl = execution.PaperBrokerPnl.compute(pos)
+    pnl = execution.PaperBrokerPnl.compute(pos, s, asset=asset)
     execution.close_trade_rows(db, ticket, price, pnl, reason_prefix)
     signal_log.log_event(
         db=db, event="closed", asset=asset, direction=direction,
@@ -410,11 +445,12 @@ async def _manage_position(db, broker, pos: Position, price: float,
                     execution.persist_sl_move(
                         db, str(pos.ticket or ""), pos.stop_loss, move_kind)
                     signal_log.log_event(
-                        db=db, event="order_opened", asset=str(pos.asset or ""),
+                        db=db, event="sl_moved", asset=str(pos.asset or ""),
                         direction=str(pos.direction or ""),
                         entry=pos.entry_price, stop_loss=pos.stop_loss,
                         ticket=str(pos.ticket or ""), source="auto",
-                        reason=f"SL ย้ายไป {pos.stop_loss:g} ({move_kind})")
+                        reason=f"SL ย้ายไป {pos.stop_loss:g} ({move_kind})"
+                               f" จาก {old_sl:g}")
                     # SL move LINE alert — stop_loss is CRITICAL so it pushes
                     # immediately (honours the notify_stop_loss switch inside
                     # NotificationService.notify). Fail-soft: never break guard.
@@ -567,7 +603,8 @@ async def guard_once(db, broker, notifier: NotificationService,
                 log.warning("emergency close %s rejected: %s", pos.ticket,
                             getattr(result, "message", ""))
                 continue
-            pnl = execution.PaperBrokerPnl.compute(pos)
+            pnl = execution.PaperBrokerPnl.compute(
+                pos, s, asset=str(pos.asset or ""))
             execution.close_trade_rows(db, pos.ticket, price, pnl, "emergency")
             signal_log.log_event(
                 db=db, event="closed", asset=str(pos.asset or ""),
@@ -700,7 +737,8 @@ async def guard_once(db, broker, notifier: NotificationService,
                         log.warning("time-stop close %s failed: %s",
                                     pos.ticket, result.message)
                         continue
-                    pnl = execution.PaperBrokerPnl.compute(pos)
+                    pnl = execution.PaperBrokerPnl.compute(
+                        pos, s, asset=str(pos.asset or ""))
                     execution.close_trade_rows(db, pos.ticket, price, pnl, "time")
                     signal_log.log_event(
                         db=db, event="closed", asset=str(pos.asset or ""),
@@ -735,15 +773,31 @@ async def guard_once(db, broker, notifier: NotificationService,
             log.warning("close %s failed: %s", pos.ticket, result.message)
             continue
 
-        pnl = execution.PaperBrokerPnl.compute(pos)
+        pnl = execution.PaperBrokerPnl.compute(pos, s, asset=str(pos.asset or ""))
         execution.close_trade_rows(db, pos.ticket, price, pnl, reason)
+        # Honest label: `reason` stays "sl"/"tp" for the journal + badge, but a
+        # stop-out whose stop had been moved ABOVE entry is a win — calling it
+        # "ตัดขาดทุน (SL)" made the log contradict the PnL on the same row.
+        if not hit_sl:
+            label = "ปิดกำไร (TP) ที่ "
+        else:
+            moved_kind = _sl_move_kind(pos, db)
+            if pnl > 1e-9:
+                label = ("ปิดทำกำไรที่จุดกันทุน (trailing SL) ที่ "
+                         if moved_kind == "trailing"
+                         else "ปิดที่จุดกันทุน (breakeven) ที่ ")
+            elif moved_kind:
+                label = ("ปิดเสมอตัวที่จุดกันทุน (breakeven) ที่ "
+                         if moved_kind == "breakeven"
+                         else "ปิดที่จุดกันทุน (trailing SL) ที่ ")
+            else:
+                label = "ตัดขาดทุน (SL) ที่ "
         signal_log.log_event(
             db=db, event="closed", asset=str(pos.asset or ""),
             direction=str(pos.direction or ""), entry=pos.entry_price,
             exit_price=price, pnl=pnl, ticket=str(pos.ticket or ""),
             source="auto",
-            reason=("ตัดขาดทุน (SL) ที่ " if hit_sl else "ปิดกำไร (TP) ที่ ")
-            + f"{price:g}")
+            reason=label + f"{price:g}")
         closed += 1
         closed_assets.append(
             f"{pos.asset}:{'sl' if hit_sl else 'tp'}@{price:g}")

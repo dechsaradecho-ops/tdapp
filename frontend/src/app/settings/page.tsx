@@ -50,6 +50,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   gold_breakout_only: true,
   paper_spread: 0,
   spread_overrides: null,
+  paper_exit_spread_mult: 0.5,
+  paper_commission_per_lot: 3.5,
   max_drawdown_pct: 10,
   kill_daily_loss_pct: 2,
   kill_weekly_loss_pct: 5,
@@ -846,6 +848,12 @@ export default function SettingsPage() {
               <NumField label="Paper Spread (ราคา) — ค่าเดิม (fallback)" value={cfg.paper_spread}
                 onChange={(v) => set("paper_spread", v)} step={0.00001}
                 hint="ต้นทุนจำลองต่อไม้ — ใช้เฉพาะคู่ที่ไม่มี spread รายสัญลักษณ์ (0 = ไม่คิดสเปรด)" />
+              <NumField label="Spread ตอนปิดไม้ (× เท่าของ spread ขาเข้า)" value={cfg.paper_exit_spread_mult}
+                onChange={(v) => set("paper_exit_spread_mult", v)} step={0.1}
+                hint="เดิมคิดสเปรดแค่ขาเข้า ทำให้ PnL จำลองสวยกว่าความเป็นจริง — ค่าเริ่มต้น 0.5 คือเสียสเปรดครึ่งหนึ่งตอนปิด (0 = ปิดฟรี เหมือนก่อน 2026-09-11)" />
+              <NumField label="ค่าคอมมิชชัน (USD/lot)" value={cfg.paper_commission_per_lot}
+                onChange={(v) => set("paper_commission_per_lot", v)} step={0.5}
+                hint="หักจากกำไร/ขาดทุนที่บันทึกจริง (ไม่กระทบราคาปิดที่บันทึก) — 0 = ไม่คิดค่าคอม" />
               {/* --- Per-symbol spread overrides --- */}
               <div className="pt-2">
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Spread รายสัญลักษณ์</p>

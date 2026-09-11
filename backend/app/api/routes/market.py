@@ -73,9 +73,15 @@ async def market_summary(request: Request) -> MarketSummary:
     sentiment_by_asset: dict[str, str] = {}
 
     # 1) Worker-produced analysis (persisted by the Market Scanner every 5 min)
-    # limit=50: one scanner cycle now writes ~28 rows (full universe), so the
-    # old limit=25 truncated the tail of each cycle into slower tier-2 fetches.
-    rows = db.select("market_analysis", limit=50)
+    # One cycle writes one row per symbol (~28), so we need the NEWEST row per
+    # asset — NOT 50 arbitrary rows. Without `order=` PostgREST returned an
+    # arbitrary 50-row slice out of ~240k rows (audit 2026-09-11), so most of
+    # the dashboard was silently rebuilt from live refetches below.
+    try:
+        rows = db.select("market_analysis", order="created_at", desc=True,
+                         limit=4 * len(assets))
+    except TypeError:  # very old fake select() without order/desc kwargs
+        rows = db.select("market_analysis", limit=4 * len(assets))
     for row in rows:
         if row["asset"] not in {o.asset for o in opportunities}:
             # score_reasons (migration 026): full scoring breakdown from the

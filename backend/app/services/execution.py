@@ -261,6 +261,51 @@ def close_trade_rows(db, ticket: str, exit_price: float, pnl: float,
         log.error("close_trade_rows failed: %s", exc)
 
 
+def paper_exit_cost(settings, asset: str, volume: float) -> float:
+    """USD cost a real account pays on top of the paper gross PnL (>= 0).
+
+    The entry side is ALREADY simulated: execute_signal fills at
+    `apply_spread(entry, direction, effective_spread)` — the BUY pays half
+    the spread, the SELL gives it up. Two costs were still missing, and
+    without them paper PnL is optimistic (the audit found the two losers of
+    the 7 closed prod trades lost less than a quarter of one spread):
+
+      1. the EXIT half-spread — `paper_exit_spread_mult` scales it
+         (0.5 completes the round trip at one full spread, >0.5 adds the
+         slippage a stop-out suffers in a fast market, 0 disables it).
+      2. commission — `paper_commission_per_lot` per side per standard lot
+         (round turn = 2x).
+
+    Deducted from the REALIZED number without touching the recorded exit
+    price, so the journal stays comparable with the chart the user sees.
+    Unknown settings / broken values -> 0.0. Never raises.
+    """
+    if settings is None:
+        return 0.0
+    try:
+        vol = abs(float(volume or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    if vol <= 0:
+        return 0.0
+    asset_u = str(asset or "").upper()
+    try:
+        exit_mult = float(getattr(settings, "paper_exit_spread_mult", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        exit_mult = 0.0
+    try:
+        commission = float(getattr(settings, "paper_commission_per_lot", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        commission = 0.0
+    cost = 0.0
+    if exit_mult > 0:
+        contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset_u, 100_000.0)
+        cost += exit_mult * effective_spread(settings, asset_u) * vol * contract
+    if commission > 0:
+        cost += 2.0 * commission * vol  # open + close
+    return cost
+
+
 class PaperBrokerPnl:
     """PnL helper shared with the position guard (mirrors PaperBroker math).
 
@@ -268,16 +313,22 @@ class PaperBrokerPnl:
     Without the contract multiplier a 0.01-lot FX move of 100 pips would
     report PnL 0.10 instead of 100.00 — the monitor page showed PnL stuck
     at 0.00 because of this.
+
+    `settings` (optional) deducts the paper execution costs described in
+    `paper_exit_cost` above. Callers that only need a rough display number
+    (unrealized equity, goal projection) may omit it; every REALIZED number
+    that lands in the journal must pass it.
     """
 
     CONTRACT_SIZES = {"XAUUSD": 100.0}  # everything else defaults to FX 100k
 
     @staticmethod
-    def compute(pos) -> float:
+    def compute(pos, settings=None, asset: str | None = None) -> float:
         sign = 1 if pos.direction == "BUY" else -1
-        asset = str(getattr(pos, "asset", "") or "").upper()
-        contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset, 100_000.0)
-        return sign * (pos.current_price - pos.entry_price) * pos.volume * contract
+        asset_u = str(asset or getattr(pos, "asset", "") or "").upper()
+        contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset_u, 100_000.0)
+        gross = sign * (pos.current_price - pos.entry_price) * pos.volume * contract
+        return gross - paper_exit_cost(settings, asset_u, pos.volume)
 
 
 # ---------------------------------------------------------------------------

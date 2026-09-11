@@ -586,6 +586,7 @@ async def close_position(payload: ClosePositionRequest,
     db = request.app.state.db
     broker = request.app.state.broker
     ticket = payload.ticket.strip()
+    s = _settings(request)
 
     # ---- find the open journal row ---------------------------------------
     rows = db.select("paper_trades", filters={"ticket": ticket, "status": "open"},
@@ -635,9 +636,9 @@ async def close_position(payload: ClosePositionRequest,
         volume=float(row.get("volume") or 0),
         asset=str(row.get("asset") or ""),
     )
-    pnl = round(execution.PaperBrokerPnl.compute(pos), 2)
+    pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
     entry = float(row.get("entry_price") or 0)
-    capital = max(_settings(request).capital, 1.0)
+    capital = max(s.capital, 1.0)
     pnl_pct = round(pnl / capital * 100, 2)
 
     # ---- holding time -----------------------------------------------------
@@ -946,6 +947,7 @@ async def close_all_positions(payload: CloseAllRequest,
     log = logging.getLogger(__name__)
     db = request.app.state.db
     broker = request.app.state.broker
+    s = _settings(request)
 
     if not payload.confirm:
         return CloseAllResult(ok=False, closed=0, failed=0,
@@ -996,7 +998,7 @@ async def close_all_positions(payload: CloseAllRequest,
             direction=str(row.get("direction") or "BUY").upper(),
             current_price=exit_price, entry_price=entry,
             volume=float(row.get("volume") or 0), asset=asset)
-        pnl = round(execution.PaperBrokerPnl.compute(pos), 2)
+        pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
         execution.close_trade_rows(db, ticket, exit_price, pnl,
                                    payload.close_reason)
         signal_log.log_event(
@@ -1056,6 +1058,7 @@ async def close_group_positions(payload: CloseGroupRequest,
     log = logging.getLogger(__name__)
     db = request.app.state.db
     broker = request.app.state.broker
+    s = _settings(request)
 
     if not payload.confirm:
         return CloseAllResult(ok=False, closed=0, failed=0,
@@ -1138,7 +1141,7 @@ async def close_group_positions(payload: CloseGroupRequest,
             direction=str(row.get("direction") or "BUY").upper(),
             current_price=exit_price, entry_price=entry,
             volume=float(row.get("volume") or 0), asset=asset)
-        pnl = round(execution.PaperBrokerPnl.compute(pos), 2)
+        pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
         execution.close_trade_rows(db, ticket, exit_price, pnl,
                                    payload.close_reason)
         signal_log.log_event(

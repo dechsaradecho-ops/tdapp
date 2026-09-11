@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.api.routes.settings import get_app_settings
@@ -60,6 +61,65 @@ def _tradable_assets(settings) -> set[str]:
         return set(settings.effective_assets() if settings else [])
     except Exception:
         return set()
+
+
+# ---------------------------------------------------------------------------
+# Retention — market_analysis had NO TTL and grew forever.
+# One cycle writes one row per symbol (~28) every 5 min ≈ 8k rows/day ≈ 240k
+# rows a month, while every reader only needs the NEWEST row per asset (the
+# dashboard popup shows the latest score). Prod audit 2026-09-11 found the
+# table at 240k+ rows with a 50-row unordered read on top of it.
+# 7 days matches the other log tables (quote_api_logs / signal_logs).
+MARKET_ANALYSIS_TTL_DAYS = 7
+PURGE_INTERVAL_S = 3600.0  # hourly; the scanner runs every 5 min
+_last_purge = 0.0
+
+
+def purge_old_market_analysis(db: Database, force: bool = False) -> int:
+    """Delete market_analysis rows older than MARKET_ANALYSIS_TTL_DAYS.
+
+    Throttled to once per PURGE_INTERVAL_S unless force=True. Returns the
+    number of rows deleted (0 when skipped/unavailable). Never raises.
+    Prefers one bulk delete_before; falls back to per-row deletes when the
+    client lacks it (FakeDatabase).
+    """
+    global _last_purge
+    now = time.monotonic()
+    if not force and now - _last_purge < PURGE_INTERVAL_S:
+        return 0
+    _last_purge = now
+    try:
+        if db is None or not getattr(db, "available", False):
+            return 0
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=MARKET_ANALYSIS_TTL_DAYS)).isoformat()
+        bulk = getattr(db, "delete_before", None)
+        if bulk is not None:
+            deleted = int(bulk("market_analysis", "created_at", cutoff) or 0)
+            if deleted:
+                log.info("market_analysis: purged %d rows older than %d days",
+                         deleted, MARKET_ANALYSIS_TTL_DAYS)
+            return deleted
+        rows = db.select("market_analysis", order="created_at", desc=True,
+                         limit=2000)
+        # A row with no readable created_at is NOT provably stale — the bulk
+        # path (PostgREST `created_at < cutoff`) skips NULLs, so this path
+        # must too, or a fresh row would be deleted just for lagging.
+        stale = []
+        for r in rows:
+            created = str(r.get("created_at") or "")
+            if created and created < cutoff:
+                stale.append(r)
+        deleted = 0
+        for r in stale:
+            if r.get("asset") == "PROBE":  # /api/system/db-check probe rows
+                continue
+            if db.delete("market_analysis", {"id": r["id"]}):
+                deleted += 1
+        return deleted
+    except Exception as exc:
+        log.debug("market_analysis purge failed: %s", exc)
+        return 0
 
 
 async def scan_once(db: Database) -> list[dict]:
@@ -283,6 +343,8 @@ async def scan_once(db: Database) -> list[dict]:
             )
 
     log.info("Scan done: %d live, %d demo", live_used, demo_used)
+    # Retention: trim the oldest cycles (throttled to once an hour internally).
+    purge_old_market_analysis(db)
     return results
 
 

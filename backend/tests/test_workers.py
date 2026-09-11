@@ -1106,6 +1106,15 @@ class TestPositionGuardManagement:
             settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
         assert summary["moved_sl"] == 1
         assert moved == [pytest.approx(1.1000)]
+        # audit item 2: the move is `sl_moved`, NOT `order_opened` — logged as
+        # `order_opened` it inflated prod's 7-day ไม้ที่เปิด counter (44 rows
+        # where only 27 orders were really filled).
+        events = [r.get("event") for _, r in db.inserted if "event" in r]
+        assert "sl_moved" in events and "order_opened" not in events
+        sl_row = [r for _, r in db.inserted if r.get("event") == "sl_moved"][0]
+        assert sl_row["stop_loss"] == pytest.approx(1.1000)
+        assert "SL ย้ายไป" in sl_row["reason"]      # monitor page regex
+        assert "(breakeven)" in sl_row["reason"]
 
     @pytest.mark.asyncio
     async def test_trailing_extends_beyond_breakeven(self, monkeypatch):

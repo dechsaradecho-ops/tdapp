@@ -1426,6 +1426,11 @@ def walk_forward(candles: list[Candle], config: BacktestConfig,
                              note=note)
 
 
+# Closed paper trades required before a live-readiness score is reported.
+# Kept in sync with the /performance Win-Rate + Profit-Factor badge gate (30).
+READINESS_MIN_TRADES = 30
+
+
 class PaperTradingStatus(BaseModel):
     enabled: bool
     virtual_capital: float
@@ -1433,12 +1438,27 @@ class PaperTradingStatus(BaseModel):
     open_virtual_orders: int
     ai_coaching: str
     live_readiness_score: float
+    # Sample size behind live_readiness_score + whether it is meaningful yet.
+    # The UI must NOT print a confident number while readiness_ready is False:
+    # prod 2026-09-11 showed 68.1/100 from 7 closed trades while the coaching
+    # line on the same panel said "ยังไม่มีสถิติเพียงพอ" — badge and text
+    # contradicted each other, and 68/100 is one good win away from the 70
+    # "go live" threshold on pure luck.
+    readiness_ready: bool = False
+    readiness_sample: int = 0
+    readiness_min_sample: int = 30
 
 
 def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTradingStatus:
     """Summarize the PaperBroker state as live-readiness.
 
-    Score: win rate (40%) + discipline (closed trades present, 30%) + PnL (30%).
+    Score: win rate (40%) + discipline (30%) + PnL (30%).
+    BELOW `readiness_min_sample` (30) closed trades the score is WITHHELD
+    (0.0 + readiness_ready=False) instead of extrapolated: the old formula
+    always paid the 30-point discipline term plus up to 40 points of win rate
+    on a 1-trade sample, so a 7-trade paper book already read 68/100. 30 is
+    the same sample the /performance Win-Rate + Profit-Factor badges require.
+
     Accepts the real PaperBroker (_positions + closed_trades dicts) or any object
     exposing a `.trades` list with `.pnl` attributes (tests / alt brokers).
     """
@@ -1449,17 +1469,27 @@ def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTra
         closed = [float(t.pnl) for t in broker.trades if t.pnl is not None]
         open_count = len([t for t in broker.trades if t.pnl is None])
     wins = [p for p in closed if p > 0]
-    win_rate = len(wins) / len(closed) if closed else 0.0
+    sample = len(closed)
+    win_rate = len(wins) / sample if sample else 0.0
     pnl = sum(closed)
     pnl_score = max(0.0, min(1.0, 0.5 + pnl / max(virtual_capital, 1) * 5))
-    coaching = ("ยังไม่มีสถิติเพียงพอ — เทรดกระดาษอย่างน้อย 10 ไม้เพื่อให้ AI ประเมินได้"
-                if len(closed) < 10 else
-                "Win rate และ discipline ผ่านเกณฑ์ — โค้ชให้คงวินัยตามแผนเดิม")
-    readiness = round(win_rate * 40 + (min(len(closed), 10) / 10) * 30 + pnl_score * 30, 1)
+    ready = sample >= READINESS_MIN_TRADES
+    if ready:
+        coaching = ("Win rate และ discipline ผ่านเกณฑ์ — โค้ชให้คงวินัยตามแผนเดิม")
+        # discipline term is a constant 30 once the sample is complete
+        readiness = round(win_rate * 40 + 30 + pnl_score * 30, 1)
+    else:
+        missing = READINESS_MIN_TRADES - sample
+        coaching = (f"ยังไม่มีสถิติเพียงพอ — ปิดไปแล้ว {sample}/{READINESS_MIN_TRADES} ไม้ "
+                    f"(ต้องอีก {missing} ไม้) "
+                    f"คะแนนความพร้อมจะเริ่มคำนวณเมื่อครบ {READINESS_MIN_TRADES} ไม้")
+        readiness = 0.0
     return PaperTradingStatus(
         enabled=True, virtual_capital=virtual_capital, virtual_pnl=round(pnl, 2),
         open_virtual_orders=open_count,
-        ai_coaching=coaching, live_readiness_score=readiness)
+        ai_coaching=coaching, live_readiness_score=readiness,
+        readiness_ready=ready, readiness_sample=sample,
+        readiness_min_sample=READINESS_MIN_TRADES)
 
 
 # ---------- Auto-Trader: execution gate + pause state ----------
@@ -1831,6 +1861,17 @@ class AppSettings(BaseModel):
     # DEFAULT_SPREADS table; unknown symbols fall back to paper_spread.
     # None/{} → built-in defaults only (explicit null clears the override).
     spread_overrides: Optional[dict[str, float]] = None
+    # Exit-side cost as a MULTIPLE of the symbol's effective spread.
+    # The entry already pays half the spread at fill (apply_spread), so 0.5
+    # completes a full round trip; >0.5 adds the slippage a stop-out takes in
+    # a fast market (0.75 = half spread + quarter-spread slip). 0 = the exit
+    # fills exactly at the mark (pre-2026-09-11 behaviour).
+    # WHY: prod paper PnL booked the whole move on the way out and only 2 of
+    # 7 closed trades lost more than a quarter of one spread — unrealistic.
+    paper_exit_spread_mult: float = 0.5
+    # Commission per side, USD per 1.00 standard lot (FX 100k units / gold
+    # 100 oz). A round turn costs 2× this. 0 = commission-free paper fills.
+    paper_commission_per_lot: float = 3.5
 
     max_drawdown_pct: float = 10.0
     kill_daily_loss_pct: float = 2.0

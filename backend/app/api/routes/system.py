@@ -104,22 +104,40 @@ async def db_check(request: Request) -> dict:
 
 @router.get("/counts")
 async def counts(request: Request) -> dict:
-    """Row counts for the worker tables (verifies persistence is flowing)."""
+    """Row counts for the worker tables (verifies persistence is flowing).
+
+    Uses Database.count (PostgREST count=exact) — the old `select(limit=100)`
+    reported min(rows, 100) for EVERY table, so prod showed "market_analysis
+    100" while the table actually held 240k+ rows (audit 2026-09-11).
+    """
+    from app.services import signal_log
+
     db: Database = request.app.state.db
     out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
     if not db.available:
         out["verdict"] = "fail"
         out["error"] = db.init_error or "client unavailable"
         return out
-    for table, order_col in (("market_analysis", "created_at"),
-                             ("signals", "created_at"),
-                             ("news_analysis", "created_at"),
-                             ("trades", "created_at")):
-        rows = db.select(table, order=order_col, desc=True, limit=100)
-        out[table] = len(rows)
-        latest = rows[0].get("created_at") if rows else None
-        if latest:
-            out[f"{table}_latest"] = latest
+    # retention runs here too: this page is opened whenever the user wants to
+    # check that the workers are alive, so it is the natural place to trim the
+    # scanner's ~8k rows/day (throttled internally by each module).
+    try:
+        from app.workers import market_scanner
+        market_scanner.purge_old_market_analysis(db, force=True)
+    except Exception:
+        pass
+    signal_log.purge_old_logs(db)
+    for table in ("market_analysis", "signals", "news_analysis", "trades"):
+        try:
+            out[table] = int(db.count(table) or 0)
+        except Exception:
+            out[table] = len(db.select(table, limit=1000))
+        try:
+            latest = db.select(table, order="created_at", desc=True, limit=1)
+            if latest and latest[0].get("created_at"):
+                out[f"{table}_latest"] = latest[0]["created_at"]
+        except Exception:
+            pass
     out["verdict"] = "ok"
     return out
 

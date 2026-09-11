@@ -419,7 +419,8 @@ function MoveTimelineBadge({ pos, timeline }: {
                   </span>
                   {" · "}
                   <span className="font-semibold">
-                    {l.event === "closed" ? "ปิดไม้" : "SL/TP ขยับ"}
+                    {l.event === "closed" ? "ปิดไม้"
+                      : l.event === "sl_moved" ? "ย้าย SL" : "SL/TP ขยับ"}
                   </span>
                   {l.stop_loss != null && l.stop_loss > 0 && (
                     <> — SL {fmtNum(l.stop_loss, 5)}</>
@@ -482,6 +483,10 @@ export default function MonitorPage() {
       // เหตุการณ์ขยับจริง (guard "SL ย้ายไป..." / ปรับด้วยมือ / trailing /
       // breakeven) + ปิดไม้ — ไม่รวม log "เปิดออเดอร์" ตอนเปิดไม้ครั้งแรก
       // (มี stop_loss ติดมาด้วยเลยหลุด filter เดิม) — ไม่ต้องเพิ่ม endpoint ใหม่
+      //
+      // NOTE (audit 2026-09-11): การขยับ SL ถูกย้ายไป event "sl_moved" แล้ว
+      // (เดิมบันทึกเป็น order_opened ทำให้ตัวนับ "เปิดออเดอร์" ปนไม้จริงกับ
+      // การขยับ SL) — ยังรับ order_opened เดิมไว้เพื่ออ่าน log เก่าย้อนหลัง
       try {
         const logs = await api.signalLogs(200);
         const byTicket: Record<string, SignalLog[]> = {};
@@ -491,7 +496,7 @@ export default function MonitorPage() {
           // เปิดไม้ครั้งแรก — ข้าม (ไม่ใช่การขยับ)
           if (/^เปิดออเดอร์/.test(reason)) continue;
           const moveLike =
-            l.event === "closed" ||
+            l.event === "closed" || l.event === "sl_moved" ||
             (l.event === "order_opened" &&
               /SL ย้าย|TP ย้าย|breakeven|trailing|ปรับด้วยมือ|manual/i.test(reason));
           if (!moveLike) continue;

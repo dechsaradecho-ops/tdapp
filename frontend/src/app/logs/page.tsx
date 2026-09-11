@@ -1070,7 +1070,7 @@ export default function LogsPage() {
 
       {/* ---------- Gate summary (order_blocked vs order_opened) ---------- */}
       {tab === "gate" && gateSummary && (
-      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <div className="panel">
           <p className="text-xs text-slate-500">Gate ปัดตก (7 วัน)</p>
           <p className="text-2xl font-bold text-amber-400">{gateSummary.blocked.toLocaleString()}</p>
@@ -1079,7 +1079,12 @@ export default function LogsPage() {
         <div className="panel">
           <p className="text-xs text-slate-500">Gate ผ่าน (7 วัน)</p>
           <p className="text-2xl font-bold text-emerald-400">{gateSummary.opened.toLocaleString()}</p>
-          <p className="text-xs text-slate-500 mt-1">order_opened — เปิดออเดอร์จริง</p>
+          <p className="text-xs text-slate-500 mt-1">order_opened — เปิดออเดอร์จริง (ไม่รวมการขยับ SL แล้ว)</p>
+        </div>
+        <div className="panel">
+          <p className="text-xs text-slate-500">ย้าย SL (7 วัน)</p>
+          <p className="text-2xl font-bold text-cyan-300">{(gateSummary.sl_moved ?? 0).toLocaleString()}</p>
+          <p className="text-xs text-slate-500 mt-1">sl_moved — breakeven / trailing / ปรับมือ</p>
         </div>
         <div className="panel">
           <p className="text-xs text-slate-500">หมดอายุ (7 วัน)</p>

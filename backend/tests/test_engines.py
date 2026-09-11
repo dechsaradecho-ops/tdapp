@@ -1062,6 +1062,36 @@ class TestApiRoutes:
         assert data["opportunities"][0]["asset"] == "XAUUSD"
         assert data["confidence"] <= 100.0  # never the unclamped ADX*2 metric
 
+    async def test_market_summary_reads_newest_rows_ordered(self, client):
+        """audit item 4: the read had no `order=`, so PostgREST returned an
+        ARBITRARY 50-row slice out of ~240k scanner rows — the dashboard was
+        mostly rebuilt from live refetches. It must ask for the newest rows
+        and enough of them to cover every scanned asset."""
+        from app.main import app as fastapi_app
+        from tests.test_workers import FakeDatabase
+
+        class Spy(FakeDatabase):
+            def __init__(self):
+                super().__init__()
+                self.selects: list[tuple[str, dict]] = []
+
+            def select(self, table, *args, **kwargs):
+                self.selects.append((table, kwargs))
+                return super().select(table, *args, **kwargs)
+
+        db = Spy()
+        fastapi_app.state.db = db
+        r = await client.get("/api/market/summary")
+        assert r.status_code == 200
+
+        calls = [kw for t, kw in db.selects if t == "market_analysis"]
+        assert calls, "market_analysis was never read"
+        assert calls[0].get("order") == "created_at"
+        assert calls[0].get("desc") is True
+        # 28 supported assets → one row each per cycle, so a 50-row window
+        # would miss most of the universe.
+        assert calls[0].get("limit", 0) >= 56
+
     async def test_market_summary_header_empty_db_uses_demo_score(self, client):
         """Fresh install (no rows): header must still equal the top demo
         opportunity score — never a hardcoded constant."""

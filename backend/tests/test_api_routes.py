@@ -92,6 +92,82 @@ def reset_state():
 # ---------------------------------------------------------------------------
 # /health
 # ---------------------------------------------------------------------------
+class TestSystemCounts:
+    """/api/system/counts — audit item 4.
+
+    The old implementation did `len(db.select(table, limit=100))`, so EVERY
+    table reported min(rows, 100): prod showed 100/100/100/100 while
+    market_analysis really held ~240k rows. It now uses PostgREST
+    count=exact, and it trims market_analysis inline so opening the Settings
+    page also reclaims space.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counts_are_exact_past_one_hundred(self):
+        fresh = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase()
+        for i in range(240):
+            db.insert("market_analysis", {"asset": f"A{i}", "confidence": 50.0,
+                                         "created_at": fresh})
+        for i in range(130):
+            db.insert("signals", {"asset": "EURUSD", "created_at": fresh})
+        set_state(db)
+
+        body = (await call("GET", "/api/system/counts")).json()
+        assert body["verdict"] == "ok"
+        assert body["market_analysis"] == 240
+        assert body["signals"] == 130
+
+    @pytest.mark.asyncio
+    async def test_counts_reports_latest_row_timestamp(self):
+        # FakeDatabase.select returns rows as stored (it does not sort), so
+        # keep the newest row first to mimic `order=created_at&desc=true`.
+        db = FakeDatabase(rows={"trades": [
+            {"id": "t2", "created_at": "2026-09-11T08:30:00+00:00"},
+            {"id": "t1", "created_at": "2026-09-10T00:00:00+00:00"}]})
+        set_state(db)
+
+        body = (await call("GET", "/api/system/counts")).json()
+        assert body["trades"] == 2
+        assert body["trades_latest"] == "2026-09-11T08:30:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_counts_zero_rows_have_no_latest_key(self):
+        set_state(FakeDatabase())
+        body = (await call("GET", "/api/system/counts")).json()
+        assert body["signals"] == 0
+        assert "signals_latest" not in body
+
+    @pytest.mark.asyncio
+    async def test_counts_purges_stale_scanner_rows(self):
+        """Opening Settings must reclaim market_analysis disk space."""
+        from datetime import timedelta
+        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        fresh = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={"market_analysis": [
+            {"id": "old", "asset": "EURUSD", "created_at": old},
+            {"id": "new", "asset": "XAUUSD", "created_at": fresh}]})
+        set_state(db)
+
+        body = (await call("GET", "/api/system/counts")).json()
+        assert body["market_analysis"] == 1
+
+    @pytest.mark.asyncio
+    async def test_counts_reports_unavailable_client(self):
+        class Offline(FakeDatabase):
+            @property
+            def available(self) -> bool:
+                return False
+
+            init_error = "SUPABASE_URL missing"
+
+        set_state(Offline())
+        body = (await call("GET", "/api/system/counts")).json()
+        assert body["verdict"] == "fail"
+        assert body["client"] == "unavailable"
+        assert "SUPABASE_URL" in body["error"]
+
+
 class TestHealth:
     @pytest.mark.asyncio
     async def test_health_ok_without_scheduler(self):
@@ -636,9 +712,12 @@ class TestClosePosition:
         assert body["direction"] == "BUY"
         assert body["entry_price"] == 1.085
         assert body["exit_price"] == 1.095
-        # BUY 0.01 lot, +0.01 price → 0.01 * 0.01 * 100_000 = +10.00
-        assert body["pnl"] == 10.0
-        assert body["pnl_pct"] == 0.1          # 10 / 10_000 capital
+        # BUY 0.01 lot, +0.01 price → 0.01 * 0.01 * 100_000 = +10.00 gross
+        # minus the EXIT-side cost now simulated (migration 033):
+        # exit spread 0.5 × 0.00010 × 0.01 lots × 100k = 0.05
+        # + commission 3.5/side × 2 × 0.01 lots = 0.07 → 0.12
+        assert body["pnl"] == 9.88
+        assert body["pnl_pct"] == 0.1          # 9.88 / 10_000 capital
         assert body["close_reason"] == "manual"
         assert body["remaining_open"] == 0
         # journal row must be closed
@@ -662,7 +741,8 @@ class TestClosePosition:
         body = (await call("POST", "/api/trading/positions/close",
                            {"ticket": "PAPER-000001"})).json()
         assert body["ok"] is True
-        assert body["pnl"] == -5.0
+        # -5.00 gross − 0.12 exit-side cost (see test_close_returns_full_summary)
+        assert body["pnl"] == -5.12
         assert body["pnl_pct"] == -0.05
 
     @pytest.mark.asyncio
@@ -678,7 +758,11 @@ class TestClosePosition:
 
     @pytest.mark.asyncio
     async def test_close_offline_falls_back_to_entry(self, monkeypatch):
-        """No live feed + no broker book → exit = entry → PnL 0 (no crash)."""
+        """No live feed + no broker book → exit = entry → PnL = -cost (no crash).
+
+        A flat round trip is NOT free: with the migration-033 cost model the
+        realized PnL is minus the exit-side spread + commission (0.12 on
+        0.01 EURUSD lots)."""
         import app.api.routes.trading as trading_route
 
         row = self._open_row()
@@ -693,7 +777,7 @@ class TestClosePosition:
                            {"ticket": "PAPER-000001"})).json()
         assert body["ok"] is True
         assert body["exit_price"] == 1.085
-        assert body["pnl"] == 0.0
+        assert body["pnl"] == -0.12
 
     @pytest.mark.asyncio
     async def test_close_updates_portfolio_summary(self, monkeypatch):
@@ -713,17 +797,20 @@ class TestClosePosition:
         set_state(db)
 
         async def fake_spot(assets, **_kw):
-            return {"EURUSD": 1.08500}, {}  # flat → PnL 0
+            return {"EURUSD": 1.08500}, {}  # flat → gross 0, so PnL = -0.12
 
         monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
         body = (await call("POST", "/api/trading/positions/close",
                            {"ticket": "PAPER-000002"})).json()
         assert body["ok"] is True
         assert body["remaining_open"] == 0
-        assert body["total_realized_pnl"] == 100.0
-        assert body["pnl_today"] == 100.0
+        # 100.00 already booked + the flat close's -0.12 exit cost
+        assert body["total_realized_pnl"] == 99.88
+        assert body["pnl_today"] == 99.88
         assert body["wins"] == 1
-        assert body["losses"] == 0
+        # the flat close is net-negative once the exit cost is charged, so it
+        # counts as a (tiny) loss — a cost-free round trip no longer exists
+        assert body["losses"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1522,7 +1609,12 @@ class TestPerformanceSources:
         body = (await call("GET", "/api/trading/paper-trading")).json()
         assert body["virtual_pnl"] == 6.0
         assert body["open_virtual_orders"] == 1
-        assert body["live_readiness_score"] > 0
+        # Only 2 closed trades: below the 30-trade readiness gate, so the
+        # score stays 0 and the sample count is reported instead of a
+        # confident-looking number derived from 2 fills (audit 2026-09-11).
+        assert body["readiness_ready"] is False
+        assert body["readiness_sample"] == 2
+        assert body["live_readiness_score"] == 0.0
 
     @pytest.mark.asyncio
     async def test_signal_report_joins_on_signal_id(self):
