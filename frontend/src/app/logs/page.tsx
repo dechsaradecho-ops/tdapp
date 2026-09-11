@@ -88,8 +88,8 @@ export default function LogsPage() {
   const [gateSummary, setGateSummary] = useState<SignalLogsResponse["summary"] | null>(null);
   const [gateTotal, setGateTotal] = useState(0);
   const [gateHasMore, setGateHasMore] = useState(false);
-  const [gateFilter, setGateFilter] = useState<"order_blocked" | "order_opened" | "all">("order_blocked");
-  const gateFilterRef = useRef<"order_blocked" | "order_opened" | "all">("order_blocked");
+  const [gateFilter, setGateFilter] = useState<"order_blocked" | "order_opened" | "all">("all");
+  const gateFilterRef = useRef<"order_blocked" | "order_opened" | "all">("all");
   const PAGE_SIZE = 50;
   const SERVER_PAGE = 500;
 
@@ -119,33 +119,52 @@ export default function LogsPage() {
     return api.signalLogs(SERVER_PAGE, offset, gateFilterRef.current);
   }, []);
 
-  const load = useCallback(async (flt?: "all" | "forex" | "gold") => {
+  // โหลดเฉพาะแท็บที่เปิดอยู่ (lazy) — เข้าหน้าครั้งแรกยิงแค่ 1 request
+  // แทน 5 requests พร้อมกัน (quotes+news+scheduler+guard+gate) ทำให้หน้าแรกไวขึ้น ~5 เท่า
+  const loadedRef = useRef<Set<string>>(new Set());
+  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate", flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
-      // summary ฝั่ง backend นับแบบ exact ทั้งหน้าต่าง 7 วัน (ไม่ติด cap 500);
-      // ตารางโหลดแค่ server page แรกของแต่ละแท็บ
-      const f = flt ?? filterRef.current;
-      const [qres, nres, sres, gres, gates] = await Promise.all([loadQuotes(f, 1), loadNews(1), loadSched(1), loadGuard(1), loadGate(1)]);
-      setLogs(qres.logs ?? []);
-      setSummary(qres.summary ?? null);
-      setTtlDays(qres.ttl_days ?? 7);
-      setQuoteTotal(qres.total ?? (qres.logs ?? []).length);
-      setQuoteHasMore(qres.has_more ?? false);
-      setNewsLogs(nres.logs ?? []);
-      setNewsSummary(nres.summary ?? null);
-      setNewsTotal(nres.total ?? (nres.logs ?? []).length);
-      setNewsHasMore(nres.has_more ?? false);
-      setSchedLogs(sres.logs ?? []);
-      setSchedSummary(sres.summary ?? null);
-      setSchedTotal(sres.total ?? (sres.logs ?? []).length);
-      setSchedHasMore(sres.has_more ?? false);
-      setGuardLogs(gres.logs ?? []);
-      setGuardTotal(gres.total ?? (gres.logs ?? []).length);
-      setGuardHasMore(gres.has_more ?? false);
-      setGateLogs(gates.logs ?? []);
-      setGateSummary(gates.summary ?? null);
-      setGateTotal(gates.total ?? (gates.logs ?? []).length);
-      setGateHasMore(gates.has_more ?? false);
+      if (t === "quotes") {
+        const f = flt ?? filterRef.current;
+        const qres = await loadQuotes(f, 1);
+        setLogs(qres.logs ?? []);
+        setSummary(qres.summary ?? null);
+        setTtlDays(qres.ttl_days ?? 7);
+        setQuoteTotal(qres.total ?? (qres.logs ?? []).length);
+        setQuoteHasMore(qres.has_more ?? false);
+      } else if (t === "news") {
+        const nres = await loadNews(1);
+        setNewsLogs(nres.logs ?? []);
+        setNewsSummary(nres.summary ?? null);
+        setNewsTotal(nres.total ?? (nres.logs ?? []).length);
+        setNewsHasMore(nres.has_more ?? false);
+      } else if (t === "guard") {
+        const gres = await loadGuard(1);
+        setGuardLogs(gres.logs ?? []);
+        setGuardTotal(gres.total ?? (gres.logs ?? []).length);
+        setGuardHasMore(gres.has_more ?? false);
+        // summary guard อาศัย schedSummary — โหลด scheduler summary แบบเบา (limit 1) ครั้งเดียว
+        if (!loadedRef.current.has("scheduler")) {
+          try {
+            const sres = await api.schedulerLogs(1, 0);
+            setSchedSummary(sres.summary ?? null);
+          } catch { /* ignore */ }
+        }
+      } else if (t === "gate") {
+        const gates = await loadGate(1);
+        setGateLogs(gates.logs ?? []);
+        setGateSummary(gates.summary ?? null);
+        setGateTotal(gates.total ?? (gates.logs ?? []).length);
+        setGateHasMore(gates.has_more ?? false);
+      } else {
+        const sres = await loadSched(1);
+        setSchedLogs(sres.logs ?? []);
+        setSchedSummary(sres.summary ?? null);
+        setSchedTotal(sres.total ?? (sres.logs ?? []).length);
+        setSchedHasMore(sres.has_more ?? false);
+      }
+      loadedRef.current.add(t);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       setPage(1);
@@ -197,8 +216,8 @@ export default function LogsPage() {
   }, [loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadOne("quotes");
+  }, [loadOne]);
 
   const runTest = async () => {
     setTesting(true);
@@ -206,7 +225,10 @@ export default function LogsPage() {
     try {
       const r = await api.quoteTest();
       setTestResult(r);
-      await load(); // ดึง log ล่าสุดที่เพิ่งเกิดจากการทดสอบ
+      // ทดสอบสร้าง quote log ใหม่ — ล้างแคช quotes แล้วโหลดแท็บปัจจุบัน
+      // (ถ้าอยู่แท็บอื่น quotes จะโหลดใหม่ตอนกดเข้ามา)
+      loadedRef.current.delete("quotes");
+      await loadOne(tabRef.current);
     } catch (e) {
       setTestResult({
         verdict: "fail",
@@ -280,7 +302,7 @@ export default function LogsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => load()} disabled={loading}
+          <button onClick={() => loadOne(tabRef.current)} disabled={loading}
             aria-busy={loading} aria-live="polite"
             title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
             className="btn-secondary disabled:opacity-50">
@@ -301,27 +323,27 @@ export default function LogsPage() {
       {/* ---------- Tabs: quotes / news / scheduler ---------- */}
       <div className="flex gap-2 text-xs">
         <button
-          onClick={() => { setTab("quotes"); tabRef.current = "quotes"; setPage(1); }}
+          onClick={() => { setTab("quotes"); tabRef.current = "quotes"; setPage(1); if (!loadedRef.current.has("quotes")) loadOne("quotes"); }}
           className={`px-3 py-1 rounded ${tab === "quotes" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           ราคา (Quote API)
         </button>
         <button
-          onClick={() => { setTab("news"); tabRef.current = "news"; setPage(1); }}
+          onClick={() => { setTab("news"); tabRef.current = "news"; setPage(1); if (!loadedRef.current.has("news")) loadOne("news"); }}
           className={`px-3 py-1 rounded ${tab === "news" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           ข่าว (News{newsSummary ? ` ${newsSummary.total}` : ""})
         </button>
         <button
-          onClick={() => { setTab("scheduler"); tabRef.current = "scheduler"; setPage(1); }}
+          onClick={() => { setTab("scheduler"); tabRef.current = "scheduler"; setPage(1); if (!loadedRef.current.has("scheduler")) loadOne("scheduler"); }}
           className={`px-3 py-1 rounded ${tab === "scheduler" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Scheduler{schedSummary ? ` ${schedSummary.total}` : ""}
         </button>
         <button
-          onClick={() => { setTab("guard"); tabRef.current = "guard"; setPage(1); }}
+          onClick={() => { setTab("guard"); tabRef.current = "guard"; setPage(1); if (!loadedRef.current.has("guard")) loadOne("guard"); }}
           className={`px-3 py-1 rounded ${tab === "guard" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Guard{schedSummary?.by_job?.position_guard ? ` ${schedSummary.by_job.position_guard.total}` : guardTotal ? ` ${guardTotal}` : ""}
         </button>
         <button
-          onClick={() => { setTab("gate"); tabRef.current = "gate"; setPage(1); }}
+          onClick={() => { setTab("gate"); tabRef.current = "gate"; setPage(1); if (!loadedRef.current.has("gate")) loadOne("gate"); }}
           className={`px-3 py-1 rounded ${tab === "gate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Gate{gateSummary ? ` ${gateSummary.blocked + gateSummary.opened}` : gateTotal ? ` ${gateTotal}` : ""}
         </button>
@@ -513,7 +535,7 @@ export default function LogsPage() {
           {(["all", "forex", "gold"] as const).map((f) => (
             <button
               key={f}
-              onClick={() => { setFilter(f); filterRef.current = f; setPage(1); load(f); }}
+              onClick={() => { setFilter(f); filterRef.current = f; setPage(1); loadOne("quotes", f); }}
               className={`px-3 py-1 rounded ${filter === f ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}
             >
               {f === "all" ? "ทั้งหมด" : f === "forex" ? "Forex" : "Gold"}
