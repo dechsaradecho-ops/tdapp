@@ -6,11 +6,17 @@ import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import LoadingGraphic from "@/components/LoadingGraphic";
 import {
+  ExtendedOpenConfirmModal,
+  ExtendedOpenResultModal,
+  ExtendedPlanView,
+} from "@/components/ExtendedOpenModal";
+import {
   BacktestConfig,
   BacktestResult,
   CorrelationResponse,
   EquityCurve,
   ExtendedAnalysis,
+  ExtendedOpenResult,
   FrequencyDecision,
   JournalAnalysis,
   KillSwitch,
@@ -65,6 +71,11 @@ export default function PerformancePanel() {
   const [bt, setBt] = useState<BacktestResult | null>(null);
   const [wf, setWf] = useState<WalkForwardResult | null>(null);
   const [btLoading, setBtLoading] = useState(false);
+  // เปิดออเดอร์จาก ORDER STRATEGY — เฉพาะขา market แรก, FINAL WAIT ล็อกปุ่ม
+  const [confirmPlan, setConfirmPlan] = useState<ExtendedPlanView | null>(null);
+  const [openBusy, setOpenBusy] = useState(false);
+  const [openError, setOpenError] = useState("");
+  const [openResult, setOpenResult] = useState<ExtendedOpenResult | null>(null);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -122,6 +133,22 @@ export default function PerformancePanel() {
   const newsBadge: Badge = news?.status === "SAFE" ? "ok" : news?.status === "CAUTION" ? "warn" : "danger";
   const killBadge: Badge = kill?.engaged ? "danger" : "ok";
   const freqBadge: Badge = freq?.allowed ? "ok" : "warn";
+
+  const confirmExtendedOpen = async () => {
+    if (openBusy) return;
+    setOpenBusy(true);
+    setOpenError("");
+    try {
+      const res = await api.extendedOpen();
+      setConfirmPlan(null);
+      setOpenResult(res);
+      await loadAll();
+    } catch (e) {
+      setOpenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOpenBusy(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -393,18 +420,22 @@ export default function PerformancePanel() {
           <div className="text-sm space-y-2">
             <p><span className="text-slate-400">FINAL DECISION:</span> <span className="font-bold">{extended.final_decision}</span></p>
             {(() => {
-              let plan: {
-                asset?: string; direction?: string; average_entry?: number;
-                stop_loss?: number; take_profit?: number;
-                entries?: { order_type?: string; price?: number; lot?: number; note?: string }[];
-                rationale?: string[];
-              } | null = null;
+              let plan: ExtendedPlanView | null = null;
               try {
                 plan = extended.order_strategy ? JSON.parse(extended.order_strategy) : null;
               } catch {
                 plan = null;
               }
-              return plan ? (
+              if (!plan) return null;
+              const isWait = (extended.final_decision || "").startsWith("WAIT");
+              const firstIsMarket = (plan.entries?.[0]?.order_type || "").toLowerCase() === "market";
+              const canOpen = !isWait && firstIsMarket;
+              const lockReason = isWait
+                ? "FINAL เป็น WAIT — ไม่ให้เปิด"
+                : !firstIsMarket
+                  ? "แผน breakout (ขาแรกไม่ใช่ market) — รอ trigger ไม่ยิง market แทน"
+                  : "";
+              return (
                 <div className="rounded border border-slate-700/60 px-3 py-2">
                   <p>
                     <span className="text-slate-400">ORDER STRATEGY:</span>{" "}
@@ -424,8 +455,26 @@ export default function PerformancePanel() {
                   {!!plan.rationale?.length && (
                     <p className="text-xs text-slate-500 pt-1">{plan.rationale.join(" · ")}</p>
                   )}
+                  <div className="pt-2">
+                    <button
+                      onClick={() => { setOpenError(""); setConfirmPlan(plan); }}
+                      disabled={!canOpen}
+                      title={canOpen ? "เปิดเฉพาะขา Market แรก (มีหน้าสรุปก่อนยืนยัน)" : lockReason}
+                      className="bg-accent text-white text-sm font-semibold rounded px-4 py-2.5 min-h-[44px] disabled:opacity-40 active:brightness-90"
+                    >
+                      เปิดออเดอร์ (ขา Market แรก)
+                    </button>
+                    {!canOpen && lockReason && (
+                      <p className="text-xs text-amber-400 pt-1">{lockReason}</p>
+                    )}
+                    {canOpen && (
+                      <p className="text-xs text-slate-500 pt-1">
+                        เปิดเฉพาะขาแรกขาเดียว · มีหน้าสรุปก่อนกดยืนยัน · แจ้ง LINE + เก็บ log อัตโนมัติ
+                      </p>
+                    )}
+                  </div>
                 </div>
-              ) : null;
+              );
             })()}
             {[
               ["NEWS & CALENDAR", extended.news_calendar],
@@ -451,6 +500,16 @@ export default function PerformancePanel() {
           </div>
         </div>
       )}
+      {/* ---------- Popup สรุปก่อนเปิด + ผลหลังยิง ---------- */}
+      <ExtendedOpenConfirmModal
+        plan={confirmPlan}
+        finalDecision={extended?.final_decision ?? ""}
+        busy={openBusy}
+        errorMsg={openError}
+        onConfirm={confirmExtendedOpen}
+        onClose={() => { if (!openBusy) { setConfirmPlan(null); setOpenError(""); } }}
+      />
+      <ExtendedOpenResultModal result={openResult} onClose={() => setOpenResult(null)} />
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   DbCounts,
   EquityCurve,
   ExtendedAnalysis,
+  ExtendedOpenResult,
   FrequencyDecision,
   GoalAssessment,
   JournalAnalysis,
@@ -188,6 +189,11 @@ export const api = {
   tradingPaper: () => get<PaperTrading>("/api/trading/paper-trading"),
 
   extendedAnalysis: () => get<ExtendedAnalysis>("/api/trading/extended-analysis"),
+
+  // POST /api/trading/extended-open — เปิดเฉพาะขา market แรกของ ORDER STRATEGY
+  // (confirm=true required; FINAL WAIT → blocked)
+  extendedOpen: () =>
+    post<ExtendedOpenResult>("/api/trading/extended-open", { confirm: true }),
 
   // ---------- Settings ----------
   getSettings: () => get<AppSettings>("/api/settings"),

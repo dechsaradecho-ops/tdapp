@@ -1646,3 +1646,117 @@ class TestExtendedAnalysisSync:
         assert body["total_trades"] == 0
         assert "XAUUSD" in body["note"] and "RSI" in body["note"]
         assert "indicator-only" in body["note"]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/trading/extended-open — open ONLY the first market leg
+# ---------------------------------------------------------------------------
+class TestExtendedOpen:
+    """Safety contract (user 2026-09-11): FINAL WAIT locks the button, only
+    entries[0] opens and only when it is a market leg, and the order flows
+    through the single execute_signal path (journal + signal_logs + LINE)."""
+
+    def _bars(self, n: int = 120):
+        from app.integrations.quotes import Candle
+        base = 1.10
+        return [Candle(o=base + i * 0.0005, h=base + i * 0.0005 + 0.002,
+                       l=base + i * 0.0005 - 0.002,
+                       c=base + i * 0.0005 + 0.001) for i in range(n)]
+
+    def _patch(self, monkeypatch, snap: dict):
+        from app.integrations import quotes as quotes_mod
+
+        async def fake_snaps(assets, **_kw):
+            return {a: dict(snap, asset=a) for a in assets}
+
+        async def fake_spot(assets, **_kw):
+            return {a: 1.10 for a in assets}, {}
+
+        async def fake_candles(asset, client, days=120):
+            return self._bars(max(30, days))
+
+        monkeypatch.setattr(quotes_mod, "fetch_all_snapshots", fake_snaps)
+        monkeypatch.setattr(quotes_mod, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(quotes_mod, "fetch_candles", fake_candles)
+
+    def _trend_snap(self) -> dict:
+        # opportunity ~75, regime bull_trend -> FINAL TRADE, market first leg
+        return {
+            "asset": "EURUSD", "price": 1.10, "ema_fast": 1.12,
+            "ema_slow": 1.08, "adx": 30.0, "supertrend_dir": 1,
+            "rsi": 62.0, "macd_hist": 0.5, "atr_pct": 0.8,
+            "volatility_index": 12.0, "news_sentiment": 0.0,
+            "high_impact_event": False, "breakout_state": 0.0,
+            "breakout_level": 0.0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_need_confirm_without_flag(self):
+        set_state(FakeDatabase())
+        body = (await call("POST", "/api/trading/extended-open", {})).json()
+        assert body["ok"] is False and body["status"] == "need_confirm"
+
+    @pytest.mark.asyncio
+    async def test_trade_opens_first_market_leg(self, monkeypatch):
+        self._patch(monkeypatch, self._trend_snap())
+        db = FakeDatabase(rows={"market_analysis": [
+            {"asset": "EURUSD", "regime": "bull_trend", "sentiment": "bullish",
+             "confidence": 78.0, "explanation": "t"},
+        ]})
+        set_state(db)
+        body = (await call("POST", "/api/trading/extended-open",
+                           {"confirm": True})).json()
+        assert body["ok"] is True, body
+        assert body["status"] == "executed"
+        assert body["asset"] == "EURUSD"
+        assert body["final_decision"].startswith("TRADE")
+        assert body["ticket"] == "TCK-123"
+        assert body["volume"] == pytest.approx(0.076, abs=0.02)
+        assert body["remaining_legs"] == 2
+        opens = db.rows.get("paper_trades", [])
+        assert len(opens) == 1 and opens[0]["source"] == "extended"
+        logs = db.rows.get("signal_logs", [])
+        assert any(r.get("event") == "order_opened"
+                   and r.get("source") == "extended" for r in logs)
+        notes = db.rows.get("notifications", [])
+        assert any(r.get("type") == "trade_opened" for r in notes)
+
+    @pytest.mark.asyncio
+    async def test_wait_blocks_and_logs(self, monkeypatch):
+        # choppy snapshot -> opportunity ~55 < 70 -> FINAL WAIT, never executes
+        snap = dict(self._trend_snap(), ema_fast=1.1004, ema_slow=1.0996,
+                    adx=12.0, supertrend_dir=0, rsi=50.0, macd_hist=0.1,
+                    atr_pct=0.5, volatility_index=8.0)
+        self._patch(monkeypatch, snap)
+        db = FakeDatabase(rows={"market_analysis": [
+            {"asset": "EURUSD", "regime": "sideway", "sentiment": "neutral",
+             "confidence": 42.5, "explanation": "t"},
+        ]})
+        set_state(db)
+        body = (await call("POST", "/api/trading/extended-open",
+                           {"confirm": True})).json()
+        assert body["ok"] is False and body["status"] == "blocked"
+        assert body["final_decision"].startswith("WAIT")
+        assert db.rows.get("paper_trades", []) == []
+        logs = db.rows.get("signal_logs", [])
+        assert any(r.get("event") == "order_blocked"
+                   and r.get("source") == "extended" for r in logs)
+
+    @pytest.mark.asyncio
+    async def test_sideway_first_leg_not_market_blocked(self, monkeypatch):
+        # adx 15 -> regime sideway (breakout stops, no market leg) but
+        # opportunity ~75 -> FINAL TRADE -> blocked on the leg check, honestly
+        snap = dict(self._trend_snap(), adx=15.0, rsi=50.0,
+                    volatility_index=8.0)
+        self._patch(monkeypatch, snap)
+        db = FakeDatabase(rows={"market_analysis": [
+            {"asset": "EURUSD", "regime": "sideway", "sentiment": "neutral",
+             "confidence": 80.0, "explanation": "t"},
+        ]})
+        set_state(db)
+        body = (await call("POST", "/api/trading/extended-open",
+                           {"confirm": True})).json()
+        assert body["ok"] is False and body["status"] == "blocked"
+        assert body["final_decision"].startswith("TRADE")
+        assert any("market" in str(r) for r in body.get("rejects", []))
+        assert db.rows.get("paper_trades", []) == []

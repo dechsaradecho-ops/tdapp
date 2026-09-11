@@ -124,6 +124,65 @@ def _journal_entries_from_paper_trades(rows: list[dict]) -> list[JournalEntry]:
 
 
 # ---------------------------------------------------------------- frequency
+def _frequency_counts(db) -> tuple[int, int, int]:
+    """Shared today/week/open counting over paper_trades (the live journal).
+
+    Single source for the /frequency badge, Extended and the execution
+    gate — all three must see the same quotas or the UI drifts from the
+    real gate (2026-09-11: Extended FINAL always WAIT while /approve opened).
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    try:
+        all_trades = db.select("paper_trades", limit=500)
+    except Exception:
+        all_trades = []
+    today_count = len([r for r in all_trades
+                       if str(r.get("created_at", ""))[:10] == today
+                       and r.get("status") != "rejected"])
+    week_count = len([r for r in all_trades
+                      if str(r.get("created_at", "")) >= week_ago[:10]
+                      and r.get("status") != "rejected"])
+    try:
+        open_rows = db.select("paper_trades", filters={"status": "open"},
+                              limit=100)
+        open_count = len(open_rows or [])
+    except Exception:
+        open_count = 0
+    return today_count, week_count, open_count
+
+
+def _evaluate_frequency(db, s: AppSettings, confidence: float,
+                        asset: str = "",
+                        profile: RiskProfile | None = None) -> FrequencyDecision:
+    """Frequency check aligned with the execution gate (execution.py Gate 2).
+
+    Regime gating belongs to the scanner, not the executor — the gate
+    evaluates with regime="bull_trend" so a trend top-scorer is not
+    throttled by the sideway default. Quality bar uses the per-asset
+    threshold (gold override) so Extended and /approve never drift apart.
+    """
+    today_count, week_count, open_count = _frequency_counts(db)
+    return FrequencyEngine(
+        profile or s.risk_profile,
+        limits_override=TradeLimits(
+            max_trades_daily=s.max_trades_daily,
+            max_trades_weekly=s.max_trades_weekly,
+            max_open_positions=s.max_open_positions,
+            risk_per_trade_pct=s.risk_per_trade_pct,
+        ),
+        min_confidence=effective_min_confidence(s, asset),
+        drawdown_throttle_pct=s.drawdown_throttle_pct,
+    ).evaluate(
+        confidence=confidence,
+        trades_today=today_count,
+        trades_this_week=week_count,
+        open_positions=open_count,
+        regime="bull_trend",  # regime gating belongs to the scanner
+        volatility_index=0.0,
+    )
+
+
 @router.get("/frequency", response_model=FrequencyDecision)
 async def get_frequency(request: Request,
                         profile: RiskProfile | None = None) -> FrequencyDecision:
@@ -135,36 +194,8 @@ async def get_frequency(request: Request,
     """
     db = request.app.state.db
     s = _settings(request)
-    eff_profile = profile or s.risk_profile
-    today = datetime.now(timezone.utc).date().isoformat()
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-
-    try:
-        all_trades = db.select("paper_trades", limit=500)
-    except Exception:
-        all_trades = []
-    today_trades = [r for r in all_trades
-                    if str(r.get("created_at", ""))[:10] == today
-                    and r.get("status") != "rejected"]
-    week_count = len([r for r in all_trades
-                      if str(r.get("created_at", "")) >= week_ago[:10]
-                      and r.get("status") != "rejected"])
-
-    return FrequencyEngine(
-        eff_profile,
-        limits_override=TradeLimits(
-            max_trades_daily=s.max_trades_daily,
-            max_trades_weekly=s.max_trades_weekly,
-            max_open_positions=s.max_open_positions,
-            risk_per_trade_pct=s.risk_per_trade_pct,
-        ),
-        min_confidence=s.min_confidence,
-        drawdown_throttle_pct=s.drawdown_throttle_pct,
-    ).evaluate(
-        confidence=s.min_confidence,
-        trades_today=len(today_trades),
-        trades_this_week=week_count,
-    )
+    return _evaluate_frequency(db, s, confidence=float(s.min_confidence),
+                               asset="", profile=profile)
 
 
 # ------------------------------------------------------------ order strategy
@@ -193,6 +224,148 @@ async def build_order_plan(payload: PlanOrderRequest) -> OrderPlan:
         regime=payload.regime, equity=payload.equity,
         risk_per_trade_pct=payload.risk_per_trade_pct,
     )
+
+
+class ExtendedOpenRequest(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/extended-open")
+async def extended_open(payload: ExtendedOpenRequest,
+                        request: Request) -> dict:
+    """Open ONLY the first market leg of the Extended ORDER STRATEGY plan.
+
+    Safety contract (user 2026-09-11):
+      - FINAL DECISION must be TRADE — WAIT blocks, never bypassed.
+      - Only entries[0] opens, and only when it is a market leg. Trend
+        plans start with market + 2 limits; sideway plans start with stops
+        (no market leg) → blocked with an honest reason.
+      - Same single execution path as /approve + auto-trader
+        (execute_signal: live re-anchor → gates → sizing → journal +
+        signal_logs + LINE notify). No custom duplicate notify/log here.
+    """
+    import json as _json
+
+    from app.services.notification_service import NotificationService
+
+    db = request.app.state.db
+    if not payload.confirm:
+        return {"ok": False, "status": "need_confirm",
+                "message": "ต้องยืนยัน (confirm=true) ก่อนเปิดออเดอร์"}
+
+    # Reuse the live Extended computation (top scorer + real proposal +
+    # officer + final decision) so the button can never drift from the box.
+    body = await extended_analysis(request)
+    final = str(body.get("final_decision") or "")
+    if final.startswith("WAIT"):
+        signal_log.log_event(
+            db=db, event="order_blocked", asset="", direction="",
+            source="extended", reason=f"FINAL DECISION เป็น WAIT — {final}")
+        return {"ok": False, "status": "blocked", "final_decision": final,
+                "rejects": [final or "FINAL DECISION เป็น WAIT"],
+                "message": f"ไม่เปิดออเดอร์ — {final}"}
+
+    try:
+        plan = _json.loads(str(body.get("order_strategy") or "{}"))
+    except (ValueError, TypeError):
+        plan = {}
+    legs = list((plan or {}).get("entries") or [])
+    if not legs:
+        return {"ok": False, "status": "blocked", "final_decision": final,
+                "rejects": ["แผนไม่มีขาให้เปิด"],
+                "message": "ไม่เปิดออเดอร์ — แผนไม่มีขาให้เปิด"}
+    first = dict(legs[0] or {})
+    if str(first.get("order_type") or "").lower() != "market":
+        reason = (f"ขาแรกเป็น {first.get('order_type')} ไม่ใช่ market — "
+                  "แผน breakout (sideway) ให้รอ trigger ไม่ยิง market แทน")
+        signal_log.log_event(
+            db=db, event="order_blocked",
+            asset=str((plan or {}).get("asset") or ""),
+            direction=str((plan or {}).get("direction") or ""),
+            source="extended", reason=reason)
+        return {"ok": False, "status": "blocked", "final_decision": final,
+                "rejects": [reason],
+                "message": f"ไม่เปิดออเดอร์ — {reason}"}
+
+    asset = str((plan or {}).get("asset") or "").upper()
+    direction = str((plan or {}).get("direction") or "BUY").upper()
+    try:
+        entry = float(first.get("price") or (plan or {}).get("average_entry") or 0)
+    except (TypeError, ValueError):
+        entry = 0.0
+    try:
+        stop_loss = float((plan or {}).get("stop_loss") or 0) or None
+    except (TypeError, ValueError):
+        stop_loss = None
+    try:
+        take_profit = float((plan or {}).get("take_profit") or 0) or None
+    except (TypeError, ValueError):
+        take_profit = None
+
+    # Confidence for the gate = the SAME proposal confidence FINAL used
+    # (extended_analysis recomputed it from the live snapshot; the scanner
+    # row can be stale/lower and would drift the gate away from FINAL).
+    try:
+        confidence = float(body.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not confidence:
+        try:
+            _rows = db.select("market_analysis", limit=50) or []
+        except Exception:
+            _rows = []
+        _seen: set[str] = set()
+        try:
+            for _r in _rows:
+                _a = str(_r.get("asset") or "").upper()
+                if not _a or _a in _seen:
+                    continue
+                _seen.add(_a)
+                if _a == asset:
+                    confidence = float(_r.get("confidence") or 0)
+                    break
+        except (TypeError, ValueError):
+            pass
+
+    s = _settings(request)
+    broker = request.app.state.broker
+    notifier = NotificationService(db, request.app.state.line)
+    report = await execution.execute_signal(
+        db, broker, notifier, s,
+        user_id=execution.DEFAULT_USER,
+        asset=asset, direction=direction,  # type: ignore[arg-type]
+        entry=entry, stop_loss=stop_loss, take_profit=take_profit,
+        confidence=confidence, opportunity=confidence,
+        signal_id=None, source="extended",
+    )
+    if not report.allowed:
+        return {"ok": False, "status": "blocked", "final_decision": final,
+                "rejects": report.rejects, "checks": report.checks,
+                "asset": asset, "direction": direction,
+                "message": "ไม่เปิดออเดอร์ — " + ("; ".join(report.rejects[:2])
+                                                  or "gate blocked")}
+
+    # Newest open row for this asset = the ticket just created (select is
+    # newest-first both in prod and FakeDatabase).
+    ticket = ""
+    try:
+        _open = db.select("paper_trades", filters={"status": "open"},
+                          limit=10) or []
+        for _r in _open:
+            if str(_r.get("asset") or "").upper() == asset:
+                ticket = str(_r.get("ticket") or "")
+                break
+        if not ticket and _open:
+            ticket = str(_open[0].get("ticket") or "")
+    except Exception:
+        ticket = ""
+    return {"ok": True, "status": "executed", "final_decision": final,
+            "asset": asset, "direction": direction, "ticket": ticket,
+            "volume": report.size_lots, "checks": report.checks,
+            "remaining_legs": len(legs) - 1,
+            "message": (f"เปิดขา Market แล้ว {direction} {asset} "
+                        f"{report.size_lots:g} lots"
+                        + (f" (ticket {ticket})" if ticket else ""))}
 
 
 # ------------------------------------------------------------- correlation
@@ -1281,7 +1454,12 @@ async def extended_analysis(request: Request) -> dict:
     else:
         asset, regime, confidence = "EURUSD", "sideway", 0.0
 
-    freq = await get_frequency(request)
+    # Frequency aligned with the execution gate (same counting + bull_trend
+    # bypass + per-asset quality bar) so FINAL can reach TRADE on a clean
+    # trend top-scorer. The old get_frequency() defaulted regime=sideway →
+    # always throttled → officer REJECTED → FINAL always WAIT, so the
+    # open button could never fire even though /approve opened fine.
+    freq = _evaluate_frequency(db, s, confidence=confidence, asset=asset)
     news = await get_calendar(request)
     session = get_session_sync()
     corr = await get_correlation(request)
@@ -1360,9 +1538,10 @@ async def extended_analysis(request: Request) -> dict:
         regime=regime, atr_pct=_atr,
         equity=s.capital,
         risk_per_trade_pct=freq.limits.risk_per_trade_pct if freq.limits else 1.0)
-    # re-run the officer against the REAL proposal confidence so the
-    # review/final decision match the plan shown (the old flow reviewed the
-    # scanner-row score but displayed dummy BUY legs).
+    # re-evaluate frequency + officer against the REAL proposal confidence
+    # so the review/final decision match the plan shown (the old flow
+    # reviewed the scanner-row score but displayed dummy BUY legs).
+    freq = _evaluate_frequency(db, s, confidence=confidence, asset=asset)
     officer = RiskOfficer().review_trade(
         confidence=confidence, opportunity_score=confidence,
         frequency=freq, news_risk=news, kill_switch=ks,
@@ -1403,6 +1582,10 @@ async def extended_analysis(request: Request) -> dict:
                     f"ยิง POST /api/trading/backtest เพื่อรันตาม indicator")
 
     return {
+        "asset": asset,
+        "confidence": confidence,
+        "direction": _direction,
+        "regime": regime,
         "news_calendar": f"{news.status}: {news.reason}",
         "session_analysis": f"{', '.join(session.active_sessions) or 'ปิดตลาด'} "
                             f"({session.volatility_hint} volatility, {session.current_utc_time})",

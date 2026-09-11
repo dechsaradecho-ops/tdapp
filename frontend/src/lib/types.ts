@@ -514,6 +514,21 @@ export interface ExtendedAnalysis {
   context_block?: string;
 }
 
+/** Response of POST /api/trading/extended-open (open first market leg). */
+export interface ExtendedOpenResult {
+  ok: boolean;
+  status: string;
+  final_decision?: string;
+  asset?: string;
+  direction?: string;
+  ticket?: string;
+  volume?: number;
+  checks?: string[];
+  rejects?: string[];
+  remaining_legs?: number;
+  message: string;
+}
+
 // ---------- App Settings ----------
 export interface AppSettings {
   risk_profile: RiskProfile;
