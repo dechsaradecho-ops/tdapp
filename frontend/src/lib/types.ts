@@ -11,7 +11,9 @@ export interface Scenario {
   note: string;
 }
 
-/** Live portfolio/market state the goal assessment was adjusted by. */
+/** Live portfolio/market state the goal assessment was adjusted by.
+ *  Enriched fields (2026-09-11 goal-vs-live sync) mirror the monitor
+ *  dashboard — all optional so old responses still parse. */
 export interface GoalRealityContext {
   data_available: boolean;
   pnl_total: number;
@@ -24,6 +26,22 @@ export interface GoalRealityContext {
   kill_triggers: string[];
   trading_paused: boolean;
   pause_reason: string;
+  /** Unrealized PnL of open positions at live marks (USD). */
+  unrealized_pnl?: number;
+  /** Live equity = settings capital + realized + unrealized. */
+  equity?: number;
+  /** Peak-to-current drawdown % from equity_snapshots. */
+  drawdown_pct?: number;
+  trades_today?: number;
+  trades_week?: number;
+  order_mode?: string;
+  allowed_assets?: string[];
+  risk_per_trade_pct?: number;
+  /** trading_settings.capital — the single source of truth. */
+  settings_capital?: number;
+  /** Asset behind market_regime (top opportunity scorer). */
+  top_asset?: string;
+  top_score?: number;
 }
 
 export interface GoalAssessment {

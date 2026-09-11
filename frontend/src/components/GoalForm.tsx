@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
@@ -30,7 +30,7 @@ const REGIME_LABELS: Record<string, string> = {
   news_driven_market: "ขับเคลื่อนด้วยข่าว",
 };
 
-export default function GoalForm() {
+export default function GoalForm({ onAssessed }: { onAssessed?: (targetPct: number) => void }) {
   const { capital, setCapital } = usePortfolio();
   const [target, setTarget] = useState(3);
   const [profile, setProfile] = useState("moderate");
@@ -39,15 +39,46 @@ export default function GoalForm() {
   const [result, setResult] = useState<GoalAssessment | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [seeded, setSeeded] = useState(false);
+
+  // Seed from the single source of truth — trading_settings (same values
+  // the chat context + execution gate use) + last assessed target.
+  // Fail-soft: settings may 401 before PIN login; keep the hardcoded
+  // defaults so the form stays usable offline.
+  useEffect(() => {
+    let alive = true;
+    try {
+      const saved = window.localStorage.getItem("tdapp_goal_target");
+      if (saved != null && Number.isFinite(Number(saved))) {
+        const v = Math.min(100, Math.max(0.5, Number(saved)));
+        if (alive) setTarget(v);
+      }
+    } catch { /* private mode — ignore */ }
+    api.getSettings()
+      .then((s) => {
+        if (!alive) return;
+        if (s.risk_profile) setProfile(s.risk_profile);
+        if (Number.isFinite(s.max_drawdown_pct) && s.max_drawdown_pct > 0) setMaxDd(s.max_drawdown_pct);
+        if (s.order_mode) setMode(s.order_mode);
+        // Capital lives in the portfolio store (monitor snapshot); the
+        // store's own CapitalSync seeds it — don't fight it here.
+        setSeeded(true);
+      })
+      .catch(() => { if (alive) setSeeded(true); });
+    return () => { alive = false; };
+  }, []);
 
   const submit = async () => {
     setLoading(true);
     setError(null);
     try {
-      setResult(await api.assessGoal({
+      const r = await api.assessGoal({
         capital, target_return_pct: target,
         risk_profile: profile, max_drawdown_pct: maxDd, trading_mode: mode,
-      }));
+      });
+      setResult(r);
+      try { window.localStorage.setItem("tdapp_goal_target", String(target)); } catch { /* ignore */ }
+      onAssessed?.(target);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -68,6 +99,9 @@ export default function GoalForm() {
     <div className="grid md:grid-cols-2 gap-4">
       <div className="panel">
         <h2 className="panel-title">Goal Engine — ประเมินความเป็นไปได้ของเป้าหมาย</h2>
+        {!seeded && (
+          <p className="text-xs text-slate-500 mb-2">กำลังโหลดค่าจากตั้งค่า…</p>
+        )}
         <div className="space-y-3">
           <label className="block text-sm">
             Capital (USD)
@@ -169,6 +203,10 @@ function RealityPanel({ reality }: { reality: GoalRealityContext }) {
   const regime = REGIME_LABELS[reality.market_regime] ?? reality.market_regime;
   const pnlColor = reality.pnl_total > 0 ? "text-profit" : reality.pnl_total < 0 ? "text-loss" : "";
   const blocked = reality.kill_switch_engaged || reality.trading_paused;
+  const unreal = reality.unrealized_pnl ?? 0;
+  const unrealColor = unreal > 0 ? "text-profit" : unreal < 0 ? "text-loss" : "";
+  const equity = reality.equity ?? 0;
+  const dd = reality.drawdown_pct ?? 0;
   return (
     <div className={`border rounded p-3 text-sm space-y-2 ${blocked ? "border-loss/40 bg-loss/10" : "border-accent/30 bg-accent/5"}`}>
       <p className="font-semibold text-slate-200 flex items-center gap-1.5"><Icon n="target" size={14} /> ประเมินจากสถานะจริงของคุณ</p>
@@ -177,12 +215,52 @@ function RealityPanel({ reality }: { reality: GoalRealityContext }) {
         <span className={`text-right font-semibold ${pnlColor}`}>
           {reality.pnl_total >= 0 ? "+" : ""}{fmtMoney(reality.pnl_total)}
         </span>
+        {unreal !== 0 && (
+          <>
+            <span>ไม้ค้าง (Unrealized)</span>
+            <span className={`text-right font-semibold ${unrealColor}`}>
+              {unreal >= 0 ? "+" : ""}{fmtMoney(unreal)}
+            </span>
+          </>
+        )}
+        {equity > 0 && (
+          <>
+            <span>Equity ปัจจุบัน</span>
+            <span className="text-right font-semibold">{fmtMoney(equity)}</span>
+          </>
+        )}
+        {dd > 0 && (
+          <>
+            <span>Drawdown (peak→ตอนนี้)</span>
+            <span className="text-right font-semibold">{dd.toFixed(1)}%</span>
+          </>
+        )}
         <span>Win Rate</span>
         <span className="text-right font-semibold">{reality.win_rate.toFixed(0)}% ({reality.closed_count} ไม้)</span>
         <span>ไม้เปิดค้าง</span>
         <span className="text-right font-semibold">{reality.open_positions}</span>
+        {(reality.trades_today != null || reality.trades_week != null) && (
+          <>
+            <span>ความถี่ (วัน/สัปดาห์)</span>
+            <span className="text-right font-semibold">{reality.trades_today ?? 0} / {reality.trades_week ?? 0}</span>
+          </>
+        )}
         <span>ตลาดตอนนี้</span>
-        <span className="text-right font-semibold">{regime}</span>
+        <span className="text-right font-semibold">
+          {regime}{reality.top_asset ? ` · ${reality.top_asset}` : ""}{reality.top_score ? ` ${reality.top_score.toFixed(0)}%` : ""}
+        </span>
+        {reality.order_mode && (
+          <>
+            <span>โหมดเทรด</span>
+            <span className="text-right font-semibold">{reality.order_mode.toUpperCase()}</span>
+          </>
+        )}
+        {reality.risk_per_trade_pct ? (
+          <>
+            <span>Risk / ไม้</span>
+            <span className="text-right font-semibold">{reality.risk_per_trade_pct}%</span>
+          </>
+        ) : null}
       </div>
       {reality.kill_switch_engaged && (
         <p className="text-loss flex items-start gap-1.5"><Icon n="octagon" size={14} className="mt-0.5" /><span>Kill Switch: {reality.kill_triggers.join("; ")}</span></p>

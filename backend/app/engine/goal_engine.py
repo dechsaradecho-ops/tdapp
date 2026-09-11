@@ -36,6 +36,14 @@ PNL_BONUS_THRESHOLD = 0.0         # realized PnL > 0 → +1 tier
 PNL_PENALTY_THRESHOLD = 0.0       # realized PnL < 0 → −1 tier
 BULL_REGIME_BONUS = True          # bull_trend/strong_bull → +1 tier
 BEAR_REGIME_PENALTY = True        # bear_trend/strong_bear → −1 tier
+# Live-system sync (2026-09-11): the scanner's most common outputs are
+# sideway / high_volatility / news_driven_market — the old code ignored all
+# three, so the assessment never reacted to the market the user actually sees.
+HIGH_VOL_PENALTY = True           # high_volatility → −1 tier (wide SL, smaller size)
+NEWS_PENALTY = True               # news_driven_market → −1 tier (wait for calm)
+# Drawdown pressure: when the live peak-to-current drawdown has eaten most of
+# the user's max-drawdown budget, the target is harder to chase safely.
+DRAWDOWN_PRESSURE_RATIO = 0.8     # dd >= 80% of max_dd → −1 tier
 
 _PROBABILITY_ORDER = [Probability.low, Probability.moderate, Probability.high]
 
@@ -136,7 +144,9 @@ class GoalEngine:
                 reasons.append(
                     f"📊 สถิติจริง: Win Rate {reality.win_rate:.0f}% จาก {reality.closed_count} ไม้ที่ปิดแล้ว (ต่ำ) → ปรับลง 1 ระดับ")
 
-        # 3) Market regime — trending market helps trend-following systems
+        # 3) Market regime — trending market helps trend-following systems.
+        # Synced with the scanner's 7 MarketRegime values (market.py header +
+        # chat context both use the top scorer — see goal.py _reality_from_db).
         regime = (reality.market_regime or "").lower()
         if BULL_REGIME_BONUS and regime in ("bull_trend", "strong_bull_trend"):
             steps += 1
@@ -146,6 +156,39 @@ class GoalEngine:
             steps -= 1
             reasons.append(
                 f"📉 ตลาดจริงตอนนี้: {regime} ({reality.market_sentiment}) → สวนทางกับระบบ → ปรับลง 1 ระดับ")
+        elif HIGH_VOL_PENALTY and regime == "high_volatility":
+            steps -= 1
+            reasons.append(
+                f"🌪️ ตลาดจริงตอนนี้: high_volatility ({reality.market_sentiment}) → ผันผวนหนัก ต้องลดขนาด/กว้าง SL → ปรับลง 1 ระดับ")
+        elif NEWS_PENALTY and regime == "news_driven_market":
+            steps -= 1
+            reasons.append(
+                f"📰 ตลาดจริงตอนนี้: news_driven_market ({reality.market_sentiment}) → ตลาดขับเคลื่อนด้วยข่าว รอให้สงบก่อน → ปรับลง 1 ระดับ")
+        elif regime == "sideway":
+            reasons.append(
+                f"➖ ตลาดจริงตอนนี้: sideway ({reality.market_sentiment}) → ตลาดไร้เทรนด์ รอ breakout — ไม่ปรับระดับ")
+
+        # 3b) Live drawdown pressure — snapshot drawdown eating the budget
+        try:
+            dd = float(getattr(reality, "drawdown_pct", 0.0) or 0.0)
+            max_dd = float(goal.max_drawdown_pct or 0.0)
+        except Exception:
+            dd, max_dd = 0.0, 0.0
+        if max_dd > 0 and dd >= max_dd * DRAWDOWN_PRESSURE_RATIO:
+            steps -= 1
+            reasons.append(
+                f"⚠️ Drawdown จริง {dd:.1f}% ใกล้เพดาน {max_dd:.1f}% → พื้นที่เสี่ยงเหลือน้อย → ปรับลง 1 ระดับ")
+
+        # 3c) Unrealized drag — open positions deeply red drag the assessment
+        try:
+            unreal = float(getattr(reality, "unrealized_pnl", 0.0) or 0.0)
+            cap = float(goal.capital or 0.0)
+        except Exception:
+            unreal, cap = 0.0, 0.0
+        if cap > 0 and unreal < 0 and abs(unreal) / cap * 100.0 >= max_dd * 0.5:
+            steps -= 1
+            reasons.append(
+                f"📉 ไม้ค้างขาดทุน {unreal:,.2f} ( Unrealized) → กดดันเป้าหมายเดือนนี้ → ปรับลง 1 ระดับ")
 
         # 4) Kill switch / manual pause — hard block, cannot be offset by bonuses
         blocked = bool(reality.kill_switch_engaged or reality.trading_paused)

@@ -89,6 +89,12 @@ class GoalRealityContext(BaseModel):
     All fields are optional-safe: when the DB has no data yet (fresh install,
     stats just reset) the engine falls back to the pure envelope math and
     `data_available=False` tells the UI to show "ยังไม่มีข้อมูลการเทรดจริง".
+
+    Enriched (2026-09-11, goal-vs-live sync): the context now mirrors what
+    the monitor dashboard shows — unrealized PnL (live marks), equity,
+    snapshot drawdown, today/week frequency, order_mode, tradable universe,
+    risk-per-trade and the top-scoring asset behind the regime. All new
+    fields default to neutral so old clients/tests keep validating.
     """
     data_available: bool = False
     pnl_total: float = 0.0            # realized PnL of closed trades (USD)
@@ -101,6 +107,18 @@ class GoalRealityContext(BaseModel):
     kill_triggers: list[str] = Field(default_factory=list)
     trading_paused: bool = False
     pause_reason: str = ""
+    # ---- enriched live state (monitor parity) ---------------------------
+    unrealized_pnl: float = 0.0       # open positions at live marks (USD)
+    equity: float = 0.0               # settings capital + realized + unrealized
+    drawdown_pct: float = 0.0         # peak-to-current % from equity_snapshots
+    trades_today: int = 0
+    trades_week: int = 0
+    order_mode: str = "auto"          # auto / semi_auto / manual
+    allowed_assets: list[str] = Field(default_factory=list)
+    risk_per_trade_pct: float = 0.0
+    settings_capital: float = 0.0     # trading_settings.capital (single source)
+    top_asset: str = ""               # asset behind market_regime (top scorer)
+    top_score: float = 0.0            # its opportunity score
 
 
 class GoalAssessment(BaseModel):

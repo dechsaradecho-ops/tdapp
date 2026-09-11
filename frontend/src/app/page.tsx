@@ -29,9 +29,18 @@ export default function DashboardPage() {
   const [summaryErr, setSummaryErr] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [selected, setSelected] = useState("XAUUSD");
+  // Monthly Goal stat — reflects the last assessed target (persisted by
+  // GoalForm in localStorage), not a hardcoded 3%.
+  const [goalPct, setGoalPct] = useState(3);
   const { capital, equity, pnl } = usePortfolio();
 
   useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("tdapp_goal_target");
+      if (saved != null && Number.isFinite(Number(saved))) {
+        setGoalPct(Math.min(100, Math.max(0.5, Number(saved))));
+      }
+    } catch { /* private mode — keep default */ }
     api.marketSummary()
       .then((s) => { setSummary(s); setSummaryLoading(false); })
       .catch(() => { setSummaryErr(true); setSummaryLoading(false); });
@@ -86,13 +95,13 @@ export default function DashboardPage() {
         <Stat label="Capital" value={fmtMoney(capital)} />
         <Stat label="Current Equity" value={fmtMoney(equity)} positive={pnl >= 0} />
         <Stat label="Current PnL" value={fmtMoney(pnl)} positive={pnl >= 0} />
-        <Stat label="Monthly Goal" value="3%" />
+        <Stat label="Monthly Goal" value={`${goalPct}%`} />
       </section>
 
       {/* ---------- สถานะการเทรดอัตโนมัติ: เปิดได้/ไม่ได้ เพราะปัจจัยอะไร ---------- */}
       <AutoTradeReadinessCard />
 
-      <GoalForm />
+      <GoalForm onAssessed={setGoalPct} />
 
       {/* ---------- Market Regime Analysis (จาก /market เดิม) ---------- */}
       <section className="panel">

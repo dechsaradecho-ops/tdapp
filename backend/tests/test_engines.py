@@ -167,6 +167,41 @@ class TestGoalRealityAdjustment:
             market_regime="strong_bull_trend"))
         assert result.probability == Probability.high
 
+    def test_high_volatility_downgrades_probability(self):
+        """Live sync: high_volatility (the scanner's common output) −1 tier."""
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            market_regime="high_volatility", market_sentiment="neutral"))
+        assert result.probability == Probability.moderate
+        assert any("high_volatility" in r for r in result.reasoning)
+
+    def test_news_driven_market_downgrades_probability(self):
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            market_regime="news_driven_market", market_sentiment="neutral"))
+        assert result.probability == Probability.moderate
+        assert any("news_driven" in r for r in result.reasoning)
+
+    def test_sideway_leaves_tier_with_explainer(self):
+        """Sideway no longer silently ignored — a reasoning line says so."""
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            market_regime="sideway"))
+        assert result.probability == Probability.high
+        assert any("sideway" in r for r in result.reasoning)
+
+    def test_drawdown_pressure_downgrades_probability(self):
+        """DD 8% of a 10% budget (>=80%) → −1 tier with a warning line."""
+        result = GoalEngine().assess(make_goal(target=3.0), make_reality(
+            drawdown_pct=8.5))
+        assert result.probability == Probability.moderate
+        assert any("Drawdown" in r for r in result.reasoning)
+
+    def test_deep_unrealized_loss_downgrades_probability(self):
+        """Open positions −6% of capital with a 10% budget → −1 tier."""
+        result = GoalEngine().assess(
+            make_goal(target=3.0, capital=10_000), make_reality(
+                unrealized_pnl=-600.0))
+        assert result.probability == Probability.moderate
+        assert any("Unrealized" in r or "ไม้ค้าง" in r for r in result.reasoning)
+
 
 # ---------------------------------------------------------------------------
 # Strategy Engine — opportunity scoring
@@ -902,6 +937,95 @@ class TestApiRoutes:
         data = r.json()
         assert data["reality"]["data_available"] is False
         assert data["probability"] in ("high", "high_probability")
+
+    async def test_goal_assess_uses_top_scorer_not_newest_row(self, client):
+        """Live sync: regime must come from the TOP-SCORING asset (same as
+        the market header + chat context) — not analysis[0] (newest row)."""
+        from tests.test_workers import FakeDatabase
+
+        db = FakeDatabase()
+        # FakeDatabase inserts prepend (newest first): insert the bull winner
+        # FIRST so the sideway EURUSD 42.5 ends up newest at index 0 — the old
+        # analysis[0] logic would pick sideway, the top scorer must win.
+        db.insert("market_analysis", {
+            "asset": "XAUUSD", "regime": "strong_bull_trend",
+            "sentiment": "bullish", "confidence": 78.0, "explanation": "t",
+        })
+        db.insert("market_analysis", {
+            "asset": "EURUSD", "regime": "sideway", "sentiment": "neutral",
+            "confidence": 42.5, "explanation": "t",
+        })
+        app.state.db = db
+
+        r = await client.post("/api/goal/assess", json={
+            "capital": 100_000, "target_return_pct": 3, "risk_profile": "moderate",
+            "max_drawdown_pct": 10, "trading_mode": "manual",
+        })
+        assert r.status_code == 200
+        reality = r.json()["reality"]
+        assert reality["market_regime"] == "strong_bull_trend"
+        assert reality["top_asset"] == "XAUUSD"
+        assert reality["top_score"] == pytest.approx(78.0)
+
+    async def test_goal_assess_paged_trades_past_500(self, client):
+        """Live sync: stats must page past the old 500-row truncation."""
+        from tests.test_workers import FakeDatabase
+
+        db = FakeDatabase()
+        # FakeDatabase.select_paged returns ALL rows; spy that the route takes
+        # the paged path for the main journal read (kill-switch internals may
+        # still use plain select — only the stats read must be paged).
+        for i in range(600):
+            db.insert("paper_trades", {
+                "user_id": "u1", "asset": "EURUSD", "direction": "BUY",
+                "volume": 0.01, "entry_price": 1.1, "exit_price": 1.11,
+                "pnl": 1.0, "status": "closed",
+            })
+        paged_calls: list[str] = []
+        orig_paged = db.select_paged
+        def spy_paged(table: str, *a, **k):
+            paged_calls.append(table)
+            return orig_paged(table, *a, **k)
+        db.select_paged = spy_paged  # type: ignore[method-assign]
+        app.state.db = db
+        try:
+            r = await client.post("/api/goal/assess", json={
+                "capital": 100_000, "target_return_pct": 3,
+                "risk_profile": "moderate", "max_drawdown_pct": 10,
+                "trading_mode": "manual",
+            })
+        finally:
+            db.select_paged = orig_paged  # type: ignore[method-assign]
+        assert r.status_code == 200
+        reality = r.json()["reality"]
+        assert "paper_trades" in paged_calls
+        assert reality["closed_count"] == 600
+        assert reality["pnl_total"] == pytest.approx(600.0)
+
+    async def test_goal_assess_enriched_fields_present(self, client):
+        """Live sync: unrealized/equity/drawdown/frequency/settings echo."""
+        from tests.test_workers import FakeDatabase
+
+        db = FakeDatabase()
+        db.insert("paper_trades", {
+            "user_id": "u1", "asset": "EURUSD", "direction": "BUY",
+            "volume": 0.1, "entry_price": 1.1, "exit_price": 1.11,
+            "pnl": 50.0, "status": "closed",
+            "created_at": "2026-09-11T00:00:00+00:00",
+        })
+        app.state.db = db
+
+        r = await client.post("/api/goal/assess", json={
+            "capital": 10_000, "target_return_pct": 3, "risk_profile": "moderate",
+            "max_drawdown_pct": 10, "trading_mode": "manual",
+        })
+        assert r.status_code == 200
+        reality = r.json()["reality"]
+        for field in ("unrealized_pnl", "equity", "drawdown_pct",
+                      "trades_today", "trades_week", "order_mode",
+                      "allowed_assets", "risk_per_trade_pct",
+                      "settings_capital", "top_asset", "top_score"):
+            assert field in reality, f"missing enriched field {field}"
 
     async def test_market_summary(self, client):
         r = await client.get("/api/market/summary")
