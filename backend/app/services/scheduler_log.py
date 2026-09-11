@@ -41,14 +41,22 @@ def _summarize(result: Any, limit: int = 480) -> str:
     Logs > Guard tab can name WHICH pair moved its stop, not just how many.
     A 300-char cap silently dropped those lists off the end — the counters
     are short, the audit lists are not.
+
+    A cut line ends with "…" on purpose: the lists are ,-separated items, so
+    a silent cut leaves a half-written price ("EURCHF@0.94") that reads like
+    a real value. The marker tells the UI to drop the partial tail.
     """
     try:
         if result is None:
             return ""
         if isinstance(result, dict):
             parts = [f"{k}={v}" for k, v in list(result.items())[:12]]
-            return (", ".join(parts))[:limit]
-        return str(result)[:limit]
+            line = ", ".join(parts)
+            if len(line) <= limit:
+                return line
+            return line[:max(0, limit - 1)] + "…"
+        text = str(result)
+        return text if len(text) <= limit else text[:max(0, limit - 1)] + "…"
     except Exception:
         return ""
 

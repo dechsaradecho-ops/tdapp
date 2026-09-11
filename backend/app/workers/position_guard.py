@@ -290,12 +290,16 @@ async def _manage_position(db, broker, pos: Position, price: float,
                            s, notifier: NotificationService) -> dict:
     """Breakeven / trailing / partial-close pass for ONE position.
 
-    Returns {"moved_sl": bool, "partial_closed": bool, "new_sl": float}
-    for the summary. Never raises — a failed broker call just skips the
-    action this cycle.
+    Returns {"moved_sl": bool, "partial_closed": bool, "new_sl": float,
+    "old_sl": float, "partial_volume": float} for the summary. Never raises —
+    a failed broker call just skips the action this cycle.
+
+    ``old_sl`` is the stop BEFORE the move, so the audit line can say WHICH
+    pair moved FROM where to where ("EURCHF@0.93624>0.94337") instead of
+    only the destination.
     """
     out = {"moved_sl": False, "partial_closed": False,
-           "new_sl": None, "partial_volume": None}
+           "new_sl": None, "old_sl": None, "partial_volume": None}
     if pos.stop_loss is None or pos.entry_price <= 0:
         return out
 
@@ -396,6 +400,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
                     pos.stop_loss = round(new_sl, 5)
                     out["moved_sl"] = True
                     out["new_sl"] = pos.stop_loss
+                    out["old_sl"] = old_sl
                     move_kind = ("breakeven"
                                  if abs(pos.stop_loss - pos.entry_price) < 1e-9
                                  else "trailing")
@@ -437,6 +442,9 @@ async def guard_once(db, broker, notifier: NotificationService,
     ``scheduler_runs.detail``: counters alone left the Logs > Guard tab
     unreadable ("moved_sl=2" with no idea WHICH pair moved), which is
     exactly the complaint that started this change.
+
+    ``sl_assets`` items are ``ASSET@OLD_SL>NEW_SL`` so the tab answers
+    "ขยับจากเท่าไร" (from what price) and not just the destination.
     """
     closed = 0
     moved = 0
@@ -585,9 +593,15 @@ async def guard_once(db, broker, notifier: NotificationService,
             if mgmt.get("moved_sl"):
                 moved += 1
                 _new = mgmt.get("new_sl")
-                sl_assets.append(
-                    f"{pos.asset}@{_new:g}" if _new is not None
-                    else str(pos.asset or ""))
+                _old = mgmt.get("old_sl")
+                # "EURCHF@0.93624>0.94337" — from > to, so the Logs > Guard
+                # chip answers "ขยับจากเท่าไร" without opening the journal.
+                if _new is not None and _old is not None:
+                    sl_assets.append(f"{pos.asset}@{_old:g}>{_new:g}")
+                elif _new is not None:
+                    sl_assets.append(f"{pos.asset}@{_new:g}")
+                else:
+                    sl_assets.append(str(pos.asset or ""))
             if mgmt.get("partial_closed"):
                 partials += 1
                 closed_assets.append(f"{pos.asset}:tp1")
@@ -768,15 +782,19 @@ async def guard_once(db, broker, notifier: NotificationService,
             "smart_skipped": smart_skipped,
             "emergency_closed": emergency_closed,
             # symbol-level audit — see docstring. Format of one item:
-            #   sl_assets     "EURCHF@0.94337"          (asset@new SL)
+            #   sl_assets     "EURCHF@0.93624>0.94337"  (asset@old SL>new SL;
+            #                 "@0.94337" alone = old SL unknown / legacy row)
             #   closed_assets "EURCHF:sl@1.2345"        (asset:reason[@exit])
             #   skip_assets   "GBPCHF:no_snapshot"
             # ";" separates items (values never contain a comma, so the
             # "k=v, k=v" line stays unambiguous for readers and regexes).
-            # Capped at 6 each so the line still fits the 500-char column.
-            "sl_assets": ";".join(sl_assets[:6]),
-            "closed_assets": ";".join(closed_assets[:6]),
-            "skip_assets": ";".join(skip_assets[:6])}
+            # Cap 4 per list: the worst case (4 long tokens each, all three
+            # lists full, 2-digit counters) lands ~440 chars, inside the
+            # 480-char budget of _summarize / the 500-char DB column. Cap 6
+            # would overflow and cut a price in half mid-token.
+            "sl_assets": ";".join(sl_assets[:4]),
+            "closed_assets": ";".join(closed_assets[:4]),
+            "skip_assets": ";".join(skip_assets[:4])}
 
 
 def run_guard_blocking(db, broker, notifier) -> dict:

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
@@ -94,10 +95,38 @@ const GUARD_SKIP_REASONS: Record<string, string> = {
   eval_error: "ประเมินไม่สำเร็จ",
 };
 
-/** "EURCHF@0.94337" → "EURCHF → SL 0.94337" */
+/** "EURCHF@0.93624>0.94337" → {asset, oldSl, newSl} (never throws)
+ *  รูปแบบเดิม "EURCHF@0.94337" (ไม่มีค่าเดิม) → oldSl = "" */
+function parseGuardSlMove(raw: string): { asset: string; oldSl: string; newSl: string } | null {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const at = s.indexOf("@");
+  if (at < 0) return { asset: s, oldSl: "", newSl: "" };
+  const asset = s.slice(0, at);
+  const parts = s.slice(at + 1).split(">");
+  if (parts.length > 1) {
+    return { asset, oldSl: parts[0].trim(), newSl: parts[1].trim() };
+  }
+  return { asset, oldSl: "", newSl: parts[0].trim() };
+}
+
+/** ตัด float noise ของส่วนต่างราคา: 0.007130000000000046 → "0.00713" */
+function fmtAuditNum(v: number): string {
+  return Number.isFinite(v) ? String(Number(v.toPrecision(6))) : "—";
+}
+
+/**
+ * "EURCHF@0.93624>0.94337" → "EURCHF → SL 0.93624 → 0.94337"
+ *
+ * บอกทั้งคู่เงินและ "ขยับจากเท่าไร" เพื่อไม่ต้องเปิด journal หาเอง
+ * (รองรับข้อมูลเก่าที่มีแต่ SL ปลายทาง)
+ */
 function guardSlLabel(raw: string): string {
-  const [asset, sl] = String(raw).split("@");
-  return sl ? `${asset} → SL ${sl}` : asset;
+  const m = parseGuardSlMove(raw);
+  if (!m) return "";
+  if (m.oldSl && m.newSl) return `${m.asset} → SL ${m.oldSl} → ${m.newSl}`;
+  const one = m.newSl || m.oldSl;
+  return one ? `${m.asset} → SL ${one}` : m.asset;
 }
 
 /** "EURCHF:sl@1.2345" → "EURCHF · ตัดขาดทุน (SL) @1.2345" */
@@ -120,6 +149,19 @@ function guardSkipLabel(raw: string): string {
   return `${asset} · ข้าม: ${GUARD_SKIP_REASONS[reason] || reason || "ไม่ทราบสาเหตุ"}`;
 }
 
+/** token "…" = บรรทัดถูกตัด (_summarize limit) → ห้ามใช้ค่าที่อาจขาดกลาง */
+const GUARD_TRUNCATED = "…";
+
+/**
+ * แยก list ชื่อคู่เงิน "A@1>2;B@3>4" เป็นรายการ
+ * ทิ้ง token สุดท้ายที่ติด "…" เพราะราคาถูกตัดครึ่ง (โชว์ผิดแย่กว่าไม่โชว์)
+ */
+function guardChipItems(rawList: string): string[] {
+  return String(rawList || "")
+    .split(";")
+    .filter((it) => it.trim() && !it.includes(GUARD_TRUNCATED));
+}
+
 /** ชิปดอกจิกของ symbol ในช่องรายละเอียด guard */
 function GuardChips({ items, tone }: { items: string[]; tone: string }) {
   if (!items.length) return null;
@@ -129,6 +171,127 @@ function GuardChips({ items, tone }: { items: string[]; tone: string }) {
         <span key={i} className={`text-[11px] px-1.5 py-0.5 rounded border ${tone}`}>
           {it}
         </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * ชิป "ขยับ SL" — โชว์ SL เดิม → SL ใหม่ ในบรรทัดเดียว
+ * และกดเพื่อเปิด popup อธิบาย (portal ไป body)
+ *
+ * WHY portal: `.panel` มี backdrop-filter → เป็น containing block ของ
+ * position:fixed ทำให้ popup ที่ไม่ portal จม/เพี้ยน (pattern เดียวกับ
+ * tap-popover ของหน้า monitor)
+ */
+function GuardSlChip({ raw }: { raw: string }) {
+  const [pop, setPop] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  const place = useCallback(() => {
+    const btn = btnRef.current, el = popRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pw = el?.offsetWidth ?? 280;
+    const ph = el?.offsetHeight ?? 140;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    let top = r.top - ph - 8;
+    if (top < 8) top = r.bottom + 8;
+    setPos({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!pop) return;
+    place();
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onScrollOrResize = () => setPop(false);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [pop, place]);
+
+  const m = parseGuardSlMove(raw);
+  if (!m) return null;
+  const o = parseFloat(m.oldSl);
+  const n = parseFloat(m.newSl);
+  const both = Number.isFinite(o) && Number.isFinite(n);
+  const delta = both ? Math.abs(n - o) : NaN;
+  const pct = both && o !== 0 ? (Math.abs(n - o) / Math.abs(o)) * 100 : NaN;
+  const label = guardSlLabel(raw);
+  const title = both
+    ? `${m.asset} — ขยับ SL\nเดิม ${m.oldSl} → ใหม่ ${m.newSl}\nกระชับขึ้น ${fmtAuditNum(delta)}`
+    : label;
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setPop((v) => !v)}
+        title={title}
+        aria-label={title}
+        aria-expanded={pop}
+        className="text-[11px] px-1.5 py-0.5 rounded border border-amber-400/30 bg-amber-500/10 text-amber-200 touch-manipulation text-left"
+      >
+        {label}
+      </button>
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="tooltip"
+          style={{ position: "fixed", top: pos.top, left: pos.left, maxWidth: "min(320px, calc(100vw - 16px))" }}
+          className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed text-slate-200"
+        >
+          <div className="font-bold mb-1">ขยับ Stop Loss — {m.asset}</div>
+          <div className="text-amber-200">
+            {m.oldSl && m.newSl ? (
+              <>SL เดิม {m.oldSl} <span className="text-slate-500">→</span> SL ใหม่ {m.newSl}</>
+            ) : (
+              <>
+                SL ใหม่ {m.newSl || m.oldSl}{" "}
+                <span className="text-slate-500">
+                  (รอบที่บันทึกก่อนมีฟีเจอร์นี้ — ไม่ได้เก็บค่าเดิม)
+                </span>
+              </>
+            )}
+          </div>
+          {both && (
+            <div className="text-slate-400 mt-0.5">
+              กระชับขึ้น {fmtAuditNum(delta)}
+              {Number.isFinite(pct) ? ` (${fmtNum(pct, 2)}%)` : ""}
+            </div>
+          )}
+          <div className="mt-1 text-slate-400">
+            guard ขยับ stop ให้แคบลงเท่านั้น (breakeven / trailing / R-ladder)
+            — ราคานี้ถูกส่งไป broker จริงแล้ว ไม่ใช่แค่ที่แสดงบนจอ
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
+/** รายการชิป "ขยับ SL" (กดดู popup ได้ทีละอัน) */
+function GuardSlChips({ items }: { items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <span className="flex flex-wrap gap-1">
+      {items.map((it, i) => (
+        <GuardSlChip key={i} raw={it} />
       ))}
     </span>
   );
@@ -178,9 +341,10 @@ function GuardDetailCell({ detail, status }: { detail: string | null; status: st
     );
   }
 
-  const slMoves = (kv.sl_assets || "").split(";").filter(Boolean);
-  const closedList = (kv.closed_assets || "").split(";").filter(Boolean);
-  const skipList = (kv.skip_assets || "").split(";").filter(Boolean);
+  const slMoves = guardChipItems(kv.sl_assets);
+  const closedList = guardChipItems(kv.closed_assets);
+  const skipList = guardChipItems(kv.skip_assets);
+  const truncated = raw.includes(GUARD_TRUNCATED);
 
   const extra: string[] = [];
   if (num("partial_closed") > 0) extra.push(`ปิดบางส่วน TP1 ${num("partial_closed")}`);
@@ -207,12 +371,7 @@ function GuardDetailCell({ detail, status }: { detail: string | null; status: st
           <span className="text-slate-400"> · {extra.join(" · ")}</span>
         )}
       </p>
-      {slMoves.length > 0 && (
-        <GuardChips
-          items={slMoves.map(guardSlLabel)}
-          tone="border-amber-400/30 bg-amber-500/10 text-amber-200"
-        />
-      )}
+      {slMoves.length > 0 && <GuardSlChips items={slMoves} />}
       {closedList.length > 0 && (
         <GuardChips
           items={closedList.map(guardClosedLabel)}
@@ -224,6 +383,11 @@ function GuardDetailCell({ detail, status }: { detail: string | null; status: st
           items={skipList.map(guardSkipLabel)}
           tone="border-slate-500/30 bg-slate-500/10 text-slate-300"
         />
+      )}
+      {truncated && (
+        <p className="text-amber-300/80">
+          รายการยาวเกิน 480 ตัวอักษร — บรรทัดถูกตัดท้าย (โชว์ไม่ครบทุกไม้)
+        </p>
       )}
       <p className="text-[10px] text-slate-600 font-mono break-all" title="ค่าดิบจาก scheduler_runs.detail">
         {raw}
@@ -710,13 +874,13 @@ export default function LogsPage() {
               <p className="text-[11px] mt-1 text-slate-500 break-words">
                 {latestRaw.sl_assets && (
                   <span className="text-amber-200/80">
-                    ขยับ: {latestRaw.sl_assets.split(";").filter(Boolean).map(guardSlLabel).join(" · ")}
+                    ขยับ: {guardChipItems(latestRaw.sl_assets).map(guardSlLabel).join(" · ")}
                   </span>
                 )}
                 {latestRaw.sl_assets && latestRaw.closed_assets && " · "}
                 {latestRaw.closed_assets && (
                   <span className="text-sky-200/80">
-                    ปิด: {latestRaw.closed_assets.split(";").filter(Boolean).map(guardClosedLabel).join(" · ")}
+                    ปิด: {guardChipItems(latestRaw.closed_assets).map(guardClosedLabel).join(" · ")}
                   </span>
                 )}
               </p>
@@ -777,6 +941,12 @@ export default function LogsPage() {
                   <span className="text-amber-200/90 font-mono">sl_assets</span> = ไม้ที่ถูกขยับ SL ·{" "}
                   <span className="text-sky-200/90 font-mono">closed_assets</span> = ไม้ที่ถูกปิด/แบ่งปิด (พร้อมสาเหตุ) ·{" "}
                   <span className="text-slate-300 font-mono">skip_assets</span> = ไม้ที่ Smart Exit สั่งแล้วข้าม
+                </p>
+                <p>
+                  ชิปของ <span className="text-amber-200/90 font-mono">sl_assets</span> อ่านว่า{" "}
+                  <span className="text-amber-200/90 font-mono">คู่เงิน@SLเดิม&gt;SLใหม่</span> เช่น{" "}
+                  <span className="text-slate-300 font-mono">EURCHF@0.93624&gt;0.94337</span>{" "}
+                  = ขยับ SL ของ EURCHF จาก 0.93624 ไป 0.94337 (กดที่ชิปเพื่อดูส่วนต่าง)
                 </p>
                 <p>
                   ประโยคอ่านแบบ:{" "}

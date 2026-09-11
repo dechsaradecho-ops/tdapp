@@ -1143,10 +1143,11 @@ class TestPositionGuardManagement:
 
     @pytest.mark.asyncio
     async def test_breakeven_audit_names_symbol_and_new_sl(self):
-        """"moved_sl=2" ต้องรู้ว่าคู่ไหนถูกขยับ ไปที่ราคาเท่าไร
+        """"moved_sl=2" ต้องรู้ว่าคู่ไหนถูกขยับ จากราคาไหนไปราคาไหน
 
         Prod 2026-09-11: monitor บอก "SL 0.93624 → 0.94337" แต่หน้า Guard
         โชว์แค่ตัวนับ → เติม sl_assets ใน summary เพื่อให้อ่านรู้เรื่อง
+        รอบ 2: ต้องบอก "ขยับจากเท่าไร" ด้วย → token เป็น ASSET@OLD>NEW
         """
         from app.workers import position_guard
         moved: list[float] = []
@@ -1156,10 +1157,32 @@ class TestPositionGuardManagement:
             self._db(), broker, _SilentNotifier(),
             settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
         assert summary["moved_sl"] == 1
-        assert summary["sl_assets"] == "EURUSD@1.1"
+        # SL เดิม 1.09 (seed) → ใหม่ = entry 1.1
+        assert summary["sl_assets"] == "EURUSD@1.09>1.1"
         # ไม่มีการปิด/ข้ามในรอบนี้ → list ว่าง (หน้าเว็บไม่โชว์ chip)
         assert summary["closed_assets"] == ""
         assert summary["skip_assets"] == ""
+
+    @pytest.mark.asyncio
+    async def test_trailing_audit_shows_old_and_new_sl(self):
+        """trailing: token ต้องมีทั้ง SL เดิมและ SL ใหม่ (ไม่ใช่แค่ปลายทาง)
+
+        หน้า Guard ใช้ตัวเลขนี้คิดส่วนต่างใน popup → ต้องเป็นค่าก่อนขยับจริง
+        ไม่ใช่ entry (ค่า R distance ที่ guard ใช้คำนวณ)
+        """
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        summary = await position_guard.guard_once(
+            self._db(), broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0))
+        # ATR proxy = 0.2 × R = 0.002 → trail = 1.2500 − 0.004 = 1.2460
+        assert moved and moved[0] == pytest.approx(1.2460, abs=1e-6)
+        old_txt, new_txt = summary["sl_assets"].split("@")[1].split(">")
+        assert float(old_txt) == pytest.approx(1.0900)
+        assert float(new_txt) == pytest.approx(1.2460, abs=1e-6)
+        assert float(new_txt) > float(old_txt)
 
     @pytest.mark.asyncio
     async def test_partial_close_not_repeated(self, monkeypatch):

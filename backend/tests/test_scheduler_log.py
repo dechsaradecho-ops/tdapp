@@ -61,21 +61,38 @@ class TestLogRun:
 
         เดิม limit=300 และ guard detail ยาวกว่านั้น ทำให้ list ชื่อคู่เงิน
         (ซึ่งอยู่ท้ายสุด) หายไป → หน้า Logs > Guard ไม่รู้ว่าคู่ไหนถูกขยับ
+        sl_assets รูปแบบปัจจุบัน = ASSET@SLเดิม>SLใหม่ (บอก "ขยับจากเท่าไร")
         """
         row = {
             "checked": 4, "closed": 1, "moved_sl": 2, "partial_closed": 0,
             "smart_closed": 1, "smart_partials": 0, "smart_skipped": 0,
             "emergency_closed": 0,
-            "sl_assets": "EURCHF@0.94337;AUDNZD@1.0821",
+            "sl_assets": "EURCHF@0.93624>0.94337;AUDNZD@1.0810>1.0821",
             "closed_assets": "XAUUSD:tp@4463.2",
             "skip_assets": "GBPCHF:no_snapshot",
         }
         s = scheduler_log._summarize(row)
-        assert "sl_assets=EURCHF@0.94337;AUDNZD@1.0821" in s
+        assert "sl_assets=EURCHF@0.93624>0.94337;AUDNZD@1.0810>1.0821" in s
         assert "closed_assets=XAUUSD:tp@4463.2" in s
         assert "skip_assets=GBPCHF:no_snapshot" in s
         # ยังต้องอยู่ในเพดานคอลัมน์ 500 ตัวอักษร
         assert len(s) <= 500
+
+    def test_summarize_marks_a_cut_line(self):
+        """บรรทัดที่ยาวเกิน limit ต้องลงท้ายด้วย "…"
+
+        list ใน guard ถูกคั่นด้วย "," — ถ้าตัดเงียบ token สุดท้ายจะเหลือ
+        "EURCHF@0.94" ซึ่งหน้าบ้านอ่านเป็นราคาจริงได้ ต้องมี marker ให้ทิ้ง
+        """
+        row = {f"k{i}": "x" * 60 for i in range(12)}
+        s = scheduler_log._summarize(row)
+        assert len(s) <= 480
+        assert s.endswith("…")
+
+    def test_summarize_keeps_marker_off_a_short_line(self):
+        s = scheduler_log._summarize({"checked": 4, "moved_sl": 0,
+                                      "sl_assets": ""})
+        assert not s.endswith("…")
 
 
 class TestPurge:
@@ -369,6 +386,8 @@ class TestSlMoveNotify:
             db, broker, rec,
             settings=AppSettings(breakeven_trigger_r=1.0, trail_atr_mult=0))
         assert summary["moved_sl"] == 1
+        # audit token ต้องบอก SL เดิม→ใหม่ (marker ที่หน้า Guard ใช้โชว์ chip)
+        assert summary["sl_assets"] == "EURUSD@1.09>1.1"
         sl_notes = [m for (_, t, m) in rec.sent if t == "stop_loss"]
         assert sl_notes, "SL move must notify with stop_loss type"
         assert "1.09" in sl_notes[0] and "1.1" in sl_notes[0]
