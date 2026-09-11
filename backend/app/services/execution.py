@@ -356,9 +356,11 @@ def equity_drawdown_pct(db, capital: float) -> float:
 def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
     """Mean open→close span in days from closed paper_trades (4.0 fallback).
 
-    Guard used to compute this from its own query and the monitor from its
-    already-fetched closed_rows — same math, two copies. Pass closed_rows
-    when the caller already has them (monitor) to skip a DB round-trip.
+    SINGLE shared definition — guard and monitor MUST call this (guard with
+    no args, monitor with its already-fetched closed_rows) so the
+    left_behind threshold can never drift apart. Rows without a realized
+    pnl are ignored on every path: the monitor pre-filters them and the
+    guard's own query cannot express IS NOT NULL, so the filter lives here.
     Never raises.
     """
     try:
@@ -371,6 +373,8 @@ def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
                 rows = []
         spans: list[float] = []
         for r in rows or []:
+            if r.get("pnl") is None:
+                continue
             c = _parse_dt(r.get("created_at"))
             x = _parse_dt(r.get("closed_at"))
             if c and x:

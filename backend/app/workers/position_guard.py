@@ -57,17 +57,15 @@ def _atr_for(pos: Position, fallback_distance: float) -> float:
 
 
 def _position_age_days(pos: Position, db=None) -> float:
-    """Age of a position in days — opened_at first, journal created_at fallback.
+    """Age of a position in days — journal created_at first, opened_at fallback.
 
-    Never raises; 0.0 when nothing is known (fresh position).
+    The journal row is authoritative (same created_at the monitor's
+    exit_info_for reads), so the guard and the monitor can never disagree
+    on age. opened_at (restored from created_at by rehydrate_book) is only
+    a fallback for rows missing from the DB. Never raises; 0.0 when
+    nothing is known (fresh position).
     """
     from datetime import datetime, timezone
-    opened = getattr(pos, "opened_at", None)
-    if opened is not None:
-        try:
-            return max(0.0, (datetime.now(timezone.utc) - opened).total_seconds() / 86400.0)
-        except Exception:
-            pass
     if db is not None:
         try:
             rows = db.select("paper_trades",
@@ -75,11 +73,15 @@ def _position_age_days(pos: Position, db=None) -> float:
                              limit=1)
             if rows:
                 created = rows[0].get("created_at")
-                if created:
-                    dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                dt = execution._parse_dt(created)
+                if dt is not None:
                     return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+        except Exception:
+            pass
+    opened = getattr(pos, "opened_at", None)
+    if opened is not None:
+        try:
+            return max(0.0, (datetime.now(timezone.utc) - opened).total_seconds() / 86400.0)
         except Exception:
             pass
     return 0.0
@@ -352,11 +354,14 @@ async def guard_once(db, broker, notifier: NotificationService,
     smart_closed = 0
     smart_partials = 0
     emergency_closed = 0
+    smart_skipped = 0
     try:
         positions = await broker.all_positions()
     except Exception as exc:
         log.error("position guard cannot list positions: %s", exc)
-        return {"checked": 0, "closed": 0, "moved_sl": 0, "partial_closed": 0}
+        return {"checked": 0, "closed": 0, "moved_sl": 0, "partial_closed": 0,
+                "smart_closed": 0, "smart_partials": 0,
+                "smart_skipped": 0, "emergency_closed": 0}
 
     # One batched live-mark fetch per cycle (30s feed cache keeps it cheap)
     live = await _live_marks(sorted({p.asset.upper() for p in positions})) \
@@ -493,6 +498,9 @@ async def guard_once(db, broker, notifier: NotificationService,
             # Only when no hard stop was hit. Blind HOLD when the indicator
             # feed is down (no snapshot) — never close without indicators.
             # Fail-safe: any eval error just skips to SL/TP + time stop.
+            # Every skip lands in smart_skipped (summary + scheduler log) so
+            # a badge that says CLOSE with an untouched position is
+            # explainable: the guard never evaluated, or the broker rejected.
             try:
                 snap = snaps.get(str(pos.asset or "").upper(), {}) or {}
                 if snap:
@@ -518,20 +526,31 @@ async def guard_once(db, broker, notifier: NotificationService,
                             partials += 1
                             smart_partials += 1
                             # remainder falls through to SL/TP + time-stop
+                        else:
+                            # Engine fired but nothing executed (broker reject
+                            # or TP1 already done) — NOT a silent no-op.
+                            smart_skipped += 1
+                            log.warning(
+                                "smart-exit %s fired %s (%s) but not applied",
+                                pos.ticket, rec,
+                                getattr(decision, "trigger", ""))
                 else:
+                    smart_skipped += 1
                     log.debug("smart-exit skip %s: no snapshot (blind HOLD)",
                               pos.ticket)
             except Exception as exc:
+                smart_skipped += 1
                 log.warning("smart-exit eval %s failed: %s", pos.ticket, exc)
 
         if not (hit_sl or hit_tp):
             # ---- time stop: close stale positions (max_hold_days) ----
             # SL/TP always wins (checked first); this only fires when neither
             # was touched but the trade has simply been open too long.
+            # Age uses the SAME journal-first _position_age_days as Smart
+            # Exit — opened_at alone would drift from the badge after deploys.
             max_hold = int(getattr(s, "max_hold_days", 0) or 0)
-            opened_at = getattr(pos, "opened_at", None)
-            if max_hold > 0 and opened_at is not None:
-                age_days = (datetime.now(timezone.utc) - opened_at).total_seconds() / 86400.0
+            if max_hold > 0:
+                age_days = _position_age_days(pos, db)
                 if age_days >= max_hold:
                     result = await broker.close_position(pos.ticket)
                     if not result.ok:
@@ -609,6 +628,7 @@ async def guard_once(db, broker, notifier: NotificationService,
     return {"checked": len(positions), "closed": closed,
             "moved_sl": moved, "partial_closed": partials,
             "smart_closed": smart_closed, "smart_partials": smart_partials,
+            "smart_skipped": smart_skipped,
             "emergency_closed": emergency_closed}
 
 

@@ -944,7 +944,7 @@ export default function SettingsPage() {
               </div>
               <NumField label="ปิดเมื่อคะแนนต่ำกว่า" value={cfg.exit_score_close}
                 onChange={(v) => set("exit_score_close", v)} step={1}
-                hint="คะแนนถือไม้ 0-100 ต่ำกว่านี้ระบบปิด/แบ่งปิดทันที (ยิ่งสูงยิ่งทน ยิ่งต่ำยิ่งตัดไว)" />
+                hint="คะแนนถือไม้ 0-100 ต่ำกว่านี้ระบบปิด/แบ่งปิดทันที (ยิ่งสูงยิ่งตัดไว ยิ่งต่ำยิ่งทน) — มีผลเฉพาะกิ่งคะแนน ไม่กัน left_behind/reversal/news" />
               <NumField label="กันกำไรเมื่อถึง (×R)" value={cfg.profit_protect_r}
                 onChange={(v) => set("profit_protect_r", v)} step={0.5}
                 hint="กำไรถึงเท่านี้แต่คุณภาพไม่ใช่ High → แบ่งปิดครึ่งหนึ่งกันกำไรหาย (0 = ไม่กัน)" />

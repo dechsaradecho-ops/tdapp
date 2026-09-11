@@ -176,3 +176,81 @@ def test_smart_exit_defaults():
     assert s.no_behind_min_r == 0.5
     assert s.no_behind_hold_mult == 5.0
     assert s.trailing_ladder is True
+
+
+class _FakeDb:
+    """Minimal select() stand-in for avg_hold_days / _position_age_days."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def select(self, table: str, filters: dict | None = None,
+               limit: int = 500, **_kw) -> list[dict]:
+        rows = list(self._rows)
+        for col, val in (filters or {}).items():
+            rows = [r for r in rows if r.get(col) == val]
+        return rows[:limit]
+
+
+def _closed(created_days_ago: float, held_days: float, pnl: float | None):
+    from datetime import datetime, timedelta, timezone
+    created = datetime.now(timezone.utc) - timedelta(days=created_days_ago)
+    closed = created + timedelta(days=held_days)
+    return {"status": "closed", "pnl": pnl,
+            "created_at": created.isoformat(), "closed_at": closed.isoformat()}
+
+
+def test_avg_hold_ignores_null_pnl_rows():
+    """Guard (own query) and monitor (pre-filtered closed_rows) must agree.
+
+    Regression for the GBPUSD left_behind mismatch: rows without a realized
+    pnl must never drag the average, whichever caller path computes it.
+    """
+    from app.services import execution
+    rows = [_closed(10, 0.5, 10.0), _closed(9, 0.5, -5.0),
+            _closed(8, 30.0, None)]  # open/legacy row, no realized pnl
+    db = _FakeDb(rows)
+    via_guard = execution.avg_hold_days(db)
+    via_monitor = execution.avg_hold_days(
+        db, [r for r in rows if r.get("pnl") is not None])
+    assert via_guard == via_monitor == 0.5
+
+
+def test_position_age_prefers_journal_created_at():
+    """Age comes from the journal row first — same value the monitor badge
+    shows — so left_behind and time-stop can't drift from the badge."""
+    from datetime import datetime, timedelta, timezone
+    from app.integrations.brokers import Position
+    from app.workers import position_guard
+    created = datetime.now(timezone.utc) - timedelta(days=2.7)
+    pos = Position(ticket="T1", user_id="u1", asset="GBPUSD",
+                   direction="BUY", volume=0.02, entry_price=1.35557,
+                   stop_loss=1.34940, take_profit=1.36770,
+                   current_price=1.35040)
+    pos.opened_at = datetime.now(timezone.utc)  # stale in-memory clock (deploy reset)
+    db = _FakeDb([{"ticket": "T1", "created_at": created.isoformat()}])
+    age = position_guard._position_age_days(pos, db)
+    assert age == _in_range(2.6, 2.8)
+
+
+def _in_range(lo: float, hi: float):
+    class _Between:
+        def __eq__(self, other):
+            return lo <= float(other) <= hi
+    return _Between()
+
+
+def test_left_behind_ignores_exit_score_close():
+    """exit_score_close=54 must NOT gate the left_behind branch: a Medium
+    score (57) with a stale losing hold still closes."""
+    from app.engine import smart_exit as _se
+    s = AppSettings(exit_score_close=54.0)
+    snap = healthy_snap()
+    snap["opportunity_score"] = 60.0  # avoid reversal vote
+    d = _se.evaluate_exit(
+        asset="GBPUSD", direction="BUY", entry_price=100.0,
+        price=99.1, stop_loss=99.0, age_days=3.0,
+        settings=s, snapshot=snap,
+        news_status="SAFE", avg_hold_days=0.5)
+    assert d.trigger == "left_behind"
+    assert d.recommendation == "CLOSE"
