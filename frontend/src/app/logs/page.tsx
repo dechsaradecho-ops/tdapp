@@ -36,6 +36,27 @@ function parseGuardDetail(detail: string): Record<string, number> {
   return out;
 }
 
+/**
+ * ข้อความ empty-state ของตาราง scheduler_runs (scheduler / guard tab)
+ *
+ * เดิมขึ้น "ต้องรัน migration 030_scheduler_logs.sql" เสมอ ซึ่งทำให้เข้าใจผิด:
+ * ตารางอาจมีอยู่และทำงานปกติ แต่ job ยังไม่ "เสร็จแล้วบันทึก log" — prod
+ * 2026-09-11: position_guard ใช้เวลา ~55 วิ/รอบ เกิน interval 1 นาที จึงถูก
+ * ข้ามด้วย max_instances=1 ตลอด → ไม่มี row ทั้งที่ตารางปกติดี
+ *
+ * แยก 2 กรณีด้วย summary.total ของทุก job: ถ้ามี log ของ job อื่นอยู่ =
+ * ตารางทำงาน (ไม่ใช่ปัญหา migration) → บอกให้รอ/กดรันเดี๋ยวนี้
+ */
+function schedulerEmptyMessage(
+  jobLabel: string,
+  summary: SchedulerLogsResponse["summary"] | null,
+) {
+  if ((summary?.total ?? 0) > 0) {
+    return `ยังไม่มีรอบ ${jobLabel} ที่บันทึกได้ — ตาราง scheduler_runs ทำงานปกติ (job อื่นมี log) แต่รอบนี้ยังไม่เสร็จหรือถูกข้าม รอรอบถัดไป (~1 นาที)`;
+  }
+  return "ยังไม่มีประวัติ scheduler เลย — ตรวจสอบว่ารัน migration 030_scheduler_logs.sql บน Supabase แล้ว และ backend ตั้ง ENABLE_WORKERS=1";
+}
+
 function BucketCard({ label, bucket }: { label: string; bucket?: { total: number; success: number; error: number } | null }) {
   if (!bucket) return null;
   return (
@@ -745,7 +766,7 @@ export default function LogsPage() {
             )}
             {!loading && schedLogs.length === 0 && (
               <tr><td colSpan={6} className="py-6 text-center text-slate-500">
-                ยังไม่มีประวัติ scheduler — ต้องรัน migration 030_scheduler_logs.sql บน Supabase ก่อน
+                {schedulerEmptyMessage("scheduler", schedSummary)}
               </td></tr>
             )}
             {schedPageRows.map((s) => (
@@ -928,7 +949,7 @@ export default function LogsPage() {
             )}
             {!loading && guardLogs.length === 0 && (
               <tr><td colSpan={8} className="py-6 text-center text-slate-500">
-                ยังไม่มีประวัติ guard — ต้องรัน migration 030_scheduler_logs.sql บน Supabase ก่อน
+                {schedulerEmptyMessage("guard", schedSummary)}
               </td></tr>
             )}
             {guardPageRows.map((g) => {

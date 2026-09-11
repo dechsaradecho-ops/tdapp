@@ -114,6 +114,60 @@ class TestSafeJob:
         assert db.inserted[0][1]["status"] == "error"
         assert "kaboom" in db.inserted[0][1]["error"]
 
+    @pytest.mark.asyncio
+    async def test_safe_job_watchdog_logs_error(self):
+        """A tick that overruns its budget must still write a row.
+
+        Prod 2026-09-11: position_guard took ~55s/cycle, so APScheduler's
+        max_instances=1 skipped every following tick and NO scheduler_runs
+        row was ever written — the Logs page looked empty and wrongly blamed
+        migration 030. The watchdog bounds the tick and logs a timeout row.
+        """
+        import asyncio as _asyncio
+
+        from app import main as main_mod
+
+        db = FakeDatabase()
+
+        async def hang():
+            await _asyncio.sleep(30)
+
+        await main_mod._safe_job(hang(), db, "position_guard", timeout_s=0.05)
+        assert len(db.inserted) == 1
+        row = db.inserted[0][1]
+        assert row["status"] == "error"
+        assert "watchdog" in row["error"]
+
+    @pytest.mark.asyncio
+    async def test_safe_job_no_watchdog_when_unset(self):
+        """timeout_s=0 (default) keeps the unbounded behaviour for long jobs."""
+        from app import main as main_mod
+
+        db = FakeDatabase()
+
+        async def quick():
+            return {"checked": 1}
+
+        await main_mod._safe_job(quick(), db, "market_scanner")
+        assert db.inserted[0][1]["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_safe_wrapper_passes_timeout(self):
+        """_safe(...) must forward timeout_s down to _safe_job."""
+        import asyncio as _asyncio
+
+        from app import main as main_mod
+
+        db = FakeDatabase()
+
+        async def hang():
+            await _asyncio.sleep(30)
+
+        await main_mod._safe(hang, db, "position_guard", timeout_s=0.05)()
+        assert len(db.inserted) == 1
+        assert db.inserted[0][1]["status"] == "error"
+        assert "watchdog" in db.inserted[0][1]["error"]
+
 
 class TestEndpoint:
     @pytest.mark.asyncio
@@ -256,3 +310,83 @@ class TestSlMoveNotify:
             db, broker, rec,
             settings=AppSettings(breakeven_trigger_r=500.0, trail_atr_mult=0))
         assert not [t for (_, t, _) in rec.sent if t == "stop_loss"]
+
+
+# ---------------------------------------------------------------------------
+# Guard cycle budget — a slow feed must degrade to SL/TP-only, never hang
+# ---------------------------------------------------------------------------
+class TestGuardContextBudget:
+    """`guard_once` must finish well inside its 1-min scheduler interval.
+
+    Prod 2026-09-11: spot(20s) + snapshot(35s) + AI pushed a cycle to ~55s.
+    With max_instances=1 the overrun made APScheduler skip every following
+    tick, so position_guard never completed-and-logged (zero rows). The
+    feeds now run CONCURRENTLY and each has its own cap; the SL/TP safety
+    path always runs.
+
+    This test mirrors the drift guard for the parallel-feed refactor: an
+    old implementation that awaited `fetch_all_snapshots` without a cap
+    would block here for 30s and fail the outer 5s wait_for.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slow_snapshot_degrades_and_still_closes(self, monkeypatch):
+        import asyncio as _asyncio
+
+        from app.integrations.brokers import Position
+        from app.models.schemas import AppSettings
+        from app.workers import position_guard
+
+        # tiny snapshot cap so the test does not wait 30s
+        monkeypatch.setattr(position_guard, "_GUARD_SNAP_BUDGET", 0.05)
+
+        async def fake_spot(assets, **_kw):
+            return {a: 1.2500 for a in assets}, {}
+
+        async def hang_snaps(assets, **_kw):
+            await _asyncio.sleep(30)
+            return {}
+
+        async def fake_news(db, s):
+            return "SAFE", ""
+
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(position_guard.quotes, "fetch_all_snapshots", hang_snaps)
+        monkeypatch.setattr(position_guard, "_smart_exit_news", fake_news)
+
+        broker = SimpleNamespace()
+        broker._positions = {"T1": Position(
+            ticket="T1", user_id="u1", asset="EURUSD", direction="BUY",
+            volume=0.02, entry_price=1.1000, stop_loss=1.0900,
+            take_profit=1.2000, current_price=1.1000)}
+        broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+        broker.mark_price = lambda ticket: _AsyncFloat(0.0)
+        broker.quote = lambda asset: _AsyncFloat(0.0)
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL([], sl)
+        closed: list[str] = []
+
+        class _Close:
+            ok = True
+            message = "closed"
+
+            def __await__(self):
+                async def _c():
+                    closed.append("T1")
+                    return self
+                return _c().__await__()
+
+        broker.close_position = lambda ticket: _Close()
+
+        db = FakeDatabase(rows={"paper_trades": []})
+        rec = _Recorder()
+
+        summary = await _asyncio.wait_for(
+            position_guard.guard_once(db, broker, rec,
+                                      settings=AppSettings()),
+            timeout=5)
+
+        # snapshot timed out → no AI eval, but the SL/TP safety path ran:
+        # live mark 1.2500 ≥ TP 1.2000 on a BUY → closed
+        assert summary["checked"] == 1
+        assert summary["closed"] == 1
+        assert closed == ["T1"]

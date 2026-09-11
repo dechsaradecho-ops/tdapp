@@ -28,6 +28,47 @@ from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
 
+# Wall-clock caps for the three independent per-cycle feeds. They are
+# fetched CONCURRENTLY (see guard_once), so a cycle costs ≈ max(caps)
+# instead of their sum. Prod 2026-09-11: the same feeds ran SEQUENTIALLY
+# (spot ≤20s → snapshots ≤35s → news) which pushed one cycle to ~55s —
+# effectively its whole 1-min interval. APScheduler runs the guard with
+# max_instances=1, so an overrun made every following tick SKIP: the job
+# never completed-and-logged, scheduler_runs stayed empty for
+# position_guard, and the Logs page wrongly blamed migration 030.
+# The marks cap guards the SL/TP safety path and is never sacrificed to a
+# slow snapshot/news feed (each has its own independent cap).
+_GUARD_MARKS_BUDGET = 20.0   # live spot marks (safety path)
+_GUARD_SNAP_BUDGET = 30.0    # Smart-Exit snapshots (AI score enhancement)
+_GUARD_NEWS_BUDGET = 12.0    # Smart-Exit news calendar
+
+
+async def _none() -> None:
+    """Awaitable no-op — keeps asyncio.gather's branches uniform."""
+    return None
+
+
+async def _bounded(coro, budget: float):
+    """Await `coro` under its own wall-clock cap; None on timeout/error.
+
+    Never raises: one slow feed degrades one branch of the cycle, it must
+    never abort the SL/TP safety path (see _GUARD_*_BUDGET above).
+    """
+    if budget and budget > 0:
+        try:
+            return await asyncio.wait_for(coro, timeout=budget)
+        except asyncio.TimeoutError:
+            log.warning("guard feed exceeded %.0fs — using fallback", budget)
+            return None
+        except Exception as exc:
+            log.debug("guard feed failed: %s", exc)
+            return None
+    try:
+        return await coro
+    except Exception as exc:
+        log.debug("guard feed failed: %s", exc)
+        return None
+
 
 async def _live_marks(assets: list[str]) -> dict[str, float]:
     """Spot marks from the live quote feed; empty dict on failure (offline-safe).
@@ -363,10 +404,6 @@ async def guard_once(db, broker, notifier: NotificationService,
                 "smart_closed": 0, "smart_partials": 0,
                 "smart_skipped": 0, "emergency_closed": 0}
 
-    # One batched live-mark fetch per cycle (30s feed cache keeps it cheap)
-    live = await _live_marks(sorted({p.asset.upper() for p in positions})) \
-        if positions else {}
-
     # Settings once per cycle (breakeven/trailing/partial knobs). Falls back
     # to schema defaults when the DB is unavailable.
     s = settings
@@ -376,6 +413,8 @@ async def guard_once(db, broker, notifier: NotificationService,
         except Exception:
             from app.models.schemas import AppSettings
             s = AppSettings()
+
+    assets = sorted({str(p.asset or "").upper() for p in positions})
 
     # ---- Smart Exit shared context (once per cycle, fail-safe) ------------
     # EXIT PRIORITY 1-8: emergency → SL/TP → trailing(ladder) → AI score →
@@ -400,17 +439,27 @@ async def guard_once(db, broker, notifier: NotificationService,
         except Exception as exc:
             log.debug("emergency kill check failed: %s", exc)
             kill_engaged = False
+
+    # ---- Feed phase: live marks + snapshots + news IN PARALLEL -----------
+    # These are independent fetches — running them one after another cost
+    # their SUM (~55s) and overran the 1-min interval (see _GUARD_*_BUDGET).
+    # Each branch keeps its own cap, so a slow snapshot/news feed degrades
+    # Smart Exit to a blind HOLD but can never delay — let alone drop — the
+    # live marks that drive the SL/TP safety path.
+    live: dict[str, float] = {}
+    if positions:
+        marks_c, snaps_c, news_c = await asyncio.gather(
+            _bounded(_live_marks(assets), _GUARD_MARKS_BUDGET),
+            (_bounded(quotes.fetch_all_snapshots(assets), _GUARD_SNAP_BUDGET)
+             if smart_on else _none()),
+            (_bounded(_smart_exit_news(db, s), _GUARD_NEWS_BUDGET)
+             if smart_on else _none()),
+        )
+        live = marks_c or {}
+        snaps = snaps_c or {}
+        if news_c:
+            news_status, news_event = news_c
     if smart_on and positions:
-        try:
-            assets = sorted({str(p.asset or "").upper() for p in positions})
-            snaps = await quotes.fetch_all_snapshots(assets)
-        except Exception as exc:
-            log.debug("smart-exit snapshots unavailable: %s", exc)
-            snaps = {}
-        try:
-            news_status, news_event = await _smart_exit_news(db, s)
-        except Exception:
-            news_status, news_event = "SAFE", ""
         try:
             avg_hold = _avg_hold_days(db)
         except Exception:

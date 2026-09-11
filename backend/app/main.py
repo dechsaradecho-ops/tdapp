@@ -28,41 +28,64 @@ from app.workers import (auto_trader, calendar_sync, daily_digest,
 log = logging.getLogger(__name__)
 
 
-async def _safe_job(coro, db=None, job_id: str = "") -> None:
+async def _safe_job(coro, db=None, job_id: str = "",
+                    timeout_s: float = 0.0) -> None:
     """Run a scheduled coroutine, logging failures instead of crashing the app.
 
     Each tick also writes ONE row to scheduler_runs (migration 030) so the
     Logs page can prove the scheduler is alive — status ok/error, wall time
     in ms, and a compact summary of the job's return value. Fail-soft: the
     run log must never break the job itself.
+
+    `timeout_s` (>0) is a watchdog on the whole tick. APScheduler runs every
+    1-min job with max_instances=1, so a job that overruns its interval gets
+    SKIPPED forever after and never completes-and-logs (prod 2026-09-11:
+    position_guard ~55s/cycle → zero rows → the Logs page looked empty and
+    wrongly blamed migration 030). Bounding wall time guarantees the tick
+    ends, writes a row, and frees the slot for the next run.
     """
     import time as _time
+    import traceback as _tb
     started = _time.monotonic()
+    err: str | None = None
+    result = None
     try:
-        result = await coro
-        if db is not None and job_id:
-            try:
-                scheduler_log.log_run(
-                    db=db, job_id=job_id, status="ok",
-                    duration_ms=int((_time.monotonic() - started) * 1000),
-                    detail=scheduler_log._summarize(result))
-            except Exception:
-                log.debug("scheduler run log failed (ok): %s", job_id)
+        if timeout_s and timeout_s > 0:
+            result = await asyncio.wait_for(coro, timeout=timeout_s)
+        else:
+            result = await coro
+    except asyncio.TimeoutError:
+        # Distinguish OUR watchdog from an inner timeout the job raised: only
+        # report a watchdog trip when we actually ran out the clock.
+        if timeout_s and _time.monotonic() - started >= timeout_s - 0.05:
+            log.error("Worker job %s exceeded %.0fs watchdog",
+                      job_id or "?", timeout_s)
+            err = f"watchdog timeout after {timeout_s:.0f}s"
+        else:
+            log.exception("Worker job failed")
+            err = _tb.format_exc(limit=3)[-500:]
     except Exception:
         log.exception("Worker job failed")
-        if db is not None and job_id:
-            try:
-                import traceback as _tb
-                err = _tb.format_exc(limit=3)[-500:]
-                scheduler_log.log_run(
-                    db=db, job_id=job_id, status="error",
-                    duration_ms=int((_time.monotonic() - started) * 1000),
-                    error=err)
-            except Exception:
-                log.debug("scheduler run log failed (error): %s", job_id)
+        err = _tb.format_exc(limit=3)[-500:]
+
+    if db is None or not job_id:
+        return
+    try:
+        if err is None:
+            scheduler_log.log_run(
+                db=db, job_id=job_id, status="ok",
+                duration_ms=int((_time.monotonic() - started) * 1000),
+                detail=scheduler_log._summarize(result))
+        else:
+            scheduler_log.log_run(
+                db=db, job_id=job_id, status="error",
+                duration_ms=int((_time.monotonic() - started) * 1000),
+                error=err)
+    except Exception:
+        log.debug("scheduler run log failed: %s", job_id)
 
 
-def _safe(factory, db=None, job_id: str = ""):
+def _safe(factory, db=None, job_id: str = "", timeout_s: float = 0.0):
     """Wrap a coroutine factory in a coroutine function APScheduler can await.
 
     GOTCHA (prod 2026-09-03): scheduling a plain sync lambda that calls
@@ -74,7 +97,7 @@ def _safe(factory, db=None, job_id: str = ""):
     the scheduler's event loop and works.
     """
     async def _job() -> None:
-        await _safe_job(factory(), db, job_id)
+        await _safe_job(factory(), db, job_id, timeout_s)
     return _job
 
 
@@ -125,7 +148,7 @@ async def lifespan(app: FastAPI):
             "interval", minutes=1, id="auto_trader", max_instances=1)
         scheduler.add_job(_safe(lambda:
             position_guard.guard_once(db, app.state.broker, notifier),
-            db, "position_guard"),
+            db, "position_guard", timeout_s=50),
             "interval", minutes=1, id="position_guard", max_instances=1)
         scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db),
                                    db, "calendar_sync"),
