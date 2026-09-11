@@ -22,6 +22,18 @@ function statusBadge(status: string) {
     : "bg-red-500/15 text-red-400";
 }
 
+/** แยกตัวเลขจาก guard detail "checked=2, closed=0, moved_sl=1, ..." (never throws) */
+function parseGuardDetail(detail: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  try {
+    for (const part of String(detail || "").split(",")) {
+      const m = part.trim().match(/^([a-z_]+)\s*=\s*(-?\d+)/i);
+      if (m) out[m[1]] = parseInt(m[2], 10) || 0;
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
 function BucketCard({ label, bucket }: { label: string; bucket?: { total: number; success: number; error: number } | null }) {
   if (!bucket) return null;
   return (
@@ -38,7 +50,7 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news" | "scheduler">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
@@ -54,7 +66,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news" | "scheduler">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -64,6 +76,10 @@ export default function LogsPage() {
   const [newsHasMore, setNewsHasMore] = useState(false);
   const [schedTotal, setSchedTotal] = useState(0);
   const [schedHasMore, setSchedHasMore] = useState(false);
+  // แท็บ Guard = scheduler_runs ที่ job_id=position_guard (server filter)
+  const [guardLogs, setGuardLogs] = useState<SchedulerLog[]>([]);
+  const [guardTotal, setGuardTotal] = useState(0);
+  const [guardHasMore, setGuardHasMore] = useState(false);
   const PAGE_SIZE = 50;
   const SERVER_PAGE = 500;
 
@@ -83,13 +99,18 @@ export default function LogsPage() {
     return api.schedulerLogs(SERVER_PAGE, offset);
   }, []);
 
+  const loadGuard = useCallback(async (pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.schedulerLogs(SERVER_PAGE, offset, "position_guard");
+  }, []);
+
   const load = useCallback(async (flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       // summary ฝั่ง backend นับแบบ exact ทั้งหน้าต่าง 7 วัน (ไม่ติด cap 500);
       // ตารางโหลดแค่ server page แรกของแต่ละแท็บ
       const f = flt ?? filterRef.current;
-      const [qres, nres, sres] = await Promise.all([loadQuotes(f, 1), loadNews(1), loadSched(1)]);
+      const [qres, nres, sres, gres] = await Promise.all([loadQuotes(f, 1), loadNews(1), loadSched(1), loadGuard(1)]);
       setLogs(qres.logs ?? []);
       setSummary(qres.summary ?? null);
       setTtlDays(qres.ttl_days ?? 7);
@@ -103,6 +124,9 @@ export default function LogsPage() {
       setSchedSummary(sres.summary ?? null);
       setSchedTotal(sres.total ?? (sres.logs ?? []).length);
       setSchedHasMore(sres.has_more ?? false);
+      setGuardLogs(gres.logs ?? []);
+      setGuardTotal(gres.total ?? (gres.logs ?? []).length);
+      setGuardHasMore(gres.has_more ?? false);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       setPage(1);
@@ -111,7 +135,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadNews, loadQuotes, loadSched]);
+  }, [loadGuard, loadNews, loadQuotes, loadSched]);
 
   // เปลี่ยน server page (ทุก 10 หน้า UI = 500 แถว) — ดึง chunk ถัดไปจาก backend
   const gotoServerPage = useCallback(async (pg: number) => {
@@ -127,6 +151,11 @@ export default function LogsPage() {
         setNewsLogs(nres.logs ?? []);
         setNewsTotal(nres.total ?? 0);
         setNewsHasMore(nres.has_more ?? false);
+      } else if (tabRef.current === "guard") {
+        const gres = await loadGuard(pg);
+        setGuardLogs(gres.logs ?? []);
+        setGuardTotal(gres.total ?? 0);
+        setGuardHasMore(gres.has_more ?? false);
       } else {
         const sres = await loadSched(pg);
         setSchedLogs(sres.logs ?? []);
@@ -141,7 +170,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadNews, loadQuotes, loadSched]);
+  }, [loadGuard, loadNews, loadQuotes, loadSched]);
 
   useEffect(() => {
     load();
@@ -184,6 +213,14 @@ export default function LogsPage() {
   const schedSafePage = Math.min(page, schedTotalPages);
   const schedChunkPage = ((schedSafePage - 1) % uiPagesPerChunk) + 1;
   const schedPageRows = schedLogs.slice((schedChunkPage - 1) * PAGE_SIZE, schedChunkPage * PAGE_SIZE);
+  // แท็บ Guard ใช้ chunk ตัวเอง (server filter job=position_guard แล้ว)
+  const guardChunkTotal = guardLogs.length;
+  const guardTotalPages = Math.max(1, Math.ceil((guardTotal || guardChunkTotal) / PAGE_SIZE));
+  const guardSafePage = Math.min(page, guardTotalPages);
+  const guardChunkPage = ((guardSafePage - 1) % uiPagesPerChunk) + 1;
+  const guardPageRows = guardLogs.slice((guardChunkPage - 1) * PAGE_SIZE, guardChunkPage * PAGE_SIZE);
+  const guardServerPage = Math.floor((guardSafePage - 1) / uiPagesPerChunk) + 1;
+  const guardServerPages = Math.max(1, Math.ceil(guardTotalPages / uiPagesPerChunk));
   const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
   const newsServerPage = Math.floor((newsSafePage - 1) / uiPagesPerChunk) + 1;
   const schedServerPage = Math.floor((schedSafePage - 1) / uiPagesPerChunk) + 1;
@@ -202,7 +239,9 @@ export default function LogsPage() {
               ? `บันทึกการดึงราคาทุกครั้งจาก API ภายนอก — เก็บ ${ttlDays} วัน ลบเกินอายุอัตโนมัติ`
               : tab === "news"
                 ? "ประวัติการวิเคราะห์ข่าว (worker ทุก 15 นาที) — พาดหัวจริง + sentiment จาก AI"
-                : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
+                : tab === "guard"
+                  ? "การทำงานของ Guard ทุกรอบ (ทุก 1 นาที) — เช็ค SL/TP, ขยับ SL, ปิดไม้ (เก็บ 7 วัน)"
+                  : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
@@ -241,6 +280,11 @@ export default function LogsPage() {
           onClick={() => { setTab("scheduler"); tabRef.current = "scheduler"; setPage(1); }}
           className={`px-3 py-1 rounded ${tab === "scheduler" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Scheduler{schedSummary ? ` ${schedSummary.total}` : ""}
+        </button>
+        <button
+          onClick={() => { setTab("guard"); tabRef.current = "guard"; setPage(1); }}
+          className={`px-3 py-1 rounded ${tab === "guard" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          Guard{schedSummary?.by_job?.position_guard ? ` ${schedSummary.by_job.position_guard.total}` : guardTotal ? ` ${guardTotal}` : ""}
         </button>
       </div>
 
@@ -335,6 +379,48 @@ export default function LogsPage() {
         ))}
       </section>
       )}
+
+      {/* ---------- Guard summary (position_guard เท่านั้น) ---------- */}
+      {tab === "guard" && (() => {
+        const b = schedSummary?.by_job?.position_guard;
+        const latest = guardLogs[0];
+        const latestKv = parseGuardDetail(latest?.detail ?? "");
+        let moved500 = 0;
+        let closed500 = 0;
+        for (const g of guardLogs) {
+          const kv = parseGuardDetail(g.detail ?? "");
+          moved500 += kv.moved_sl ?? 0;
+          closed500 += kv.closed ?? 0;
+        }
+        return (
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="panel">
+            <p className="text-xs text-slate-500">รอบ guard (7 วัน)</p>
+            <p className="text-2xl font-bold">{b ? b.total.toLocaleString() : guardTotal.toLocaleString()}</p>
+            <p className="text-xs mt-1">
+              {b ? (<><span className="text-emerald-400">ok {b.ok}</span>{"  "}<span className="text-red-400">error {b.error}</span></>) : (<span className="text-slate-500">ทุก 1 นาที/รอบ</span>)}
+            </p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">รอบล่าสุด</p>
+            <p className="text-sm font-bold mt-1">{latest?.created_at ? new Date(latest.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}</p>
+            <p className="text-xs mt-1 text-slate-400">
+              ตรวจ {latestKv.checked ?? "—"} ไม้ · ขยับ SL {latestKv.moved_sl ?? 0} · ปิด {latestKv.closed ?? 0}
+            </p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">ขยับ SL (500 รอบล่าสุด)</p>
+            <p className="text-2xl font-bold text-amber-400">{moved500}</p>
+            <p className="text-xs text-slate-500 mt-1">ครั้งที่ guard เลื่อน stop</p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">ปิดไม้ (500 รอบล่าสุด)</p>
+            <p className="text-2xl font-bold">{closed500}</p>
+            <p className="text-xs text-slate-500 mt-1">SL/TP + smart + time-stop</p>
+          </div>
+        </section>
+        );
+      })()}
 
       {/* ---------- Provider breakdown ---------- */}
       {tab === "quotes" && summary && Object.keys(summary.by_provider).length > 0 && (
@@ -615,6 +701,95 @@ export default function LogsPage() {
                     gotoServerPage(schedServerPage + 1).then(() => setPage(schedServerPage * uiPagesPerChunk + 1));
                   }}
                   disabled={schedSafePage >= schedTotalPages || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      )}
+
+      {/* ---------- Guard run table (position_guard เท่านั้น) ---------- */}
+      {tab === "guard" && (
+      <section className="panel">
+        <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">เวลา</th>
+              <th className="py-2 pr-3">สถานะ</th>
+              <th className="py-2 pr-3">ตรวจ</th>
+              <th className="py-2 pr-3">ขยับ SL</th>
+              <th className="py-2 pr-3">ปิดไม้</th>
+              <th className="py-2 pr-3">ms</th>
+              <th className="py-2 pr-3">รายละเอียด</th>
+              <th className="py-2">Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && guardLogs.length === 0 && (
+              <tr><td colSpan={8} className="py-6">
+                <LoadingGraphic message="กำลังโหลดประวัติ guard — Render cold start อาจใช้เวลาสักครู่" compact />
+              </td></tr>
+            )}
+            {!loading && guardLogs.length === 0 && (
+              <tr><td colSpan={8} className="py-6 text-center text-slate-500">
+                ยังไม่มีประวัติ guard — ต้องรัน migration 030_scheduler_logs.sql บน Supabase ก่อน
+              </td></tr>
+            )}
+            {guardPageRows.map((g) => {
+              const kv = parseGuardDetail(g.detail ?? "");
+              const moved = kv.moved_sl ?? 0;
+              const closed = kv.closed ?? 0;
+              return (
+              <tr key={g.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
+                  {g.created_at ? new Date(g.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
+                </td>
+                <td className="py-2 pr-3">
+                  <span className={`px-2 py-0.5 rounded ${g.status === "ok" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{g.status}</span>
+                </td>
+                <td className="py-2 pr-3 text-slate-300">{kv.checked ?? "—"}</td>
+                <td className="py-2 pr-3 font-bold">
+                  {moved > 0 ? <span className="text-amber-400">{moved}</span> : <span className="text-slate-500">0</span>}
+                </td>
+                <td className="py-2 pr-3">
+                  {closed > 0 ? <span className="text-sky-400 font-bold">{closed}</span> : <span className="text-slate-500">0</span>}
+                </td>
+                <td className="py-2 pr-3 text-slate-400">{g.duration_ms ?? "—"}</td>
+                <td className="py-2 pr-3 max-w-[320px] truncate text-slate-300" title={g.detail || ""}>{g.detail || "—"}</td>
+                <td className="py-2 max-w-[280px] truncate" title={g.error || ""}><span className="text-loss">{g.error || "—"}</span></td>
+              </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        </div>
+        {(guardLogs.length > 0 || guardTotal > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {guardSafePage}/{guardTotalPages} · แสดง {guardPageRows.length} จาก {guardTotal.toLocaleString()} รอบ
+              {guardServerPages > 1 && ` · ชุดที่ ${guardServerPage}/${guardServerPages}`} · เก็บสูงสุด {ttlDays} วัน
+            </p>
+            {guardTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => {
+                    if (guardChunkPage > 1 || guardSafePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(guardServerPage - 1).then(() => setPage((guardServerPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={guardSafePage <= 1 || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{guardSafePage} / {guardTotalPages}</span>
+                <button onClick={() => {
+                    if (guardChunkPage < uiPagesPerChunk && guardChunkPage * PAGE_SIZE < guardChunkTotal) { setPage((p) => Math.min(guardTotalPages, p + 1)); return; }
+                    if (!guardHasMore && guardServerPage >= guardServerPages) { setPage((p) => Math.min(guardTotalPages, p + 1)); return; }
+                    gotoServerPage(guardServerPage + 1).then(() => setPage(guardServerPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={guardSafePage >= guardTotalPages || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ถัดไป
                 </button>
