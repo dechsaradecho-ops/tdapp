@@ -556,3 +556,65 @@ async def quote_test(request: Request) -> dict:
         "hint": ("ทุก call ถูกบันทึกใน log แล้ว — กดรีเฟรชเพื่อดูผลล่าสุด"
                  if prices else "ทุก feed ล้มเหลว — ดูรายละเอียด error ใน log"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Scheduler run log — one row per APScheduler job tick (7-day auto-expiry)
+# ---------------------------------------------------------------------------
+@router.get("/scheduler-logs")
+async def scheduler_logs(request: Request, limit: int = 100, offset: int = 0,
+                         job: str = "all", status: str = "all") -> dict:
+    """Recent scheduler ticks + summary card data.
+
+    Server-side paging like /quote-logs: `offset` skips rows so the Logs
+    page scheduler tab can walk the full 7-day window in 500-row chunks;
+    `limit` capped at 500 per request. `job`/`status` filter server-side.
+    Rows older than 7 days are purged automatically (throttled to once per
+    5 min; force=True here so opening the page always cleans up).
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    from app.services import scheduler_log
+    scheduler_log.purge_old_logs(db, force=True)
+    page_size = max(1, min(limit, 500))
+    page_offset = max(0, offset)
+    filters: dict[str, Any] = {}
+    if job and job != "all":
+        filters["job_id"] = job
+    if status in ("ok", "error"):
+        filters["status"] = status
+    rows = db.select(scheduler_log.TABLE, filters=filters, order="created_at",
+                     desc=True, limit=page_size, offset=page_offset)
+    out["logs"] = [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "job_id": r.get("job_id"),
+            "status": r.get("status"),
+            "duration_ms": r.get("duration_ms"),
+            "detail": r.get("detail"),
+            "error": r.get("error"),
+        }
+        for r in rows
+    ]
+    out["summary"] = scheduler_log.summary(db)
+    out["ttl_days"] = scheduler_log.SCHEDULER_LOG_TTL_DAYS
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=scheduler_log.SCHEDULER_LOG_TTL_DAYS)).isoformat()
+        total = db.count(scheduler_log.TABLE, filters=filters or None,
+                         created_after=cutoff)
+        out["total"] = total if total is not None else len(rows)
+    except Exception:
+        out["total"] = len(rows)
+    out["has_more"] = (page_offset + len(rows)) < (out["total"] or 0)
+    out["verdict"] = "ok"
+    return out

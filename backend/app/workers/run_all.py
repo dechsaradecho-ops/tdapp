@@ -17,6 +17,7 @@ from app.integrations.brokers import PaperBroker
 from app.integrations.line_client import LineClient
 from app.services.database import Database
 from app.services.notification_service import NotificationService
+from app.services import scheduler_log
 from app.workers import (auto_trader, calendar_sync, daily_digest,
                          market_scanner, news_analysis, notification_worker,
                          portfolio_monitor, position_guard)
@@ -34,23 +35,31 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler()
 
-    scheduler.add_job(_safe(lambda: market_scanner.scan_once(db)),
+    scheduler.add_job(_safe(lambda: market_scanner.scan_once(db),
+                            db, "market_scanner"),
                       "interval", minutes=5, id="market_scanner", max_instances=1)
-    scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db)),
+    scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db),
+                            db, "news_analysis"),
                       "interval", minutes=15, id="news_analysis", max_instances=1)
     scheduler.add_job(_safe(lambda:
-        asyncio.to_thread(portfolio_monitor.monitor_once, db, broker, notifier)),
+        asyncio.to_thread(portfolio_monitor.monitor_once, db, broker, notifier),
+        db, "portfolio_monitor"),
         "interval", minutes=1, id="portfolio_monitor", max_instances=1)
-    scheduler.add_job(_safe(lambda: notification_worker.dispatch_pending(db, notifier)),
+    scheduler.add_job(_safe(lambda: notification_worker.dispatch_pending(db, notifier),
+                            db, "notifications"),
                       "interval", minutes=1, id="notifications", max_instances=1)
-    scheduler.add_job(_safe(lambda: auto_trader.trade_once(db, broker, notifier)),
+    scheduler.add_job(_safe(lambda: auto_trader.trade_once(db, broker, notifier),
+                            db, "auto_trader"),
                       "interval", minutes=1, id="auto_trader", max_instances=1)
-    scheduler.add_job(_safe(lambda: position_guard.guard_once(db, broker, notifier)),
+    scheduler.add_job(_safe(lambda: position_guard.guard_once(db, broker, notifier),
+                            db, "position_guard"),
                       "interval", minutes=1, id="position_guard", max_instances=1)
-    scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db)),
+    scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db),
+                            db, "calendar_sync"),
                       "interval", hours=6, id="calendar_sync", max_instances=1)
     scheduler.add_job(_safe(lambda:
-        daily_digest.send_digest_once(db, notifier)),
+        daily_digest.send_digest_once(db, notifier),
+        db, "daily_digest"),
         "interval", minutes=60, id="daily_digest", max_instances=1)
 
     scheduler.start()
@@ -65,18 +74,42 @@ async def main() -> None:
         scheduler.shutdown()
 
 
-def _safe(factory):
+def _safe(factory, db=None, job_id: str = ""):
     """Coroutine-function wrapper APScheduler can await on the event loop.
 
     A plain sync lambda calling asyncio.create_task() never runs under
     AsyncIOScheduler — sync callables execute in an executor thread with no
     running event loop, so every tick failed before the task was created.
+
+    Each tick also writes ONE scheduler_runs row (migration 030) — the
+    standalone runner mirrors main.py so both paths stay observable.
     """
+    import time as _time
+
     async def _job() -> None:
+        started = _time.monotonic()
         try:
-            await factory()
+            result = await factory()
+            if db is not None and job_id:
+                try:
+                    scheduler_log.log_run(
+                        db=db, job_id=job_id, status="ok",
+                        duration_ms=int((_time.monotonic() - started) * 1000),
+                        detail=scheduler_log._summarize(result))
+                except Exception:
+                    log.debug("scheduler run log failed (ok): %s", job_id)
         except Exception:
             log.exception("Worker job failed")
+            if db is not None and job_id:
+                try:
+                    import traceback as _tb
+                    err = _tb.format_exc(limit=3)[-500:]
+                    scheduler_log.log_run(
+                        db=db, job_id=job_id, status="error",
+                        duration_ms=int((_time.monotonic() - started) * 1000),
+                        error=err)
+                except Exception:
+                    log.debug("scheduler run log failed (error): %s", job_id)
     return _job
 
 

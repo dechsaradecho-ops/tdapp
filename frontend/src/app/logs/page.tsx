@@ -11,6 +11,8 @@ import {
   QuoteApiLog,
   QuoteLogSummary,
   QuoteTestResult,
+  SchedulerLog,
+  SchedulerLogsResponse,
 } from "@/lib/types";
 
 /** สีของ badge ตามสถานะ call */
@@ -36,11 +38,13 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
   const [newsSummary, setNewsSummary] = useState<NewsLogsResponse["summary"] | null>(null);
+  const [schedLogs, setSchedLogs] = useState<SchedulerLog[]>([]);
+  const [schedSummary, setSchedSummary] = useState<SchedulerLogsResponse["summary"] | null>(null);
   const [ttlDays, setTtlDays] = useState(7);
   const [err, setErr] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
@@ -50,7 +54,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -58,6 +62,8 @@ export default function LogsPage() {
   const [quoteHasMore, setQuoteHasMore] = useState(false);
   const [newsTotal, setNewsTotal] = useState(0);
   const [newsHasMore, setNewsHasMore] = useState(false);
+  const [schedTotal, setSchedTotal] = useState(0);
+  const [schedHasMore, setSchedHasMore] = useState(false);
   const PAGE_SIZE = 50;
   const SERVER_PAGE = 500;
 
@@ -72,13 +78,18 @@ export default function LogsPage() {
     return api.newsLogs(SERVER_PAGE, offset);
   }, []);
 
+  const loadSched = useCallback(async (pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.schedulerLogs(SERVER_PAGE, offset);
+  }, []);
+
   const load = useCallback(async (flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       // summary ฝั่ง backend นับแบบ exact ทั้งหน้าต่าง 7 วัน (ไม่ติด cap 500);
       // ตารางโหลดแค่ server page แรกของแต่ละแท็บ
       const f = flt ?? filterRef.current;
-      const [qres, nres] = await Promise.all([loadQuotes(f, 1), loadNews(1)]);
+      const [qres, nres, sres] = await Promise.all([loadQuotes(f, 1), loadNews(1), loadSched(1)]);
       setLogs(qres.logs ?? []);
       setSummary(qres.summary ?? null);
       setTtlDays(qres.ttl_days ?? 7);
@@ -88,6 +99,10 @@ export default function LogsPage() {
       setNewsSummary(nres.summary ?? null);
       setNewsTotal(nres.total ?? (nres.logs ?? []).length);
       setNewsHasMore(nres.has_more ?? false);
+      setSchedLogs(sres.logs ?? []);
+      setSchedSummary(sres.summary ?? null);
+      setSchedTotal(sres.total ?? (sres.logs ?? []).length);
+      setSchedHasMore(sres.has_more ?? false);
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       setPage(1);
@@ -96,7 +111,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadNews, loadQuotes]);
+  }, [loadNews, loadQuotes, loadSched]);
 
   // เปลี่ยน server page (ทุก 10 หน้า UI = 500 แถว) — ดึง chunk ถัดไปจาก backend
   const gotoServerPage = useCallback(async (pg: number) => {
@@ -107,11 +122,16 @@ export default function LogsPage() {
         setLogs(qres.logs ?? []);
         setQuoteTotal(qres.total ?? 0);
         setQuoteHasMore(qres.has_more ?? false);
-      } else {
+      } else if (tabRef.current === "news") {
         const nres = await loadNews(pg);
         setNewsLogs(nres.logs ?? []);
         setNewsTotal(nres.total ?? 0);
         setNewsHasMore(nres.has_more ?? false);
+      } else {
+        const sres = await loadSched(pg);
+        setSchedLogs(sres.logs ?? []);
+        setSchedTotal(sres.total ?? 0);
+        setSchedHasMore(sres.has_more ?? false);
       }
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
@@ -121,7 +141,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadNews, loadQuotes]);
+  }, [loadNews, loadQuotes, loadSched]);
 
   useEffect(() => {
     load();
@@ -159,10 +179,17 @@ export default function LogsPage() {
   const newsSafePage = Math.min(page, newsTotalPages);
   const newsChunkPage = ((newsSafePage - 1) % uiPagesPerChunk) + 1;
   const newsPageRows = newsLogs.slice((newsChunkPage - 1) * PAGE_SIZE, newsChunkPage * PAGE_SIZE);
+  const schedChunkTotal = schedLogs.length;
+  const schedTotalPages = Math.max(1, Math.ceil((schedTotal || schedChunkTotal) / PAGE_SIZE));
+  const schedSafePage = Math.min(page, schedTotalPages);
+  const schedChunkPage = ((schedSafePage - 1) % uiPagesPerChunk) + 1;
+  const schedPageRows = schedLogs.slice((schedChunkPage - 1) * PAGE_SIZE, schedChunkPage * PAGE_SIZE);
   const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
   const newsServerPage = Math.floor((newsSafePage - 1) / uiPagesPerChunk) + 1;
+  const schedServerPage = Math.floor((schedSafePage - 1) / uiPagesPerChunk) + 1;
   const serverPages = Math.max(1, Math.ceil(totalPages / uiPagesPerChunk));
   const newsServerPages = Math.max(1, Math.ceil(newsTotalPages / uiPagesPerChunk));
+  const schedServerPages = Math.max(1, Math.ceil(schedTotalPages / uiPagesPerChunk));
 
   return (
     <div className="space-y-4">
@@ -173,7 +200,9 @@ export default function LogsPage() {
           <p className="text-xs text-slate-500">
             {tab === "quotes"
               ? `บันทึกการดึงราคาทุกครั้งจาก API ภายนอก — เก็บ ${ttlDays} วัน ลบเกินอายุอัตโนมัติ`
-              : "ประวัติการวิเคราะห์ข่าว (worker ทุก 15 นาที) — พาดหัวจริง + sentiment จาก AI"}
+              : tab === "news"
+                ? "ประวัติการวิเคราะห์ข่าว (worker ทุก 15 นาที) — พาดหัวจริง + sentiment จาก AI"
+                : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
@@ -196,7 +225,7 @@ export default function LogsPage() {
         </div>
       </section>
 
-      {/* ---------- Tabs: quotes / news ---------- */}
+      {/* ---------- Tabs: quotes / news / scheduler ---------- */}
       <div className="flex gap-2 text-xs">
         <button
           onClick={() => { setTab("quotes"); tabRef.current = "quotes"; setPage(1); }}
@@ -207,6 +236,11 @@ export default function LogsPage() {
           onClick={() => { setTab("news"); tabRef.current = "news"; setPage(1); }}
           className={`px-3 py-1 rounded ${tab === "news" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           ข่าว (News{newsSummary ? ` ${newsSummary.total}` : ""})
+        </button>
+        <button
+          onClick={() => { setTab("scheduler"); tabRef.current = "scheduler"; setPage(1); }}
+          className={`px-3 py-1 rounded ${tab === "scheduler" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          Scheduler{schedSummary ? ` ${schedSummary.total}` : ""}
         </button>
       </div>
 
@@ -272,6 +306,31 @@ export default function LogsPage() {
           <div key={ev} className="panel">
             <p className="text-xs text-slate-500">{ev}</p>
             <p className="text-2xl font-bold">{n}</p>
+          </div>
+        ))}
+      </section>
+      )}
+
+      {/* ---------- Scheduler summary ---------- */}
+      {tab === "scheduler" && schedSummary && (
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="panel">
+          <p className="text-xs text-slate-500">รันทั้งหมด (7 วัน)</p>
+          <p className="text-2xl font-bold">{schedSummary.total}</p>
+          <p className="text-xs mt-1">
+            <span className="text-emerald-400">ok {schedSummary.ok}</span>
+            {"  "}
+            <span className="text-red-400">error {schedSummary.error}</span>
+          </p>
+        </div>
+        {Object.entries(schedSummary.by_job).map(([job, b]) => (
+          <div key={job} className="panel">
+            <p className="text-xs text-slate-500">{job}</p>
+            <p className="text-2xl font-bold">{b.total}</p>
+            <p className="text-xs mt-1">
+              <span className="text-emerald-400">ok {b.ok}</span>
+              {b.error > 0 && <span className="text-red-400"> ✗{b.error}</span>}
+            </p>
           </div>
         ))}
       </section>
@@ -480,6 +539,82 @@ export default function LogsPage() {
                     gotoServerPage(newsServerPage + 1).then(() => setPage(newsServerPage * uiPagesPerChunk + 1));
                   }}
                   disabled={newsSafePage >= newsTotalPages || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      )}
+
+      {/* ---------- Scheduler run table ---------- */}
+      {tab === "scheduler" && (
+      <section className="panel">
+        <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">เวลา</th>
+              <th className="py-2 pr-3">Job</th>
+              <th className="py-2 pr-3">สถานะ</th>
+              <th className="py-2 pr-3">ms</th>
+              <th className="py-2 pr-3">ผลลัพธ์</th>
+              <th className="py-2">Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && schedLogs.length === 0 && (
+              <tr><td colSpan={6} className="py-6">
+                <LoadingGraphic message="กำลังโหลดประวัติ scheduler — Render cold start อาจใช้เวลาสักครู่" compact />
+              </td></tr>
+            )}
+            {!loading && schedLogs.length === 0 && (
+              <tr><td colSpan={6} className="py-6 text-center text-slate-500">
+                ยังไม่มีประวัติ scheduler — ต้องรัน migration 030_scheduler_logs.sql บน Supabase ก่อน
+              </td></tr>
+            )}
+            {schedPageRows.map((s) => (
+              <tr key={s.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">
+                  {s.created_at ? new Date(s.created_at).toLocaleString("th-TH", { hour12: false }) : "—"}
+                </td>
+                <td className="py-2 pr-3 font-bold whitespace-nowrap">{s.job_id}</td>
+                <td className="py-2 pr-3">
+                  <span className={`px-2 py-0.5 rounded ${s.status === "ok" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{s.status}</span>
+                </td>
+                <td className="py-2 pr-3 text-slate-400">{s.duration_ms ?? "—"}</td>
+                <td className="py-2 pr-3 max-w-[320px] truncate text-slate-300" title={s.detail || ""}>{s.detail || "—"}</td>
+                <td className="py-2 max-w-[280px] truncate" title={s.error || ""}><span className="text-loss">{s.error || "—"}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+        {(schedLogs.length > 0 || schedTotal > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {schedSafePage}/{schedTotalPages} · แสดง {schedPageRows.length} จาก {schedTotal.toLocaleString()} รายการ
+              {schedServerPages > 1 && ` · ชุดที่ ${schedServerPage}/${schedServerPages}`} · เก็บสูงสุด {ttlDays} วัน
+            </p>
+            {schedTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => {
+                    if (schedChunkPage > 1 || schedSafePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(schedServerPage - 1).then(() => setPage((schedServerPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={schedSafePage <= 1 || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{schedSafePage} / {schedTotalPages}</span>
+                <button onClick={() => {
+                    if (schedChunkPage < uiPagesPerChunk && schedChunkPage * PAGE_SIZE < schedChunkTotal) { setPage((p) => Math.min(schedTotalPages, p + 1)); return; }
+                    if (!schedHasMore && schedServerPage >= schedServerPages) { setPage((p) => Math.min(schedTotalPages, p + 1)); return; }
+                    gotoServerPage(schedServerPage + 1).then(() => setPage(schedServerPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={schedSafePage >= schedTotalPages || loading}
                   className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
                   ถัดไป
                 </button>

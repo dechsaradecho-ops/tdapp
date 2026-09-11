@@ -27,6 +27,7 @@ import {
   PortfolioRecommendation,
   QuoteLogsResponse,
   QuoteTestResult,
+  SchedulerLogsResponse,
   LineTargetsResponse,
   LineTargetMutation,
   LineDiag,
@@ -254,6 +255,13 @@ export const api = {
     get<SignalLogsResponse>(
       `/api/system/signal-logs?limit=${limit}&offset=${offset}` +
       `&event=${encodeURIComponent(event)}`
+    ),
+
+  // ---------- Scheduler run log (7-day auto-expiry, server paging) ----------
+  schedulerLogs: (limit = 100, offset = 0, job = "all", status = "all") =>
+    get<SchedulerLogsResponse>(
+      `/api/system/scheduler-logs?limit=${limit}&offset=${offset}` +
+      `&job=${encodeURIComponent(job)}&status=${encodeURIComponent(status)}`
     ),
 
   // ---------- LINE: notification targets + test button ----------

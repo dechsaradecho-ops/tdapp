@@ -306,24 +306,38 @@ async def _manage_position(db, broker, pos: Position, price: float,
             else (new_sl < (pos.stop_loss or 1e18))
         if improves and abs(new_sl - pos.stop_loss) > 1e-9:
             try:
+                old_sl = pos.stop_loss
                 result = await broker.modify_stop_loss(pos.ticket, round(new_sl, 5))
                 if result.ok:
                     pos.stop_loss = round(new_sl, 5)
                     out["moved_sl"] = True
+                    move_kind = ("breakeven"
+                                 if abs(pos.stop_loss - pos.entry_price) < 1e-9
+                                 else "trailing")
                     # Persist the move back to the journal row — otherwise the
                     # monitor kept showing the ORIGINAL SL forever (migration
                     # 021 powers the "SL ถูกขยับ" badge on the monitor page).
                     execution.persist_sl_move(
-                        db, str(pos.ticket or ""), pos.stop_loss,
-                        "breakeven" if abs(pos.stop_loss - pos.entry_price) < 1e-9
-                        else "trailing")
+                        db, str(pos.ticket or ""), pos.stop_loss, move_kind)
                     signal_log.log_event(
                         db=db, event="order_opened", asset=str(pos.asset or ""),
                         direction=str(pos.direction or ""),
                         entry=pos.entry_price, stop_loss=pos.stop_loss,
                         ticket=str(pos.ticket or ""), source="auto",
-                        reason=f"SL ย้ายไป {pos.stop_loss:g} "
-                               f"({'breakeven' if abs(pos.stop_loss - pos.entry_price) < 1e-9 else 'trailing'})")
+                        reason=f"SL ย้ายไป {pos.stop_loss:g} ({move_kind})")
+                    # SL move LINE alert — stop_loss is CRITICAL so it pushes
+                    # immediately (honours the notify_stop_loss switch inside
+                    # NotificationService.notify). Fail-soft: never break guard.
+                    try:
+                        await notifier.notify(
+                            pos.user_id, "stop_loss",
+                            f"🔔 SL ขยับ ({move_kind})\n"
+                            f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
+                            f"SL {old_sl:g} → {pos.stop_loss:g} @ {price:g} "
+                            f"({r_multiple:.2f}R)\nTicket {pos.ticket}",
+                        )
+                    except Exception as exc:
+                        log.debug("sl-move notify failed: %s", exc)
             except Exception as exc:
                 log.warning("modify SL %s failed: %s", pos.ticket, exc)
     return out

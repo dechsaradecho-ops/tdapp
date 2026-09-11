@@ -18,6 +18,7 @@ from app.integrations.ai_provider import get_ai_provider
 from app.services.database import Database
 from app.services.notification_service import NotificationService
 from app.services import quote_log
+from app.services import scheduler_log
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
 from app.workers import (auto_trader, calendar_sync, daily_digest,
@@ -27,15 +28,41 @@ from app.workers import (auto_trader, calendar_sync, daily_digest,
 log = logging.getLogger(__name__)
 
 
-async def _safe_job(coro) -> None:
-    """Run a scheduled coroutine, logging failures instead of crashing the app."""
+async def _safe_job(coro, db=None, job_id: str = "") -> None:
+    """Run a scheduled coroutine, logging failures instead of crashing the app.
+
+    Each tick also writes ONE row to scheduler_runs (migration 030) so the
+    Logs page can prove the scheduler is alive — status ok/error, wall time
+    in ms, and a compact summary of the job's return value. Fail-soft: the
+    run log must never break the job itself.
+    """
+    import time as _time
+    started = _time.monotonic()
     try:
-        await coro
+        result = await coro
+        if db is not None and job_id:
+            try:
+                scheduler_log.log_run(
+                    db=db, job_id=job_id, status="ok",
+                    duration_ms=int((_time.monotonic() - started) * 1000),
+                    detail=scheduler_log._summarize(result))
+            except Exception:
+                log.debug("scheduler run log failed (ok): %s", job_id)
     except Exception:
         log.exception("Worker job failed")
+        if db is not None and job_id:
+            try:
+                import traceback as _tb
+                err = _tb.format_exc(limit=3)[-500:]
+                scheduler_log.log_run(
+                    db=db, job_id=job_id, status="error",
+                    duration_ms=int((_time.monotonic() - started) * 1000),
+                    error=err)
+            except Exception:
+                log.debug("scheduler run log failed (error): %s", job_id)
 
 
-def _safe(factory):
+def _safe(factory, db=None, job_id: str = ""):
     """Wrap a coroutine factory in a coroutine function APScheduler can await.
 
     GOTCHA (prod 2026-09-03): scheduling a plain sync lambda that calls
@@ -47,7 +74,7 @@ def _safe(factory):
     the scheduler's event loop and works.
     """
     async def _job() -> None:
-        await _safe_job(factory())
+        await _safe_job(factory(), db, job_id)
     return _job
 
 
@@ -78,26 +105,34 @@ async def lifespan(app: FastAPI):
         scheduler = AsyncIOScheduler()
         db = app.state.db
         notifier = NotificationService(db, app.state.line)
-        scheduler.add_job(_safe(lambda: market_scanner.scan_once(db)),
+        scheduler.add_job(_safe(lambda: market_scanner.scan_once(db),
+                                   db, "market_scanner"),
                           "interval", minutes=5, id="market_scanner", max_instances=1)
-        scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db)),
+        scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db),
+                                   db, "news_analysis"),
                           "interval", minutes=15, id="news_analysis", max_instances=1)
         scheduler.add_job(_safe(lambda: asyncio.to_thread(
-            portfolio_monitor.monitor_once, db, app.state.broker, notifier)),
+            portfolio_monitor.monitor_once, db, app.state.broker, notifier),
+            db, "portfolio_monitor"),
             "interval", minutes=1, id="portfolio_monitor", max_instances=1)
         scheduler.add_job(_safe(lambda:
-            notification_worker.dispatch_pending(db, notifier)),
+            notification_worker.dispatch_pending(db, notifier),
+            db, "notifications"),
             "interval", minutes=1, id="notifications", max_instances=1)
         scheduler.add_job(_safe(lambda:
-            auto_trader.trade_once(db, app.state.broker, notifier)),
+            auto_trader.trade_once(db, app.state.broker, notifier),
+            db, "auto_trader"),
             "interval", minutes=1, id="auto_trader", max_instances=1)
         scheduler.add_job(_safe(lambda:
-            position_guard.guard_once(db, app.state.broker, notifier)),
+            position_guard.guard_once(db, app.state.broker, notifier),
+            db, "position_guard"),
             "interval", minutes=1, id="position_guard", max_instances=1)
-        scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db)),
+        scheduler.add_job(_safe(lambda: calendar_sync.sync_once(db),
+                                   db, "calendar_sync"),
                           "interval", hours=6, id="calendar_sync", max_instances=1)
         scheduler.add_job(_safe(lambda:
-            daily_digest.send_digest_once(db, notifier)),
+            daily_digest.send_digest_once(db, notifier),
+            db, "daily_digest"),
             "interval", minutes=60, id="daily_digest", max_instances=1)
         scheduler.start()
         app.state.scheduler = scheduler

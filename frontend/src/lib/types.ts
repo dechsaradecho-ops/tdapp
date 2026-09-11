@@ -214,6 +214,35 @@ export interface NewsLogsResponse {
   has_more: boolean;
 }
 
+// ---------- Scheduler run log (7-day auto-expiry) ----------
+export interface SchedulerLog {
+  id: string;
+  created_at: string | null;
+  job_id: string;
+  status: "ok" | "error";
+  duration_ms: number | null;
+  detail: string;
+  error: string;
+}
+
+export interface SchedulerLogsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  logs: SchedulerLog[];
+  summary: {
+    total: number;
+    ok: number;
+    error: number;
+    by_job: Record<string, { total: number; ok: number; error: number }>;
+  };
+  ttl_days: number;
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+}
+
 export interface MarketSummary {
   regime: string;
   confidence: number;

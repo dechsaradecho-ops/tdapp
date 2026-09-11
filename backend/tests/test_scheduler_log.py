@@ -1,0 +1,258 @@
+"""Tests for SL-move LINE alert + scheduler run log.
+
+Covers: scheduler_log.log_run/purge/summary, _safe_job run logging
+(ok/error), GET /api/system/scheduler-logs, and the guard SL-move
+notifier.notify(stop_loss) hook.
+
+Run from backend/: d:\\tdapp\\.venv\\Scripts\\python.exe -m pytest tests/test_scheduler_log.py -v
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from app.services import scheduler_log
+from tests.test_workers import FakeDatabase
+from tests.test_api_routes import call, set_state
+
+
+def _row(days_old: float, job_id: str = "position_guard",
+         status: str = "ok") -> dict:
+    created = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+    return {"id": f"row-{days_old}-{job_id}-{status}", "created_at": created,
+            "job_id": job_id, "status": status, "duration_ms": 12,
+            "detail": "checked=1", "error": ""}
+
+
+class TestLogRun:
+    def test_log_run_inserts_row(self):
+        db = FakeDatabase()
+        scheduler_log.log_run(db=db, job_id="position_guard", status="ok",
+                              duration_ms=34, detail="checked=1, moved_sl=1")
+        assert len(db.inserted) == 1
+        table, row = db.inserted[0]
+        assert table == "scheduler_runs"
+        assert row["job_id"] == "position_guard"
+        assert row["status"] == "ok"
+        assert row["duration_ms"] == 34
+
+    def test_log_run_skips_when_db_none(self):
+        scheduler_log.log_run(db=None, job_id="x")  # must not raise
+
+    def test_log_run_swallows_db_errors(self):
+        class Boom:
+            available = True
+
+            def insert(self, *a, **k):
+                raise RuntimeError("db down")
+        scheduler_log.log_run(db=Boom(), job_id="x")  # must not raise
+
+    def test_summarize_dict(self):
+        s = scheduler_log._summarize({"checked": 1, "moved_sl": 1})
+        assert "checked=1" in s and "moved_sl=1" in s
+
+    def test_summarize_none(self):
+        assert scheduler_log._summarize(None) == ""
+
+
+class TestPurge:
+    def test_purge_deletes_rows_older_than_7_days(self):
+        db = FakeDatabase(rows={"scheduler_runs": [_row(8), _row(10), _row(3)]})
+        scheduler_log._last_purge = 0.0
+        deleted = scheduler_log.purge_old_logs(db, force=True)
+        assert deleted == 2
+        assert len(db.rows["scheduler_runs"]) == 1
+
+    def test_purge_throttled(self):
+        db = FakeDatabase(rows={"scheduler_runs": [_row(10)]})
+        scheduler_log.purge_old_logs(db, force=True)
+        assert scheduler_log.purge_old_logs(db) == 0
+
+
+class TestSummary:
+    def test_summary_counts_by_job(self):
+        db = FakeDatabase(rows={"scheduler_runs": [
+            _row(1, "position_guard", "ok"), _row(1, "position_guard", "error"),
+            _row(1, "market_scanner", "ok"), _row(8, "position_guard", "ok"),
+        ]})
+        out = scheduler_log.summary(db)
+        assert out["total"] == 3  # 8-day row excluded
+        assert out["ok"] == 2 and out["error"] == 1
+        assert out["by_job"]["position_guard"] == {"total": 2, "ok": 1, "error": 1}
+        assert out["by_job"]["market_scanner"]["total"] == 1
+
+
+class TestSafeJob:
+    @pytest.mark.asyncio
+    async def test_safe_job_logs_ok(self):
+        from app import main as main_mod
+
+        db = FakeDatabase()
+
+        async def fake_coro():
+            return {"checked": 2, "moved_sl": 1}
+
+        await main_mod._safe_job(fake_coro(), db, "position_guard")
+        assert len(db.inserted) == 1
+        table, row = db.inserted[0]
+        assert table == "scheduler_runs"
+        assert row["status"] == "ok" and "checked=2" in row["detail"]
+
+    @pytest.mark.asyncio
+    async def test_safe_job_logs_error(self):
+        from app import main as main_mod
+
+        db = FakeDatabase()
+
+        async def boom():
+            raise RuntimeError("kaboom")
+
+        await main_mod._safe_job(boom(), db, "auto_trader")  # must not raise
+        assert len(db.inserted) == 1
+        assert db.inserted[0][1]["status"] == "error"
+        assert "kaboom" in db.inserted[0][1]["error"]
+
+
+class TestEndpoint:
+    @pytest.mark.asyncio
+    async def test_scheduler_logs_endpoint(self):
+        db = FakeDatabase(rows={"scheduler_runs": [
+            _row(1, "position_guard", "ok"), _row(1, "auto_trader", "error"),
+        ]})
+        set_state(db)
+        resp = await call("GET", "/api/system/scheduler-logs?limit=100&offset=0")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["verdict"] == "ok"
+        assert body["total"] == 2
+        assert len(body["logs"]) == 2
+        assert body["summary"]["total"] == 2
+
+    @pytest.mark.asyncio
+    async def test_scheduler_logs_job_filter(self):
+        db = FakeDatabase(rows={"scheduler_runs": [
+            _row(1, "position_guard", "ok"), _row(1, "auto_trader", "error"),
+        ]})
+        set_state(db)
+        resp = await call("GET", "/api/system/scheduler-logs?limit=100&offset=0&job=position_guard")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert all(r["job_id"] == "position_guard" for r in body["logs"])
+
+
+# ---------------------------------------------------------------------------
+# SL-move LINE alert — guard must notify(stop_loss) with old → new on move
+# ---------------------------------------------------------------------------
+class _AsyncModifySL:
+    def __init__(self, sink: list, value: float):
+        self._sink, self._value = sink, value
+
+    def __await__(self):
+        async def _coro():
+            self._sink.append(self._value)
+            from app.integrations.brokers import OrderResult
+            return OrderResult(ok=True, message="SL moved")
+        return _coro().__await__()
+
+
+class _AsyncList:
+    def __init__(self, items):
+        self._items = items
+
+    def __await__(self):
+        async def _coro():
+            return self._items
+        return _coro().__await__()
+
+
+class _AsyncFloat:
+    def __init__(self, value):
+        self._value = value
+
+    def __await__(self):
+        async def _coro():
+            return self._value
+        return _coro().__await__()
+
+
+class _AsyncClosed:
+    ok = True
+    message = "closed"
+
+    def __await__(self):
+        async def _coro():
+            return self
+        return _coro().__await__()
+
+
+class _Recorder:
+    def __init__(self):
+        self.sent: list[tuple[str, str, str]] = []
+
+    async def notify(self, user_id, ntype, message, **_kw):
+        self.sent.append((user_id, ntype, message))
+        return None
+
+
+class TestSlMoveNotify:
+    @pytest.fixture(autouse=True)
+    def _no_network_spot(self, monkeypatch):
+        from app.workers import position_guard
+
+        async def fake_spot(assets, **_kw):
+            return {a: 1.2500 for a in assets}, {}
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+
+    def _broker(self):
+        from app.integrations.brokers import Position
+        broker = SimpleNamespace()
+        broker._positions = {"T1": Position(
+            ticket="T1", user_id="u1", asset="EURUSD", direction="BUY",
+            volume=0.02, entry_price=1.1000, stop_loss=1.0900,
+            take_profit=None, current_price=1.1000)}
+        broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+        broker.mark_price = lambda ticket: _AsyncFloat(1.1000)
+        broker.quote = lambda asset: _AsyncFloat(0.0)
+        broker.close_position = lambda ticket: _AsyncClosed()
+        return broker
+
+    @pytest.mark.asyncio
+    async def test_sl_move_sends_stop_loss_notify(self):
+        from app.models.schemas import AppSettings
+        from app.workers import position_guard
+
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+             "direction": "buy", "volume": 0.02, "entry_price": 1.1000,
+             "stop_loss": 1.0900, "partial_done": False}]})
+        rec = _Recorder()
+        summary = await position_guard.guard_once(
+            db, broker, rec,
+            settings=AppSettings(breakeven_trigger_r=1.0, trail_atr_mult=0))
+        assert summary["moved_sl"] == 1
+        sl_notes = [m for (_, t, m) in rec.sent if t == "stop_loss"]
+        assert sl_notes, "SL move must notify with stop_loss type"
+        assert "1.09" in sl_notes[0] and "1.1" in sl_notes[0]
+
+    @pytest.mark.asyncio
+    async def test_no_move_no_notify(self):
+        from app.models.schemas import AppSettings
+        from app.workers import position_guard
+
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL([], sl)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+             "direction": "buy", "volume": 0.02, "entry_price": 1.1000,
+             "stop_loss": 1.0900, "partial_done": False}]})
+        rec = _Recorder()
+        # trigger above any plausible profit → no move
+        await position_guard.guard_once(
+            db, broker, rec,
+            settings=AppSettings(breakeven_trigger_r=500.0, trail_atr_mult=0))
+        assert not [t for (_, t, _) in rec.sent if t == "stop_loss"]
