@@ -1183,7 +1183,10 @@ async def backtest(config: BacktestConfig) -> BacktestResult:
         return BacktestResult(config=config, total_trades=0, win_rate_pct=0.0,
                               profit_factor=0.0, sharpe_ratio=0.0, max_drawdown_pct=0.0,
                               final_equity=config.initial_capital,
-                              note=f"ไม่มีข้อมูลราคา ({exc.__class__.__name__})")
+                              note=f"{config.asset} {config.indicator} — ไม่มีข้อมูลราคา "
+                                   f"({exc.__class__.__name__}) | indicator-only long/flat "
+                                   f"บน daily candles (ยังไม่รวม confidence gate / risk sizing / "
+                                   f"spread ของระบบจริง)")
     return run_backtest(candles, config)
 
 
@@ -1198,7 +1201,10 @@ async def walk_forward_route(config: BacktestConfig) -> WalkForwardResult:
     except Exception as exc:
         return WalkForwardResult(segments=0, in_sample_win_rates=[],
                                  out_sample_win_rates=[], reliability_score=0.0,
-                                 note=f"ไม่มีข้อมูลราคา ({exc.__class__.__name__})")
+                                 note=f"{config.asset} {config.indicator} — ไม่มีข้อมูลราคา "
+                                      f"({exc.__class__.__name__}) | indicator-only long/flat "
+                                      f"บน daily candles (ยังไม่รวม confidence gate / risk sizing / "
+                                      f"spread ของระบบจริง)")
     return walk_forward(candles, config)
 
 
@@ -1248,12 +1254,32 @@ async def extended_analysis(request: Request) -> dict:
 
     ctx = await _build_context(db)
 
-    # market snapshot for order strategy demo leg
-    rows = db.select("market_analysis", limit=5)
-    top = rows[0] if rows else None
-    regime = top.get("regime", "sideway") if top else "sideway"
-    confidence = float(top.get("confidence") or 0) if top else 0.0
-    asset = top.get("asset", "EURUSD") if top else "EURUSD"
+    # market snapshot for the order-strategy leg — TOP SCORER, same source
+    # as the market header + goal assessment + chat context (never the
+    # newest row: limit=5 + rows[0] picked an arbitrary asset, so Extended
+    # disagreed with every other surface). limit=50 keeps the full ~28-row
+    # scanner cycle; dedupe keeps the newest row per asset.
+    try:
+        _rows = db.select("market_analysis", limit=50) or []
+    except Exception:
+        _rows = []
+    _seen: set[str] = set()
+    _per_asset: dict[str, tuple[float, str]] = {}
+    for _r in _rows:
+        _a = str(_r.get("asset") or "").upper()
+        if not _a or _a in _seen:
+            continue  # select() is newest-first → keep newest row per asset
+        _seen.add(_a)
+        try:
+            _score = float(_r.get("confidence") or 0)
+        except (TypeError, ValueError):
+            _score = 0.0
+        _per_asset[_a] = (_score, str(_r.get("regime") or "sideway"))
+    if _per_asset:
+        asset, (_conf, regime) = max(_per_asset.items(), key=lambda kv: kv[1][0])
+        confidence = float(_conf or 0)
+    else:
+        asset, regime, confidence = "EURUSD", "sideway", 0.0
 
     freq = await get_frequency(request)
     news = await get_calendar(request)
@@ -1270,11 +1296,111 @@ async def extended_analysis(request: Request) -> dict:
         min_confidence=effective_min_confidence(s, asset),
         min_opportunity=s.min_opportunity)
 
+    # order strategy — REAL proposal for the top scorer (same path as the
+    # scanner: live snapshot → opportunity score → build_proposal with the
+    # user's RR target + SL clamp + gold invalidation → OrderStrategyEngine
+    # legs). The old code priced a dummy BUY 1.0/0.99/1.02 on every asset,
+    # so gold showed a 1.0 entry and FX-sized legs. Fail-safe: snapshot
+    # failure falls back to a spot-anchored plan, never raises.
+    from app.engine.strategy_engine import regime_of as _regime_of
+    _direction: str = "BUY"
+    _atr = 0.8
+    _entry = 0.0
+    _sl = 0.0
+    _tp = 0.0
+    try:
+        from app.integrations import quotes as _quotes
+        _snaps = await _quotes.fetch_all_snapshots([asset])
+        _snap = dict((_snaps or {}).get(asset) or {})
+    except Exception:
+        _snap = {}
+    if _snap:
+        try:
+            _ind = IndicatorSnapshot(**{**_snap, "source": "live"})
+            _opp = engine.opportunity_score(_ind)
+            _bullish = bool(_ind.ema_fast > _ind.ema_slow)
+            _rr = max(0.5, float(getattr(s, "rr_target", 2.0) or 2.0))
+            _prop = engine.build_proposal(
+                _ind, _opp, risk_per_trade_pct=float(s.risk_per_trade_pct or 0),
+                regime_bullish=_bullish, rr_target=_rr,
+                sl_min_pct=float(getattr(s, "sl_distance_min_pct", 0) or 0),
+                sl_max_pct=float(getattr(s, "sl_distance_max_pct", 0) or 0),
+                invalidation_level=(float(_ind.breakout_level)
+                                    if str(asset).upper() == "XAUUSD" else 0.0))
+            _direction = str(_prop.direction or "BUY").upper()
+            _atr = float(_ind.atr_pct or 0.8)
+            _entry = float(_prop.entry or 0)
+            _sl = float(_prop.stop_loss or 0)
+            _tp = float(_prop.take_profit or 0)
+            confidence = float(_prop.confidence or confidence)
+            regime = _regime_of(_ind)
+        except Exception:
+            pass
+    if not _entry:
+        # snapshot unavailable — anchor at the live spot price with an
+        # ATR-derived stop so the plan still reflects the real market.
+        try:
+            from app.integrations import quotes as _quotes2
+            _prices, _fail = await _quotes2.fetch_spot_prices([asset])
+            _spot = float((_prices or {}).get(asset) or 0)
+        except Exception:
+            _spot = 0.0
+        if _spot > 0:
+            _entry = _spot
+            _dist = max(_spot * _atr / 100.0 * 1.5, _spot * 0.001)
+            _direction = "BUY" if regime in ("bull_trend", "strong_bull_trend") else "SELL"
+            _sign = 1.0 if _direction == "BUY" else -1.0
+            _rr = max(0.5, float(getattr(s, "rr_target", 2.0) or 2.0))
+            _sl = _spot - _sign * _dist
+            _tp = _spot + _sign * _dist * _rr
     plan = OrderStrategyEngine().build_plan(
-        asset=asset, direction="BUY", entry=1.0, stop_loss=0.99,
-        take_profit=1.02, regime=regime, atr_pct=0.8,
+        asset=asset, direction=_direction,  # type: ignore[arg-type]
+        entry=_entry or 1.0, stop_loss=_sl or (_entry or 1.0) * 0.99,
+        take_profit=_tp or (_entry or 1.0) * 1.02,
+        regime=regime, atr_pct=_atr,
         equity=s.capital,
         risk_per_trade_pct=freq.limits.risk_per_trade_pct if freq.limits else 1.0)
+    # re-run the officer against the REAL proposal confidence so the
+    # review/final decision match the plan shown (the old flow reviewed the
+    # scanner-row score but displayed dummy BUY legs).
+    officer = RiskOfficer().review_trade(
+        confidence=confidence, opportunity_score=confidence,
+        frequency=freq, news_risk=news, kill_switch=ks,
+        correlation_score=corr["portfolio_correlation"],
+        correlation_cap=s.correlation_cap,
+        min_confidence=effective_min_confidence(s, asset),
+        min_opportunity=s.min_opportunity)
+
+    # backtest leg — LIVE run for the same top scorer (fail-soft). The old
+    # text told the user to POST manually, so Extended never showed a real
+    # number. Uses the saved backtest_* settings (same defaults the panel
+    # seeds) over real daily candles; feed failure keeps an honest note.
+    _bt_text = "ยิง POST /api/trading/backtest เพื่อรันตาม indicator (ไม่รันอัตโนมัติเพราะใช้เวลา)"
+    try:
+        from app.integrations import quotes as _quotes3
+        from app.models.schemas import BacktestConfig as _BTC
+        from app.models.schemas import INDICATORS as _INDS
+        from app.models.schemas import run_backtest as _run_bt
+        import httpx as _httpx
+        _bt_ind = str(getattr(s, "backtest_indicator", "EMA") or "EMA")
+        if _bt_ind not in list(_INDS):
+            _bt_ind = "EMA"
+        _bt_days = int(getattr(s, "backtest_days", 120) or 120)
+        _bt_cfg = _BTC(asset=asset, indicator=_bt_ind,  # type: ignore[arg-type]
+                       days=max(30, min(_bt_days, 365)),
+                       initial_capital=float(s.capital or 0),
+                       risk_per_trade_pct=float(s.risk_per_trade_pct or 0))
+        async with _httpx.AsyncClient() as _client:
+            _candles = await _quotes3.fetch_candles(
+                asset, _client, days=int(_bt_cfg.days))
+        _bt_res = _run_bt(_candles, _bt_cfg)
+        _bt_text = (f"{asset} {_bt_ind} {_bt_days}d: {_bt_res.total_trades} trades, "
+                    f"win {_bt_res.win_rate_pct}%, PF {_bt_res.profit_factor}, "
+                    f"Sharpe {_bt_res.sharpe_ratio}, MaxDD {_bt_res.max_drawdown_pct}%, "
+                    f"equity {_bt_res.final_equity:g} — {_bt_res.note}")
+    except Exception as _bt_exc:
+        _bt_text = (f"{asset}: รัน backtest ไม่สำเร็จ ({_bt_exc.__class__.__name__}) — "
+                    f"ยิง POST /api/trading/backtest เพื่อรันตาม indicator")
 
     return {
         "news_calendar": f"{news.status}: {news.reason}",
@@ -1290,7 +1416,7 @@ async def extended_analysis(request: Request) -> dict:
         "journal_insight": f"{journal.total_trades} trades/{journal.period_days}d, "
                            f"win {journal.win_rate_pct}%, PF {journal.profit_factor}, "
                            f"avgRR {journal.average_rr}",
-        "backtest_result": "ยิง POST /api/trading/backtest เพื่อรันตาม indicator (ไม่รันอัตโนมัติเพราะใช้เวลา)",
+        "backtest_result": _bt_text,
         "paper_trading_status": f"readiness {paper.live_readiness_score}/100 — {paper.ai_coaching}",
         "kill_switch_status": ks.message,
         "final_decision": _final_decision(officer, news, ks, confidence, asset, s),

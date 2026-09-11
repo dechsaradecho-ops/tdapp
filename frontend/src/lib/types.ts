@@ -511,6 +511,7 @@ export interface ExtendedAnalysis {
   paper_trading_status: string;
   kill_switch_status: string;
   final_decision: string;
+  context_block?: string;
 }
 
 // ---------- App Settings ----------

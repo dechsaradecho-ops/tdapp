@@ -1237,7 +1237,9 @@ def run_backtest(candles: list[Candle], config: BacktestConfig) -> BacktestResul
         profit_factor=round(gp / gl, 2) if gl > 0 else (99.0 if gp > 0 else 0.0),
         sharpe_ratio=round(sharpe, 2), max_drawdown_pct=round(max_dd, 2),
         final_equity=round(equity, 2), equity_curve=[round(v, 2) for v in curve],
-        note=f"indicator={config.indicator}, long/flat บน daily candles (next-bar open execution)")
+        note=f"{config.asset} {config.indicator} บน {len(closes)} daily candles "
+             f"(next-bar open, long/flat indicator-only — ยังไม่รวม confidence gate / "
+             f"allowed_assets / risk sizing / spread / commission ของระบบจริง)")
 
 
 # ---------- Walk-Forward & Paper Trading ----------
@@ -1273,8 +1275,11 @@ def walk_forward(candles: list[Candle], config: BacktestConfig,
         return WalkForwardResult(
             segments=0, in_sample_win_rates=[], out_sample_win_rates=[],
             reliability_score=0.0,
-            note=f"ข้อมูลไม่พอสำหรับ Walk Forward (มี {len(closes)} แท่ง ต้อง ≥ "
-                 f"{MIN_SEGMENT_BARS}) — เพิ่มจำนวนวัน (Days) แล้วรันใหม่")
+            note=f"{config.asset} {config.indicator} — ข้อมูลไม่พอสำหรับ Walk Forward "
+                 f"(มี {len(closes)} แท่ง ต้อง ≥ {MIN_SEGMENT_BARS}) — "
+                 f"เพิ่มจำนวนวัน (Days) แล้วรันใหม่ | indicator-only long/flat "
+                 f"บน daily candles (ยังไม่รวม confidence gate / risk sizing / "
+                 f"spread ของระบบจริง)")
     while segments > 1 and len(closes) // segments < MIN_SEGMENT_BARS:
         segments -= 1
     seg_len = len(closes) // segments
@@ -1298,11 +1303,16 @@ def walk_forward(candles: list[Candle], config: BacktestConfig,
         # signal never flips) — the IS/OOS ratio is undefined; report 0
         # with an honest note instead of a formula-derived fake number.
         reliability = 0.0
-        note = (f"ใช้ {segments} segment(s) × {seg_len} แท่ง — ไม่มีเทรดใน In-Sample "
-                f"(สัญญาณไม่กลับทางเลยในช่วงนี้) จึงประเมิน reliability ไม่ได้")
+        note = (f"{config.asset} {config.indicator} — ใช้ {segments} segment(s) × {seg_len} แท่ง "
+                f"— ไม่มีเทรดใน In-Sample (สัญญาณไม่กลับทางเลยในช่วงนี้) "
+                f"จึงประเมิน reliability ไม่ได้ | indicator-only long/flat "
+                f"บน daily candles (ยังไม่รวม confidence gate / risk sizing / "
+                f"spread ของระบบจริง)")
     else:
         reliability = round(max(0.0, min(100.0, (ratio * 0.6 + consistency * 0.4) * 100)), 1)
-        note = f"ใช้ {segments} segment(s) × {seg_len} แท่ง (IS 60% / OOS 40%)"
+        note = (f"{config.asset} {config.indicator} — ใช้ {segments} segment(s) × {seg_len} แท่ง "
+                f"(IS 60% / OOS 40%) | indicator-only long/flat บน daily candles "
+                f"(ยังไม่รวม confidence gate / allowed_assets / risk sizing / spread)")
         if segments < 4:
             note += " — ข้อมูลสั้น ลดจำนวน segments ให้แต่ละช่วงยาวพอ"
     return WalkForwardResult(segments=segments, in_sample_win_rates=is_wr,

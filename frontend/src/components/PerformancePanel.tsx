@@ -363,7 +363,12 @@ export default function PerformancePanel() {
         {wf && (
           <div className="pt-3 text-sm">
             <div className="text-slate-400 text-xs">Walk Forward Reliability</div>
-            <div className="flex items-center gap-3">
+            <p className="text-xs text-slate-500">
+              IS 60% / OOS 40% บน daily candles จริง (next-bar open, long/flat
+              indicator-only — ยังไม่รวม confidence gate / allowed_assets /
+              risk sizing / spread ของระบบจริง)
+            </p>
+            <div className="flex items-center gap-3 pt-1">
               <span className="text-lg font-bold">{wf.reliability_score}/100</span>
               <span className="text-slate-500 text-xs">
                 {wf.segments} segments · IS {wf.in_sample_win_rates.map((v) => `${v}%`).join(", ")}
@@ -377,12 +382,51 @@ export default function PerformancePanel() {
         {bt?.note && <p className="text-xs text-slate-500 pt-2">{bt.note}</p>}
       </div>
 
-      {/* Extended output format */}
+      {/* Extended output format — every section computed live backend-side:
+          market leg = top scorer (same source as market header + goal + chat,
+          never newest row); order plan = real proposal legs (snapshot →
+          build_proposal → OrderStrategyEngine, never dummy BUY 1.0);
+          backtest leg = live run over real daily candles (fail-soft note). */}
       {extended && (
         <div className="panel">
           <h2 className="panel-title">Extended Output Format</h2>
           <div className="text-sm space-y-2">
             <p><span className="text-slate-400">FINAL DECISION:</span> <span className="font-bold">{extended.final_decision}</span></p>
+            {(() => {
+              let plan: {
+                asset?: string; direction?: string; average_entry?: number;
+                stop_loss?: number; take_profit?: number;
+                entries?: { order_type?: string; price?: number; lot?: number; note?: string }[];
+                rationale?: string[];
+              } | null = null;
+              try {
+                plan = extended.order_strategy ? JSON.parse(extended.order_strategy) : null;
+              } catch {
+                plan = null;
+              }
+              return plan ? (
+                <div className="rounded border border-slate-700/60 px-3 py-2">
+                  <p>
+                    <span className="text-slate-400">ORDER STRATEGY:</span>{" "}
+                    {plan.asset} {plan.direction} avg {plan.average_entry} ·
+                    SL {plan.stop_loss} · TP {plan.take_profit}
+                  </p>
+                  {!!plan.entries?.length && (
+                    <ul className="text-xs text-slate-400 list-disc pl-4 pt-1">
+                      {plan.entries.map((leg, i) => (
+                        <li key={i}>
+                          {leg.order_type} @ {leg.price} lot {leg.lot}
+                          {leg.note ? ` — ${leg.note}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {!!plan.rationale?.length && (
+                    <p className="text-xs text-slate-500 pt-1">{plan.rationale.join(" · ")}</p>
+                  )}
+                </div>
+              ) : null;
+            })()}
             {[
               ["NEWS & CALENDAR", extended.news_calendar],
               ["SESSION ANALYSIS", extended.session_analysis],
@@ -396,6 +440,14 @@ export default function PerformancePanel() {
             ].map(([k, v]) => (
               <p key={k as string}><span className="text-slate-400">{k}:</span> {v}</p>
             ))}
+            {!!extended.context_block && (
+              <details className="pt-1">
+                <summary className="text-xs text-slate-500 cursor-pointer">
+                  CONTEXT BLOCK (market + portfolio ที่ AI ใช้ — เดียวกับแชท)
+                </summary>
+                <pre className="text-xs text-slate-500 whitespace-pre-wrap pt-1">{extended.context_block}</pre>
+              </details>
+            )}
           </div>
         </div>
       )}

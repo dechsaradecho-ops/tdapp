@@ -1509,3 +1509,140 @@ class TestPerformanceSources:
         assert body["by_regime"] == [{
             "key": "bull_trend", "trades": 1,
             "win_rate_pct": 100.0, "total_pnl": 12.0}]
+
+
+class TestExtendedAnalysisSync:
+    """Regression (2026-09-11, "Performance Walk Forward + Extended ไม่สอดคล้อง
+    กับระบบ ตรวจสอบที่มา"): extended-analysis drifted off the live system —
+      market leg read limit=5 + rows[0] (newest row = arbitrary asset) →
+        disagreed with the market header + goal + chat (top scorer)
+      order leg priced a dummy BUY 1.0/0.99/1.02 on every asset →
+        gold showed a 1.0 entry and FX-sized legs
+      backtest leg was a static "POST manually" string → never a real number
+    """
+
+    def _snap(self, asset: str) -> dict:
+        # strong_snapshot-shaped dict (fetch_all_snapshots contract).
+        return {
+            "asset": asset, "price": 100.0, "ema_fast": 105.0,
+            "ema_slow": 95.0, "adx": 40.0, "supertrend_dir": 1,
+            "rsi": 62.0, "macd_hist": 2.0, "atr_pct": 0.8,
+            "volatility_index": 12.0, "news_sentiment": 0.0,
+            "high_impact_event": False, "breakout_state": 2.0,
+            "breakout_level": 99.0,
+        }
+
+    def _bars(self, n: int = 120):
+        from app.integrations.quotes import Candle
+        base = 1.10
+        return [Candle(o=base + i * 0.0005, h=base + i * 0.0005 + 0.002,
+                       l=base + i * 0.0005 - 0.002,
+                       c=base + i * 0.0005 + 0.001) for i in range(n)]
+
+    @pytest.mark.asyncio
+    async def test_extended_uses_top_scorer_not_newest_row(self, monkeypatch):
+        """Newest row EURUSD/sideway must NOT win — XAUUSD top scorer drives
+        the order plan + live backtest leg + context."""
+        import json
+        from app.integrations import quotes as quotes_mod
+        # FakeDatabase inserts prepend (newest first): insert the bull winner
+        # FIRST so sideway EURUSD ends up newest at index 0.
+        db = FakeDatabase(rows={"market_analysis": []})
+        db.insert("market_analysis", {
+            "asset": "XAUUSD", "regime": "strong_bull_trend",
+            "sentiment": "bullish", "confidence": 78.0,
+            "explanation": "t",
+        })
+        db.insert("market_analysis", {
+            "asset": "EURUSD", "regime": "sideway", "sentiment": "neutral",
+            "confidence": 42.5, "explanation": "t",
+        })
+        set_state(db)
+
+        async def fake_snaps(assets, **_kw):
+            return {a: dict(self._snap(a)) for a in assets}
+        async def fake_spot(assets, **_kw):
+            return {a: 100.0 for a in assets}, {}
+        async def fake_candles(asset, client, days=120):
+            return self._bars(max(30, days))
+        monkeypatch.setattr(quotes_mod, "fetch_all_snapshots", fake_snaps)
+        monkeypatch.setattr(quotes_mod, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(quotes_mod, "fetch_candles", fake_candles)
+
+        r = await call("GET", "/api/trading/extended-analysis")
+        assert r.status_code == 200
+        body = r.json()
+        plan = json.loads(body["order_strategy"])
+        # top scorer wins (not the newest EURUSD row)
+        assert plan["asset"] == "XAUUSD"
+        # real proposal legs — never the dummy BUY 1.0/0.99/1.02 plan.
+        # (lots round to 0.0 at price 100 with the FX contract value, so
+        # assert on PRICES not average_entry: avg is lot-weighted → 0.0
+        # when every leg rounds to 0 lots — same as production.)
+        assert plan["entries"][0]["price"] == pytest.approx(100.0, abs=5.0)
+        assert plan["stop_loss"] == pytest.approx(98.0, abs=5.0)
+        assert plan["take_profit"] > 100.0
+        assert body["execution_plan"]
+        # live backtest leg names the same top scorer (not the POST hint)
+        assert "XAUUSD" in body["backtest_result"]
+        assert "POST" not in body["backtest_result"] or "trades" in body["backtest_result"]
+        # shared grounded context with the chat surface
+        assert "GROUNDED CONTEXT" in (body.get("context_block") or "")
+        assert body["final_decision"]
+
+    @pytest.mark.asyncio
+    async def test_extended_offline_stays_fail_soft(self, monkeypatch):
+        """No rows + dead feeds → honest EURUSD defaults, never raises."""
+        from app.integrations import quotes as quotes_mod
+        set_state(FakeDatabase())
+
+        async def boom_snaps(assets, **_kw):
+            raise RuntimeError("offline")
+        async def boom_spot(assets, **_kw):
+            raise RuntimeError("offline")
+        async def boom_candles(asset, client, days=120):
+            raise RuntimeError("offline")
+        monkeypatch.setattr(quotes_mod, "fetch_all_snapshots", boom_snaps)
+        monkeypatch.setattr(quotes_mod, "fetch_spot_prices", boom_spot)
+        monkeypatch.setattr(quotes_mod, "fetch_candles", boom_candles)
+
+        r = await call("GET", "/api/trading/extended-analysis")
+        assert r.status_code == 200
+        body = r.json()
+        assert "EURUSD" in body["backtest_result"]
+        assert "ไม่สำเร็จ" in body["backtest_result"]
+        assert body["final_decision"]
+
+    @pytest.mark.asyncio
+    async def test_walk_forward_route_fail_soft_carries_provenance(self, monkeypatch):
+        """Feed failure → segments 0 with asset+indicator+scope in the note."""
+        from app.integrations import quotes as quotes_mod
+        set_state(FakeDatabase())
+
+        async def boom(asset, client, days=120):
+            raise RuntimeError("feed down")
+        monkeypatch.setattr(quotes_mod, "fetch_candles", boom)
+        body = (await call("POST", "/api/trading/walk-forward", json_body={
+            "asset": "EURUSD", "indicator": "EMA", "days": 120,
+            "initial_capital": 10000, "risk_per_trade_pct": 1.0,
+        })).json()
+        assert body["segments"] == 0 and body["reliability_score"] == 0.0
+        assert "EURUSD" in body["note"] and "EMA" in body["note"]
+        assert "indicator-only" in body["note"]
+
+    @pytest.mark.asyncio
+    async def test_backtest_route_fail_soft_carries_provenance(self, monkeypatch):
+        """Feed failure → 0 trades with asset+indicator+scope in the note."""
+        from app.integrations import quotes as quotes_mod
+        set_state(FakeDatabase())
+
+        async def boom(asset, client, days=120):
+            raise RuntimeError("feed down")
+        monkeypatch.setattr(quotes_mod, "fetch_candles", boom)
+        body = (await call("POST", "/api/trading/backtest", json_body={
+            "asset": "XAUUSD", "indicator": "RSI", "days": 120,
+            "initial_capital": 10000, "risk_per_trade_pct": 1.0,
+        })).json()
+        assert body["total_trades"] == 0
+        assert "XAUUSD" in body["note"] and "RSI" in body["note"]
+        assert "indicator-only" in body["note"]

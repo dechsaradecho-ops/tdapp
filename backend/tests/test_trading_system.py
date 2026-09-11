@@ -337,6 +337,51 @@ def test_walk_forward_adaptive_segments_no_fake_40():
     assert "ไม่พอ" in tiny.note
 
 
+def _alternating_candles(n: int = 300) -> list[Candle]:
+    """Mean-reverting fixture: EMA signal flips every bar → every IS/OOS
+    window has trades, so the normal reliability path is exercised."""
+    return [Candle(o=1.10 + (0.005 if i % 2 == 0 else -0.005),
+                   h=1.11, l=1.09,
+                   c=1.10 + (0.005 if i % 2 == 0 else -0.005))
+            for i in range(n)]
+
+
+def test_backtest_note_carries_provenance():
+    """Sync (2026-09-11): the note must state asset+indicator+bar count and
+    the indicator-only scope (no confidence gate / sizing / spread)."""
+    cfg = BacktestConfig(asset="EURUSD", indicator="EMA")
+    res = run_backtest(_trending_candles(), cfg)
+    assert "EURUSD" in res.note and "EMA" in res.note
+    assert "indicator-only" in res.note
+    assert "confidence gate" in res.note
+
+
+def test_walk_forward_notes_carry_provenance():
+    """Sync (2026-09-11): every WF note states asset+indicator and the
+    indicator-only scope — the panel renders the note as the methodology."""
+    cfg = BacktestConfig(asset="EURUSD", indicator="EMA")
+    tiny = walk_forward(_trending_candles(60), cfg, segments=4)
+    assert tiny.segments == 0 and tiny.reliability_score == 0.0
+    assert "EURUSD" in tiny.note and "EMA" in tiny.note
+    assert "indicator-only" in tiny.note
+    # trending 160: no IS trades → honest 0, never the fake formula number
+    flat = walk_forward(_trending_candles(160), cfg, segments=4)
+    assert flat.reliability_score == 0.0
+    assert "EURUSD" in flat.note and "In-Sample" in flat.note
+    assert "indicator-only" in flat.note
+
+
+def test_walk_forward_normal_path_note():
+    """Alternating fixture hits the real IS/OOS ratio path: 4 full segments,
+    reliability in bounds, note states IS/OOS split + indicator-only scope."""
+    cfg = BacktestConfig(asset="EURUSD", indicator="EMA")
+    res = walk_forward(_alternating_candles(), cfg, segments=4)
+    assert res.segments == 4
+    assert 0 <= res.reliability_score <= 100
+    assert "IS 60%" in res.note and "OOS 40%" in res.note
+    assert "indicator-only" in res.note
+
+
 # ------------------------------------------------------------ paper trading
 class FakeBroker:
     class T:

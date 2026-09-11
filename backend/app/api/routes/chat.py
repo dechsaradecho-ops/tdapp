@@ -73,7 +73,9 @@ async def _build_context(db, broker=None) -> str:
     engine = StrategyEngine()
 
     # ---- Live market context: worker rows → live quotes → demo constants ----
-    rows = db.select("market_analysis", limit=25)
+    # limit=50 keeps the full ~28-row scanner cycle (same as market header +
+    # goal + extended); the old limit=25 truncated the tail of each cycle.
+    rows = db.select("market_analysis", limit=50)
     seen: set[str] = set()
     per_asset: dict[str, tuple[float, str]] = {}
     regime_str, regime_confidence = "sideway", 50.0
