@@ -1547,7 +1547,13 @@ async def extended_analysis(request: Request) -> dict:
         take_profit=_tp or (_entry or 1.0) * 1.02,
         regime=regime, atr_pct=_atr,
         equity=s.capital,
-        risk_per_trade_pct=freq.limits.risk_per_trade_pct if freq.limits else 1.0)
+        # live risk %, NOT freq.limits.risk_per_trade_pct — that is Optional and
+        # becomes None the moment the frequency gate denies (limits exhausted),
+        # which silently re-priced every leg at the 1.0% fallback: the panel
+        # showed a lot up to 6x smaller than the one execution would use.
+        # _evaluate_frequency always overrides limits with s.risk_per_trade_pct,
+        # so reading the setting directly is both safer and identical.
+        risk_per_trade_pct=float(s.risk_per_trade_pct or 1.0))
     # re-evaluate frequency + officer against the REAL proposal confidence
     # so the review/final decision match the plan shown (the old flow
     # reviewed the scanner-row score but displayed dummy BUY legs).
