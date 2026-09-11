@@ -174,7 +174,9 @@ def test_smart_exit_defaults():
     assert s.news_exit_min_r == 1.0
     assert s.volatility_exit_atr == 2.5
     assert s.no_behind_min_r == 0.5
-    assert s.no_behind_hold_mult == 5.0
+    assert s.no_behind_hold_mult == 1.75
+    assert s.no_behind_min_days == 2.0
+    assert s.time_stop_min_r == 1.0
     assert s.trailing_ladder is True
 
 
@@ -245,13 +247,49 @@ def test_avg_hold_ignores_degenerate_instant_spans():
     assert execution.avg_hold_days(_FakeDb(rows)) == 3.0  # (2+3+4)/3
 
 
-def test_avg_hold_fallback_keeps_left_behind_dormant():
-    """Threshold = avg × no_behind_hold_mult must stay above max_hold_days
-    while the sample is thin, so the time stop expires positions first."""
-    from app.services import execution
+def test_left_behind_threshold_never_passes_time_stop():
+    """threshold = max(avg × mult, floor) but clamped to max_hold_days.
+
+    Regression for the dead-code bug: with mult=5 the threshold was
+    avg 2.4 × 5 = 11.9 days against a 5-day time stop, so left_behind could
+    NEVER fire and the R-blind time stop closed everything instead.
+    """
+    from app.engine import smart_exit as _se
     s = AppSettings()
-    avg = execution.avg_hold_days(_FakeDb([]))
-    assert avg * s.no_behind_hold_mult > s.max_hold_days
+    # generous sample → the multiplier would overshoot max_hold_days
+    d = _se.left_behind_days(settings=s, avg_hold_days=8.0)
+    assert d == float(s.max_hold_days) == 5.0
+    # thin sample (4.0) → 7.0 days, still clamped to the 5-day stop
+    assert _se.left_behind_days(settings=s, avg_hold_days=4.0) == 5.0
+    # a short-but-real average → floor wins (2.0 > 1.75 × 0.8)
+    assert _se.left_behind_days(settings=s, avg_hold_days=0.8) == 2.0
+    # collapsed average still cannot go under the floor
+    assert _se.left_behind_days(settings=s, avg_hold_days=0.51) == 2.0
+    # 0.0 means "unknown" → neutral 4.0 fallback, then clamped as usual
+    assert _se.left_behind_days(settings=s, avg_hold_days=0.0) == 5.0
+    # mult=0 disables the rule entirely (existing semantics kept)
+    assert _se.left_behind_days(
+        settings=AppSettings(no_behind_hold_mult=0), avg_hold_days=4.0) == 0.0
+
+
+def test_left_behind_threshold_respects_disabled_time_stop():
+    """max_hold_days=0 (time stop off) must not clamp the threshold to 0."""
+    from app.engine import smart_exit as _se
+    s = AppSettings(max_hold_days=0, no_behind_min_days=0.0)
+    assert _se.left_behind_days(settings=s, avg_hold_days=4.0) == 7.0
+
+
+def test_evaluate_exit_reports_behind_days():
+    """The decision object must expose the threshold it used — the popup and
+    the guard read the same number instead of re-deriving the formula."""
+    s = AppSettings()
+    d = smart_exit.evaluate_exit(
+        asset="EURUSD", direction="BUY", entry_price=100.0,
+        price=100.2, stop_loss=99.0, age_days=30.0,
+        settings=s, snapshot=healthy_snap(),
+        news_status="SAFE", avg_hold_days=4.0)
+    assert d.trigger == "left_behind"
+    assert d.behind_days == 5.0  # clamped by max_hold_days
 
 
 def test_position_age_prefers_journal_created_at():

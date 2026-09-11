@@ -6,6 +6,7 @@ import CloseGroupModal, { CloseGroupMode } from "@/components/CloseGroupModal";
 import CloseSingleModal from "@/components/CloseSingleModal";
 import ClosePositionModal from "@/components/ClosePositionModal";
 import PositionChartModal from "@/components/PositionChartModal";
+import CloseReasonBadge from "@/components/CloseReasonBadge";
 import CopyNum from "@/components/CopyNum";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
@@ -970,11 +971,7 @@ export default function MonitorPage() {
                       <StatusBadge status={t.status} />
                     </td>
                     <td className="py-2 pr-4 text-xs">
-                      {t.close_reason === "sl" ? "ตัดขาดทุน (SL)"
-                        : t.close_reason === "tp" ? "ถึงเป้า (TP)"
-                        : t.close_reason === "manual" ? "ปิดเอง"
-                        : t.close_reason === "time" ? "หมดเวลา (Time Stop)"
-                        : "-"}
+                      <CloseReasonBadge trade={t} rules={snap.exit_rules} />
                     </td>
                     <td className="py-2 text-xs">{t.source === "auto" ? "Auto" : "Approve"}</td>
                   </tr>

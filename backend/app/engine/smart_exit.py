@@ -77,6 +77,11 @@ class ExitDecision:
     # e.g. "exit_score", "reversal", "news", "volatility", "left_behind",
     # "profit_protect", "time_stop", "emergency"
     trigger: str = ""
+    # Effective age threshold (days) the left_behind rule used this cycle.
+    # 0.0 when the rule is disabled (no_behind_hold_mult <= 0). Surfaced so the
+    # monitor can show the SAME number the engine reasons about instead of
+    # re-deriving it in the UI.
+    behind_days: float = 0.0
 
 
 def quality_of(score: float) -> Literal["High", "Medium", "Low"]:
@@ -93,6 +98,53 @@ def _clamp01(x: float) -> float:
 
 def _dir_sign(direction: str) -> int:
     return 1 if str(direction or "").upper() == "BUY" else -1
+
+
+def left_behind_days(*, settings, avg_hold_days: float | None,
+                     max_hold_days: int | None = None) -> float:
+    """Age threshold (days) of the NO-POSITION-LEFT-BEHIND rule; 0 = disabled.
+
+    SINGLE definition — `evaluate_exit`, the monitor snapshot (popup text) and
+    tests all read this, so the number the UI shows is the number the engine
+    used. Computed as:
+
+        days = max(avg_hold × no_behind_hold_mult, no_behind_min_days)
+        days = min(days, max_hold_days)      # only when the time stop is on
+
+    The floor matters MORE after the multiplier was lowered (1.75): the
+    average is itself floored at 0.5 day, so a collapsed sample would give a
+    0.9-day threshold — the 2026-09-11 incident was exactly a collapsed
+    average. The cap keeps the rule from ever drifting PAST the time stop,
+    which is what made it dead code (mult=5 → 11.9 days vs a 5-day stop).
+
+    Never raises; returns 0.0 when the rule is off (mult <= 0).
+    """
+    try:
+        mult = float(getattr(settings, "no_behind_hold_mult", 1.75) or 0)
+    except (TypeError, ValueError):
+        mult = 0.0
+    if mult <= 0:
+        return 0.0
+    try:
+        avg = max(0.5, float(avg_hold_days or 4.0))
+    except (TypeError, ValueError):
+        avg = 4.0
+    days = avg * mult
+    try:
+        floor = float(getattr(settings, "no_behind_min_days", 2.0) or 0)
+    except (TypeError, ValueError):
+        floor = 0.0
+    if floor > 0:
+        days = max(days, floor)
+    hard = max_hold_days if max_hold_days is not None else getattr(
+        settings, "max_hold_days", 0)
+    try:
+        hard = int(hard or 0)
+    except (TypeError, ValueError):
+        hard = 0
+    if hard > 0:
+        days = min(days, float(hard))
+    return days
 
 
 def evaluate_exit(
@@ -160,7 +212,7 @@ def _evaluate(
     news_min_r = float(getattr(s, "news_exit_min_r", 1.0) or 0)
     vol_exit_atr = float(getattr(s, "volatility_exit_atr", 2.5) or 0)
     behind_min_r = float(getattr(s, "no_behind_min_r", 0.5) or 0)
-    behind_mult = float(getattr(s, "no_behind_hold_mult", 5.0) or 0)
+    behind_mult = float(getattr(s, "no_behind_hold_mult", 1.75) or 0)
 
     ema_fast = float(snap.get("ema_fast") or 0)
     ema_slow = float(snap.get("ema_slow") or 0)
@@ -348,10 +400,11 @@ def _evaluate(
 
     # ---- NO POSITION LEFT BEHIND ------------------------------------------
     avg_hold = max(0.5, float(avg_hold_days or 4.0))
+    behind_days = left_behind_days(settings=s, avg_hold_days=avg_hold,
+                                   max_hold_days=max_hold)
     left_behind = (
-        behind_mult > 0 and behind_min_r >= 0
-        and r_mult < behind_min_r
-        and age_days > avg_hold * behind_mult
+        behind_days > 0 and behind_min_r >= 0 and r_mult < behind_min_r
+        and age_days > behind_days
     )
 
     volatility_spike = vol_exit_atr > 0 and atr_pct > vol_exit_atr
@@ -368,7 +421,8 @@ def _evaluate(
         rec, final, trigger = "CLOSE", "CLOSE", "left_behind"
         reasoning.append(
             f"ไม้ค้างทุน: กำไร {r_mult:+.1f}R < {behind_min_r:g}R "
-            f"+ ถือ {age_days:.0f} วัน > {behind_mult:g}× ค่าเฉลี่ย ({avg_hold:.1f} วัน) "
+            f"+ ถือ {age_days:.1f} วัน เกินเกณฑ์ {behind_days:.1f} วัน "
+            f"({behind_mult:g}× ค่าเฉลี่ย {avg_hold:.1f} วัน) "
             "— Capital Efficiency")
     elif news_exit:
         rec, final, trigger = "CLOSE", "CLOSE", "news"
@@ -421,6 +475,7 @@ def _evaluate(
         exit_score=score, quality=quality, factors=factors,
         signals=signals, recommendation=rec, final=final,
         reasoning=reasoning[:5], trigger=trigger,
+        behind_days=round(float(behind_days), 2),
     )
 
 

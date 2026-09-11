@@ -43,7 +43,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   news_exit_min_r: 1.0,
   volatility_exit_atr: 2.5,
   no_behind_min_r: 0.5,
-  no_behind_hold_mult: 5.0,
+  no_behind_hold_mult: 1.75,
+  no_behind_min_days: 2.0,
+  time_stop_min_r: 1.0,
   trailing_ladder: true,
   gold_breakout_only: true,
   paper_spread: 0,
@@ -837,7 +839,7 @@ export default function SettingsPage() {
                 hint="กำไรถึงกี่เท่า R ถึงแบ่งปิด (เช่น 1.0 = บวก 1R เก็บกำไรบางส่วนทันที)" />
               <NumField label="Max Hold Days (วัน)" value={cfg.max_hold_days}
                 onChange={(v) => set("max_hold_days", v)} step={1}
-                hint="time stop — ถือครบกี่วันระบบปิดเองไม่ว่าราคาอยู่ไหน (กันทุนจมกับไม้ไม่วิ่ง)" />
+                hint="เพดานอายุไม้ขั้นสุดท้าย — ไม้ที่อายุเกินนี้ปิดเอง ยกเว้นกำไรถึงเกณฑ์ Time Stop ยกเว้น (ดูหัวข้อ Smart Exit) ส่วนปกติ 'No-Behind' จะตัดไม้ตามเวลาก่อนถึงเพดานนี้อยู่แล้ว" />
               <NumField label="RR Target (1:X)" value={cfg.rr_target}
                 onChange={(v) => set("rr_target", v)} step={0.1}
                 hint="TP ห่างกี่เท่าของ SL (เช่น 2 = เสี่ยง 1 ได้ 2 — win rate 40% ก็ยังกำไร)" />
@@ -961,8 +963,14 @@ export default function SettingsPage() {
                 onChange={(v) => set("no_behind_min_r", v)} step={0.1}
                 hint="กำไรต่ำกว่านี้ + ถือนานเกิน = ไม้เน่า ตัดทิ้งเอาทุนไปหาโอกาสใหม่" />
               <NumField label="No-Behind ถือเกิน (×เท่าเฉลี่ย)" value={cfg.no_behind_hold_mult}
-                onChange={(v) => set("no_behind_hold_mult", v)} step={0.5}
-                hint="ถือนานเกินกี่เท่าของค่าเฉลี่ยถึงโดนตัดทิ้ง — คืนทุนไปหาโอกาสที่ดีกว่า" />
+                onChange={(v) => set("no_behind_hold_mult", v)} step={0.25}
+                hint="เกณฑ์วัน = ค่านี้ × ค่าเฉลี่ยเวลาถือจริง นี่คือไม้ตายหลักที่ปิดไม้ตามเวลา (ยิงก่อน max hold) — 0 = ปิดกฎนี้ แล้วปล่อยให้ time stop ตัดแทน" />
+              <NumField label="No-Behind พื้นขั้นต่ำ (วัน)" value={cfg.no_behind_min_days}
+                onChange={(v) => set("no_behind_min_days", v)} step={0.5}
+                hint="เกณฑ์วันจะไม่ต่ำกว่านี้ กันค่าเฉลี่ยพังแล้วตัดไม้เร็วเกินคาด (0 = ไม่มีพื้น)" />
+              <NumField label="Time Stop ยกเว้นไม้กำไร (×R)" value={cfg.time_stop_min_r}
+                onChange={(v) => set("time_stop_min_r", v)} step={0.5}
+                hint="ไม้ที่อายุเกิน Max Hold Days แต่กำไรถึงค่านี้จะไม่ถูกปิดเพราะอายุ — ป้องกัน time stop ตัดไม้กำไรทิ้ง (0 = ปิดตามอายุเสมอ)" />
             </div>
 
             {/* --- Kill switch / drawdown --- */}

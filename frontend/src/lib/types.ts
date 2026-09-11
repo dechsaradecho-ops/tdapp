@@ -571,9 +571,15 @@ export interface AppSettings {
   news_exit_min_r: number;
   /** ATR% above this + profit → scale out (0 = off) */
   volatility_exit_atr: number;
-  /** NO POSITION LEFT BEHIND: profit < this R + age > mult × avg → close */
+  /** NO POSITION LEFT BEHIND: profit < this R + age > threshold → close.
+   *  ไม้นี้คือไม้ตายหลักสำหรับปิดไม้ตามเวลา (ยิงก่อน max_hold_days) */
   no_behind_min_r: number;
+  /** threshold = mult × ค่าเฉลี่ยเวลาถือ (0 = ปิดกฎนี้) */
   no_behind_hold_mult: number;
+  /** พื้นขั้นต่ำของ threshold (วัน) — กันค่าเฉลี่ยพังแล้วเกณฑ์สั้นเกินไป (0 = ไม่มีพื้น) */
+  no_behind_min_days: number;
+  /** Time stop ยกเว้นไม้กำไร: ไม้แก่เกิน max_hold_days แต่กำไร ≥ ค่านี้จะไม่ถูกปิด (0 = ปิดตามอายุเสมอ) */
+  time_stop_min_r: number;
   /** R-ladder trailing 1R→BE / 2R→+1R / 3R→+2R (false = legacy breakeven+trail) */
   trailing_ladder: boolean;
   /** Strategy D: XAUUSD only trades breakout/retest setups (false = old behaviour) */
@@ -742,6 +748,24 @@ export interface MonitorTrade {
   close_reason: string | null;
   closed_at: string | null;
   created_at: string | null;
+  /** Realized created_at → closed_at span; null for rows closed before
+   *  the close reason was tracked (no backfill — never fabricate history). */
+  holding_days?: number | null;
+  stop_loss?: number | null;
+  initial_stop_loss?: number | null;
+}
+
+/** Live exit-rule thresholds — the numbers the close-reason popup explains. */
+export interface MonitorExitRules {
+  smart_exit_enabled: boolean;
+  max_hold_days: number;
+  avg_hold_days: number;
+  left_behind_days: number;
+  no_behind_hold_mult: number;
+  no_behind_min_r: number;
+  no_behind_min_days: number;
+  time_stop_min_r: number;
+  exit_score_close: number;
 }
 
 export interface MonitorStats {
@@ -770,6 +794,8 @@ export interface MonitorSnapshot {
   pnl: number;
   /** Real Risk Engine status computed server-side (same inputs as the worker). */
   risk?: RiskStatus | null;
+  /** Live exit-rule thresholds for the close-reason popup. */
+  exit_rules?: MonitorExitRules | null;
 }
 
 /** Response of POST /api/trading/positions/close (manual close popup). */

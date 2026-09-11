@@ -97,6 +97,44 @@ def _atr_for(pos: Position, fallback_distance: float) -> float:
     return abs(pos.entry_price - pos.stop_loss) * 0.2
 
 
+def _r_multiple_at(pos: Position, price: float, db=None) -> float:
+    """R-multiple of a position at `price`, measured against the ORIGINAL risk.
+
+    Only used to decide whether the time stop is allowed to cut a position.
+    The CURRENT stop is not a valid denominator: breakeven / trailing move it
+    to (or past) entry, so `abs(entry - stop_loss)` collapses to ~0 and reports
+    a fantasy R. `initial_stop_loss` (migration 021, the same field the monitor
+    badge reads) is used first, current SL only as fallback. 0.0 when the risk
+    distance is unknown.
+
+    Never raises.
+    """
+    try:
+        entry = float(getattr(pos, "entry_price", 0) or 0)
+        price = float(price or 0)
+        if entry <= 0 or price <= 0:
+            return 0.0
+        sl = None
+        if db is not None:
+            rows = db.select(
+                "paper_trades",
+                filters={"ticket": str(getattr(pos, "ticket", "") or "")},
+                limit=1)
+            if rows:
+                sl = rows[0].get("initial_stop_loss")
+        if sl is None:
+            sl = getattr(pos, "stop_loss", None)
+        if sl is None:
+            return 0.0
+        risk = abs(entry - float(sl))
+        if risk <= 0:
+            return 0.0
+        sign = 1 if str(getattr(pos, "direction", "") or "").upper() == "BUY" else -1
+        return (price - entry) * sign / risk
+    except Exception:
+        return 0.0
+
+
 def _position_age_days(pos: Position, db=None) -> float:
     """Age of a position in days — journal created_at first, opened_at fallback.
 
@@ -600,7 +638,17 @@ async def guard_once(db, broker, notifier: NotificationService,
             max_hold = int(getattr(s, "max_hold_days", 0) or 0)
             if max_hold > 0:
                 age_days = _position_age_days(pos, db)
-                if age_days >= max_hold:
+                # R-exemption (2026-09-11, option "ก"): age alone is not a
+                # reason to cut a live winner. The left_behind rule above is
+                # R-conditional and spares profitable positions; without this
+                # check the R-BLIND time stop re-closed exactly what
+                # left_behind let through — a +3R position could be killed on
+                # day 5. R uses the ORIGINAL stop so a trailed/breakeven SL
+                # can't inflate it (see _r_multiple_at).
+                ts_min_r = float(getattr(s, "time_stop_min_r", 1.0) or 0)
+                r_now = _r_multiple_at(pos, price, db) if ts_min_r > 0 else 0.0
+                if age_days >= max_hold and (ts_min_r <= 0 or r_now < ts_min_r):
+                    age_txt = f"{age_days:.1f}"
                     result = await broker.close_position(pos.ticket)
                     if not result.ok:
                         log.warning("time-stop close %s failed: %s",
@@ -613,8 +661,9 @@ async def guard_once(db, broker, notifier: NotificationService,
                         direction=str(pos.direction or ""),
                         entry=pos.entry_price, exit_price=price, pnl=pnl,
                         ticket=str(pos.ticket or ""), source="auto",
-                        reason=f"หมดเวลาถือไม้ (time stop) เกิน {max_hold} วัน "
-                               f"— ปิดที่ {price:g}")
+                        reason=f"หมดเวลาถือไม้ (time stop) ถือ {age_txt} วัน "
+                               f"เกิน {max_hold} วัน และกำไร {r_now:+.2f}R "
+                               f"< {ts_min_r:g}R — ปิดที่ {price:g}")
                     closed += 1
                     try:
                         await notifier.notify(
@@ -623,10 +672,14 @@ async def guard_once(db, broker, notifier: NotificationService,
                             f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
                             f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
                             f"Held: {age_days:.1f} days (limit {max_hold})\n"
+                            f"R: {r_now:+.2f} (need ≥ {ts_min_r:g} to survive)\n"
                             f"PnL: {pnl:+,.2f}",
                         )
                     except Exception as exc:
                         log.error("time-stop notify failed: %s", exc)
+                elif age_days >= max_hold:
+                    log.info("time stop spared %s: %+.2fR ≥ %.2gR after %.1f days",
+                             pos.ticket, r_now, ts_min_r, age_days)
             continue
 
         reason = "sl" if hit_sl else "tp"

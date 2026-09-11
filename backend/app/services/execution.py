@@ -927,7 +927,8 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     dashboard, never raise.
     """
     from app.models.schemas import (
-        MonitorOpenPosition, MonitorSnapshot, MonitorStats, MonitorTrade,
+        MonitorExitRules, MonitorOpenPosition, MonitorSnapshot, MonitorStats,
+        MonitorTrade,
     )
 
     # ---- journal rows ----------------------------------------------------
@@ -1132,6 +1133,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                 },
                 recommendation=d.recommendation, final=d.final,
                 reasoning=list(d.reasoning or []), trigger=d.trigger,
+                behind_days=float(getattr(d, "behind_days", 0.0) or 0.0),
             )
         except Exception:
             return None
@@ -1237,6 +1239,14 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             calc_notes=calc_notes,
         ))
 
+    def _holding_days(r: dict) -> float | None:
+        """Realized created_at → closed_at span; None when not closeable."""
+        c = _parse_dt(r.get("created_at"))
+        x = _parse_dt(r.get("closed_at"))
+        if c is None or x is None:
+            return None
+        return round(max(0.0, (x - c).total_seconds() / 86400.0), 2)
+
     recent = [MonitorTrade(
         id=str(r.get("id")), asset=r["asset"],
         direction=str(r["direction"]).upper(),
@@ -1248,6 +1258,10 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         ticket=r.get("ticket"), close_reason=r.get("close_reason"),
         closed_at=_parse_dt(r.get("closed_at")),
         created_at=_parse_dt(r.get("created_at")),
+        holding_days=_holding_days(r),
+        stop_loss=float(r["stop_loss"]) if r.get("stop_loss") is not None else None,
+        initial_stop_loss=(float(r["initial_stop_loss"])
+                           if r.get("initial_stop_loss") is not None else None),
     ) for r in sorted(
         rows, key=lambda r: str(r.get("created_at") or ""), reverse=True)[:50]]
 
@@ -1257,6 +1271,28 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     stats = MonitorStats(
         open_positions=len(open_rows), **st,
     )
+
+    # ---- live exit rules (close-reason popup explainability) -------------
+    # Same derivation the workers use (smart_exit.left_behind_days), so the
+    # popup can say "ถือ 4.2 วัน เกินเกณฑ์ 4.2 วัน" without storing prose.
+    try:
+        from app.engine import smart_exit as _se_rules
+        _avg_hold = avg_hold_days(db, closed_rows)
+        exit_rules = MonitorExitRules(
+            smart_exit_enabled=bool(getattr(s, "smart_exit_enabled", True)),
+            max_hold_days=int(getattr(s, "max_hold_days", 0) or 0),
+            avg_hold_days=round(float(_avg_hold or 0.0), 2),
+            left_behind_days=round(_se_rules.left_behind_days(
+                settings=s, avg_hold_days=_avg_hold), 2),
+            no_behind_hold_mult=float(getattr(s, "no_behind_hold_mult", 0) or 0),
+            no_behind_min_r=float(getattr(s, "no_behind_min_r", 0) or 0),
+            no_behind_min_days=float(getattr(s, "no_behind_min_days", 0) or 0),
+            time_stop_min_r=float(getattr(s, "time_stop_min_r", 0) or 0),
+            exit_score_close=float(getattr(s, "exit_score_close", 0) or 0),
+        )
+    except Exception as exc:
+        log.warning("exit_rules build failed: %s", exc)
+        exit_rules = None
 
     # ---- live portfolio value (home page Current Equity / Current PnL) ----
     # PnL = realized (closed rows) + unrealized (live marks) — computed from
@@ -1312,4 +1348,5 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         generated_at=now,
         feed_status=feed_status,
         equity=live_equity, pnl=live_pnl,
+        exit_rules=exit_rules,
     )

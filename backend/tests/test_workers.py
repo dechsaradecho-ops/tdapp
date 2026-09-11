@@ -1217,13 +1217,77 @@ class TestPositionGuardManagement:
         db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
         summary = await position_guard.guard_once(
             db, broker, _SilentNotifier(),
-            settings=self._settings(max_hold_days=5,
+            settings=self._settings(max_hold_days=5, time_stop_min_r=0.0,
                                     breakeven_trigger_r=0, trail_atr_mult=0))
         assert closed == ["T1"]
         assert summary["closed"] == 1
         row = db.rows["paper_trades"][0]
         assert row["status"] == "closed"
         assert row["close_reason"] == "time"
+
+    @pytest.mark.asyncio
+    async def test_time_stop_spares_winner_above_min_r(self, monkeypatch):
+        """Aged position that is a live winner is NOT cut on age alone.
+
+        Regression (2026-09-11, option ก): the R-blind time stop used to close
+        exactly the winners left_behind deliberately spares. Fixture: entry
+        1.1000 / SL 1.0900 / live 1.2500 = +15R.
+        """
+        from app.workers import position_guard
+        closed: list[str] = []
+        broker = self._broker()
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=9)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=9)).isoformat())
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=5, time_stop_min_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert summary["closed"] == 0
+        assert db.rows["paper_trades"][0]["status"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_time_stop_closes_aged_position_below_min_r(self, monkeypatch):
+        """Aged position earning < time_stop_min_r is still cut (+0.5R < 1R)."""
+        from app.workers import position_guard
+        closed: list[str] = []
+        # risk = |1.1000 - 0.8000| = 0.3000; live 1.2500 → +0.5R
+        broker = self._broker(sl=0.8000)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=7)
+        db = self._db(stop_loss=0.8000,
+                      created_at=(datetime.now(timezone.utc) - timedelta(days=7)).isoformat())
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=5, time_stop_min_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == ["T1"]
+        assert summary["closed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_r_multiple_uses_initial_stop_not_trailed_stop(self):
+        """A trailed/breakeven SL must not be the R denominator.
+
+        |entry - stop_loss| collapses to 0 once SL sits at entry, which would
+        divide by ~0 and report a fantasy R.
+        """
+        from app.workers import position_guard
+        from app.integrations.brokers import Position
+        pos = Position(ticket="T1", user_id="u1", asset="EURUSD",
+                       direction="BUY", volume=0.02, entry_price=1.1000,
+                       stop_loss=1.1000,  # trailed to breakeven
+                       take_profit=None, current_price=1.1005)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "status": "open",
+             "initial_stop_loss": 1.0900}]})
+        # original risk 0.0100 → (1.1005 - 1.1000) / 0.0100 = 0.05
+        assert position_guard._r_multiple_at(pos, 1.1005, db) == pytest.approx(0.05)
+        # no journal row and no stop at all → unknown, never raises
+        cos = Position(ticket="T9", user_id="u1", asset="EURUSD",
+                       direction="BUY", volume=0.01, entry_price=1.1000,
+                       stop_loss=None, take_profit=None, current_price=1.1100)
+        assert position_guard._r_multiple_at(cos, 1.1100, None) == 0.0
 
     @pytest.mark.asyncio
     async def test_time_stop_spares_fresh_position(self, monkeypatch):
@@ -1270,7 +1334,7 @@ class TestPositionGuardManagement:
         db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
         summary = await position_guard.guard_once(
             db, broker, _SilentNotifier(),
-            settings=self._settings(max_hold_days=5,
+            settings=self._settings(max_hold_days=5, time_stop_min_r=0.0,
                                     breakeven_trigger_r=0, trail_atr_mult=0))
         assert closed == ["T1"]
         assert summary["closed"] == 1

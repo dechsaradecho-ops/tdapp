@@ -374,7 +374,8 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "profit_protect_r": 1.5, "reversal_opp_min": 55.0,
         "news_exit_enabled": True, "news_exit_min_r": 0.5,
         "volatility_exit_atr": 2.0, "no_behind_min_r": 0.3,
-        "no_behind_hold_mult": 3.0, "trailing_ladder": True,
+        "no_behind_hold_mult": 1.25, "no_behind_min_days": 1.5,
+        "time_stop_min_r": 2.0, "trailing_ladder": True,
         # kill / risk / news / correlation — tight leash
         "max_drawdown_pct": 8.0, "kill_daily_loss_pct": 1.5,
         "kill_weekly_loss_pct": 4.0, "kill_monthly_loss_pct": 6.0,
@@ -395,7 +396,8 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "profit_protect_r": 2.0, "reversal_opp_min": 50.0,
         "news_exit_enabled": True, "news_exit_min_r": 1.0,
         "volatility_exit_atr": 2.5, "no_behind_min_r": 0.5,
-        "no_behind_hold_mult": 5.0, "trailing_ladder": True,
+        "no_behind_hold_mult": 1.75, "no_behind_min_days": 2.0,
+        "time_stop_min_r": 1.0, "trailing_ladder": True,
         "max_drawdown_pct": 10.0, "kill_daily_loss_pct": 2.0,
         "kill_weekly_loss_pct": 5.0, "kill_monthly_loss_pct": 8.0,
         "drawdown_throttle_pct": 5.0, "correlation_cap": 80.0,
@@ -419,7 +421,8 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "profit_protect_r": 3.0, "reversal_opp_min": 40.0,
         "news_exit_enabled": True, "news_exit_min_r": 2.0,
         "volatility_exit_atr": 3.5, "no_behind_min_r": 0.2,
-        "no_behind_hold_mult": 8.0, "trailing_ladder": True,
+        "no_behind_hold_mult": 3.0, "no_behind_min_days": 4.0,
+        "time_stop_min_r": 0.5, "trailing_ladder": True,
         # kill / risk / news / correlation — loose leash
         "max_drawdown_pct": 15.0, "kill_daily_loss_pct": 3.0,
         "kill_weekly_loss_pct": 7.0, "kill_monthly_loss_pct": 12.0,
@@ -1429,6 +1432,28 @@ class SmartExitInfo(BaseModel):
     final: str = "CONTINUE"  # CONTINUE/PROTECT/SCALE_OUT/CLOSE/EMERGENCY_CLOSE
     reasoning: list[str] = Field(default_factory=list)
     trigger: str = ""
+    # Effective NO-POSITION-LEFT-BEHIND age threshold (days) used this cycle —
+    # lets the UI show "อายุ 4.2 วัน / เกณฑ์ 4.2 วัน" without re-deriving it.
+    behind_days: float = 0.0
+
+
+class MonitorExitRules(BaseModel):
+    """Live exit-rule thresholds, shown by the close-reason popup.
+
+    Every number here is derived from trading_settings exactly the way the
+    workers derive it, so the popup can explain a `smart_exit:left_behind`
+    close ("ถือ 4.2 วัน เกินเกณฑ์ 4.2 วัน") without storing prose per trade.
+    Read-only presentation data — never used to make a decision.
+    """
+    smart_exit_enabled: bool = True
+    max_hold_days: int = 0
+    avg_hold_days: float = 0.0
+    left_behind_days: float = 0.0
+    no_behind_hold_mult: float = 0.0
+    no_behind_min_r: float = 0.0
+    no_behind_min_days: float = 0.0
+    time_stop_min_r: float = 0.0
+    exit_score_close: float = 0.0
 
 
 class MonitorOpenPosition(BaseModel):
@@ -1481,6 +1506,13 @@ class MonitorTrade(BaseModel):
     close_reason: Optional[str] = None
     closed_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    # Popup explainability for a CLOSED row. holding_days is the realized
+    # created_at → closed_at span (None when closed_at is missing, i.e. rows
+    # closed before the reason was tracked). The stop fields let the UI show
+    # the R the position was carrying when it was cut.
+    holding_days: Optional[float] = None
+    stop_loss: Optional[float] = None
+    initial_stop_loss: Optional[float] = None
 
 
 class MonitorStats(BaseModel):
@@ -1531,6 +1563,8 @@ class MonitorSnapshot(BaseModel):
     # old manual localStorage numbers so รีเซ็ตสถิติ resets them for real.
     equity: float = 0.0
     pnl: float = 0.0
+    # Live exit-rule thresholds for the close-reason popup on a closed row.
+    exit_rules: Optional[MonitorExitRules] = None
 
 
 # ---------- Auth: 6-digit PIN gate ----------
@@ -1647,8 +1681,28 @@ class AppSettings(BaseModel):
     volatility_exit_atr: float = 2.5
     # NO POSITION LEFT BEHIND: profit < no_behind_min_r AND age >
     # no_behind_hold_mult × avg holding time → auto CLOSE (Capital Efficiency).
+    #
+    # PRIMARY time-based exit (2026-09-11, option "ก"). The multiplier used to
+    # be 5.0 (= 5 × no_behind_hold_mult ≈ 11.9 days with a 2.4-day average),
+    # which pushed the threshold PAST max_hold_days — so this rule could never
+    # fire and the crude time stop closed every position instead, winners
+    # included. At 1.75 it fires ~1-2 days BEFORE the time stop and only on
+    # positions that went nowhere (< no_behind_min_r).
     no_behind_min_r: float = 0.5
-    no_behind_hold_mult: float = 5.0
+    no_behind_hold_mult: float = 1.75
+    # Hard floor for the resulting threshold, in days. Needed because
+    # LOWERING the multiplier also lowers the worst case: avg_hold is floored
+    # at 0.5 inside the rule, so mult=1.75 could yield a 0.9-day threshold if
+    # the sample collapsed (the 2026-09-11 incident was exactly a collapsed
+    # average). The floor decouples "how the average is measured" from "how
+    # fast capital can be recycled". 0 disables the floor.
+    no_behind_min_days: float = 2.0
+    # Time stop exemption: a position older than max_hold_days is still closed
+    # UNLESS it is winning by at least this many R (R measured against the
+    # ORIGINAL stop). Without it the time stop cuts live winners — the
+    # left_behind rule deliberately spares them, so the time stop must too.
+    # 0 = close on age regardless of profit (legacy behaviour).
+    time_stop_min_r: float = 1.0
     # R-ladder trailing: 1R→BE / 2R→+1R / 3R→+2R. True = ladder (spec),
     # False = legacy single breakeven_trigger_r + trail_atr_mult behaviour.
     trailing_ladder: bool = True
