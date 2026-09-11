@@ -298,11 +298,65 @@ function GuardSlChips({ items }: { items: string[] }) {
 }
 
 /**
- * ช่อง "รายละเอียด" ของตาราง guard — แปลง "checked=4, moved_sl=2, ..."
- * ให้เป็นประโยคไทยที่อ่านรู้เรื่อง + บอกว่าไม้ตัวไหนถูกขยับ/ปิด/ข้าม
- * พร้อมโชว์ค่าดิบไว้ด้านล่างสำหรับ debug
+ * ช่อง "รายละเอียดรอบนี้" ของตาราง guard — สรุปเป็น "บรรทัดเดียว" แล้วกดเปิด popup
+ *
+ * เดิม cell นี้แสดงหลายบรรทัดต่อแถว (ประโยค + ชิปดอกจิก + ค่าดิบ font-mono)
+ * ทำให้ตารางสูงไม่เท่ากัน และตัวเลขอย่าง moved_sl ก็ต้องเลื่อนไปเปิด details
+ * อ่านวิธีแปลข้างล่าง ตอนนี้แถวโชว์สรุปสั้นสีสว่าง (ตรวจ 4 · ขยับ SL 2 · ปิด 0)
+ * แล้วกดที่แถวเพื่อเปิด popup ที่อธิบายทุกตัวนับ + รายชื่อคู่เงิน + ค่าดิบ
+ *
+ * WHY portal: `.panel` มี backdrop-filter → เป็น containing block ของ
+ * position:fixed จึงต้อง portal ไป document.body (pattern เดียวกับ GuardSlChip)
  */
-function GuardDetailCell({ detail, status }: { detail: string | null; status: string }) {
+function GuardDetailCell({ detail, status, createdAt, durationMs }: {
+  detail: string | null;
+  status: string;
+  /** เวลาของรอบ (โชว์หัว popup) */
+  createdAt?: string | null;
+  /** ระยะเวลารอบ (ms) — โชว์หัว popup */
+  durationMs?: number | null;
+}) {
+  const [pop, setPop] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  const place = useCallback(() => {
+    const btn = btnRef.current, el = popRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pw = el?.offsetWidth ?? 340;
+    const ph = el?.offsetHeight ?? 300;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    let top = r.top - ph - 8;
+    if (top < 8) top = r.bottom + 8;
+    // popup สูงได้ถึง 80vh — กันล้นขอบล่างของจอ
+    if (top + ph > window.innerHeight - 8) top = Math.max(8, window.innerHeight - ph - 8);
+    setPos({ top, left });
+  }, []);
+
+  useEffect(() => {
+    if (!pop) return;
+    place();
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onScrollOrResize = () => setPop(false);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [pop, place]);
+
   const raw = String(detail || "");
   const kv = splitGuardDetail(raw);
   const num = (k: string) => {
@@ -310,88 +364,178 @@ function GuardDetailCell({ detail, status }: { detail: string | null; status: st
     return Number.isFinite(v) ? v : 0;
   };
 
-  if (num("skipped_prev_running") > 0) {
-    return (
-      <div className="text-xs space-y-0.5">
-        <p className="text-amber-300 font-medium">ถูกข้าม — รอบก่อนยังไม่จบ</p>
-        <p className="text-slate-500">รอบนี้ไม่ได้ตรวจไม้เลย (จำนวนรอบยังนับครบ ไม่หายไป)</p>
-        <p className="text-[10px] text-slate-600 font-mono break-all">{raw}</p>
-      </div>
-    );
-  }
-
-  if (status === "error" || (!raw.trim() && status === "error")) {
-    return (
-      <div className="text-xs space-y-0.5">
-        <p className="text-red-300 font-medium">รอบนี้ล้มเหลว — ดูช่อง Error</p>
-        {raw.trim() ? (
-          <p className="text-[10px] text-slate-600 font-mono break-all">{raw}</p>
-        ) : null}
-      </div>
-    );
-  }
-
-  // รอบที่ถูกยกเลิก/หมดเวลาก่อนเขียน log (เช่น watchdog 50 วิ)
-  if (!raw.trim()) {
-    return (
-      <div className="text-xs space-y-0.5">
-        <p className="text-slate-400">ไม่มีรายละเอียด</p>
-        <p className="text-slate-500">รอบนี้ถูกยกเลิก/หมดเวลาก่อนบันทึกผล — ดู heartbeat ด้านบน</p>
-      </div>
-    );
-  }
-
+  const skipped = num("skipped_prev_running") > 0;
+  const failed = status === "error";
+  const empty = !raw.trim();
   const slMoves = guardChipItems(kv.sl_assets);
   const closedList = guardChipItems(kv.closed_assets);
   const skipList = guardChipItems(kv.skip_assets);
   const truncated = raw.includes(GUARD_TRUNCATED);
+  // อธิบายเฉพาะตัวนับที่มีค่าจริง (0 = ไม่เกิดเหตุการณ์นั้นรอบนี้)
+  const fieldRows = GUARD_FIELDS.filter((f) => num(f.key) > 0);
+  const extras: string[] = [];
+  if (num("partial_closed") > 0) extras.push(`ปิดบางส่วน TP1 ${num("partial_closed")}`);
+  if (num("smart_closed") > 0) extras.push(`smart ปิด ${num("smart_closed")}`);
+  if (num("smart_partials") > 0) extras.push(`smart แบ่งปิด ${num("smart_partials")}`);
+  if (num("smart_skipped") > 0) extras.push(`smart ข้าม ${num("smart_skipped")}`);
+  if (num("emergency_closed") > 0) extras.push(`⚠ ฉุกเฉิน ${num("emergency_closed")}`);
 
-  const extra: string[] = [];
-  if (num("partial_closed") > 0) extra.push(`ปิดบางส่วน TP1 ${num("partial_closed")}`);
-  if (num("smart_closed") > 0) extra.push(`smart ปิด ${num("smart_closed")}`);
-  if (num("smart_partials") > 0) extra.push(`smart แบ่งปิด ${num("smart_partials")}`);
-  if (num("smart_skipped") > 0) extra.push(`smart ข้าม ${num("smart_skipped")}`);
-  if (num("emergency_closed") > 0) extra.push(`⚠ ฉุกเฉิน ${num("emergency_closed")}`);
+  // โทนสีของแถวสรุป: ข้าม (เหลือง) · ล้มเหลว (แดง) · ไม่มีข้อมูล (เทา) · ปกติ (ขาว)
+  const tone = skipped
+    ? "border-amber-400/50 bg-amber-500/15 text-amber-200"
+    : failed
+      ? "border-rose-400/50 bg-rose-500/15 text-rose-200"
+      : empty
+        ? "border-slate-400/40 bg-slate-500/15 text-slate-200"
+        : "border-white/15 bg-white/[0.07] text-slate-100 hover:bg-white/[0.11]";
 
   return (
-    <div className="text-xs space-y-1">
-      <p className="text-slate-200">
-        ตรวจ <b>{num("checked")}</b> ไม้
-        <span className="text-slate-500"> · </span>
-        ขยับ SL{" "}
-        <b className={num("moved_sl") > 0 ? "text-amber-300" : "text-slate-400"}>
-          {num("moved_sl")}
-        </b>
-        <span className="text-slate-500"> · </span>
-        ปิดไม้{" "}
-        <b className={num("closed") > 0 ? "text-sky-300" : "text-slate-400"}>
-          {num("closed")}
-        </b>
-        {extra.length > 0 && (
-          <span className="text-slate-400"> · {extra.join(" · ")}</span>
-        )}
-      </p>
-      {slMoves.length > 0 && <GuardSlChips items={slMoves} />}
-      {closedList.length > 0 && (
-        <GuardChips
-          items={closedList.map(guardClosedLabel)}
-          tone="border-sky-400/30 bg-sky-500/10 text-sky-200"
-        />
+    <div className="text-xs">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setPop((v) => !v)}
+        aria-expanded={pop}
+        title="กดเพื่อดูรายละเอียดรอบนี้แบบเต็ม"
+        className={`inline-flex w-full min-w-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-left touch-manipulation ${tone}`}
+      >
+        <span className="min-w-0 flex-1 truncate">
+          {skipped ? (
+            <>ข้ามรอบนี้ <span className="text-amber-300/80">— รอบก่อนยังไม่จบ</span></>
+          ) : failed ? (
+            <>รอบนี้ล้มเหลว <span className="text-rose-300/80">— ดูช่อง Error</span></>
+          ) : empty ? (
+            <>ไม่มีรายละเอียด <span className="text-slate-400">— รอบถูกยกเลิก/หมดเวลา</span></>
+          ) : (
+            <>
+              ตรวจ <b className={num("checked") > 0 ? "text-slate-50" : "text-slate-400"}>{num("checked")}</b>
+              <span className="text-slate-500"> · </span>
+              ขยับ SL <b className={num("moved_sl") > 0 ? "text-amber-300" : "text-slate-400"}>{num("moved_sl")}</b>
+              <span className="text-slate-500"> · </span>
+              ปิด <b className={num("closed") > 0 ? "text-sky-300" : "text-slate-400"}>{num("closed")}</b>
+              {extras.length > 0 && <span className="text-slate-300"> · {extras.join(" · ")}</span>}
+              {truncated && <span className="text-amber-300"> · ⚠ รายการถูกตัดท้าย</span>}
+            </>
+          )}
+        </span>
+        <span className={`shrink-0 text-slate-400 transition-transform ${pop ? "rotate-90" : ""}`}>›</span>
+      </button>
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label="รายละเอียดรอบนี้ของ position_guard"
+          style={{ position: "fixed", top: pos.top, left: pos.left, width: "min(360px, calc(100vw - 16px))" }}
+          className="z-50 max-h-[80vh] overflow-y-auto rounded-xl border border-slate-600 bg-slate-900/95 backdrop-blur px-3.5 py-3 text-xs leading-relaxed text-slate-100 shadow-xl"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold text-slate-50">รายละเอียดรอบนี้</span>
+            <span className={`text-[11px] px-1.5 py-0.5 rounded ${skipped ? "bg-amber-500/20 text-amber-200" : failed ? "bg-red-500/20 text-red-200" : "bg-emerald-500/20 text-emerald-200"}`}>
+              {skipped ? "ข้าม" : failed ? "error" : "ok"}
+            </span>
+          </div>
+          <p className="mt-0.5 text-[11px] text-slate-300">
+            {createdAt ? new Date(createdAt).toLocaleString("th-TH", { hour12: false }) : "—"}
+            {durationMs != null && <> · ใช้ <b className="text-slate-100">{durationMs}</b> ms</>}
+          </p>
+          <div className="border-t border-slate-700 my-2" />
+          {skipped ? (
+            <p className="text-amber-200">
+              รอบนี้ <b>ถูกข้าม</b> เพราะรอบก่อนยังไม่จบ — ไม่ได้ตรวจไม้เลย (จำนวนรอบยังนับครบ ไม่หายไป)
+            </p>
+          ) : failed ? (
+            <p className="text-rose-200">
+              รอบนี้ <b>ล้มเหลว</b> ระหว่างทำงาน — ข้อความ error อยู่ในคอลัมน์ Error ของแถวนี้
+            </p>
+          ) : empty ? (
+            <p className="text-slate-200">
+              รอบนี้ถูกยกเลิก/หมดเวลาก่อนบันทึกผล — ดู heartbeat ด้านบนประกอบ
+            </p>
+          ) : (
+            <>
+              <p className="text-slate-50">
+                ตรวจ <b>{num("checked")}</b> ไม้
+                <span className="text-slate-500"> · </span>
+                ขยับ SL <b className="text-amber-300">{num("moved_sl")}</b>
+                <span className="text-slate-500"> · </span>
+                ปิดไม้ <b className="text-sky-300">{num("closed")}</b>
+              </p>
+              <p className="mt-1 text-[11px] text-slate-300">
+                guard ไล่ตรวจไม้เปิดทุกรอบ ถ้าราคาไปทางบวกจะเลื่อน stop ให้กระชับขึ้น
+                (breakeven / trailing / R-ladder) แล้วส่งราคานั้นไป broker จริง · ปิด 0
+                ไม่ได้แปลว่าพัง เพราะ SL/TP ที่ตั้งไว้ทำงานที่ฝั่ง broker เอง
+              </p>
+            </>
+          )}
+          {fieldRows.length > 0 && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1">ตัวนับรอบนี้</p>
+              <ul className="space-y-1">
+                {fieldRows.map((f) => (
+                  <li key={f.key} className="flex gap-1.5">
+                    <span className="text-slate-500 shrink-0">•</span>
+                    <span>
+                      <b className="text-slate-50">{f.label}</b>
+                      <span className="text-slate-100"> = {num(f.key)}</span>
+                      <span className="text-slate-400"> — {f.hint}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {(slMoves.length > 0 || closedList.length > 0 || skipList.length > 0) && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1.5">ไม้ที่ถูกแตะในรอบนี้</p>
+              {slMoves.length > 0 && (
+                <div className="mb-2">
+                  <p className="text-[11px] font-medium text-amber-300 mb-1">
+                    ขยับ SL {slMoves.length} ไม้ — กดที่ชิปเพื่อดูส่วนต่าง
+                  </p>
+                  <GuardSlChips items={slMoves} />
+                </div>
+              )}
+              {closedList.length > 0 && (
+                <div className="mb-2">
+                  <p className="text-[11px] font-medium text-sky-300 mb-1">ปิด/แบ่งปิด {closedList.length} ไม้</p>
+                  <GuardChips
+                    items={closedList.map(guardClosedLabel)}
+                    tone="border-sky-400/40 bg-sky-500/15 text-sky-100"
+                  />
+                </div>
+              )}
+              {skipList.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-medium text-slate-300 mb-1">สั่งแล้วข้าม {skipList.length} ไม้</p>
+                  <GuardChips
+                    items={skipList.map(guardSkipLabel)}
+                    tone="border-slate-400/40 bg-slate-500/15 text-slate-200"
+                  />
+                </div>
+              )}
+            </>
+          )}
+          {truncated && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-amber-200">
+                รายการยาวเกิน 480 ตัวอักษร — ข้อความถูกตัดท้าย (แสดงไม้ไม่ครบทุกตัว)
+              </p>
+            </>
+          )}
+          {raw.trim() && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-[10px] font-mono break-all text-slate-400" title="ค่าดิบจาก scheduler_runs.detail">
+                {raw}
+              </p>
+            </>
+          )}
+        </div>,
+        document.body
       )}
-      {skipList.length > 0 && (
-        <GuardChips
-          items={skipList.map(guardSkipLabel)}
-          tone="border-slate-500/30 bg-slate-500/10 text-slate-300"
-        />
-      )}
-      {truncated && (
-        <p className="text-amber-300/80">
-          รายการยาวเกิน 480 ตัวอักษร — บรรทัดถูกตัดท้าย (โชว์ไม่ครบทุกไม้)
-        </p>
-      )}
-      <p className="text-[10px] text-slate-600 font-mono break-all" title="ค่าดิบจาก scheduler_runs.detail">
-        {raw}
-      </p>
     </div>
   );
 }
@@ -920,45 +1064,6 @@ export default function LogsPage() {
               )}
             </div>
           )}
-          <div className="panel col-span-2 md:col-span-4">
-            <details>
-              <summary className="text-xs text-slate-400 cursor-pointer select-none">
-                ตัวเลขในคอลัมน์ &quot;รายละเอียด&quot; หมายถึงอะไร (กดเพื่อเปิด)
-              </summary>
-              <div className="mt-2 grid gap-1.5 md:grid-cols-2">
-                {GUARD_FIELDS.map((f) => (
-                  <p key={f.key} className="text-xs text-slate-400">
-                    <span className="text-slate-200 font-medium">{f.label}</span>
-                    <span className="text-slate-600 font-mono"> ({f.key})</span>
-                    {" — "}
-                    {f.hint}
-                  </p>
-                ))}
-              </div>
-              <div className="mt-2 text-xs text-slate-500 space-y-0.5">
-                <p>
-                  ต่อท้ายด้วยรายชื่อคู่เงินของรอบนั้น:{" "}
-                  <span className="text-amber-200/90 font-mono">sl_assets</span> = ไม้ที่ถูกขยับ SL ·{" "}
-                  <span className="text-sky-200/90 font-mono">closed_assets</span> = ไม้ที่ถูกปิด/แบ่งปิด (พร้อมสาเหตุ) ·{" "}
-                  <span className="text-slate-300 font-mono">skip_assets</span> = ไม้ที่ Smart Exit สั่งแล้วข้าม
-                </p>
-                <p>
-                  ชิปของ <span className="text-amber-200/90 font-mono">sl_assets</span> อ่านว่า{" "}
-                  <span className="text-amber-200/90 font-mono">คู่เงิน@SLเดิม&gt;SLใหม่</span> เช่น{" "}
-                  <span className="text-slate-300 font-mono">EURCHF@0.93624&gt;0.94337</span>{" "}
-                  = ขยับ SL ของ EURCHF จาก 0.93624 ไป 0.94337 (กดที่ชิปเพื่อดูส่วนต่าง)
-                </p>
-                <p>
-                  ประโยคอ่านแบบ:{" "}
-                  <span className="text-slate-300">
-                    ตรวจ 4 ไม้ · ขยับ SL 2 · ปิดไม้ 0
-                  </span>{" "}
-                  หมายถึง guard ไล่ครบ 4 ไม้ เลื่อน stop สำเร็จ 2 ไม้ และไม่ปิดไม้ใดเลย (ปกติ — guard
-                  ส่วนใหญ่แค่ขยับ stop แล้วปล่อยให้ SL/TP ทำงานเอง)
-                </p>
-              </div>
-            </details>
-          </div>
         </section>
         );
       })()}
@@ -1431,7 +1536,12 @@ export default function LogsPage() {
                 </td>
                 <td className="py-2 pr-3 text-slate-400">{g.duration_ms ?? "—"}</td>
                 <td className="py-2 pr-3 min-w-[260px] max-w-[420px]">
-                  <GuardDetailCell detail={g.detail} status={g.status} />
+                  <GuardDetailCell
+                    detail={g.detail}
+                    status={g.status}
+                    createdAt={g.created_at}
+                    durationMs={g.duration_ms}
+                  />
                 </td>
                 <td className="py-2 max-w-[280px] truncate" title={g.error || ""}><span className="text-loss">{g.error || "—"}</span></td>
               </tr>
