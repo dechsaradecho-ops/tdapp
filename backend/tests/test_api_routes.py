@@ -1444,6 +1444,49 @@ class TestPerformanceSources:
         assert body["exposure"] == []
 
     @pytest.mark.asyncio
+    async def test_correlation_symbol_risk_for_requested_assets(self):
+        """?assets= adds per-symbol correlation risk + cap + open book.
+
+        The dashboard Opportunity Score needs to answer "ถ้าเปิดคู่นี้จะซ้ำ
+        กับไม้ที่เปิดอยู่ไหม" without a second settings round-trip, so the
+        route returns the cap it judged against and the live positions.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "o1", "ticket": "PAPER-o1", "asset": "EURUSD",
+             "direction": "buy", "volume": 0.02, "entry_price": 1.08,
+             "status": "open", "created_at": now},
+        ]})
+        set_state(db)
+        body = (await call(
+            "GET", "/api/trading/correlation?assets=EURUSD,GBPUSD,XAUUSD"
+        )).json()
+        assert body["open_positions"] == [
+            {"asset": "EURUSD", "direction": "BUY", "volume": 0.02}]
+        assert body["correlation_cap"] == 80.0  # AppSettings default
+        risk = body["symbol_risk"]
+        assert set(risk) == {"EURUSD", "GBPUSD", "XAUUSD"}
+        # already open → duplicate/high (auto-trader's own duplicate gate)
+        assert risk["EURUSD"]["duplicate"] is True
+        assert risk["EURUSD"]["level"] == "high"
+        # correlated forex cousin → flagged against the open EURUSD leg
+        assert risk["GBPUSD"]["level"] in ("low", "medium")
+        assert risk["GBPUSD"]["with"][0]["asset"] == "EURUSD"
+        # gold vs forex = −0.30 prior → a hedge, NOT correlation risk
+        assert risk["XAUUSD"]["with"] == []
+        assert risk["XAUUSD"]["hedges"][0]["asset"] == "EURUSD"
+        assert risk["XAUUSD"]["hedges"][0]["correlation"] == -0.3
+        assert risk["XAUUSD"]["level"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_correlation_symbol_risk_is_opt_in(self):
+        """Without ?assets= the extra map stays empty (card callers unchanged)."""
+        set_state(FakeDatabase(rows={"paper_trades": []}))
+        body = (await call("GET", "/api/trading/correlation")).json()
+        assert body["symbol_risk"] == {}
+        assert body["open_positions"] == []
+
+    @pytest.mark.asyncio
     async def test_journal_reads_closed_paper_trades(self):
         """Closed paper rows (incl. an open decoy) → win rate / PF / RR."""
         db = FakeDatabase(rows={"paper_trades": [

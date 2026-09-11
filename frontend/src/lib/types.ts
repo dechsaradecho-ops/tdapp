@@ -427,6 +427,38 @@ export interface CorrelationResponse {
   assets: string[];
   portfolio_correlation: number;
   exposure: { currency: string; exposure_pct: number; direction_net: string }[];
+  /** เพดานที่ execution gate 4 ใช้ตัดสิน (trading_settings.correlation_cap) */
+  correlation_cap?: number;
+  /** ไม้ที่เปิดอยู่จริง — ใช้โชว์ในแถบสรุป Opportunity Score */
+  open_positions?: { asset: string; direction: string; volume: number }[];
+  /** ต่อสัญลักษณ์ — มีเฉพาะเมื่อเรียกด้วย ?assets=A,B,C */
+  symbol_risk?: Record<string, CorrelationSymbolRisk>;
+}
+
+/** ไม้เปิดที่ซ้ำความเสี่ยงกับสัญลักษณ์ที่กำลังพิจารณา */
+export interface CorrelationLinkedPosition {
+  asset: string;
+  direction: string;
+  /** + = ทับความเสี่ยง (ไปทางเดียวกัน), − = สวนทาง (ช่วยกระจาย) */
+  correlation: number;
+  /** สกุลเงินที่ถือร่วมกัน เช่น ["EUR"] (ว่างเมื่อไม่ใช่คู่ FX) */
+  shared: string[];
+}
+
+/** ผลประเมินความเสี่ยง correlation ของการเปิดสัญลักษณ์หนึ่งเพิ่ม */
+export interface CorrelationSymbolRisk {
+  /** high = เกินเพดานจริง (gate บล็อก), none = ไม่ซ้ำกับไม้ไหนเลย */
+  level: "none" | "low" | "medium" | "high";
+  /** portfolio_correlation ถ้าเปิดคู่นี้เพิ่ม (ตัวเลขเดียวกับที่ gate ใช้) */
+  projected: number;
+  /** portfolio_correlation ของไม้เปิดปัจจุบัน */
+  current: number;
+  delta: number;
+  over_cap: boolean;
+  /** มีไม้เปิดคู่นี้อยู่แล้ว — ระบบกันไม้ซ้ำ */
+  duplicate: boolean;
+  with: CorrelationLinkedPosition[];
+  hedges: CorrelationLinkedPosition[];
 }
 
 export interface NewsRisk {

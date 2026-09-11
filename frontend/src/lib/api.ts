@@ -165,8 +165,14 @@ export const api = {
     risk_per_trade_pct?: number;
   }) => post<OrderPlan>("/api/trading/order-plan", input),
 
-  tradingCorrelation: () => get<CorrelationResponse>("/api/trading/correlation"),
-
+  // GET /api/trading/correlation — ไม่ส่ง assets = สรุปพอร์ตอย่างเดียว;
+  // ส่ง assets (Opportunity Score) = ได้ symbol_risk ต่อคู่มาด้วย ว่ารวมกับ
+  // ไม้ที่เปิดอยู่แล้วจะซ้ำความเสี่ยงหรือไม่
+  tradingCorrelation: (assets?: string[]) =>
+    get<CorrelationResponse>(
+      `/api/trading/correlation${assets?.length
+        ? `?assets=${encodeURIComponent(assets.join(","))}` : ""}`,
+    ),
   tradingCalendar: () => get<NewsRisk>("/api/trading/calendar"),
 
   tradingSession: () => get<SessionStatus>("/api/trading/session"),

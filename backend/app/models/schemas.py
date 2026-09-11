@@ -802,6 +802,109 @@ class CorrelationEngine:
         vals = [abs(cls.pairwise(a, b)) for a, b in combinations(assets, 2)]
         return round(min(100.0, sum(vals) / len(vals) * 100), 1)
 
+    # ---- per-candidate risk vs the OPEN book (dashboard Opportunity Score) ----
+    # execution.py gate 4 rejects an order when portfolio_correlation(assets)
+    # EXCEEDS correlation_cap, so "would adding this pair push the book over
+    # the cap" is the exact question the dashboard badge has to answer.
+    NEAR_CAP_RATIO = 0.6
+
+    @classmethod
+    def shared_currencies(cls, a: str, b: str) -> list[str]:
+        """Currencies two FX pairs hold in common ([] when either is not FX).
+
+        EURUSD + EURJPY → ["EUR"] — the concrete "ถือสกุลเดียวกัน" evidence
+        behind the score, and the reason a CHF/JPY stack is worse than two
+        unrelated pairs.
+        """
+        pa = quotes.fx_parts(str(a or "").upper())
+        pb = quotes.fx_parts(str(b or "").upper())
+        if not pa or not pb:
+            return []
+        return sorted(set(pa) & set(pb))
+
+    @classmethod
+    def symbol_risk(cls, candidates: list[str], open_positions: list[dict],
+                    cap: float | None = None) -> dict[str, dict]:
+        """Correlation risk of adding each candidate to the open book.
+
+        `open_positions`: [{"asset", "direction"(optional)}] — the live book.
+        Returns {ASSET: {...}}:
+
+          level      none | low | medium | high (high = gate 4 would block it)
+                     · high     projected > cap  (or the pair is already open)
+                     · medium   projected ≥ cap × NEAR_CAP_RATIO
+                     · low      correlated but the book stays well under cap
+                     · none     nothing in the book shares a risk factor
+          projected  portfolio_correlation(open + ASSET) — the gate's own number
+          current    portfolio_correlation(open)
+          delta      projected − current (negative = the pair diversifies)
+          over_cap   projected > cap
+          duplicate  ASSET already has an open position (auto-trader blocks it)
+          with       open positions that STACK risk (positive correlation or a
+                     shared currency), strongest first
+          hedges     open positions that run AGAINST it (negative prior — a
+                     gold leg against a forex book dampens, not stacks) —
+                     reported so the badge never calls a hedge "เสี่ยง"
+
+        An unknown/zero cap degrades to 100 so the levels never invert.
+        """
+        book = sorted({str(p.get("asset") or "").upper()
+                       for p in open_positions if p.get("asset")})
+        limit = float(cap) if cap else 100.0
+        if limit <= 0:
+            limit = 100.0
+        current = cls.portfolio_correlation(book)
+        out: dict[str, dict] = {}
+        for raw in candidates:
+            cand = str(raw or "").upper().strip()
+            if not cand or cand in out:
+                continue
+            linked: list[dict] = []
+            hedges: list[dict] = []
+            for p in open_positions:
+                other = str(p.get("asset") or "").upper()
+                if not other:
+                    continue
+                # pairwise(x, x) returns the class prior, so pin self to 1.0 —
+                # an already-open pair IS the same trade, not a 0.55 cousin.
+                corr = 1.0 if other == cand else cls.pairwise(cand, other)
+                shared = cls.shared_currencies(cand, other)
+                item = {
+                    "asset": other,
+                    "direction": str(p.get("direction") or "").upper(),
+                    "correlation": round(corr, 2),
+                    "shared": shared,
+                }
+                if corr > 0 or shared:
+                    linked.append(item)
+                elif corr < 0:
+                    hedges.append(item)
+            linked.sort(key=lambda d: (-d["correlation"], d["asset"]))
+            hedges.sort(key=lambda d: (d["correlation"], d["asset"]))
+            projected = cls.portfolio_correlation(sorted(set(book) | {cand}))
+            duplicate = cand in book
+            if duplicate:
+                level = "high"
+            elif not linked:
+                level = "none"
+            elif projected > limit:
+                level = "high"
+            elif projected >= limit * cls.NEAR_CAP_RATIO:
+                level = "medium"
+            else:
+                level = "low"
+            out[cand] = {
+                "level": level,
+                "projected": projected,
+                "current": current,
+                "delta": round(projected - current, 1),
+                "over_cap": projected > limit,
+                "duplicate": duplicate,
+                "with": linked,
+                "hedges": hedges,
+            }
+        return out
+
 
 class ExposureEngine:
     """Sums currency exposure across open positions (USD/EUR/JPY/Gold/Crypto)."""

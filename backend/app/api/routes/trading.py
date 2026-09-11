@@ -398,30 +398,52 @@ async def extended_open(payload: ExtendedOpenRequest,
 
 # ------------------------------------------------------------- correlation
 @router.get("/correlation")
-async def get_correlation(request: Request) -> dict:
+async def get_correlation(request: Request, assets: str | None = None) -> dict:
     """Portfolio correlation (0-100) + per-currency exposure breakdown.
 
     Reads OPEN paper_trades (the live journal) — the old version read the
     legacy `trades` table (migration 001, never written by the live path),
     so it always reported a dead EURUSD/0/[] card while real positions were
     open. Fail-safe: a broken read degrades to empty, never raises.
+
+    `?assets=EURUSD,GBPUSD` (comma-separated) adds `symbol_risk`: for each of
+    those symbols, whether adding it to the open book would repeat an existing
+    risk factor — the Opportunity Score panel on the dashboard uses it to flag
+    "ไม้ที่เปิดอยู่เสี่ยงซ้ำ". `correlation_cap` is returned so the caller can
+    show the same threshold gate 4 judges on (no second settings round-trip).
     """
     db = request.app.state.db
     try:
         trades = db.select("paper_trades", filters={"status": "open"}, limit=100)
     except Exception:
         trades = []
-    assets = sorted({str(t.get("asset") or "") for t in trades if t.get("asset")})
-    corr = CorrelationEngine().portfolio_correlation(assets)
+    open_assets = sorted({str(t.get("asset") or "") for t in trades if t.get("asset")})
+    corr = CorrelationEngine().portfolio_correlation(open_assets)
     exposure = ExposureEngine().analyze([
         {"asset": t["asset"], "direction": t.get("direction", ""),
          "volume": float(t.get("volume") or 0), "price": float(t.get("entry_price") or 1)}
         for t in trades if t.get("asset")
     ])
+    positions = [
+        {"asset": str(t["asset"]).upper(),
+         "direction": str(t.get("direction") or "").upper(),
+         "volume": float(t.get("volume") or 0)}
+        for t in trades if t.get("asset")
+    ]
+    try:
+        cap: float | None = float(_settings(request).correlation_cap)
+    except Exception:
+        cap = None
+    wanted = [a.strip().upper() for a in (assets or "").split(",") if a.strip()][:60]
     return {
-        "assets": assets,
+        "assets": open_assets,
         "portfolio_correlation": corr,
         "exposure": [e.model_dump() for e in exposure],
+        "correlation_cap": cap,
+        "open_positions": positions,
+        "symbol_risk": (
+            CorrelationEngine.symbol_risk(wanted, positions, cap) if wanted else {}
+        ),
     }
 
 

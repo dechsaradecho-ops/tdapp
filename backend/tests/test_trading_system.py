@@ -147,6 +147,71 @@ def test_correlation_mixed_portfolio_lower():
     assert score < 50
 
 
+# ---- per-candidate risk vs the open book (dashboard Opportunity Score) ----
+def test_shared_currencies_finds_common_leg():
+    """EURUSD + EURJPY hold EUR together; gold has no FX legs at all."""
+    assert CorrelationEngine.shared_currencies("EURUSD", "EURJPY") == ["EUR"]
+    assert CorrelationEngine.shared_currencies("EURUSD", "USDJPY") == ["USD"]
+    assert CorrelationEngine.shared_currencies("XAUUSD", "EURUSD") == []
+
+
+def test_symbol_risk_empty_book_is_harmless():
+    """No open positions → level none / projected 0 (nothing to stack)."""
+    risk = CorrelationEngine.symbol_risk(["EURUSD", "GBPUSD"], [], cap=80.0)
+    assert set(risk) == {"EURUSD", "GBPUSD"}
+    for r in risk.values():
+        assert r["level"] == "none"
+        assert r["projected"] == 0.0 and r["with"] == [] and r["hedges"] == []
+        assert r["duplicate"] is False and r["over_cap"] is False
+
+
+def test_symbol_risk_calls_a_hedge_a_hedge():
+    """XAUUSD against an open EURUSD is corr −0.30 → hedge, level none."""
+    book = [{"asset": "EURUSD", "direction": "BUY"}]
+    r = CorrelationEngine.symbol_risk(["XAUUSD"], book, cap=80.0)["XAUUSD"]
+    assert r["with"] == []
+    assert r["hedges"] == [{"asset": "EURUSD", "direction": "BUY",
+                            "correlation": -0.3, "shared": []}]
+    assert r["level"] == "none"
+
+
+def test_symbol_risk_flags_forex_stack_against_cap():
+    """EURUSD open + GBPUSD candidate → 55 correlation (69% of cap 80)."""
+    book = [{"asset": "EURUSD", "direction": "BUY"}]
+    r = CorrelationEngine.symbol_risk(["GBPUSD"], book, cap=80.0)["GBPUSD"]
+    assert r["current"] == 0.0            # one open pair alone has no pairwise term
+    assert r["projected"] == 55.0         # forex/forex prior
+    assert r["delta"] == 55.0
+    assert r["level"] == "medium"        # 55 ≥ 80 × 0.6 but still under the cap
+    assert r["over_cap"] is False
+    assert r["with"] == [{"asset": "EURUSD", "direction": "BUY",
+                          "correlation": 0.55, "shared": ["USD"]}]
+
+
+def test_symbol_risk_high_when_projection_breaks_the_cap():
+    """Same book with a tight cap → high/over_cap (gate 4 would reject)."""
+    book = [{"asset": "EURUSD", "direction": "BUY"}]
+    r = CorrelationEngine.symbol_risk(["GBPUSD"], book, cap=50.0)["GBPUSD"]
+    assert r["projected"] == 55.0
+    assert r["level"] == "high" and r["over_cap"] is True
+
+
+def test_symbol_risk_marks_duplicate_open_position():
+    """Candidate already open → duplicate + correlation 1.0 (not the 0.55 cousin)."""
+    book = [{"asset": "EURUSD", "direction": "SELL"}]
+    r = CorrelationEngine.symbol_risk(["EURUSD"], book, cap=80.0)["EURUSD"]
+    assert r["duplicate"] is True and r["level"] == "high"
+    assert r["with"][0]["correlation"] == 1.0
+    assert r["with"][0]["direction"] == "SELL"
+
+
+def test_symbol_risk_zero_cap_degrades_to_100():
+    """cap 0/None must not invert the bands (every pair would look high)."""
+    book = [{"asset": "EURUSD", "direction": "BUY"}]
+    r = CorrelationEngine.symbol_risk(["GBPUSD"], book, cap=None)["GBPUSD"]
+    assert r["level"] == "low" and r["over_cap"] is False
+
+
 def test_exposure_sums_currency_nets():
     rows = [
         {"asset": "EURUSD", "direction": "BUY", "volume": 1.0, "price": 1.1},

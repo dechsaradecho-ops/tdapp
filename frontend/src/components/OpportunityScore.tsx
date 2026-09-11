@@ -3,8 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import LoadingGraphic from "@/components/LoadingGraphic";
+import { api } from "@/lib/api";
 import { scoreColor } from "@/lib/format";
-import { AssetOpportunity } from "@/lib/types";
+import {
+  AssetOpportunity,
+  CorrelationLinkedPosition,
+  CorrelationResponse,
+  CorrelationSymbolRisk,
+} from "@/lib/types";
 
 const BAND_LABEL: Record<string, string> = {
   very_high: "Very High",
@@ -13,15 +19,47 @@ const BAND_LABEL: Record<string, string> = {
   low: "Low",
 };
 
+/** ป้ายความเสี่ยง correlation ของแถว (มาจาก symbol_risk ที่ backend คิดให้) */
+const RISK_CHIP: Record<string, { label: string; cls: string }> = {
+  high: { label: "เสี่ยงซ้ำ", cls: "border-rose-400/40 bg-rose-500/15 text-rose-200" },
+  medium: { label: "เฝ้าระวัง", cls: "border-amber-400/30 bg-amber-500/10 text-amber-200" },
+  low: { label: "ต่ำ", cls: "border-white/10 bg-white/[0.06] text-slate-300" },
+};
+
+function riskChip(risk: CorrelationSymbolRisk | null | undefined) {
+  if (!risk) return null;
+  // เปิดคู่นี้อยู่แล้ว = ความเสี่ยงซ้ำชัดเจนที่สุด (auto-trader บล็อกไม้ซ้ำ)
+  if (risk.duplicate) {
+    return { label: "เปิดอยู่แล้ว", cls: "border-sky-400/40 bg-sky-500/15 text-sky-200" };
+  }
+  return RISK_CHIP[risk.level] ?? null; // none = ไม่ซ้ำกับไม้ไหน → ไม่มีป้าย
+}
+
+/** บรรทัดอธิบายไม้เปิดหนึ่งไม้ที่เกี่ยวข้องกับสัญลักษณ์ที่กำลังดู */
+function linkedLine(p: CorrelationLinkedPosition): string {
+  const bits = [
+    `สัมพันธ์ ${Math.round(Math.abs(p.correlation) * 100)}%`,
+  ];
+  // USD อยู่ในเกือบทุกคู่ — เน้นเฉพาะสกุลอื่นที่ถือร่วมกันจริง
+  const shared = p.shared.filter((c) => c !== "USD");
+  if (shared.length) bits.push(`ถือ ${shared.join("/")} ร่วม`);
+  return `${p.asset} (${p.direction}) — ${bits.join(" · ")}`;
+}
+
 /** แถวเดียวของ Opportunity Score — กดที่แถวเพื่อเปิด popup "ที่มาของคะแนน"
- *  (รายละเอียดการคำนวณทุก component จาก score_reasons ที่ scanner เขียนลง DB).
+ *  (รายละเอียดการคำนวณทุก component จาก score_reasons ที่ scanner เขียนลง DB)
+ *  + ส่วน "ความเสี่ยงจากไม้ที่เปิดอยู่" (correlation risk) เมื่อมีไม้เปิดค้าง.
  *  popover แบบ glass ต้อง createPortal ลง document.body เพราะ .panel มี
  *  backdrop-filter ที่ทำให้ position: fixed ภายใน panel ถูก trap
  *  (pattern เดียวกับ LevelMovedBadge หน้า monitor). */
-function ScoreRow({ o, gate, tradable }: {
+function ScoreRow({ o, gate, tradable, risk, cap }: {
   o: AssetOpportunity;
   gate: number | null;
   tradable: boolean;
+  /** ผลประเมิน correlation ของคู่นี้กับไม้ที่เปิดอยู่ (null = ยังไม่มีข้อมูล) */
+  risk?: CorrelationSymbolRisk | null;
+  /** เพดาน correlation ที่ gate ใช้ (ไว้เทียบ projected) */
+  cap?: number;
 }) {
   const [pop, setPop] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
@@ -70,6 +108,12 @@ function ScoreRow({ o, gate, tradable }: {
 
   const passes = gate != null && o.score >= gate;
   const details = (o.score_reasons?.length ? o.score_reasons : o.reasons).filter(Boolean);
+  const chip = riskChip(risk);
+  const riskItems = risk?.with ?? [];
+  const riskBearing = !!chip || riskItems.length > 0;
+  const capPct = risk && cap && cap > 0
+    ? Math.round((risk.projected / cap) * 100)
+    : null;
 
   return (
     <div
@@ -89,6 +133,16 @@ function ScoreRow({ o, gate, tradable }: {
           {o.asset} <span className="text-xs font-normal text-slate-500">{BAND_LABEL[o.band] ?? o.band}</span>
           {!tradable && (
             <span className="text-[10px] text-slate-500 border border-white/10 rounded px-1 ml-1.5">ดูอย่างเดียว</span>
+          )}
+          {chip && (
+            <span
+              className={`text-[10px] border rounded px-1 ml-1.5 whitespace-nowrap ${chip.cls}`}
+              title={risk?.duplicate
+                ? "มีไม้เปิดคู่นี้อยู่แล้ว — ระบบกันไม้ซ้ำ"
+                : "ซ้ำความเสี่ยงกับไม้ที่เปิดอยู่ — แตะดูรายละเอียด"}
+            >
+              {chip.label}
+            </span>
           )}
         </span>
         <span className="flex items-center gap-1">
@@ -146,6 +200,47 @@ function ScoreRow({ o, gate, tradable }: {
               <span className="block text-slate-500 mt-0.5">อยู่นอก allowed_assets — วิเคราะห์อย่างเดียว ไม่เข้าระบบเทรด</span>
             )}
           </div>
+          {riskBearing && risk && (
+            <>
+              <div className="border-t border-slate-800 my-2" />
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                ความเสี่ยงจากไม้ที่เปิดอยู่
+              </p>
+              {risk.duplicate && (
+                <p className="text-xs text-sky-300">
+                  เปิดไม้คู่นี้อยู่แล้ว — ระบบกันไม้ซ้ำ ไม่เปิดเพิ่ม
+                </p>
+              )}
+              {riskItems.length > 0 && (
+                <ul className="space-y-1 text-xs text-slate-300">
+                  {riskItems.map((p) => (
+                    <li key={p.asset} className="flex gap-1.5">
+                      <span className="text-slate-600 shrink-0">•</span>
+                      <span>{linkedLine(p)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {!risk.duplicate && (
+                <p className="mt-1.5 text-xs text-slate-400">
+                  ถ้าเปิดคู่นี้ พอร์ตจะมีความสัมพันธ์ {""}
+                  <span className={risk.over_cap ? "text-rose-300 font-semibold" : "text-slate-200 font-semibold"}>
+                    {risk.projected.toFixed(0)}%
+                  </span>
+                  {capPct != null && ` (${capPct}% ของเพดาน ${cap}%)`}
+                  {" — "}
+                  {risk.over_cap
+                    ? "เกินเพดาน ระบบจะไม่ยอมเปิดไม้นี้"
+                    : "ยังไม่เกินเพดาน แต่เพิ่มความเสี่ยงรวมของพอร์ต"}
+                </p>
+              )}
+              {(risk.hedges?.length ?? 0) > 0 && (
+                <p className="mt-1 text-[11px] text-emerald-300/80">
+                  กระจายความเสี่ยงกับ {risk.hedges.map((h) => h.asset).join(", ")} (สวนทางกัน)
+                </p>
+              )}
+            </>
+          )}
           <div className="border-t border-slate-800 my-2" />
           <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">ที่มาของคะแนน</p>
           {details.length ? (
@@ -185,6 +280,20 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
   // Client-side paging (หน้าละ 5) — 28 คู่ใน universe ยาวเกินไปสำหรับการอ่านครั้งเดียว
   const PAGE_SIZE = 5;
   const [page, setPage] = useState(1);
+  // Correlation risk ของไม้ที่เปิดอยู่ — ขอ backend คิดให้ทั้งชุดพร้อมกัน
+  // (symbol_risk) พร้อมเพดานที่ gate ใช้; ล้มเหลว/ยังไม่ login = null แล้ว
+  // แถวก็แค่ไม่มีป้าย ไม่ทำให้ panel พัง
+  const [corr, setCorr] = useState<CorrelationResponse | null>(null);
+  const assetKey = opportunities.map((o) => o.asset).join(",");
+  useEffect(() => {
+    const assets = assetKey ? assetKey.split(",") : [];
+    if (!assets.length) { setCorr(null); return; }
+    let alive = true;
+    api.tradingCorrelation(assets)
+      .then((r) => { if (alive) setCorr(r); })
+      .catch(() => { if (alive) setCorr(null); });
+    return () => { alive = false; };
+  }, [assetKey]);
   if (loading) {
     return <LoadingGraphic message="กำลังโหลดข้อมูลตลาด... (Render cold start อาจใช้เวลาสักครู่)" />;
   }
@@ -203,11 +312,50 @@ export default function OpportunityScore({ opportunities, loading, error, minCon
   // clamp แทน reset — dashboard poll ทุก 30 วิ อย่าบังคับผู้ใช้กลับหน้า 1 ตอนข้อมูลรีเฟรช
   const safePage = Math.min(page, totalPages);
   const pageRows = opportunities.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  // แถบสรุปความเสี่ยงพอร์ต — แสดงเมื่อ "มีไม้เปิดค้าง" เท่านั้น (พอร์ตว่าง =
+  // ไม่มีความเสี่ยงซ้ำให้เตือน) และ cap สูงสุด 0 กันหารศูนย์
+  // 60% นี้ต้องตรงกับ CorrelationEngine.NEAR_CAP_RATIO ฝั่ง backend
+  const riskMap = corr?.symbol_risk ?? null;
+  const cap = corr?.correlation_cap ?? null;
+  const book = corr?.open_positions ?? [];
+  const capPct = corr && cap && cap > 0
+    ? Math.min(100, Math.round((corr.portfolio_correlation / cap) * 100))
+    : null;
+  const overCap = !!(corr && cap && corr.portfolio_correlation > cap);
+  const nearCap = capPct != null && !overCap && capPct >= 60;
   return (
     <div>
+    {book.length > 0 && corr && (
+      <div className="mb-3 rounded-xl border border-white/10 bg-white/[0.03] px-2.5 py-2">
+        <div className="flex items-center justify-between gap-2 text-[11px]">
+          <span className="text-slate-400">ความเสี่ยงความสัมพันธ์พอร์ต</span>
+          <span className={`font-semibold ${overCap ? "text-rose-300" : nearCap ? "text-amber-300" : "text-slate-200"}`}>
+            {corr.portfolio_correlation.toFixed(0)}%
+            {cap != null && <span className="font-normal text-slate-500"> / เพดาน {cap}%</span>}
+          </span>
+        </div>
+        <div className="relative h-1.5 bg-slate-800 rounded mt-1 overflow-hidden" title={`portfolio correlation ${corr.portfolio_correlation} / cap ${cap ?? "-"}`}>
+          <div
+            className={`h-full rounded ${overCap ? "bg-rose-500" : nearCap ? "bg-amber-500" : "bg-emerald-500/70"}`}
+            style={{ width: `${capPct ?? 0}%` }}
+          />
+        </div>
+        <p className="mt-1 text-[11px] text-slate-500">
+          ไม้เปิด {book.length} ไม้: {book.map((p) => `${p.asset} ${p.direction}`).join(" · ")}
+        </p>
+        <p className={`mt-0.5 text-[11px] ${overCap ? "text-rose-300" : nearCap ? "text-amber-300" : "text-slate-500"}`}>
+          {overCap
+            ? "เกินเพดาน — ระบบจะไม่เปิดไม้เพิ่มจนกว่าจะปิดบางส่วน"
+            : nearCap
+              ? "ใกล้เพดาน — เปิดคู่ที่สัมพันธ์กันอีกไม่กี่ไม้จะติดเพดาน"
+              : "ยังห่างเพดาน — ป้ายบนแต่ละแถวบอกว่าคู่นั้นซ้ำไม้เปิดหรือไม่"}
+        </p>
+      </div>
+    )}
     <div className="space-y-3">
       {pageRows.map((o) => (
-        <ScoreRow key={o.asset} o={o} gate={gateFor(o.asset)} tradable={isTradable(o.asset)} />
+        <ScoreRow key={o.asset} o={o} gate={gateFor(o.asset)} tradable={isTradable(o.asset)}
+          risk={riskMap?.[o.asset] ?? null} cap={cap ?? undefined} />
       ))}
     </div>
     {opportunities.length > 0 && (
