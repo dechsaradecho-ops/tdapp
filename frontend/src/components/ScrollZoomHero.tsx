@@ -117,18 +117,27 @@ export default function ScrollZoomHero() {
         });
 
         // "กล้อง" — ทุกชั้นเริ่มพร้อมกันและจบพร้อมกัน (position 0) ต่างกันที่อัตรา
+        // ⚠️ yPercent ต้องเป็นค่าติดลบเท่านั้น (เลื่อนขึ้น) ห้ามเป็นบวกเด็ดขาด
+        //    เดิม img เริ่มที่ yPercent: 4 = ขยับ "ลง" 4% ของความสูงแบนด์
+        //    scale 1.18 ให้ส่วนเกินข้างละ 9% → พอเลื่อนลง 4% ขอบบนของรูปก็ไป
+        //    อยู่ต่ำกว่าขอบจอ ~4% (≈30px ที่แบนด์ 760px) เผยให้เห็นพื้นหลังแอป
+        //    (ดำเกือบสนิท) เป็น "ช่องว่างด้านบน" ของแบ็กกราวด์ — ไม่เกี่ยวกับ
+        //    การ์ด/ระยะ padding เลย จึงแก้ padding เท่าไรก็ไม่หาย
+        //    ค่าใหม่ -2% = รูปเลยขอบบนขึ้นไปเล็กน้อยตลอดเวลา (กันการ์ด/กรอบ
+        //    rotateX 5° ที่ทำให้ขอบบนหดเข้าไปด้วย) ส่วนล่างถูก mask จางอยู่แล้ว
+        //    จึงไม่เห็นส่วนที่ถูกตัดทิ้ง
         if (imgRef.current) {
           tl.fromTo(
             imgRef.current,
-            { scale: 1.18, yPercent: 4, rotateX: 5, transformPerspective: 1100, filter: "brightness(1.06) saturate(1.02)" },
-            { scale: 1.62, yPercent: -5, rotateX: 0, filter: "brightness(0.74) saturate(1.3)" },
+            { scale: 1.18, yPercent: -2, rotateX: 5, transformPerspective: 1100, filter: "brightness(1.06) saturate(1.02)" },
+            { scale: 1.62, yPercent: -7, rotateX: 0, filter: "brightness(0.74) saturate(1.3)" },
             0,
           );
         }
         if (glowRef.current) {
           tl.fromTo(
             glowRef.current,
-            { scale: 1.06, yPercent: 3, rotateX: 3, transformPerspective: 1100, opacity: 0.75 },
+            { scale: 1.06, yPercent: 0, rotateX: 3, transformPerspective: 1100, opacity: 0.75 },
             { scale: 1.24, yPercent: -7, rotateX: 0, opacity: 1 },
             0,
           );
@@ -184,7 +193,9 @@ export default function ScrollZoomHero() {
           aria-hidden="true"
           draggable={false}
           className="zoom-hero-img select-none"
-          style={{ transform: "scale(1.18) translate3d(0, 4%, 0)" }}
+          // ค่าเริ่มต้นก่อน hydrate / ตอน prefers-reduced-motion: ต้อง "เลยขอบบนขึ้นไป"
+          // เท่ากับ timeline (translate ติดลบ) ไม่ใช่ 4% ที่เลื่อนลงจนเห็นเป็นช่องว่าง
+          style={{ transform: "scale(1.18) translate3d(0, -2%, 0)" }}
         />
 
         {/* ชั้นกลางไกล: แสงบรรยากาศ */}

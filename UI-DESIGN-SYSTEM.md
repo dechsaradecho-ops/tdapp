@@ -75,9 +75,9 @@ body {
 
 **แบบด์ image zoom หน้าหลัก (ScrollZoomHero):** `position: absolute; inset-x-0; top: 0` — mount ผ่าน `<HomeHero />` ใน `app/layout.tsx` **ก่อน `<DesktopNav />` และนอก `<main>`** เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้า ตรงกับ header (ถ้าอยู่ใน `<main>` จะโดน padding `py-4/sm:py-5` ของ main + ความสูง sticky nav ลงมาอีก ~90px) · `HomeHero` เป็น client component ที่ gate ด้วย `usePathname() === "/"` (หน้าอื่น return `null`; ตอน prerender แต่ละหน้ามี pathname ของตัวเอง จึงได้แถบมาใน HTML แรก) · ไม่กิน layout (absolute) + `pointer-events-none` → เนื้อหาห่อด้วย `relative z-10` ให้ลอยอยู่ข้างบน · ปลายล่างจางเป็น alpha ด้วย `mask-image` (ไม่ทับด้วยสีดำ) เพื่อคง BackgroundLayer/aurora เป็นชั้นล่างสุด · **ความสูง `h-[clamp(360px,85vh,780px)]`** (เดิม `clamp(320px,70vh,660px)`) = กินพื้นที่ลงมาถึงการ์ดแถวที่ 2-3 บนมือถือ (วัด 390×844 ได้ 717px) — แบนด์เป็น absolute จึงไม่ดันเนื้อหา และเพราะ ScrollTrigger ใช้ `start: "top top"` / `end: "bottom 25%"` ระยะซูมจึงยาวขึ้นตามความสูงเองโดยไม่ต้องแก้ timeline · GSAP ScrollTrigger scrub ขับ "camera dolly-in" (ภาพ + เลเยอร์แสง/กริด/โบเก้ ซูมคนละอัตรา) · เปลี่ยนรูปได้ใน Settings → "แบบด์ image zoom หน้าหลัก (Hero)" = `BackgroundPicker variant="hero"` เก็บ localStorage key `tdapp_hero_image` (1920px, JPEG q0.72, dim slider ปิด) + event `tdapp:hero-changed`; ใส่รูปเองแล้วจะตัด grid/bokeh ออกและซูมจากกลางภาพ (เหลือ glow จาง + vignette) · ใช้ `inset-x-0` **ไม่ใช่ `w-screen`** (100vw นับ scrollbar ทำให้เกิด scroll แนวนอน) และต้องมี `html { overflow-x: clip }` (ห้าม `hidden` — จะสร้าง scroll container แล้วพัง `position: sticky` ของ DesktopNav)
 
-⚠️ **`<main>` บนมือถือต้อง `pt-0`** — มือถือไม่มี header (`DesktopNav` = `hidden md:flex`) จึงไม่มีอะไรกินพื้นที่บรรทัดแรก เหลือแต่ `py-4` (16px) ที่เห็นเป็น "ช่องว่างข้างบน" ทึบ ๆ (ด้านหลังคือ `.zoom-hero-vignette` ที่เกือบดำ) → ปัจจุบัน `<main className="px-3 py-4 pt-0 sm:px-6 md:py-5 max-w-7xl mx-auto pb-24 md:pb-5">`
-- **`pt-0` ต้องอยู่หลัง `py-4`** ในลิสต์คลาส — Tailwind ออก CSS ของ `.pt-*` หลัง `.py-*` ในเลเยอร์เดียวกัน คลาสที่มาทีหลังจึงชนะ (ตรวจในไฟล์ build แล้ว: `.py-4` idx 19397 < `.pt-0` idx 19872)
-- **คืนค่า padding ด้วย `md:` ไม่ใช่ `sm:`** — header โผล่ที่ `md` (768px) ดังนั้นมือถือแนวนอน (เช่น 844×390) ก็ต้องได้ `pt-0` ด้วย
+⚠️ **`<main>` ต้องเว้น gap จากขอบบน "เหมือนเดิม"** — ปัจจุบัน `<main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto pb-24 md:pb-5">` (py-4 = 16px มือถือ / sm:py-5 = 20px)
+- **ประวัติ (อย่าแก้ซ้ำ):** เคยตั้ง `pt-0` เพื่อไล่ "ช่องว่างด้านบน" โดยเข้าใจว่าเป็น padding ของ main ที่ไม่มีอะไรกินพื้นที่ — **ไม่หาย** เพราะแถบนั้นอยู่ที่ *ชั้นแบ็กกราวด์* ไม่ใช่ระยะของการ์ด (ดู `.zoom-hero-img` ด้านบน: `yPercent` เคยเป็น **+4** = เลื่อนรูปลง เผยพื้นหลังแอปเป็นแถบด้านบน) · แก้ที่ต้นเหตุแล้ว = `yPercent` ต้องติดลบ → จึงคืน `py-4`/`sm:py-5` ให้การ์ดมี gap จากขอบบนตามปกติ
+- **`yPercent` ของทุกชั้นใน `.zoom-hero` ต้องติดลบเท่านั้น** (เลื่อนขึ้น) — ค่าบวก = ขอบบนของรูปไปอยู่ต่ำกว่าขอบจอ เกิด "gap ด้านบน" ของแบ็กกราวด์ทันที · ตรวจด้วย `img.getBoundingClientRect().top` ต้องติดลบ (390×844 วัดได้ `imgTop ≈ -77`, `imgH ≈ 847`, `.zoom-hero` h=717)
 - **ห้าม "จัดบ้าน" เป็น `p-0`** — `px-3` กันการ์ดชนขอบจอ และ `pb-24` กัน dock ทับเนื้อหา
 
 ---
@@ -230,7 +230,7 @@ document.fonts?.ready?.then(center)  // center ซ้ำหลัง font swap (
 
 แท็บแรก/สุดท้าย (หน้าหลัก/Settings) เลื่อนชนขอบเพราะ clamp ที่ maxScroll — พฤติกรรมปกติของ scroll container
 
-**Layout ต้องเว้นที่ให้ dock:** `<main className="px-3 py-4 pt-0 sm:px-6 md:py-5 max-w-7xl mx-auto pb-24 md:pb-5">` — ⚠️ ห้ามใช้ `.safe-bottom` บน main (env() มาทีหลัง Tailwind จะ override pb-* เป็น 0 ทำให้ dock ทับเนื้อหา) · ดูหมายเหตุ `pt-0` ที่ §3
+**Layout ต้องเว้นที่ให้ dock:** `<main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto pb-24 md:pb-5">` — ⚠️ ห้ามใช้ `.safe-bottom` บน main (env() มาทีหลัง Tailwind จะ override pb-* เป็น 0 ทำให้ dock ทับเนื้อหา) · `py-4`/`sm:py-5` = gap การ์ดกับขอบบน (ต้องเว้นไว้) · ดูหมายเหตุ `.zoom-hero` `yPercent` ที่ §3
 
 ⚠️ **ห้ามใส่ `.lg-refract` กลับบน dock โดยไม่ทดสอบ Samsung เครื่องจริง** — เดิม dock ใช้ `.lg-refract` (SVG displacement บน ::before) แล้วบน Samsung Internet วาดเป็น "กรอบซ้อน" เพี้ยน ๆ (commit 9c355bd เอาออก) — dock ปัจจุบันใช้ inline blur บนตัว nav เอง ซึ่ง Samsung รองรับปกติ
 

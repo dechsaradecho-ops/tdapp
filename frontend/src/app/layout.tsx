@@ -69,16 +69,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             appears after Tailwind utilities in globals.css and overrides pb-* to 0,
             which let the bottom nav cover the last content block on every page.
 
-            pt-0 บนมือถือ (< md): มือถือไม่มี header (DesktopNav เป็น `hidden md:flex`)
-            จึงไม่มีอะไรกินพื้นที่บรรทัดแรก — เหลือแต่ py-4 = 16px ที่เห็นเป็น "ช่องว่าง
-            ข้างบน" ทึบ ๆ (ด้านหลังคือขอบบนของ .zoom-hero ที่เกือบดำจาก vignette)
-            จึงดันเนื้อหาขึ้นชิดขอบบนสุด ให้ตรงกับที่ DesktopNav ชิดขอบบนบนเดสก์ท็อป
-            ใช้ md ไม่ใช่ sm เพราะ breakpoint ที่หัวเว็บโผล่คือ md (768px) — มือถือ
-            แนวนอน (เช่น 844×390) กว้างเกิน 640 จึงยังต้องได้ pt-0 ด้วย
-            (ยังคง py/pb รอบข้าง: px-3 กันการ์ดชนขอบจอ, pb-24 กัน dock ทับ)
-            ลำดับคลาสสำคัญ: `pt-0` ต้องชนะ `py-4` (Tailwind ออก CSS ของ pt หลัง py)
-            และ `md:py-5` (อยู่ใน media block ซึ่งมาหลัง base) คืน pt ให้แท็บเล็ต/เดสก์ท็อป */}
-        <main className="px-3 py-4 pt-0 sm:px-6 md:py-5 max-w-7xl mx-auto pb-24 md:pb-5">
+            py-4 / sm:py-5 = "ระยะจากการ์ดถึงขอบบน" ที่ตั้งใจ "เว้นไว้เหมือนเดิม"
+            (ย้อนกลับจากค่าที่เคยเป็น pt-0)
+
+            ประวัติ: เคยลองแก้ "ช่องว่างด้านบน" ด้วยการตั้ง pt-0 ให้เนื้อหาชิดขอบบน
+            สุด (สมมติฐาน: py-4 = 16px ที่ไม่มีอะไรกินพื้นที่) — แต่ไม่หาย เพราะ
+            ช่องว่างนั้นอยู่ที่ "ชั้นแบ็กกราวด์" ไม่ใช่ระยะของการ์ด:
+            รูปใน .zoom-hero ตั้ง yPercent: 4 (เลื่อนลง 4% ของแบนด์) ขอบบนของรูป
+            จึงต่ำกว่าขอบจอ → เผยพื้นหลังแอปดำ ๆ เป็นแถบด้านบน
+            แก้ที่ต้นเหตุแล้วใน components/ScrollZoomHero.tsx (yPercent ติดลบ)
+            จึงคืน pt ให้การ์ด "เว้น gap จากขอบบนเหมือนเดิม" ได้ตามที่ต้องการ
+
+            ลำดับคลาสสำคัญ: อย่าใส่ pt-0 หลัง py-4 อีก — py-4 มาหลังในไฟล์
+            Tailwind utilities layer จึงเป็นตัวที่ชนะ แล้วการ์ดจะชิดขอบบน
+            (px-3 กันการ์ดชนขอบจอ, pb-24 กัน dock ทับ — ห้ามแตะ) */}
+        <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto pb-24 md:pb-5">
           <AuthGate>{children}</AuthGate>
         </main>
         <MobileNav />
