@@ -30,7 +30,9 @@ function StatCard({ label, value, cls = "", active = false, onClick, disabled = 
       disabled={disabled || !onClick}
       aria-pressed={active}
       title="แตะเพื่อกรองตารางตามรายการนี้ (แตะซ้ำเพื่อล้างตัวกรอง)"
-      className={`panel text-left w-full cursor-pointer touch-manipulation select-none transition-all duration-150 active:scale-[0.97] hover:border-white/25 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${active ? "border-accent/60 bg-accent/[0.08] shadow-[0_0_0_1px_rgba(10,132,255,0.5),0_8px_32px_rgba(0,0,0,0.45)]" : ""} disabled:cursor-default disabled:active:scale-100`}
+      /* lg-press = สปริงเด้งกลับตอนปล่อย (globals.css) — ไม่ใช้ active:scale ของ
+         Tailwind เพราะมันเป็น transition เชิงเส้น ไม่กระดอน */
+      className={`panel lg-press text-left w-full cursor-pointer touch-manipulation select-none hover:border-white/25 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${active ? "border-accent/60 bg-accent/[0.08] shadow-[0_0_0_1px_rgba(10,132,255,0.5),0_8px_32px_rgba(0,0,0,0.45)]" : ""} disabled:cursor-default`}
     >
       <p className="text-xs text-slate-500 flex items-center justify-between gap-1">
         <span>{label}</span>

@@ -622,6 +622,72 @@ button:not(:disabled):active {
   }
 }
 
+/* ---------- Liquid Glass press: แตะการ์ดแล้ว "เด้ง" เหมือนผิวของเหลว ----------
+   จังหวะ 2 ท่อน (สำคัญ): กดลง = ยุบตัวเร็ว 90ms (squash แกน Y มากกว่า X ให้รู้สึกเป็น
+   ก้อนเจลลี่) → ปล่อย = สปริงดีดกลับเกินขนาดจริงแล้วนุ่มเข้าที่ (overshoot 1.7)
+   ตัวสปริงคือหัวใจของความ "เด้ง" — bezier ปกติจะหยุดนิ่งไม่กระดอน
+
+   ครอบ: การ์ดทุกใบในกริด (.panel), ปุ่มที่เป็นการ์ด, และ .lg-press (ใช้ซ้ำได้)
+   ตัดออกเฉพาะการ์ดที่มีช่องกรอกฟอร์ม (input/select/textarea) — แตะช่องกรอกแล้ว
+   :active ลากขึ้นถึงการ์ดแม่ ทำให้ทั้งใบกระพริบตอนพิมพ์
+   และการ์ดที่มีตาราง/กราฟ (table/iframe/canvas) — ย่อทั้งบล็อกแล้วกระตุกและ
+   repaint หนักบนมือถือ
+   ผลพลอยได้: :is() เป็น forgiving selector list → browser ที่ไม่มี :has()
+   จะตัดเงื่อนไขนั้นทิ้งแล้วยังได้การเด้งของ button.panel ปกติ */
+:is(
+  .lg-press,
+  button.panel,
+  .panel[role="button"],
+  main .grid > .panel:not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(table)):not(:has(iframe)):not(:has(canvas))
+) {
+  -webkit-tap-highlight-color: transparent;
+  /* จุดหมุนต่ำกว่ากึ่งกลางเล็กน้อย = ยุบลงพื้น ไม่ใช่หดเข้ากลาง */
+  transform-origin: 50% 60%;
+  transition:
+    transform 480ms cubic-bezier(0.2, 1.7, 0.4, 1),
+    box-shadow 240ms ease,
+    background-color 200ms ease,
+    border-color 200ms ease;
+}
+
+:is(
+  .lg-press,
+  button.panel,
+  .panel[role="button"],
+  main .grid > .panel:not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(table)):not(:has(iframe)):not(:has(canvas))
+):active {
+  /* squash: ยุบแนวดิ่งมากกว่าแนวนอน แล้วสปริงดีดกลับเป็นรูปเดิม */
+  transform: scale(0.955, 0.935);
+  transition:
+    transform 90ms cubic-bezier(0.4, 0, 0.6, 1),
+    box-shadow 240ms ease,
+    background-color 200ms ease,
+    border-color 200ms ease;
+  /* เงาจมลง + ไฮไลต์ด้านใน = แก้วถูกกดบุ๋ม (ไม่ใช่แค่ย่อ) */
+  box-shadow:
+    0 2px 10px rgba(0, 0, 0, 0.5),
+    inset 0 4px 14px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+/* ประกายแก้ว (sheen ::after ของ .panel) สว่างวาบขึ้นตอนกด */
+:is(
+  .lg-press,
+  button.panel,
+  .panel[role="button"],
+  main .grid > .panel:not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(table)):not(:has(iframe)):not(:has(canvas))
+)::after {
+  transition: opacity 240ms ease;
+}
+:is(
+  .lg-press,
+  button.panel,
+  .panel[role="button"],
+  main .grid > .panel:not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(table)):not(:has(iframe)):not(:has(canvas))
+):active::after {
+  opacity: 0.85;
+}
+
 @keyframes lg-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
