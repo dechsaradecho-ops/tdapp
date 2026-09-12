@@ -13,6 +13,8 @@
  * ผ่าน event ประจำ variant (BackgroundLayer → "tdapp:bg-changed", ScrollZoomHero → "tdapp:hero-changed")
  * ความสว่าง (ความเข้ม scrim ดำ) เก็บแยกใน localStorage — ปรับได้จาก slider ทั้ง 2 variant
  * (key: tdapp_bg_dim สำหรับพื้นหลังแอป · tdapp_hero_dim สำหรับแบบด์ image zoom)
+ * ระดับการซูม (เฉพาะ variant="hero") — เก็บใน tdapp_hero_zoom เป็น "ตัวคูณของช่วงซูม"
+ * ของทุกชั้นใน ScrollZoomHero (0 = ภาพนิ่งไม่ซูม · 1 = ค่าที่ออกแบบไว้เป๊ะ · 2 = ซูมแรงสุด)
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +27,7 @@ const BG_DIM_KEY = "tdapp_bg_dim";
 const HERO_KEY = "tdapp_hero_image";
 const HERO_EVENT = "tdapp:hero-changed";
 const HERO_DIM_KEY = "tdapp_hero_dim";
+const HERO_ZOOM_KEY = "tdapp_hero_zoom";
 const MAX_DIM = 1600; // px — ด้านยาวสุดของพื้นหลังแอป
 const MAX_DIM_HERO = 1920; // ฮีโร่เป็นแบบด์กว้างเต็มจอ + ถูกซูมขยาย — เก็บรายละเอียดมากกว่า
 const MAX_STORED_BYTES = 2_800_000; // ~2.8MB data URL — ปลอดภัยกับ quota localStorage ส่วนใหญ่ (5MB)
@@ -40,6 +43,15 @@ export const BG_DIM_MIN = 0;
 export const BG_DIM_MAX = 0.85;
 export const HERO_DIM_DEFAULT = 0;
 
+/** ระดับการซูมของแบบด์ฮีโร่ — ตัวคูณของ "ช่วงซูม" (end − start) ของทุกชั้นใน ScrollZoomHero
+ *  0 = ไม่ซูมเลย (ทุกชั้นนิ่งอยู่ที่ scale เริ่มต้น) · 1 = ค่าที่ออกแบบไว้เป๊ะ
+ *  2 = ช่วงซูมกว้างเป็น 2 เท่า (เห็นการซูมชัดขึ้น)
+ *  เป็นตัวคูณ "ช่วง" ไม่ใช่ตัวคูณ scale ตรง ๆ → ค่า 1 ต้องได้หน้าตาเดิมเป๊ะเสมอ
+ *  และสัดส่วนความลึก 3D ระหว่างชั้น (ใกล้ขยายเร็ว / ไกลขยายช้า) คงเดิมทุกค่า */
+export const HERO_ZOOM_DEFAULT = 1;
+export const HERO_ZOOM_MIN = 0;
+export const HERO_ZOOM_MAX = 2;
+
 const VARIANTS: Record<
   PickerVariant,
   {
@@ -53,6 +65,10 @@ const VARIANTS: Record<
     dimLabel: string;
     dimHintOn: string;
     dimHintOff: string;
+    /** สไลเดอร์ "ระดับการซูม" — มีเฉพาะ variant ที่มี scroll-zoom (ฮีโร่) */
+    showZoom?: boolean;
+    zoomLabel?: string;
+    zoomHint?: string;
     /** พรีวิวตอนยังไม่ตั้งรูปเอง — ฮีโร่โชว์ภาพเริ่มต้นในตัว */
     defaultPreview?: string;
     emptyText: string;
@@ -87,9 +103,12 @@ const VARIANTS: Record<
     dimDefault: HERO_DIM_DEFAULT,
     maxDim: MAX_DIM_HERO,
     showDim: true,
-    dimLabel: "ความสว่างแบบด์ image zoom",
+    dimLabel: "ความสว่าง (Image zoom)",
     dimHintOn: "เลื่อนไปขวา = แบบด์ด้านบนมืดลง (การ์ด/ตัวหนังสืออ่านง่ายขึ้น) · ปรับแล้วใช้ได้ทันทีทุกหน้า",
     dimHintOff: "",
+    showZoom: true,
+    zoomLabel: "ระดับการซูม (Zoom scale)",
+    zoomHint: "0% = ไม่ซูมเลย (ภาพนิ่ง) · 100% = ค่าเริ่มต้น · 200% = ซูมแรงสุด — มีผลกับทุกชั้นของแบบด์ (ภาพ/แสง/กริด/โบเก้) พร้อมกัน",
     defaultPreview: "/scroll-zoom.svg",
     emptyText: "ใช้ภาพเริ่มต้นในตัวอยู่",
     defaultText: "ภาพเริ่มต้น (Scroll Zoom)",
@@ -100,18 +119,24 @@ const VARIANTS: Record<
   },
 };
 
-/** อ่านความเข้ม scrim — ค่าที่เก็บไว้ หรือ fallback ตาม variant (private mode → fallback) */
-export function readStoredDim(key: string = BG_DIM_KEY, fallback: number = BG_DIM_DEFAULT): number {
+/** อ่านค่าตัวเลขที่เก็บใน localStorage แบบ clamp ช่วง (ยังไม่เคยตั้ง/อ่านไม่ได้ → fallback)
+ *  ใช้ร่วมกันทั้งความสว่าง (0–0.85) และระดับการซูม (0–2) */
+function readStoredNumber(key: string, fallback: number, min: number, max: number): number {
   if (typeof window === "undefined") return fallback;
   try {
     const raw = window.localStorage.getItem(key);
     if (raw === null) return fallback;
     const n = Number(raw);
     if (!Number.isFinite(n)) return fallback;
-    return Math.min(BG_DIM_MAX, Math.max(BG_DIM_MIN, n));
+    return Math.min(max, Math.max(min, n));
   } catch {
     return fallback; // private mode / storage disabled
   }
+}
+
+/** อ่านความเข้ม scrim — ค่าที่เก็บไว้ หรือ fallback ตาม variant (private mode → fallback) */
+export function readStoredDim(key: string = BG_DIM_KEY, fallback: number = BG_DIM_DEFAULT): number {
+  return readStoredNumber(key, fallback, BG_DIM_MIN, BG_DIM_MAX);
 }
 
 export function readStoredBgDim(): number {
@@ -121,6 +146,11 @@ export function readStoredBgDim(): number {
 /** ความสว่างของแบบด์ image zoom (ตั้งใน Settings) — ใช้โดย ScrollZoomHero */
 export function readStoredHeroDim(): number {
   return readStoredDim(HERO_DIM_KEY, HERO_DIM_DEFAULT);
+}
+
+/** ระดับการซูมของแบบด์ฮีโร่ (ตั้งใน Settings) — ใช้โดย ScrollZoomHero */
+export function readStoredHeroZoom(): number {
+  return readStoredNumber(HERO_ZOOM_KEY, HERO_ZOOM_DEFAULT, HERO_ZOOM_MIN, HERO_ZOOM_MAX);
 }
 
 /** อ่าน data URL ของรูปที่ผู้ใช้ตั้งไว้ (คีย์ไหนก็ได้) — null = ยังไม่ตั้ง/อ่านไม่ได้ */
@@ -151,12 +181,26 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [dim, setDim] = useState(BG_DIM_DEFAULT);
+  // ระดับการซูมของแบบด์ฮีโร่ — ใช้เฉพาะ variant="hero" (ตั้งใจไม่ set ตอน variant="app")
+  const [zoom, setZoom] = useState(HERO_ZOOM_DEFAULT);
+  // เครื่อง/OS ที่ปิดอนิเมชัน → ScrollZoomHero ไม่สร้าง timeline → สไลเดอร์ซูมไม่มีผล
+  const [reduceMotion, setReduceMotion] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setPreview(readStoredImage(cfg.key));
     setDim(readStoredDim(cfg.dimKey, cfg.dimDefault));
+    setZoom(readStoredHeroZoom());
   }, [cfg.key, cfg.dimKey, cfg.dimDefault]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => setReduceMotion(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
 
   const apply = (dataUrl: string | null) => {
     try {
@@ -232,6 +276,19 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
       // private mode — ยังอัปเดต UI ให้เห็นผลทันทีแม้เก็บไม่ได้
     }
     setDim(clamped);
+    window.dispatchEvent(new Event(cfg.event));
+  };
+
+  /** ระดับการซูม — คีย์เดียว (HERO_ZOOM_KEY) เพราะมีผลกับฮีโร่เท่านั้น
+   *  ยิง event เดียวกับรูป/ความสว่าง → ScrollZoomHero อ่านค่าใหม่แล้วสร้าง timeline ใหม่ */
+  const setZoomScale = (value: number) => {
+    const clamped = Math.min(HERO_ZOOM_MAX, Math.max(HERO_ZOOM_MIN, value));
+    try {
+      window.localStorage.setItem(HERO_ZOOM_KEY, String(clamped));
+    } catch {
+      // private mode — ยังอัปเดต UI ให้เห็นผลทันทีแม้เก็บไม่ได้
+    }
+    setZoom(clamped);
     window.dispatchEvent(new Event(cfg.event));
   };
 
@@ -332,6 +389,45 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
         />
         <p className="text-[11px] text-slate-500">
           {dimEnabled ? cfg.dimHintOn : cfg.dimHintOff}
+        </p>
+      </div>
+      )}
+
+      {/* ปรับ "ระดับการซูม" (เฉพาะ variant ที่มี scroll-zoom = ฮีโร่)
+          ค่าเป็นตัวคูณของ "ช่วงซูม" (end − start) ของทุกชั้นใน ScrollZoomHero
+          → 100% = ค่าที่ออกแบบไว้เป๊ะ · 0% = ทุกชั้นนิ่ง (ไม่ซูม) · 200% = ช่วงซูมกว้าง 2 เท่า
+          ปรับแล้ว ScrollZoomHero สร้าง timeline ใหม่ทันทีผ่าน event เดียวกับรูป/ความสว่าง
+          (ไม่ต้องอัปโหลดรูปใหม่ — สไลเดอร์นี้ใช้ได้กับภาพเริ่มต้นในตัวด้วย) */}
+      {cfg.showZoom && (
+      <div className="rounded-lg border border-slate-700 p-3 space-y-2">
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-slate-300 font-medium">{cfg.zoomLabel}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 tabular-nums">{Math.round(zoom * 100)}%</span>
+            {zoom !== HERO_ZOOM_DEFAULT && (
+              <button
+                onClick={() => setZoomScale(HERO_ZOOM_DEFAULT)}
+                className="text-[11px] text-slate-400 border border-slate-700 rounded px-2 min-h-[28px] active:bg-slate-800"
+              >
+                ค่าเริ่มต้น
+              </button>
+            )}
+          </div>
+        </div>
+        <input
+          type="range"
+          min={HERO_ZOOM_MIN}
+          max={HERO_ZOOM_MAX}
+          step={0.05}
+          value={zoom}
+          onChange={(e) => setZoomScale(Number(e.target.value))}
+          className="bg-dim-slider w-full"
+          aria-label={cfg.zoomLabel}
+        />
+        <p className="text-[11px] text-slate-500">
+          {reduceMotion
+            ? "เครื่องนี้ตั้งปิดอนิเมชัน (prefers-reduced-motion) — แบบด์แสดงเป็นภาพนิ่ง ระดับการซูมจึงยังไม่เห็นผล"
+            : cfg.zoomHint}
         </p>
       </div>
       )}

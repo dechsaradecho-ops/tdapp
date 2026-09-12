@@ -1146,6 +1146,10 @@ button:not(:disabled):active {
    GSAP เป็นตัวขับ transform ทั้งหมด (โหลดแบบ dynamic import ในคอมโพเนนต์)
    ค่าที่เขียนไว้ที่นี่ = ภาพนิ่งก่อน hydrate และเป็น fallback ตอน
    prefers-reduced-motion (JS จะไม่แตะเลยถ้าผู้ใช้ปิดอนิเมชัน)
+   หมายเหตุ: "ช่วงซูม" ด้านบนคือค่าที่ ระดับการซูม = 100% (ค่าเริ่มต้น) —
+   Settings → slider "ระดับการซูม (Zoom scale)" (localStorage tdapp_hero_zoom)
+   คูณเฉพาะ "ช่วง" (end − start) ของทุกชั้น จึงไม่ต้องมีค่าใน CSS ที่นี่
+   (ค่าใน CSS = ค่า start ซึ่งไม่ขึ้นกับระดับการซูม)
 
    เลเยอร์: [ล่างสุด] แบ็กกราวด์เดิมของแอป (body aurora + BackgroundLayer
    ที่ผู้ใช้อัปโหลด — fixed z ลบ)  →  [บน] แบนด์ฮีโร่นี้  →  [บนสุด] เนื้อหา
@@ -1237,7 +1241,7 @@ button:not(:disabled):active {
   transform-origin: 50% 45%;
 }
 /* ชั้นนิ่ง (ไม่ซูม) — scrim ดำคุม "ความสว่าง" ของแบบด์
-   (Settings → slider "ความสว่างแบบด์ image zoom", localStorage tdapp_hero_dim)
+   (Settings → slider "ความสว่าง (Image zoom)", localStorage tdapp_hero_dim)
    ตั้งใจวางไว้ "ใต้" .zoom-hero-vignette → หรี่ภาพ/HUD ได้ตามใจ
    แต่ความเข้มของ vignette ที่ช่วยให้การ์ดแถวบนสุดอ่านออกจะไม่ถูกตัดทอนไปด้วย
    default 0 (ไม่มี scrim) = หน้าตาเดิมเป๊ะ · ใช้ rgba ผ่าน inline style จาก JS */

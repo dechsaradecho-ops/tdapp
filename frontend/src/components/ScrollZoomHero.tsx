@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, readStoredHero, readStoredHeroDim } from "@/components/BackgroundPicker";
+import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, HERO_ZOOM_DEFAULT, readStoredHero, readStoredHeroDim, readStoredHeroZoom } from "@/components/BackgroundPicker";
 
 /**
  * ScrollZoomHero — แบ็กกราวด์ด้านบนสุดของหน้าแรก เลียนแบบ effect #26
@@ -50,9 +50,15 @@ import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, readStoredHero, readStoredHeroDim }
  *   • เปลี่ยนรูปแล้วอัปเดตทันทีผ่าน event tdapp:hero-changed
  *   • ผู้ใช้ที่ปิดอนิเมชัน (prefers-reduced-motion) ก็ยังเห็นรูปที่ตั้งไว้ (ภาพนิ่ง)
  *
- * ความสว่าง: Settings → slider "ความสว่างแบบด์ image zoom" (localStorage tdapp_hero_dim)
+ * ความสว่าง: Settings → slider "ความสว่าง (Image zoom)" (localStorage tdapp_hero_dim)
  * → scrim ดำทับ "เฉพาะภาพ + HUD" (อยู่ใต้ vignette) ยิ่งค่ามาก แบบด์ยิ่งมืด
  *   default = 0 (หน้าตาเดิมเป๊ะ) · ปรับแล้วเห็นผลทันทีทุกหน้าผ่าน event เดียวกัน
+ *
+ * ระดับการซูม: Settings → slider "ระดับการซูม (Zoom scale)" (localStorage tdapp_hero_zoom)
+ * → ตัวคูณของ "ช่วงซูม" (end − start) ของทุกชั้น: 0 = ภาพนิ่งไม่ซูม · 1 = ค่าเดิมเป๊ะ
+ *   · 2 = ช่วงซูมกว้างเป็น 2 เท่า — ดูรายละเอียดที่ zoomScale() ด้านล่าง
+ *   ค่าใหม่มีผลทันทีผ่าน event เดียวกัน (effect ผูก zoom เป็น dependency → สร้าง
+ *   timeline ใหม่ โดย ctx.revert() คืน inline style ให้ก่อน)
  *
  * ทำไมไม่ import gsap ตรง ๆ ด้านบน: หน้าแรกเป็น dashboard ที่ผู้ใช้เปิดบ่อย
  * GSAP + ScrollTrigger ~90KB ก่อน gzip — dynamic import ทำให้มันไปอยู่ใน chunk
@@ -64,6 +70,18 @@ import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, readStoredHero, readStoredHeroDim }
  *     (จำเป็นเพราะ React StrictMode ใน dev เรียก effect สองรอบ)
  *   • ScrollTrigger.refresh() เมื่อรูปโหลดเสร็จ ไม่งั้นวัดความสูงผิด
  */
+/** ค่า scale ของชั้นหนึ่ง ๆ ที่ "ระดับการซูม" k (Settings → tdapp_hero_zoom)
+ *  start/end = scale ที่ k = 1 (ค่าที่ออกแบบไว้) →
+ *    k = 0 → start          ทุกชั้นนิ่ง ไม่มีการขยายเลย (ยังมีการเลื่อน/เอียงตาม parallax)
+ *    k = 1 → end            ค่าที่ออกแบบไว้เป๊ะ
+ *    k = 2 → start + 2Δ     ช่วงซูมกว้างเป็น 2 เท่า (ซูมแรงขึ้น)
+ *  ทำไมผูกเป็นตัวคูณ "ช่วง" ไม่ใช่ตัวคูณ scale ตรง ๆ: ทำให้ k = 1 ได้หน้าตาเดิม
+ * เป๊ะเสมอ (hit-test ง่าย ไม่มี regression) และคง "สัดส่วน" ระหว่างชั้นไว้ทุกค่า k
+ *  — ชั้นใกล้ยังขยายเร็วกว่าชั้นไกลเท่าเดิม จึงไม่เสียความลึก 3D */
+function zoomScale(start: number, end: number, k: number): number {
+  return start + (end - start) * k;
+}
+
 export default function ScrollZoomHero() {
   const rootRef = useRef<HTMLElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -74,14 +92,17 @@ export default function ScrollZoomHero() {
   const [src, setSrc] = useState<string | null>(null);
   // ความสว่างของแบบด์ (ความเข้ม scrim ดำ 0–0.85) — ตั้งใน Settings, default 0 = หน้าตาเดิม
   const [dim, setDim] = useState(HERO_DIM_DEFAULT);
+  // ระดับการซูม (ตัวคูณของช่วงซูม 0–2) — ตั้งใน Settings, default 1 = ค่าที่ออกแบบไว้
+  const [zoom, setZoom] = useState(HERO_ZOOM_DEFAULT);
   const custom = src !== null;
 
-  // อ่านรูป/ความสว่างที่ตั้งไว้ + ฟัง event ให้เปลี่ยนได้ทันทีโดยไม่ต้องรีโหลดหน้า
+  // อ่านรูป/ความสว่าง/ระดับการซูมที่ตั้งไว้ + ฟัง event ให้เปลี่ยนได้ทันทีโดยไม่ต้องรีโหลดหน้า
   // (แยก effect จากตัว GSAP เพราะต้องทำงานแม้ผู้ใช้ปิดอนิเมชัน)
   useEffect(() => {
     const read = () => {
       setSrc(readStoredHero());
       setDim(readStoredHeroDim());
+      setZoom(readStoredHeroZoom());
     };
     read();
     window.addEventListener(HERO_IMAGE_EVENT, read);
@@ -109,6 +130,10 @@ export default function ScrollZoomHero() {
       st = ScrollTrigger;
 
       ctx = gsap.context(() => {
+        // ระดับการซูมจาก Settings — ตัวคูณของ "ช่วงซูม" ของทุกชั้น (ดู zoomScale)
+        //   k = 0 → ทุกชั้นนิ่ง (scale คงที่ = ค่า start) · k = 1 → ค่าเดิมเป๊ะ
+        //   k = 2 → ช่วงซูมกว้างเป็น 2 เท่า · สัดส่วนระหว่างชั้นคงเดิมทุกค่า k
+        const k = zoom;
         const tl = gsap.timeline({
           defaults: { ease: "none" },
           scrollTrigger: {
@@ -139,7 +164,7 @@ export default function ScrollZoomHero() {
           tl.fromTo(
             imgRef.current,
             { scale: 1.18, yPercent: -2, rotateX: 5, transformPerspective: 1100, filter: "brightness(1.06) saturate(1.02)" },
-            { scale: 1.62, yPercent: -7, rotateX: 0, filter: "brightness(0.74) saturate(1.3)" },
+            { scale: zoomScale(1.18, 1.62, k), yPercent: -7, rotateX: 0, filter: "brightness(0.74) saturate(1.3)" },
             0,
           );
         }
@@ -147,7 +172,7 @@ export default function ScrollZoomHero() {
           tl.fromTo(
             glowRef.current,
             { scale: 1.06, yPercent: 0, rotateX: 3, transformPerspective: 1100, opacity: 0.75 },
-            { scale: 1.24, yPercent: -7, rotateX: 0, opacity: 1 },
+            { scale: zoomScale(1.06, 1.24, k), yPercent: -7, rotateX: 0, opacity: 1 },
             0,
           );
         }
@@ -155,7 +180,7 @@ export default function ScrollZoomHero() {
           tl.fromTo(
             gridRef.current,
             { scale: 1, yPercent: 6, rotateX: 4, transformPerspective: 1100, opacity: 0.55 },
-            { scale: 1.46, yPercent: -12, rotateX: 0, opacity: 0.9 },
+            { scale: zoomScale(1, 1.46, k), yPercent: -12, rotateX: 0, opacity: 0.9 },
             0,
           );
         }
@@ -163,7 +188,7 @@ export default function ScrollZoomHero() {
           tl.fromTo(
             nearRef.current,
             { scale: 1.1, yPercent: 10, rotateX: 2, transformPerspective: 1100, opacity: 0.85 },
-            { scale: 2.3, yPercent: -16, rotateX: 0, opacity: 1 },
+            { scale: zoomScale(1.1, 2.3, k), yPercent: -16, rotateX: 0, opacity: 1 },
             0,
           );
         }
@@ -183,7 +208,9 @@ export default function ScrollZoomHero() {
     };
     // custom = เปลี่ยนชุดเลเยอร์ (มี/ไม่มี grid+bokeh) → ต้องสร้าง timeline ใหม่
     // ให้ตรงกับ DOM ปัจจุบัน; ctx.revert() ใน cleanup คืน inline style ให้ก่อน
-  }, [custom]);
+    // zoom  = เปลี่ยน "ช่วงซูม" ของทุกชั้น → timeline ต้องสร้างใหม่ (ค่าถูก bake ตอน build)
+    //         ctx.revert() คืน inline style ก่อนเช่นกัน → ไม่มี transform ค้างทับกัน
+  }, [custom, zoom]);
 
   return (
     <section

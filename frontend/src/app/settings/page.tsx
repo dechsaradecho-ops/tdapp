@@ -568,11 +568,12 @@ export default function SettingsPage() {
 
       {/* ---------------- Hero band (image zoom) image picker ---------------- */}
       <div className="panel md:col-span-2">
-        <h2 className="panel-title">แบบด์ image zoom (Hero)</h2>
+        <h2 className="panel-title">Image zoom (Hero)</h2>
         <p className="text-xs text-slate-500 mb-3">
           รูปที่ใช้เป็นแถบพื้นหลังบนสุดของ "ทุกหน้า" (ค่อย ๆ ซูมเข้าตอนเลื่อนหน้า) — ไม่ใส่ = ใช้ภาพเริ่มต้นในตัว
           · เก็บในเครื่องนี้ (localStorage) แยกจากภาพพื้นหลังด้านบน
           · ปรับความสว่างของแบบด์ได้จากสไลเดอร์ด้านล่าง (ใช้ได้ทันทีแม้ยังไม่เปลี่ยนรูป)
+          · ปรับระดับการซูม (zoom scale) ได้จากสไลเดอร์ถัดลงมา
         </p>
         <BackgroundPicker variant="hero" />
       </div>
