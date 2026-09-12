@@ -8,7 +8,7 @@ import { HERO_IMAGE_EVENT, readStoredHero } from "@/components/BackgroundPicker"
  * "GSAP ScrollTrigger image zoom" (prismic.io/blog/css-scroll-effects)
  *
  * ทำหน้าที่เป็น "แบ็กกราวด์" ล้วน ๆ : แบนด์เต็มความกว้างจอ ติดขอบบนสุดของหน้า
- * (โดน mount จาก app/layout.tsx ผ่าน <HomeHero /> จึงอยู่เหนือ <main> —
+ * (โดน mount จาก app/layout.tsx ผ่าน <AppHero /> จึงอยู่เหนือ <main> —
  * ถ้าอยู่ใน <main> แบนด์จะเริ่มต่ำลงมาอีก ~70-90px ตาม padding ของ main +
  * ความสูง sticky DesktopNav)
  *

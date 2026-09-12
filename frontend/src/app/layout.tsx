@@ -4,7 +4,7 @@ import BackgroundLayer from "@/components/BackgroundLayer";
 import CapitalSync from "@/components/CapitalSync";
 import ChatWidget from "@/components/ChatWidget";
 import DesktopNav from "@/components/DesktopNav";
-import HomeHero from "@/components/HomeHero";
+import AppHero from "@/components/AppHero";
 import MobileNav from "@/components/MobileNav";
 import PwaRegister from "@/components/PwaRegister";
 import "./globals.css";
@@ -56,10 +56,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </defs>
         </svg>
         <BackgroundLayer />
-        {/* แบ็กกราวด์ฮีโร่หน้าหลัก (GSAP scroll zoom) — ต้องอยู่นอก <main> และ
+        {/* แบ็กกราวด์ฮีโร่ (GSAP scroll zoom) — ต้องอยู่นอก <main> และ
             ก่อน DesktopNav เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้าไปจนถึง header
-            (HomeHero เช็ค pathname === "/" เอง; หน้าอื่นไม่แสดง) */}
-        <HomeHero />
+            แสดง "ทุกหน้า" (เดิมชื่อ HomeHero/gate เฉพาะ "/") — ปัจจุบัน
+            แบนด์มี z-index: -1 จึงอยู่ใต้เนื้อหาทุกหน้าเองโดยไม่ต้องแตะ <main> */}
+        <AppHero />
         {/* Desktop (md+): floating liquid glass pill navbar (codefronts style —
             blur 20px + bg-white/10 + ring white/20 + rounded-full) — sticky ลอยเหนือเนื้อหา
             มือถือ (< md) ไม่แสดง — ใช้ MobileNav dock ล่างแทน */}

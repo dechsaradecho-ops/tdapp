@@ -91,11 +91,12 @@ export default function DashboardPage() {
 
   return (
     <>
-      {/* แบ็กกราวด์ฮีโร่ (GSAP ScrollTrigger image zoom) ย้ายไป mount ที่
-          app/layout.tsx ผ่าน <HomeHero /> เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้า
-          ตรงกับ header — ไม่ติด padding ของ <main> */}
+      {/* แบ็กกราวด์ฮีโร่ (GSAP ScrollTrigger image zoom) mount ที่
+          app/layout.tsx ผ่าน <AppHero /> — แสดงทุกหน้า และแถบเริ่มที่ขอบบนสุด
+          ของหน้า ตรงกับ header (ไม่ติด padding ของ <main>) */}
 
-      {/* เนื้อหาทั้งหน้า — ยกขึ้นชั้นบน (z-10) ให้ลอยเหนือแบ็กกราวด์ */}
+      {/* เนื้อหาทั้งหน้า — ยกขึ้นชั้นบน (z-10) ให้ลอยเหนือแบ็กกราวด์
+          (ตอนนี้ .zoom-hero มี z-index: -1 จึงไม่จำเป็นแล้ว แต่คงไว้เพื่อความชัดเจน) */}
       <div className="relative z-10 space-y-6">
         <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Stat label="Capital" value={fmtMoney(capital)} />
