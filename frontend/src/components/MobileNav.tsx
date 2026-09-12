@@ -370,8 +370,9 @@ export default function MobileNav() {
       rimB.style.opacity = rimA;
       // แยกสีแบบปริซึม "ตามทิศลาก" (ไม่สมมาตร): แดงสวนทางนิ้ว / น้าเงินตามนิ้ว /
       // เขียวขยายวงตรงกลาง — หยดน้ำจริงกระเจิงแรงสุดตามแนวเคลื่อนที่ ไม่ใช่ซ้ายขวาเสมอ
-      // ⚠️ shift จำกัด ~0.6–2.6px: วง 1px ถ้าเยื้องเกินนี้จะหลุดเป็นขอบซ้อน (เคย ~6px)
-      const rimShift = 0.6 + spd * 8;
+      // ⚠️ shift บูสต์รอบแรงต่อเนื่อง 1.2–5.0 → 1.4–5.8px: แยกสีชัดขึ้น แต่ยัง
+      // ต่ำกว่า ~6px ที่เคยหลุดเป็นขอบซ้อน
+      const rimShift = 1.4 + spd * 17;
       rimR.style.transform = `translate3d(${(-dx * rimShift).toFixed(2)}px,${(-dy * rimShift).toFixed(2)}px,0)`;
       rimG.style.transform = `scale(${(1 + ca * 0.0035).toFixed(4)})`;
       rimB.style.transform = `translate3d(${(dx * rimShift).toFixed(2)}px,${(dy * rimShift).toFixed(2)}px,0)`;
@@ -389,8 +390,8 @@ export default function MobileNav() {
       const sway = Math.min(spd / 0.25, 1) * 0.6 + dragDist * 0.4;
       disp.style.opacity = Math.min(alpha * 1.15, 1).toFixed(3);
       disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
-      disp.style.setProperty("--sdx", (-dx * sway * 2.5).toFixed(2) + "px");
-      disp.style.setProperty("--sdy", (-dy * sway * 2.5).toFixed(2) + "px");
+      disp.style.setProperty("--sdx", (-dx * sway * 5.6).toFixed(2) + "px");
+      disp.style.setProperty("--sdy", (-dy * sway * 5.6).toFixed(2) + "px");
       // หมุนรุ้ง/แสงขอบให้ด้านเข้มสุดอยู่ตามทิศลาก (conic `from` = มุมเริ่มไล่สี
       // ⇒ ลากไปทางไหน ด้านนั้นรุ้งชัด ตรงข้ามจาง = ไม่สมมาตรตามนิ้วจริง)
       // atan2(dy,dx) เป็นมุมเวกเตอร์ลาก (deg) ใช้ตรง ๆ ได้เลยกับ conic
@@ -772,10 +773,11 @@ export default function MobileNav() {
               {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
                     = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
                     วัดจาก scale: ขอบวงถูกดึงเข้า ±(scale/2) px
-                      R 7 = ±3.5px · G 9 = ±4.5px · B 11 = ±5.5px
-                    ⇒ ที่ขอบวงสีแยกกัน ~2px = เห็นขอบสีรุ้งบาง ไม่เป็นวงขาวหนา
-                    (เทียบ D0–D3: scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็น
-                     วงขาวหนา ~10px — ลดครึ่งหนึ่งแล้ววงใส เหลือแค่รุ้งขอบบาง)
+                      R 14 = ±7px · G 17 = ±8.5px · B 20 = ±10px
+                    ⇒ ที่ขอบวงสีแยกกัน ~3px = เห็นขอบสีรุ้งชัด ไม่เป็นวงขาวหนา
+                    (บูสต์รอบแรงต่อเนื่องตามคำขอ "เอฟเฟคแรงขึ้น" — เทียบ D0–D3:
+                     scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็นวงขาวหนา ~10px
+                     จึงยังแตะแค่ขอบล่างของเพดานนั้น)
                     (กลางวง ~1x ไม่ขยาย — ภาพนิ่งกลาง บีบแรงเฉพาะแถบขอบ
                      แบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
                     feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
@@ -803,7 +805,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chR"
                 in2="map"
-                scale="7"
+                scale="17"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dR"
@@ -811,7 +813,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chG"
                 in2="map"
-                scale="9"
+                scale="20"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dG"
@@ -819,7 +821,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chB"
                 in2="map"
-                scale="11"
+                scale="24"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dB"
