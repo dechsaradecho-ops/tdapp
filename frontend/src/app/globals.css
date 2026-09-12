@@ -223,6 +223,73 @@ input[type="checkbox"] {
   transform: none;
 }
 
+/* ---------- Fluid drag lens (FluidGlass-style — เขียนเอง ไม่ใช้ three/.glb) ----------
+   เลนส์แก้วเหลวที่ "ตามนิ้วแบบหนืด" ขณะลาก dock — ตำแหน่ง/สปริง/squash/chromatic
+   คำนวณใน MobileNav.tsx (ไม่ใช่ CSS) ที่นี่มีแค่หน้าตา
+   - อยู่ "นอก" <nav> ที่ z-index 41 + pointer-events: none → ไม่แตะ DOM ของ
+     package และไม่แย่ง pointer ของ drag ที่ package ทำอยู่
+   - ห้ามใช้ backdrop-filter: url() ที่ชั้นนี้ — Samsung Internet render dock พัง
+     (บทเรียนเดิมด้านบน) จึงทำ "ความหักเห" ด้วย filter: url(#dock-liquid-warp)
+     บน artwork ของเลนส์เอง ปลอดภัยทุก browser (ไม่รองรับ = แค่ไม่บิด ไม่พัง)
+   - width/height ต้องตรงกับ W/H ใน MobileNav.tsx */
+.dock-liquid__lens,
+.dock-liquid__wake {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 84px;
+  height: 48px;
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform, opacity;
+  filter: url("#dock-liquid-warp");
+}
+/* wake เป็น "ฝ้าหาง" ไม่ใช่ของแข็ง — เบลอเพิ่มให้กลืนกับเลนส์หลัก */
+.dock-liquid__wake {
+  filter: url("#dock-liquid-warp") blur(4px);
+}
+/* ::before = ตัวของเหลว ลดจำนวน DOM node */
+.dock-liquid__lens::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  /* แก้วใส: ขอบหักแสง (rim) + แกนกลางบาง ๆ ที่แสงถูกรวบ + ประกายฟ้าขอบล่าง
+     ค่าความทึบตั้งให้ "เห็นหลังแก้ว" ได้ — ลดลงแล้วถ้าดูขุ่นเป็นลูกบอล */
+  background:
+    radial-gradient(120% 140% at 50% 0%, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0) 52%),
+    radial-gradient(90% 120% at 50% 55%, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0) 70%),
+    radial-gradient(115% 135% at 50% 110%, rgba(124, 196, 255, 0.26), rgba(124, 196, 255, 0) 64%);
+  box-shadow:
+    0 0 22px rgba(124, 196, 255, 0.24),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+/* หางของเหลว (wake): ฝ้าจาง ๆ ที่ลากตาม — ทำตัวให้แคบและเบลอเพื่อไม่ให้ดูเป็น
+   "ลูกแก้วลูกที่สอง" ซ้อนกับเลนส์หลัก (ตั้งสเกล/ความจางใน MobileNav.tsx) */
+.dock-liquid__wake::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: radial-gradient(110% 130% at 50% 60%, rgba(124, 196, 255, 0.2), rgba(124, 196, 255, 0) 70%);
+  box-shadow: 0 0 18px rgba(124, 196, 255, 0.18);
+}
+/* ขอบ chromatic aberration (แดง/น้ำเงิน) — ระยะเยื้องตั้งจาก JS ตามความเร็วลาก */
+.dock-liquid__ca {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+.dock-liquid__ca--r {
+  box-shadow: inset 0 0 0 1.5px rgba(255, 96, 96, 0.55);
+}
+.dock-liquid__ca--b {
+  box-shadow: inset 0 0 0 1.5px rgba(96, 170, 255, 0.55);
+}
+
 /* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */
 /* ปุ่มหลัก — สูง >= 44px บนมือถือเพื่อให้แตะง่าย */
 .btn-primary {
