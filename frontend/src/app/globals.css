@@ -381,13 +381,13 @@ input[type="checkbox"] {
 /* ขอบรุ้งหยดน้ำ: เส้น 1px สามสี alpha ต่ำ — แค่ "ย้อมสี" ให้เส้นขอบขาว
    (hairline ของ sheen) ไม่ใช่เส้นขาวหนาเอง */
 .dock-glass__rim--r {
-  box-shadow: inset 0 0 0 1px rgba(255, 110, 110, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(255, 110, 110, 0.55);
 }
 .dock-glass__rim--g {
-  box-shadow: inset 0 0 0 1px rgba(140, 255, 210, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(140, 255, 210, 0.26);
 }
 .dock-glass__rim--b {
-  box-shadow: inset 0 0 0 1px rgba(110, 180, 255, 0.78);
+  box-shadow: inset 0 0 0 1px rgba(110, 180, 255, 0.58);
 }
 
 /* --- วงกลมแก้วตอนลาก (orb) ------------------------------------------------
@@ -424,9 +424,9 @@ input[type="checkbox"] {
      (ยัง << ค่าเดิมที่เคยเป็นผืนขาว) */
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0.15),
-    rgba(255, 255, 255, 0.1) 62%,
-    rgba(255, 255, 255, 0.1) 86%,
+    rgba(255, 255, 255, 0.04),
+    rgba(255, 255, 255, 0.03) 62%,
+    rgba(255, 255, 255, 0.03) 86%,
     rgba(255, 255, 255, 0) 100%
   );
   -webkit-backdrop-filter: blur(7px) saturate(145%) brightness(1.18);
@@ -474,20 +474,21 @@ input[type="checkbox"] {
   backdrop-filter: url("#dock-glass-lens");
   /* ⚠️ mask ของ lens: ตัวหนังสือ/ฉากหลังที่บิดแล้วต้อง "เห็น" ถึงกลางวง —
      เดิมทึบแค่ 94% หมายถึงโซนกลางกลับไปใช้ backdrop ของ orb ธรรมดา
-     (ใสเกินจนวงอ่านเป็นรู) ⇒ ทึบถึง 99% แล้วเฟดแคบ 1% ที่ขอบนอกสุด
-     (คงขอบคม ~1px แบบหยดน้ำ แต่เนื้อวงแสดงภาพที่บิดแล้วทั้งวง) */
+     (ใสเกินจนวงอ่านเป็นรู) ⇒ ทึบถึง 96% แล้วเฟดนุ่ม 96→100% (4% ≈ 1.7px)
+     เฟดแคบ 1% เดิมชันเกินจนขอบเป็นรอยหยักตอนซูม — 4% ยังคมเหมือนหยดน้ำ
+     แต่ไล่ alpha นุ่ม ไม่มีขั้นบันได */
   -webkit-mask-image: radial-gradient(
     closest-side,
-    #000 97%,
-    rgba(0, 0, 0, 0.95) 99%,
-    rgba(0, 0, 0, 0.4) 99.5%,
+    #000 94%,
+    #000 96%,
+    rgba(0, 0, 0, 0.6) 98.5%,
     transparent 100%
   );
   mask-image: radial-gradient(
     closest-side,
-    #000 97%,
-    rgba(0, 0, 0, 0.95) 99%,
-    rgba(0, 0, 0, 0.4) 99.5%,
+    #000 94%,
+    #000 96%,
+    rgba(0, 0, 0, 0.6) 98.5%,
     transparent 100%
   );
 }
@@ -503,8 +504,8 @@ input[type="checkbox"] {
     /* เนื้อแก้วชั้นใน สว่างสม่ำเสมอ — จางมาก แค่พอให้รู้ว่าเป็นแก้ว */
     radial-gradient(
       closest-side,
-      rgba(255, 255, 255, 0.12),
-      rgba(255, 255, 255, 0.06) 60%,
+      rgba(255, 255, 255, 0.04),
+      rgba(255, 255, 255, 0.02) 60%,
       rgba(255, 255, 255, 0) 76%
     ),
     /* วงแหวนแสงใน (inner caustic): แสงที่ขอบหยดน้ำโฟกัสเข้ามา — วงสว่างบาง
@@ -512,9 +513,11 @@ input[type="checkbox"] {
        บูสต์รอบแรงต่อเนื่อง 0.18→0.24 ให้เอฟเฟคชัด (ยังบาง ~2px ไม่เป็นผืน) */
     radial-gradient(
       closest-side,
-      rgba(255, 255, 255, 0) 76%,
-      rgba(220, 240, 255, 0.24) 83%,
-      rgba(255, 255, 255, 0) 88%
+      rgba(255, 255, 255, 0) 74%,
+      rgba(220, 240, 255, 0.06) 79%,
+      rgba(220, 240, 255, 0.12) 83%,
+      rgba(220, 240, 255, 0.06) 86.5%,
+      rgba(255, 255, 255, 0) 90%
     ),
     /* วงแหวนหักเหหลัก: ฟ้ารอบวง เท่ากันทั้งวง (ไล่ระดับช้า ๆ ไม่เป็นขั้น)
        ⚠️ เดิมไล่ 60%→100% (กว้าง ~17px) ทำให้โซนขอบสว่างเป็น "ผืน" ใหญ่
@@ -523,18 +526,21 @@ input[type="checkbox"] {
     radial-gradient(
       closest-side,
       rgba(255, 255, 255, 0) 70%,
-      rgba(190, 225, 255, 0.2) 88%,
-      rgba(255, 255, 255, 0.08) 96%,
+      rgba(190, 225, 255, 0.05) 79%,
+      rgba(190, 225, 255, 0.1) 88%,
+      rgba(255, 255, 255, 0.04) 95%,
       rgba(255, 255, 255, 0) 99%
     ),
-    /* เส้นแสงคาดขอบ: hairline "คม" แบบ Fluid Glass — 95% → พีค 96.5% → จาง
-       98.2% = แกนสว่าง ~1.1px + พีคบูสต์รอบแรงต่อเนื่อง 0.6→0.75 (เอฟเฟคชัด
-       แต่ยังบาง 1px ไม่ทับ disperse ที่จบ 94%) */
+    /* เส้นแสงคาดขอบ: hairline แบบ Fluid Glass — ไล่นุ่ม 94.5% → พีค 96.5% → จาง
+       99% (≈1.9px ช่วงแสงรวม แกนสว่าง ~1px) แถบแคบเดิม 95→98.2% ชันเกินจน
+       เป็นขั้นบันไดสีตอนซูม — กว้างขึ้นนิดเดียวแต่ไล่ alpha นุ่มทั้งสองข้าง */
     radial-gradient(
       closest-side,
-      rgba(255, 255, 255, 0) 95%,
-      rgba(255, 255, 255, 0.75) 96.5%,
-      rgba(255, 255, 255, 0) 98.2%
+      rgba(255, 255, 255, 0) 94.5%,
+      rgba(255, 255, 255, 0.25) 95.8%,
+      rgba(255, 255, 255, 0.5) 96.5%,
+      rgba(255, 255, 255, 0.25) 97.6%,
+      rgba(255, 255, 255, 0) 99%
     );
 }
 /* ชั้นประกายในเนื้อแก้ว — กระจายสม่ำเสมอทั้งวง (วาวแบบแก้ว ไม่ใช่หย่อมแสง)
@@ -546,12 +552,12 @@ input[type="checkbox"] {
   pointer-events: none;
   mix-blend-mode: screen;
   filter: url("#dock-glass-caustic");
-  opacity: 1;
+  opacity: 0.5;
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0.22),
-    rgba(214, 236, 255, 0.13) 52%,
-    rgba(200, 230, 255, 0.08) 74%,
+    rgba(255, 255, 255, 0.1),
+    rgba(214, 236, 255, 0.06) 52%,
+    rgba(200, 230, 255, 0.04) 74%,
     rgba(255, 255, 255, 0) 92%
   );
 }
@@ -569,17 +575,17 @@ input[type="checkbox"] {
   background:
     radial-gradient(
       34% 30% at 62% 68%,
-      rgba(255, 190, 130, 0.36),
+      rgba(255, 190, 130, 0.14),
       rgba(255, 190, 130, 0) 70%
     ),
     radial-gradient(
       30% 28% at 36% 30%,
-      rgba(150, 210, 255, 0.31),
+      rgba(150, 210, 255, 0.12),
       rgba(150, 210, 255, 0) 70%
     ),
     radial-gradient(
       26% 30% at 30% 62%,
-      rgba(200, 150, 255, 0.24),
+      rgba(200, 150, 255, 0.1),
       rgba(200, 150, 255, 0) 70%
     );
 }
@@ -622,18 +628,22 @@ input[type="checkbox"] {
   transform: translate(var(--sdx, 0px), var(--sdy, 0px)) scale(calc(1 - var(--spx)));
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0) 88%,
+    rgba(255, 255, 255, 0) 86.5%,
+    rgba(255, 96, 74, 0.3) 89.5%,
     rgba(255, 96, 74, 0.58) 91.5%,
-    rgba(255, 255, 255, 0) 94%
+    rgba(255, 96, 74, 0.3) 93.2%,
+    rgba(255, 255, 255, 0) 95%
   );
 }
 /* เขียว: ตรงกลาง (อ้างอิง) */
 .dock-glass__disperse > .dock-glass__disperse--g {
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0) 88%,
+    rgba(255, 255, 255, 0) 86.5%,
+    rgba(120, 255, 190, 0.17) 89.5%,
     rgba(120, 255, 190, 0.33) 91.5%,
-    rgba(255, 255, 255, 0) 94%
+    rgba(120, 255, 190, 0.17) 93.2%,
+    rgba(255, 255, 255, 0) 95%
   );
 }
 /* น้ำเงิน: รัศมีใหญ่สุด (หักเหมากสุด) — กลมศูนย์กลาง + translate สวนทางแดง
@@ -642,9 +652,11 @@ input[type="checkbox"] {
   transform: translate(calc(var(--sdx, 0px) * -1), calc(var(--sdy, 0px) * -1)) scale(calc(1 + var(--spx)));
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0) 88%,
+    rgba(255, 255, 255, 0) 86.5%,
+    rgba(96, 148, 255, 0.32) 89.5%,
     rgba(96, 148, 255, 0.62) 91.5%,
-    rgba(255, 255, 255, 0) 94%
+    rgba(96, 148, 255, 0.32) 93.2%,
+    rgba(255, 255, 255, 0) 95%
   );
 }
 /* --- รุ้งรอบขอบแบบไม่สมมาตร (iridescent rim) ---------------------------------
@@ -672,17 +684,21 @@ input[type="checkbox"] {
   );
   -webkit-mask-image: radial-gradient(
     closest-side,
-    transparent 87%,
-    #000 90%,
+    transparent 86%,
+    rgba(0, 0, 0, 0.55) 88.5%,
+    #000 91%,
     #000 93%,
-    transparent 95.5%
+    rgba(0, 0, 0, 0.55) 94.5%,
+    transparent 96%
   );
   mask-image: radial-gradient(
     closest-side,
-    transparent 87%,
-    #000 90%,
+    transparent 86%,
+    rgba(0, 0, 0, 0.55) 88.5%,
+    #000 91%,
     #000 93%,
-    transparent 95.5%
+    rgba(0, 0, 0, 0.55) 94.5%,
+    transparent 96%
   );
 }
 /* --- แสงขอบไม่สมมาตร (edge light) --------------------------------------------
@@ -696,25 +712,29 @@ input[type="checkbox"] {
   mix-blend-mode: screen;
   background: conic-gradient(
     from var(--dang, 200deg) at 50% 50%,
-    rgba(255, 255, 255, 1),
-    rgba(255, 255, 255, 0.41) 22%,
-    rgba(255, 255, 255, 0.16) 50%,
-    rgba(255, 255, 255, 0.31) 78%,
-    rgba(255, 255, 255, 1)
+    rgba(255, 255, 255, 0.55),
+    rgba(255, 255, 255, 0.22) 22%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.17) 78%,
+    rgba(255, 255, 255, 0.55)
   );
   -webkit-mask-image: radial-gradient(
     closest-side,
-    transparent 93%,
-    #000 95%,
+    transparent 92%,
+    rgba(0, 0, 0, 0.55) 94%,
+    #000 96%,
     #000 97.5%,
-    transparent 99%
+    rgba(0, 0, 0, 0.55) 98.7%,
+    transparent 100%
   );
   mask-image: radial-gradient(
     closest-side,
-    transparent 93%,
-    #000 95%,
+    transparent 92%,
+    rgba(0, 0, 0, 0.55) 94%,
+    #000 96%,
     #000 97.5%,
-    transparent 99%
+    rgba(0, 0, 0, 0.55) 98.7%,
+    transparent 100%
   );
 }
 /* หางของเหลว (wake): ฝ้ากลมจาง ๆ ที่ตามหลัง orb ช้ากว่า — เห็นเฉพาะตอนลาก */

@@ -105,8 +105,8 @@ const go = (href: string) => {
    ⚠️ SPAN ต้องเท่ากับ "ครึ่งหนึ่งของ filter region" ของ #dock-glass-lens
       (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
       ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
-const LENS_MAP_N = 160; // ความละเอียดพอ — ค่าถูก interpolate ตอนใช้
-const LENS_MAP_P = 3.0; // เลขชี้กำลังของแรมป์: 3.0 = กลางแบน (~1x) ขอบชัน (หยดน้ำ); 1.0 = ขยายทั้งวง (แว่นขยาย — ไม่ใช้)
+const LENS_MAP_N = 256; // 256px + เบลอ 1px ฆ่าขั้นบันได 8-bit → ขอบเลนส์เรียบ ไม่หยัก (160px เดิมเห็นรอยหยักตอนซูม)
+const LENS_MAP_P = 3.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 1.5): กลางแบน (~1x) ขอบชัน (หยดน้ำ) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
 const buildLensMap = (): string | null => {
   if (typeof document === "undefined") return null; // กัน SSR ตอน build
@@ -122,7 +122,10 @@ const buildLensMap = (): string | null => {
       const u = (((x + 0.5) / LENS_MAP_N) * 2 - 1) * LENS_MAP_SPAN;
       const v = (((y + 0.5) / LENS_MAP_N) * 2 - 1) * LENS_MAP_SPAN;
       const r = Math.sqrt(u * u + v * v) || 1e-6; // กันหารศูนย์ที่กลางวง
-      const f = Math.pow(Math.min(r, 1), LENS_MAP_P);
+      // smootherstep S(t)=6t^5-15t^4+10t^3: S'(0)=S'(1)=0 (เรียบทั้งกลางและขอบ ไม่มีรอยหัก) ยกกำลัง P/2 ดันความชันไปชิดขอบแบบหยดน้ำ
+      const t = Math.min(r, 1);
+      const s = t * t * t * (t * (t * 6 - 15) + 10);
+      const f = Math.pow(s, LENS_MAP_P / 2);
       const i = (y * LENS_MAP_N + x) * 4;
       // ลบ = sample เข้าหากลางวง ⇒ ขยาย (เลนส์นูน); ห้ามกลับเป็นบวก (ภาพจะหด)
       d[i] = Math.round((0.5 - 0.5 * (u / r) * f) * 255);
@@ -132,6 +135,21 @@ const buildLensMap = (): string | null => {
     }
   }
   ctx.putImageData(img, 0, 0);
+  // เบลอ 1px ฆ่าขั้นบันไดควอนไทซ์ 8-bit (255 ขั้น) — scale 17-24 ขยายขั้นพวกนี้เป็นรอยหยัก/แถบสีที่ขอบวง
+  try {
+    const soft = document.createElement("canvas");
+    soft.width = LENS_MAP_N;
+    soft.height = LENS_MAP_N;
+    const sctx = soft.getContext("2d");
+    if (sctx) {
+      (sctx as unknown as { filter: string }).filter = "blur(1px)";
+      sctx.drawImage(cv, 0, 0);
+      ctx.clearRect(0, 0, LENS_MAP_N, LENS_MAP_N);
+      ctx.drawImage(soft, 0, 0);
+    }
+  } catch (e) {
+    void e; // browser ไม่มี canvas filter → ใช้แผนที่ดิบ (ยังดีกว่าไม่มี)
+  }
   return cv.toDataURL("image/png");
 };
 
@@ -614,8 +632,9 @@ export default function MobileNav() {
           style={{ position: "absolute" }}
         >
           <defs>
-            {/* คลื่นยาว (baseFrequency ต่ำ) + แอมพลิจูดน้อย (scale ต่ำ) → บิดนุ่ม
-                Glow ให้เส้นรอบวงยังเท่ากันทั้งวง ไม่หยักเป็นหย่อม ๆ */}
+            {/* คลื่นยาวความถี่เดียว (octave 1) + แอมพลิจูดน้อย → บิดนุ่ม
+                octave 2 เดิมมีความถี่สูงซ้อน ทำให้ hairline 1px เป็นคลื่นถี่
+                อ่านเป็น "รอยหยัก" ตอนซูม ⇒ ตัดออก + เบลอแรงขึ้น + scale 6→4 */}
             <filter
               id="dock-glass-warp"
               x="-40%"
@@ -626,16 +645,16 @@ export default function MobileNav() {
             >
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.012 0.016"
-                numOctaves="2"
+                baseFrequency="0.008 0.01"
+                numOctaves="1"
                 seed="71"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="6" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="8" result="soft" />
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="6"
+                scale="4"
                 xChannelSelector="R"
                 yChannelSelector="G"
               />
@@ -655,17 +674,17 @@ export default function MobileNav() {
             >
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.05 0.06"
+                baseFrequency="0.032 0.038"
                 numOctaves="2"
                 seed="53"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="2.6" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="3.5" result="soft" />
               {/* red */}
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="3"
+                scale="2"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dispR"
@@ -680,7 +699,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="6"
+                scale="4"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dispG"
@@ -695,7 +714,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="9"
+                scale="6"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dispB"
