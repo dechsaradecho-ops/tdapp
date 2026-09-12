@@ -273,6 +273,12 @@ export default function MobileNav() {
     let moved = false;
     let startX = 0;
     let startY = 0;
+    // จุดกดนิ้ว (พิกัดใน <nav>) — อ้างอิงทิศลากจริง (นิ้วอยู่ไหนเทียบจุดกด)
+    // ⚠️ เดิมใช้ target-rest (จุดพัก = กลางแท็บ active) ⇒ กดแท็บ Monitor บนหน้า
+    // Home แล้วลากซ้าย/ขวา เวกเตอร์ชี้จาก Home→Monitor เหมือนกันทั้งคู่
+    // (วัดจริง dang -11.1° vs -7.6° แทบไม่ต่าง) ⇒ รุ้งไม่ตามนิ้ว
+    let startLocalX = 0;
+    let startLocalY = 28;
     let pressIdx = 0;
     let raf = 0;
     let last = 0;
@@ -322,10 +328,12 @@ export default function MobileNav() {
       const vmag = Math.sqrt(main.v * main.v + mainY.v * mainY.v);
       const spd = Math.min(vmag / 3200, 0.25);
       // ทิศการลาก (unit vector) — ขณะเคลื่อนใช้ velocity; พอนิ่งแล้ว (vmag ตก)
-      // ใช้ทิศ "นิ้วอยู่ตรงไหนเทียบจุดพัก" แทน ⇒ ความไม่สมมาตรยังค้างให้เห็น
+      // ใช้ทิศ "นิ้วอยู่ตรงไหนเทียบจุดกด" แทน ⇒ ความไม่สมมาตรยังค้างให้เห็น
       // ตอนถือค้าง ไม่หายพร้อมความเร็ว (ภาพถ่ายตอนลากจึงยังเห็นรุ้งเป็นลิ่ม)
-      const tdx = targetX - restX;
-      const tdy = targetY - restY;
+      // ⚠️ ต้องเทียบจุดกด ไม่ใช่จุดพัก (rest = กลางแท็บ active — กดแท็บเดียว
+      // แล้วลากซ้าย/ขวา เวกเตอร์ rest เหมือนกันทั้งคู่ ⇒ รุ้งไม่ตามนิ้ว)
+      const tdx = targetX - startLocalX;
+      const tdy = targetY - startLocalY;
       const tmag = Math.sqrt(tdx * tdx + tdy * tdy);
       const dx = vmag > 40 ? main.v / vmag : tmag > 8 ? tdx / tmag : 1;
       const dy = vmag > 40 ? mainY.v / vmag : tmag > 8 ? tdy / tmag : 0;
@@ -373,8 +381,8 @@ export default function MobileNav() {
       // ปริมาณ = ความเร็ว (spd) + ระยะลากจากจุดพัก ⇒ ถือค้างไว้เฉย ๆ ก็ยังกระเจิง
       const dragDist = Math.min(
         Math.sqrt(
-          (targetX - restX) * (targetX - restX) +
-            (targetY - restY) * (targetY - restY),
+          (targetX - startLocalX) * (targetX - startLocalX) +
+            (targetY - startLocalY) * (targetY - startLocalY),
         ) / 120,
         1,
       );
@@ -383,6 +391,13 @@ export default function MobileNav() {
       disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
       disp.style.setProperty("--sdx", (-dx * sway * 2.5).toFixed(2) + "px");
       disp.style.setProperty("--sdy", (-dy * sway * 2.5).toFixed(2) + "px");
+      // หมุนรุ้ง/แสงขอบให้ด้านเข้มสุดอยู่ตามทิศลาก (conic `from` = มุมเริ่มไล่สี
+      // ⇒ ลากไปทางไหน ด้านนั้นรุ้งชัด ตรงข้ามจาง = ไม่สมมาตรตามนิ้วจริง)
+      // atan2(dy,dx) เป็นมุมเวกเตอร์ลาก (deg) ใช้ตรง ๆ ได้เลยกับ conic
+      disp.style.setProperty(
+        "--dang",
+        `${((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1)}deg`,
+      );
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
@@ -501,6 +516,8 @@ export default function MobileNav() {
       moved = false;
       startX = e.clientX;
       startY = e.clientY;
+      startLocalX = e.clientX - nr.left;
+      startLocalY = e.clientY - nr.top;
       pressIdx = idxAtX(e.clientX - nr.left);
       targetAlpha = 1;
       targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
