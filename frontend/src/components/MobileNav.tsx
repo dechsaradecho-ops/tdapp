@@ -327,6 +327,16 @@ export default function MobileNav() {
         ` scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
       orb.style.opacity = alpha.toFixed(3);
 
+      // 👉 เจาะรูใน .dock-glass__frost ให้ตรงกับวงกลม (ดูเหตุผลเต็มใน globals.css)
+      //    แถบ dock ยังเบลอ 20px "เหมือนตอนพัก" แต่ orb ไม่ต้องบิดบนภาพที่เบลอ
+      //    จนเรียบ ⇒ ได้ทั้งเบลอ และ distortion เต็มแรง
+      //    พิกัดเป็น px ในกรอบของ nav (ตัวเดียวกับที่คำนวณ transform ของ orb)
+      //    เขียนเฉพาะตอนลาก เพราะ mask ทำงานเฉพาะตอน .is-warping เท่านั้น
+      if (alpha > 0.02) {
+        nav.style.setProperty("--orb-cx", `${main.p.toFixed(2)}px`);
+        nav.style.setProperty("--orb-cy", `${mainY.p.toFixed(2)}px`);
+      }
+
       // wake = หางของเหลวกลมตามหลัง (over-damped → ตามหลังเสมอ)
       wake.style.transform =
         `translate3d(${(tail.p - ORB / 2).toFixed(2)}px,${(tailY.p - ORB / 2).toFixed(2)}px,0)` +
@@ -348,9 +358,9 @@ export default function MobileNav() {
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
-      // ⚠️ ต้องปิด .dock-glass__frost ระหว่างลาก — ไม่งั้นภาพที่เบลอ 20px จะถูก
-      // composited เข้า backdrop ของ orb ในโซนที่ทับกับแถบ dock ⇒ เลนส์บิดได้
-      // แค่ครึ่งวงบน/ล่าง ส่วนกลางวงเรียบ (ดูเหตุผลที่ globals.css)
+      // ⚠️ .dock-glass__frost ต้องเบลออยู่ตลอด แม้ระหว่างลาก (ผู้ใช้ยืนยัน)
+      //    สิ่งที่ toggle แทนคือ "การเจาะรู" ตรงตำแหน่งวงกลม (--orb-cx/--orb-cy)
+      //    ⇒ แถบ dock ยังเบลอเหมือนเดิม แต่ orb เห็นหน้าเว็บจริง ⇒ บิดเต็มแรง
       nav.classList.toggle("is-warping", alpha > 0.02);
     };
 
@@ -543,7 +553,8 @@ export default function MobileNav() {
                • backdrop-filter บน nav = backdrop root ⇒ เลนส์ของ orb เห็นภาพเรียบ
                  ⇒ displacement ไม่เกิด (วัดจาก pixel diff แล้ว)
                • pseudo-element + backdrop-filter = ใช้ไม่ได้บน Samsung Internet
-            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/orb และ nav.is-warping ซ่อนมัน */}
+            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/orb และตอนลาก nav.is-warping
+            จะ "เจาะรู" ตรงตำแหน่งวงกลม (ไม่ใช่ซ่อนทั้งแถบ) ⇒ ยังเบลอเหมือนเดิม */}
         <span className="dock-glass__frost" aria-hidden="true" />
 
         {/* filter defs ต้องอยู่ใน DOM จริง (ห้าม display:none) เหมือน #lg-refract
