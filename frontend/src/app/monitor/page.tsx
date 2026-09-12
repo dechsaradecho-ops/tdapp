@@ -945,7 +945,10 @@ export default function MonitorPage() {
                   <th className="py-2 pr-4">Entry</th>
                   <th className="py-2 pr-4">Exit</th>
                   <th className="py-2 pr-4">PnL</th>
-                  <th className="py-2 pr-4">สถานะ</th>
+                  {/* สถานะ: ตาราง auto-layout ถูกบีบจน "ปิดแล้ว" ตกบรรทัดบนมือถือ
+                      (แถวสูงไม่เท่ากัน) — min-width ที่ <th> คือตัวคุมความกว้าง
+                      ของคอลัมน์จริง ๆ (width ที่ <th> เป็นแค่ preferred width) */}
+                  <th className="py-2 pr-4 min-w-[5rem]">สถานะ</th>
                   <th className="py-2 pr-4">เหตุผลปิด</th>
                   <th className="py-2">ที่มา</th>
                 </tr>
@@ -972,7 +975,7 @@ export default function MonitorPage() {
                         </span>
                       ) : "-"}
                     </td>
-                    <td className="py-2 pr-4">
+                    <td className="py-2 pr-4 whitespace-nowrap">
                       <StatusBadge status={t.status} />
                     </td>
                     <td className="py-2 pr-4 text-xs">
@@ -1039,5 +1042,7 @@ function StatusBadge({ status }: { status: string }) {
     rejected: { label: "ถูกบล็อก", cls: "text-loss" },
   };
   const it = map[status] ?? { label: status, cls: "text-slate-400" };
-  return <span className={`text-xs font-semibold ${it.cls}`}>{it.label}</span>;
+  // whitespace-nowrap: Thai หักบรรทัดได้กลางคำ เบราว์เซอร์จึงยอมบีบคอลัมน์
+  // เหลือ ~30px แล้ว "ปิดแล้ว" ตกเป็น 2 บรรทัด (แถวสูงไม่เท่ากัน)
+  return <span className={`text-xs font-semibold whitespace-nowrap ${it.cls}`}>{it.label}</span>;
 }
