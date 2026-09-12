@@ -319,8 +319,12 @@ input[type="checkbox"] {
      3. .dock-glass__orb-caustic = ประกายในเนื้อแก้ว กระจายสม่ำเสมอทั้งวง
    ⚠️ ทุก gradient ต้องจัดกึ่งกลาง (closest-side เปล่า ๆ) ห้ามใส่ `at X% Y%`
       ไม่งั้นแสงจะไปกองเป็นหย่อม ๆ ที่มุมเดียว ไม่เป็นวงกลมรอบขอบ
-   ⚠️ ห้ามใส่ backdrop-filter: url() ที่ตัว .dock-glass__orb ตรง ๆ — Samsung
-      Internet render dock พัง (บทเรียนด้านบน) ใช้ .dock-glass--lens เป็นตัว gate */
+   ⚠️ backdrop-filter: url() ใส่ได้ แต่ต้องผ่าน .dock-glass--lens เท่านั้น
+      (MobileNav เป็นคนเช็ค CSS.supports แล้วติดคลาสให้) — ไม่ใส่ตรง ๆ ที่นี่
+      เพื่อให้ถอดคลาสเมื่อไรก็กลับไปใช้ blur() ธรรมดาได้ทันที
+      หมายเหตุ: บทเรียนเก่าเรื่อง Samsung Internet พังนั้นมาจากการใส่ url()
+      บน <nav> ทั้งแถบซึ่งมองเห็นตลอดเวลา — ตอนนี้อยู่บน orb 84px ที่โผล่
+      เฉพาะตอนลาก จึงเลือกไม่กรอง UA อีก (ดู Phase 8 ใน MobileNav) */
 .dock-glass__orb {
   position: absolute;
   left: 0;
@@ -366,7 +370,7 @@ input[type="checkbox"] {
    กลไก: feTurbulence คลื่นยาว (1 รอบต่อวง) → blur → feDisplacementMap
    หมายเหตุ: feImage ใช้เป็นแผนที่ displacement ไม่ได้ใน Chromium (ทดสอบแล้ว
    ให้ผลเป็น uniform/ว่างเปล่า) จึงต้องใช้ feTurbulence เป็นตัวสร้างสนาม
-   ⚠️ gate ด้วย .dock-glass--lens (ใส่จาก MobileNav เมื่อไม่ใช่ Samsung Internet)
+   ⚠️ gate ด้วย .dock-glass--lens (MobileNav ติดให้เมื่อ CSS.supports ผ่าน)
       — ถอดคลาสเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรพัง */
 .dock-glass--lens .dock-glass__orb {
   /* ⚠️ ต้องมี url() ตัวเดียวเท่านั้น — ถ้าใส่ blur()/saturate() ปนไปด้วย

@@ -136,16 +136,19 @@ export default function MobileNav() {
     // ผู้ใช้ที่ปิดอนิเมชัน → pill ยัง mark แท็บ active แต่นิ่ง ไม่มีสปริง/การลาก
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    // เลนส์บิดเบี้ยวภาพหลังแก้ว (backdrop-filter: url()) เปิดเฉพาะ browser
-    // ที่รองรับจริง และ "ไม่ใช่ Samsung Internet"
-    // (บทเรียนใน globals.css: Samsung render dock พังเมื่อเจอ backdrop-filter: url())
+    // เลนส์บิดเบี้ยวภาพหลังแก้ว (backdrop-filter: url()) เปิดตามความสามารถจริง
+    // ของ browser เท่านั้น — เช็คแค่ CSS.supports ไม่กรอง UA
+    //
+    // (เดิมเคยกั้น Samsung Internet ไว้ เพราะบทเรียนเก่าที่ใส่ url() บน <nav>
+    //  ทั้งแถบแล้ว Samsung render เป็นเฟรมซ้อน ตอนนี้ url() ย้ายมาอยู่บน
+    //  .dock-glass__orb ซึ่ง opacity:0 ตอนพักและโผล่แค่ 84px ตอนลาก
+    //  พื้นที่เสี่ยงจึงเหลือน้อยมาก — เลือกแลกให้ Samsung ได้เอฟเฟคนี้ไปด้วย)
     // ถอดคลาสออกเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรเสียหาย
     const lensOk =
       typeof CSS !== "undefined" &&
       typeof CSS.supports === "function" &&
       (CSS.supports("backdrop-filter", 'url("#dock-glass-lens")') ||
-        CSS.supports("-webkit-backdrop-filter", 'url("#dock-glass-lens")')) &&
-      !/SamsungBrowser/i.test(navigator.userAgent);
+        CSS.supports("-webkit-backdrop-filter", 'url("#dock-glass-lens")'));
     if (lensOk) nav.classList.add("dock-glass--lens");
 
     // เผย pill (CSS ซ่อนไว้กัน flash ก่อน JS วัดตำแหน่งเสร็จ)
