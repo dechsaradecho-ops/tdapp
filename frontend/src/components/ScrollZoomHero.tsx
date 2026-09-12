@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, HERO_ZOOM_DEFAULT, readStoredHero, readStoredHeroDim, readStoredHeroZoom } from "@/components/BackgroundPicker";
+import { HERO_DIM_DEFAULT, HERO_HEIGHT_DEFAULT, HERO_IMAGE_EVENT, HERO_ZOOM_DEFAULT, readStoredHero, readStoredHeroDim, readStoredHeroHeight, readStoredHeroZoom } from "@/components/BackgroundPicker";
 
 /**
  * ScrollZoomHero — แบ็กกราวด์ด้านบนสุดของหน้าแรก เลียนแบบ effect #26
@@ -23,6 +23,9 @@ import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, HERO_ZOOM_DEFAULT, readStoredHero, 
  * แบนด์เป็น absolute จึงไม่ดันเนื้อหา — เนื้อหาลอยทับอยู่ข้างบน (main pt-0 บนมือถือ)
  * และระยะ ScrollTrigger (start top top → end bottom 25%) ยึดความสูงนี้
  * → แบนด์สูงขึ้น = ระยะซูมยาวขึ้นตามไปด้วย ไม่ต้องแก้ timeline
+ * ค่านี้ = ค่า "ที่ออกแบบไว้" (ความยาวแบบด์ 100%) — Settings → slider
+ * "ความยาวแบบด์ (Band height)" (localStorage tdapp_hero_height) คูณทั้งก้อน clamp
+ * ด้วยตัวเลขเดียวกันผ่าน bandHeight() ด้านล่าง (50%–200%, default 100% = ค่าเดิมเป๊ะ)
  *
  * ไม่กินพื้นที่ใน layout (absolute) และไม่รับ pointer event
  * → เนื้อหาทุกอย่างในหน้า (การ์ด/ฟอร์ม/กราฟ) วางทับอยู่ข้างบนตามปกติ
@@ -56,9 +59,13 @@ import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, HERO_ZOOM_DEFAULT, readStoredHero, 
  *
  * ระดับการซูม: Settings → slider "ระดับการซูม (Zoom scale)" (localStorage tdapp_hero_zoom)
  * → ตัวคูณของ "ช่วงซูม" (end − start) ของทุกชั้น: 0 = ภาพนิ่งไม่ซูม · 1 = ค่าเดิมเป๊ะ
- *   · 2 = ช่วงซูมกว้างเป็น 2 เท่า — ดูรายละเอียดที่ zoomScale() ด้านล่าง
+ *   · 3 = ช่วงซูมกว้างเป็น 3 เท่า — ดูรายละเอียดที่ zoomScale() ด้านล่าง
  *   ค่าใหม่มีผลทันทีผ่าน event เดียวกัน (effect ผูก zoom เป็น dependency → สร้าง
  *   timeline ใหม่ โดย ctx.revert() คืน inline style ให้ก่อน)
+ *
+ * ความยาวแบนด์: Settings → slider "ความยาวแบบด์ (Band height)" (localStorage
+ * tdapp_hero_height) → ตัวคูณของความสูงที่ออกแบบไว้ (bandHeight() ด้านล่าง)
+ *   ค่าใหม่มีผลทันทีผ่าน event เดียวกัน (ผูก height เป็น dependency เหมือน zoom)
  *
  * ทำไมไม่ import gsap ตรง ๆ ด้านบน: หน้าแรกเป็น dashboard ที่ผู้ใช้เปิดบ่อย
  * GSAP + ScrollTrigger ~90KB ก่อน gzip — dynamic import ทำให้มันไปอยู่ใน chunk
@@ -74,12 +81,26 @@ import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, HERO_ZOOM_DEFAULT, readStoredHero, 
  *  start/end = scale ที่ k = 1 (ค่าที่ออกแบบไว้) →
  *    k = 0 → start          ทุกชั้นนิ่ง ไม่มีการขยายเลย (ยังมีการเลื่อน/เอียงตาม parallax)
  *    k = 1 → end            ค่าที่ออกแบบไว้เป๊ะ
- *    k = 2 → start + 2Δ     ช่วงซูมกว้างเป็น 2 เท่า (ซูมแรงขึ้น)
+ *    k = 3 → start + 3Δ     ช่วงซูมกว้างเป็น 3 เท่า (ซูมแรงสุด)
  *  ทำไมผูกเป็นตัวคูณ "ช่วง" ไม่ใช่ตัวคูณ scale ตรง ๆ: ทำให้ k = 1 ได้หน้าตาเดิม
  * เป๊ะเสมอ (hit-test ง่าย ไม่มี regression) และคง "สัดส่วน" ระหว่างชั้นไว้ทุกค่า k
  *  — ชั้นใกล้ยังขยายเร็วกว่าชั้นไกลเท่าเดิม จึงไม่เสียความลึก 3D */
 function zoomScale(start: number, end: number, k: number): number {
   return start + (end - start) * k;
+}
+
+/** ความสูงของแบนด์ที่ "ความยาวแบบด์" h (Settings → tdapp_hero_height)
+ *  ค่าที่ออกแบบไว้ (h = 1) = clamp(360px, 85vh, 780px) ตรงกับคลาสใน JSX เป๊ะ
+ *  วิธีคูณ: h × clamp(a, b, c) = clamp(h·a, h·b, h·c) สำหรับ h > 0
+ *  → เขียนเป็นตัวเลขจริงลง inline style ได้ (อ่านง่ายใน devtools ไม่ต้องมี calc ซ้อน)
+ *  และ "พื้นขั้นต่ำ + เพดาน" ขยับตามสัดส่วนเดียวกัน → แบนด์ยาวขึ้นจริงทุกช่วง
+ *  โดยไม่ตายช่วงบนจอสูง (ที่เคยติดเพดาน 780px) หรือจอเตี้ย (ที่เคยติดพื้น 360px)
+ *  ⚠️ ถ้าแก้คลาส h-[clamp(...)] ใน JSX ต้องแก้ค่าคงที่ชุดนี้ให้ตรงกันด้วย */
+const BAND_MIN = 360; // px — พื้นขั้นต่ำ
+const BAND_VH = 85; // % ความสูงจอ
+const BAND_MAX = 780; // px — เพดาน
+function bandHeight(h: number): string {
+  return `clamp(${Math.round(BAND_MIN * h)}px, ${(BAND_VH * h).toFixed(1)}vh, ${Math.round(BAND_MAX * h)}px)`;
 }
 
 export default function ScrollZoomHero() {
@@ -92,17 +113,20 @@ export default function ScrollZoomHero() {
   const [src, setSrc] = useState<string | null>(null);
   // ความสว่างของแบบด์ (ความเข้ม scrim ดำ 0–0.85) — ตั้งใน Settings, default 0 = หน้าตาเดิม
   const [dim, setDim] = useState(HERO_DIM_DEFAULT);
-  // ระดับการซูม (ตัวคูณของช่วงซูม 0–2) — ตั้งใน Settings, default 1 = ค่าที่ออกแบบไว้
+  // ระดับการซูม (ตัวคูณของช่วงซูม 0–3) — ตั้งใน Settings, default 1 = ค่าที่ออกแบบไว้
   const [zoom, setZoom] = useState(HERO_ZOOM_DEFAULT);
+  // ความยาวแบนด์ (ตัวคูณของความสูง 0.5–2) — ตั้งใน Settings, default 1 = ความสูงที่ออกแบบไว้
+  const [height, setHeight] = useState(HERO_HEIGHT_DEFAULT);
   const custom = src !== null;
 
-  // อ่านรูป/ความสว่าง/ระดับการซูมที่ตั้งไว้ + ฟัง event ให้เปลี่ยนได้ทันทีโดยไม่ต้องรีโหลดหน้า
+  // อ่านรูป/ความสว่าง/ระดับการซูม/ความยาวแบนด์ ที่ตั้งไว้ + ฟัง event ให้เปลี่ยนได้ทันทีโดยไม่ต้องรีโหลดหน้า
   // (แยก effect จากตัว GSAP เพราะต้องทำงานแม้ผู้ใช้ปิดอนิเมชัน)
   useEffect(() => {
     const read = () => {
       setSrc(readStoredHero());
       setDim(readStoredHeroDim());
       setZoom(readStoredHeroZoom());
+      setHeight(readStoredHeroHeight());
     };
     read();
     window.addEventListener(HERO_IMAGE_EVENT, read);
@@ -132,7 +156,7 @@ export default function ScrollZoomHero() {
       ctx = gsap.context(() => {
         // ระดับการซูมจาก Settings — ตัวคูณของ "ช่วงซูม" ของทุกชั้น (ดู zoomScale)
         //   k = 0 → ทุกชั้นนิ่ง (scale คงที่ = ค่า start) · k = 1 → ค่าเดิมเป๊ะ
-        //   k = 2 → ช่วงซูมกว้างเป็น 2 เท่า · สัดส่วนระหว่างชั้นคงเดิมทุกค่า k
+        //   k = 3 → ช่วงซูมกว้างเป็น 3 เท่า · สัดส่วนระหว่างชั้นคงเดิมทุกค่า k
         const k = zoom;
         const tl = gsap.timeline({
           defaults: { ease: "none" },
@@ -210,7 +234,9 @@ export default function ScrollZoomHero() {
     // ให้ตรงกับ DOM ปัจจุบัน; ctx.revert() ใน cleanup คืน inline style ให้ก่อน
     // zoom  = เปลี่ยน "ช่วงซูม" ของทุกชั้น → timeline ต้องสร้างใหม่ (ค่าถูก bake ตอน build)
     //         ctx.revert() คืน inline style ก่อนเช่นกัน → ไม่มี transform ค้างทับกัน
-  }, [custom, zoom]);
+    // height = เปลี่ยนความสูงของแบนด์ → ScrollTrigger ยึด start/end กับความสูงนี้
+    //         ต้องสร้างใหม่ ไม่งั้นระยะซูมยังอิงความสูงเดิม (refresh ไม่พอ)
+  }, [custom, zoom, height]);
 
   return (
     <section
@@ -219,6 +245,9 @@ export default function ScrollZoomHero() {
       className={`zoom-hero pointer-events-none absolute inset-x-0 top-0 h-[clamp(360px,85vh,780px)] overflow-hidden${
         custom ? " zoom-hero--custom" : ""
       }`}
+      // ความยาวแบนด์จาก Settings — inline style ทับคลาส (คลาส = ค่าที่ออกแบบไว้ 100%)
+      // ตั้งใจไม่ใส่ตอนค่า = default เพื่อคงคลาสเดิมเป็น "แหล่งความจริง" ของความสูงดีไซน์
+      style={height === HERO_HEIGHT_DEFAULT ? undefined : { height: bandHeight(height) }}
     >
       <div className="relative h-full w-full">
         {/* ชั้นไกลสุด: ภาพ (เริ่มต้นในตัว หรือรูปที่ผู้ใช้ตั้งใน Settings) */}

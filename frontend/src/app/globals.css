@@ -1150,6 +1150,10 @@ button:not(:disabled):active {
    Settings → slider "ระดับการซูม (Zoom scale)" (localStorage tdapp_hero_zoom)
    คูณเฉพาะ "ช่วง" (end − start) ของทุกชั้น จึงไม่ต้องมีค่าใน CSS ที่นี่
    (ค่าใน CSS = ค่า start ซึ่งไม่ขึ้นกับระดับการซูม)
+   ส่วน "ความยาวแบบด์" (Settings → slider "ความยาวแบบด์ (Band height)",
+   localStorage tdapp_hero_height) ถูกใส่เป็น inline style ที่ <section> ทับคลาส
+   h-[clamp(360px,85vh,780px)] → ค่าใน CSS ที่นี่ = ความยาว 100% (ค่าเริ่มต้น)
+   (ความสูงเป็น px/vh ล้วน ไม่มี transform → ไม่ต้องแก้ค่า transform ใด ๆ)
 
    เลเยอร์: [ล่างสุด] แบ็กกราวด์เดิมของแอป (body aurora + BackgroundLayer
    ที่ผู้ใช้อัปโหลด — fixed z ลบ)  →  [บน] แบนด์ฮีโร่นี้  →  [บนสุด] เนื้อหา

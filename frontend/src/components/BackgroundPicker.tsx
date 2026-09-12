@@ -14,7 +14,9 @@
  * ความสว่าง (ความเข้ม scrim ดำ) เก็บแยกใน localStorage — ปรับได้จาก slider ทั้ง 2 variant
  * (key: tdapp_bg_dim สำหรับพื้นหลังแอป · tdapp_hero_dim สำหรับแบบด์ image zoom)
  * ระดับการซูม (เฉพาะ variant="hero") — เก็บใน tdapp_hero_zoom เป็น "ตัวคูณของช่วงซูม"
- * ของทุกชั้นใน ScrollZoomHero (0 = ภาพนิ่งไม่ซูม · 1 = ค่าที่ออกแบบไว้เป๊ะ · 2 = ซูมแรงสุด)
+ * ของทุกชั้นใน ScrollZoomHero (0 = ภาพนิ่งไม่ซูม · 1 = ค่าที่ออกแบบไว้เป๊ะ · 3 = ซูมแรงสุด)
+ * ความยาวของแบบด์ (เฉพาะ variant="hero") — เก็บใน tdapp_hero_height เป็น "ตัวคูณของความสูง"
+ * ที่ออกแบบไว้ (0.5 = ครึ่งเดียว · 1 = ค่าเดิมเป๊ะ · 2 = ยาวเป็น 2 เท่า)
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -28,6 +30,7 @@ const HERO_KEY = "tdapp_hero_image";
 const HERO_EVENT = "tdapp:hero-changed";
 const HERO_DIM_KEY = "tdapp_hero_dim";
 const HERO_ZOOM_KEY = "tdapp_hero_zoom";
+const HERO_HEIGHT_KEY = "tdapp_hero_height";
 const MAX_DIM = 1600; // px — ด้านยาวสุดของพื้นหลังแอป
 const MAX_DIM_HERO = 1920; // ฮีโร่เป็นแบบด์กว้างเต็มจอ + ถูกซูมขยาย — เก็บรายละเอียดมากกว่า
 const MAX_STORED_BYTES = 2_800_000; // ~2.8MB data URL — ปลอดภัยกับ quota localStorage ส่วนใหญ่ (5MB)
@@ -45,12 +48,23 @@ export const HERO_DIM_DEFAULT = 0;
 
 /** ระดับการซูมของแบบด์ฮีโร่ — ตัวคูณของ "ช่วงซูม" (end − start) ของทุกชั้นใน ScrollZoomHero
  *  0 = ไม่ซูมเลย (ทุกชั้นนิ่งอยู่ที่ scale เริ่มต้น) · 1 = ค่าที่ออกแบบไว้เป๊ะ
- *  2 = ช่วงซูมกว้างเป็น 2 เท่า (เห็นการซูมชัดขึ้น)
+ *  3 = ช่วงซูมกว้างเป็น 3 เท่า (ซูมแรงสุด)
  *  เป็นตัวคูณ "ช่วง" ไม่ใช่ตัวคูณ scale ตรง ๆ → ค่า 1 ต้องได้หน้าตาเดิมเป๊ะเสมอ
  *  และสัดส่วนความลึก 3D ระหว่างชั้น (ใกล้ขยายเร็ว / ไกลขยายช้า) คงเดิมทุกค่า */
 export const HERO_ZOOM_DEFAULT = 1;
 export const HERO_ZOOM_MIN = 0;
-export const HERO_ZOOM_MAX = 2;
+export const HERO_ZOOM_MAX = 3;
+
+/** ความยาว (ความสูง) ของแบบด์ฮีโร่ — ตัวคูณของความสูงที่ออกแบบไว้
+ *  (1 เท่าของ h-[clamp(360px,85vh,780px)] ใน ScrollZoomHero)
+ *  0.5 = สั้นสุด (ครึ่งเดียว) · 1 = ค่าที่ออกแบบไว้เป๊ะ · 2 = ยาวเป็น 2 เท่า
+ *  คูณทั้งก้อน clamp (พื้นขั้นต่ำ / ค่าตาม vh / เพดาน) ด้วยตัวเลขเดียวกัน →
+ *  แบนด์ยาวขึ้นตามสัดส่วนจริง และสไลเดอร์ไม่ "ตายช่วง" บนจอสูงที่เคยติดเพดาน 780px
+ *  แบนด์ยาวขึ้น = ระยะ scroll-zoom ยาวขึ้นเอง เพราะ ScrollTrigger ยึดความสูงของแบนด์
+ *  (start top top → end bottom 25%) จึงไม่ต้องแก้ timeline เพิ่ม */
+export const HERO_HEIGHT_DEFAULT = 1;
+export const HERO_HEIGHT_MIN = 0.5;
+export const HERO_HEIGHT_MAX = 2;
 
 const VARIANTS: Record<
   PickerVariant,
@@ -69,6 +83,10 @@ const VARIANTS: Record<
     showZoom?: boolean;
     zoomLabel?: string;
     zoomHint?: string;
+    /** สไลเดอร์ "ความยาวแบบด์" — มีเฉพาะ variant ฮีโร่ */
+    showHeight?: boolean;
+    heightLabel?: string;
+    heightHint?: string;
     /** พรีวิวตอนยังไม่ตั้งรูปเอง — ฮีโร่โชว์ภาพเริ่มต้นในตัว */
     defaultPreview?: string;
     emptyText: string;
@@ -108,7 +126,10 @@ const VARIANTS: Record<
     dimHintOff: "",
     showZoom: true,
     zoomLabel: "ระดับการซูม (Zoom scale)",
-    zoomHint: "0% = ไม่ซูมเลย (ภาพนิ่ง) · 100% = ค่าเริ่มต้น · 200% = ซูมแรงสุด — มีผลกับทุกชั้นของแบบด์ (ภาพ/แสง/กริด/โบเก้) พร้อมกัน",
+    zoomHint: "0% = ไม่ซูมเลย (ภาพนิ่ง) · 100% = ค่าเริ่มต้น · 300% = ซูมแรงสุด — มีผลกับทุกชั้นของแบบด์ (ภาพ/แสง/กริด/โบเก้) พร้อมกัน",
+    showHeight: true,
+    heightLabel: "ความยาวแบบด์ (Band height)",
+    heightHint: "100% = ค่าเริ่มต้น · 50% = สั้นสุด (ครึ่งเดียว) · 200% = ยาวสุด (สูงเป็น 2 เท่า) — แถบยาวขึ้น = ระยะซูมยาวขึ้นตามเอง (ไม่ต้องตั้งค่าเพิ่ม)",
     defaultPreview: "/scroll-zoom.svg",
     emptyText: "ใช้ภาพเริ่มต้นในตัวอยู่",
     defaultText: "ภาพเริ่มต้น (Scroll Zoom)",
@@ -120,7 +141,7 @@ const VARIANTS: Record<
 };
 
 /** อ่านค่าตัวเลขที่เก็บใน localStorage แบบ clamp ช่วง (ยังไม่เคยตั้ง/อ่านไม่ได้ → fallback)
- *  ใช้ร่วมกันทั้งความสว่าง (0–0.85) และระดับการซูม (0–2) */
+ *  ใช้ร่วมกันทั้งความสว่าง (0–0.85) · ระดับการซูม (0–3) · ความยาวแบบด์ (0.5–2) */
 function readStoredNumber(key: string, fallback: number, min: number, max: number): number {
   if (typeof window === "undefined") return fallback;
   try {
@@ -153,6 +174,11 @@ export function readStoredHeroZoom(): number {
   return readStoredNumber(HERO_ZOOM_KEY, HERO_ZOOM_DEFAULT, HERO_ZOOM_MIN, HERO_ZOOM_MAX);
 }
 
+/** ความยาว (ความสูง) ของแบบด์ฮีโร่ (ตั้งใน Settings) — ใช้โดย ScrollZoomHero */
+export function readStoredHeroHeight(): number {
+  return readStoredNumber(HERO_HEIGHT_KEY, HERO_HEIGHT_DEFAULT, HERO_HEIGHT_MIN, HERO_HEIGHT_MAX);
+}
+
 /** อ่าน data URL ของรูปที่ผู้ใช้ตั้งไว้ (คีย์ไหนก็ได้) — null = ยังไม่ตั้ง/อ่านไม่ได้ */
 export function readStoredImage(key: string): string | null {
   if (typeof window === "undefined") return null;
@@ -175,6 +201,64 @@ export function readStoredHero(): string | null {
 /** ชื่อ event ที่ picker ยิงเมื่อรูป/ความสว่างเปลี่ยน — ใช้ให้ component ปลายทาง listen */
 export const HERO_IMAGE_EVENT = HERO_EVENT;
 
+/** การ์ดสไลเดอร์ปรับค่าตัวเลขของแบบด์ — ใช้ร่วมกันทั้ง "ระดับการซูม" และ "ความยาวแบบด์"
+ *  โครงเดียวกับการ์ดความสว่าง (หัวเรื่อง + ค่าที่อ่านได้ + ปุ่มค่าเริ่มต้น + สไลเดอร์ + คำอธิบาย)
+ *  ปุ่ม "ค่าเริ่มต้น" โผล่เฉพาะเมื่อค่าปัจจุบัน ≠ ค่าเริ่มต้นของสไลเดอร์นั้น
+ *  ผูกกับ <input type="range"> ตรง ๆ (ไม่ใช่ controlled-by-key) → ต้องมี aria-label
+ *  ให้ชัดเพราะในหน้ามีสไลเดอร์หลายตัว */
+function SliderCard({
+  label,
+  value,
+  min,
+  max,
+  step,
+  defaultValue,
+  readout,
+  hint,
+  onSet,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  defaultValue: number;
+  /** ข้อความค่าปัจจุบันที่แสดงมุมขวา (เช่น "150%") */
+  readout: string;
+  hint: string;
+  onSet: (value: number) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-700 p-3 space-y-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-slate-300 font-medium">{label}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-slate-400 tabular-nums">{readout}</span>
+          {value !== defaultValue && (
+            <button
+              onClick={() => onSet(defaultValue)}
+              className="text-[11px] text-slate-400 border border-slate-700 rounded px-2 min-h-[28px] active:bg-slate-800"
+            >
+              ค่าเริ่มต้น
+            </button>
+          )}
+        </div>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onSet(Number(e.target.value))}
+        className="bg-dim-slider w-full"
+        aria-label={label}
+      />
+      <p className="text-[11px] text-slate-500">{hint}</p>
+    </div>
+  );
+}
+
 export default function BackgroundPicker({ variant = "app" }: { variant?: PickerVariant }) {
   const cfg = VARIANTS[variant];
   const [preview, setPreview] = useState<string | null>(null);
@@ -183,6 +267,8 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
   const [dim, setDim] = useState(BG_DIM_DEFAULT);
   // ระดับการซูมของแบบด์ฮีโร่ — ใช้เฉพาะ variant="hero" (ตั้งใจไม่ set ตอน variant="app")
   const [zoom, setZoom] = useState(HERO_ZOOM_DEFAULT);
+  // ความยาว (ความสูง) ของแบบด์ฮีโร่ — ใช้เฉพาะ variant="hero"
+  const [bandHeight, setBandHeightState] = useState(HERO_HEIGHT_DEFAULT);
   // เครื่อง/OS ที่ปิดอนิเมชัน → ScrollZoomHero ไม่สร้าง timeline → สไลเดอร์ซูมไม่มีผล
   const [reduceMotion, setReduceMotion] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -191,6 +277,7 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
     setPreview(readStoredImage(cfg.key));
     setDim(readStoredDim(cfg.dimKey, cfg.dimDefault));
     setZoom(readStoredHeroZoom());
+    setBandHeightState(readStoredHeroHeight());
   }, [cfg.key, cfg.dimKey, cfg.dimDefault]);
 
   useEffect(() => {
@@ -289,6 +376,20 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
       // private mode — ยังอัปเดต UI ให้เห็นผลทันทีแม้เก็บไม่ได้
     }
     setZoom(clamped);
+    window.dispatchEvent(new Event(cfg.event));
+  };
+
+  /** ความยาวแบบด์ — คีย์เดียว (HERO_HEIGHT_KEY) เพราะมีผลกับฮีโร่เท่านั้น
+   *  ยิง event เดียวกับรูป/ความสว่าง/ระดับการซูม → ScrollZoomHero คำนวณความสูงใหม่
+   *  แล้วสร้าง timeline + ScrollTrigger ใหม่ (ระยะซูมยึดความสูงของแบนด์) */
+  const setBandHeight = (value: number) => {
+    const clamped = Math.min(HERO_HEIGHT_MAX, Math.max(HERO_HEIGHT_MIN, value));
+    try {
+      window.localStorage.setItem(HERO_HEIGHT_KEY, String(clamped));
+    } catch {
+      // private mode — ยังอัปเดต UI ให้เห็นผลทันทีแม้เก็บไม่ได้
+    }
+    setBandHeightState(clamped);
     window.dispatchEvent(new Event(cfg.event));
   };
 
@@ -393,43 +494,46 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
       </div>
       )}
 
+      {/* ปรับ "ความยาวแบบด์" (เฉพาะ variant ฮีโร่)
+          ค่าเป็นตัวคูณของความสูงที่ออกแบบไว้ (h-[clamp(360px,85vh,780px)] ใน ScrollZoomHero)
+          → 100% = ค่าที่ออกแบบไว้เป๊ะ · 50% = ครึ่งเดียว · 200% = ยาวเป็น 2 เท่า
+          แบนด์ยาวขึ้น = ระยะ scroll-zoom ยาวขึ้นเอง (ScrollTrigger ยึดความสูงของแบนด์)
+          ปรับแล้ว ScrollZoomHero คำนวณความสูง + สร้าง timeline ใหม่ทันทีผ่าน event เดียวกัน */}
+      {cfg.showHeight && (
+        <SliderCard
+          label={cfg.heightLabel ?? "ความยาวแบบด์ (Band height)"}
+          value={bandHeight}
+          min={HERO_HEIGHT_MIN}
+          max={HERO_HEIGHT_MAX}
+          step={0.05}
+          defaultValue={HERO_HEIGHT_DEFAULT}
+          readout={`${Math.round(bandHeight * 100)}%`}
+          hint={cfg.heightHint ?? ""}
+          onSet={setBandHeight}
+        />
+      )}
+
       {/* ปรับ "ระดับการซูม" (เฉพาะ variant ที่มี scroll-zoom = ฮีโร่)
           ค่าเป็นตัวคูณของ "ช่วงซูม" (end − start) ของทุกชั้นใน ScrollZoomHero
-          → 100% = ค่าที่ออกแบบไว้เป๊ะ · 0% = ทุกชั้นนิ่ง (ไม่ซูม) · 200% = ช่วงซูมกว้าง 2 เท่า
+          → 100% = ค่าที่ออกแบบไว้เป๊ะ · 0% = ทุกชั้นนิ่ง (ไม่ซูม) · 300% = ช่วงซูมกว้าง 3 เท่า
           ปรับแล้ว ScrollZoomHero สร้าง timeline ใหม่ทันทีผ่าน event เดียวกับรูป/ความสว่าง
           (ไม่ต้องอัปโหลดรูปใหม่ — สไลเดอร์นี้ใช้ได้กับภาพเริ่มต้นในตัวด้วย) */}
       {cfg.showZoom && (
-      <div className="rounded-lg border border-slate-700 p-3 space-y-2">
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-slate-300 font-medium">{cfg.zoomLabel}</span>
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400 tabular-nums">{Math.round(zoom * 100)}%</span>
-            {zoom !== HERO_ZOOM_DEFAULT && (
-              <button
-                onClick={() => setZoomScale(HERO_ZOOM_DEFAULT)}
-                className="text-[11px] text-slate-400 border border-slate-700 rounded px-2 min-h-[28px] active:bg-slate-800"
-              >
-                ค่าเริ่มต้น
-              </button>
-            )}
-          </div>
-        </div>
-        <input
-          type="range"
+        <SliderCard
+          label={cfg.zoomLabel ?? "ระดับการซูม (Zoom scale)"}
+          value={zoom}
           min={HERO_ZOOM_MIN}
           max={HERO_ZOOM_MAX}
           step={0.05}
-          value={zoom}
-          onChange={(e) => setZoomScale(Number(e.target.value))}
-          className="bg-dim-slider w-full"
-          aria-label={cfg.zoomLabel}
+          defaultValue={HERO_ZOOM_DEFAULT}
+          readout={`${Math.round(zoom * 100)}%`}
+          hint={
+            reduceMotion
+              ? "เครื่องนี้ตั้งปิดอนิเมชัน (prefers-reduced-motion) — แบบด์แสดงเป็นภาพนิ่ง ระดับการซูมจึงยังไม่เห็นผล"
+              : cfg.zoomHint ?? ""
+          }
+          onSet={setZoomScale}
         />
-        <p className="text-[11px] text-slate-500">
-          {reduceMotion
-            ? "เครื่องนี้ตั้งปิดอนิเมชัน (prefers-reduced-motion) — แบบด์แสดงเป็นภาพนิ่ง ระดับการซูมจึงยังไม่เห็นผล"
-            : cfg.zoomHint}
-        </p>
-      </div>
       )}
 
       <p className="text-xs text-slate-500">
