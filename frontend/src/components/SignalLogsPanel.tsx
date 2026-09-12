@@ -22,12 +22,22 @@ function eventMeta(ev: string) {
   return EVENT_META[ev] ?? { label: ev, cls: "bg-slate-500/20 text-slate-300" };
 }
 
-function StatCard({ label, value, cls = "" }: { label: string; value: number | null; cls?: string }) {
+function StatCard({ label, value, cls = "", active = false, onClick, disabled = false }: { label: string; value: number | null; cls?: string; active?: boolean; onClick?: () => void; disabled?: boolean }) {
   return (
-    <div className="panel">
-      <p className="text-xs text-slate-500">{label}</p>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || !onClick}
+      aria-pressed={active}
+      title="แตะเพื่อกรองตารางตามรายการนี้ (แตะซ้ำเพื่อล้างตัวกรอง)"
+      className={`panel text-left w-full cursor-pointer touch-manipulation select-none transition-all duration-150 active:scale-[0.97] hover:border-white/25 hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${active ? "border-accent/60 bg-accent/[0.08] shadow-[0_0_0_1px_rgba(10,132,255,0.5),0_8px_32px_rgba(0,0,0,0.45)]" : ""} disabled:cursor-default disabled:active:scale-100`}
+    >
+      <p className="text-xs text-slate-500 flex items-center justify-between gap-1">
+        <span>{label}</span>
+        <span aria-hidden className={`text-[10px] transition-transform duration-150 ${active ? "text-accent" : "text-slate-600"}`}>›</span>
+      </p>
       <p className={`text-2xl font-bold ${cls}`}>{value == null ? "—" : value.toLocaleString()}</p>
-    </div>
+    </button>
   );
 }
 
@@ -109,6 +119,16 @@ export default function SignalLogsPanel() {
     load(f);
   };
 
+  // แตะการ์ดซ้ำ = กลับไป "ทั้งหมด" (toggle) — การ์ด "ทั้งหมด" แตะแล้วอยู่เฉยๆ ถ้าเลือกอยู่แล้ว
+  const toggleFilter = (f: string) => {
+    if (loading) return;
+    if (f === "all") {
+      if (filter !== "all") changeFilter("all");
+      return;
+    }
+    changeFilter(filter === f ? "all" : f);
+  };
+
   // ตารางคือ server chunk ปัจจุบัน (500 แถว) — filter ทำฝั่ง server แล้ว
   const shown = logs;
   // จำนวนหน้าทั้งหมดอ้างจาก total จริง (count=exact) ไม่ใช่ความยาว chunk
@@ -146,12 +166,12 @@ export default function SignalLogsPanel() {
 
       {/* ---------- Summary cards ---------- */}
       <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <StatCard label="เหตุการณ์ทั้งหมด (7 วัน)" value={summary?.total ?? null} />
-        <StatCard label="เปิดออเดอร์" value={summary?.opened ?? null} cls="text-emerald-400" />
-        <StatCard label="ไม่เปิดออเดอร์" value={summary?.blocked ?? null} cls="text-amber-400" />
-        <StatCard label="หมดอายุ" value={summary?.expired ?? null} />
-        <StatCard label="ย้าย SL" value={summary?.sl_moved ?? null} cls="text-cyan-300" />
-        <StatCard label="ปิดไม้" value={summary?.closed ?? null} cls="text-violet-300" />
+        <StatCard label="เหตุการณ์ทั้งหมด (7 วัน)" value={summary?.total ?? null} active={filter === "all"} onClick={() => toggleFilter("all")} disabled={loading} />
+        <StatCard label="เปิดออเดอร์" value={summary?.opened ?? null} cls="text-emerald-400" active={filter === "order_opened"} onClick={() => toggleFilter("order_opened")} disabled={loading} />
+        <StatCard label="ไม่เปิดออเดอร์" value={summary?.blocked ?? null} cls="text-amber-400" active={filter === "order_blocked"} onClick={() => toggleFilter("order_blocked")} disabled={loading} />
+        <StatCard label="หมดอายุ" value={summary?.expired ?? null} active={filter === "expired"} onClick={() => toggleFilter("expired")} disabled={loading} />
+        <StatCard label="ย้าย SL" value={summary?.sl_moved ?? null} cls="text-cyan-300" active={filter === "sl_moved"} onClick={() => toggleFilter("sl_moved")} disabled={loading} />
+        <StatCard label="ปิดไม้" value={summary?.closed ?? null} cls="text-violet-300" active={filter === "closed"} onClick={() => toggleFilter("closed")} disabled={loading} />
       </section>
 
       {/* ---------- Asset breakdown ---------- */}
