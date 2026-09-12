@@ -90,79 +90,86 @@ export default function DashboardPage() {
     });
 
   return (
-    <div className="space-y-6">
-      <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Stat label="Capital" value={fmtMoney(capital)} />
-        <Stat label="Current Equity" value={fmtMoney(equity)} positive={pnl >= 0} />
-        <Stat label="Current PnL" value={fmtMoney(pnl)} positive={pnl >= 0} />
-        <Stat label="Monthly Goal" value={`${goalPct}%`} />
-      </section>
+    <>
+      {/* แบ็กกราวด์ฮีโร่ (GSAP ScrollTrigger image zoom) ย้ายไป mount ที่
+          app/layout.tsx ผ่าน <HomeHero /> เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้า
+          ตรงกับ header — ไม่ติด padding ของ <main> */}
 
-      {/* ---------- สถานะการเทรดอัตโนมัติ: เปิดได้/ไม่ได้ เพราะปัจจัยอะไร ---------- */}
-      <AutoTradeReadinessCard />
+      {/* เนื้อหาทั้งหน้า — ยกขึ้นชั้นบน (z-10) ให้ลอยเหนือแบ็กกราวด์ */}
+      <div className="relative z-10 space-y-6">
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Stat label="Capital" value={fmtMoney(capital)} />
+          <Stat label="Current Equity" value={fmtMoney(equity)} positive={pnl >= 0} />
+          <Stat label="Current PnL" value={fmtMoney(pnl)} positive={pnl >= 0} />
+          <Stat label="Monthly Goal" value={`${goalPct}%`} />
+        </section>
 
-      <GoalForm onAssessed={setGoalPct} />
+        {/* ---------- สถานะการเทรดอัตโนมัติ: เปิดได้/ไม่ได้ เพราะปัจจัยอะไร ---------- */}
+        <AutoTradeReadinessCard />
 
-      {/* ---------- Market Regime Analysis (จาก /market เดิม) ---------- */}
-      <section className="panel">
-        <h2 className="panel-title">Market Regime Analysis</h2>
-        {summary ? (
-          <div className="grid md:grid-cols-3 gap-4">
-            <div>
-              <p className="text-xs text-slate-500">Regime</p>
-              <p className="text-xl font-bold">{summary.regime.replace(/_/g, " ").toUpperCase()}</p>
+        <GoalForm onAssessed={setGoalPct} />
+
+        {/* ---------- Market Regime Analysis (จาก /market เดิม) ---------- */}
+        <section className="panel">
+          <h2 className="panel-title">Market Regime Analysis</h2>
+          {summary ? (
+            <div className="grid md:grid-cols-3 gap-4">
+              <div>
+                <p className="text-xs text-slate-500">Regime</p>
+                <p className="text-xl font-bold">{summary.regime.replace(/_/g, " ").toUpperCase()}</p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500">Confidence</p>
+                <p className="text-xl font-bold text-accent">{summary.confidence}%</p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500">Sentiment</p>
+                <p className={`text-xl font-bold ${summary.sentiment === "bullish" ? "text-profit" : summary.sentiment === "bearish" ? "text-loss" : ""}`}>
+                  {summary.sentiment.toUpperCase()}
+                </p>
+              </div>
+              <p className="md:col-span-3 text-sm text-slate-400">{summary.explanation}</p>
             </div>
-            <div>
-              <p className="text-xs text-slate-500">Confidence</p>
-              <p className="text-xl font-bold text-accent">{summary.confidence}%</p>
+          ) : summaryLoading ? (
+            <LoadingGraphic message="กำลังโหลดข้อมูลตลาด..." compact />
+          ) : (
+            <p className="text-slate-500 text-sm">
+              ไม่มีข้อมูล — ตรวจสอบว่า backend รันอยู่
+            </p>
+          )}
+        </section>
+
+        <section className="grid md:grid-cols-3 gap-4">
+          <div className="panel md:col-span-2">
+            {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น
+                เดิมเป็น chip 28 ปุ่มเล็มพื้นที่หน้าจอมาก (ผู้ใช้ขอ 2026-09-07) →
+                dropdown เดียว + เรียงตาม confidence มาก → น้อย
+                GlassSelect รับ label เป็น JSX ได้แล้ว (badge % สีตามเกณฑ์) */}
+            <div className="mb-3">
+              <GlassSelect
+                value={selected}
+                onChange={setSelected}
+                className="w-full md:max-w-xs"
+                ariaLabel="เลือกสัญลักษณ์"
+                options={symbolOptions}
+              />
             </div>
-            <div>
-              <p className="text-xs text-slate-500">Sentiment</p>
-              <p className={`text-xl font-bold ${summary.sentiment === "bullish" ? "text-profit" : summary.sentiment === "bearish" ? "text-loss" : ""}`}>
-                {summary.sentiment.toUpperCase()}
-              </p>
-            </div>
-            <p className="md:col-span-3 text-sm text-slate-400">{summary.explanation}</p>
+            <TradingViewChart symbol={tvSymbol(selected)} />
           </div>
-        ) : summaryLoading ? (
-          <LoadingGraphic message="กำลังโหลดข้อมูลตลาด..." compact />
-        ) : (
-          <p className="text-slate-500 text-sm">
-            ไม่มีข้อมูล — ตรวจสอบว่า backend รันอยู่
-          </p>
-        )}
-      </section>
-
-      <section className="grid md:grid-cols-3 gap-4">
-        <div className="panel md:col-span-2">
-          {/* ตัวเลือกสัญลักษณ์ (จาก /market เดิม) — XAUUSD ค่าเริ่มต้น
-              เดิมเป็น chip 28 ปุ่มเล็มพื้นที่หน้าจอมาก (ผู้ใช้ขอ 2026-09-07) →
-              dropdown เดียว + เรียงตาม confidence มาก → น้อย
-              GlassSelect รับ label เป็น JSX ได้แล้ว (badge % สีตามเกณฑ์) */}
-          <div className="mb-3">
-            <GlassSelect
-              value={selected}
-              onChange={setSelected}
-              className="w-full md:max-w-xs"
-              ariaLabel="เลือกสัญลักษณ์"
-              options={symbolOptions}
+          <div className="panel">
+            <h2 className="panel-title">Opportunity Score</h2>
+            <OpportunityScore
+              opportunities={summary?.opportunities ?? []}
+              loading={summaryLoading}
+              error={summaryErr}
+              minConfidence={summary?.min_confidence}
+              minConfidenceGold={summary?.min_confidence_gold}
+              tradableAssets={settings?.allowed_assets}
             />
           </div>
-          <TradingViewChart symbol={tvSymbol(selected)} />
-        </div>
-        <div className="panel">
-          <h2 className="panel-title">Opportunity Score</h2>
-          <OpportunityScore
-            opportunities={summary?.opportunities ?? []}
-            loading={summaryLoading}
-            error={summaryErr}
-            minConfidence={summary?.min_confidence}
-            minConfidenceGold={summary?.min_confidence_gold}
-            tradableAssets={settings?.allowed_assets}
-          />
-        </div>
-      </section>
-    </div>
+        </section>
+      </div>
+    </>
   );
 }
 

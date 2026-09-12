@@ -1930,6 +1930,21 @@ class AppSettings(BaseModel):
     allowed_assets: list[str] = Field(
         default_factory=lambda: list(quotes.DEFAULT_ASSETS))
 
+    # ---- AI chat (Settings page, migration 034) ----------------------------
+    # Non-secret overrides for the AI that answers the chat widget, LINE
+    # webhook and journal/explain endpoints. Precedence:
+    #     Settings page (these fields) > ai.config.json > per-provider default
+    # Empty string = not overridden (keep the file/default value) so an old
+    # settings row behaves exactly like the pre-034 system. The API KEY is
+    # never stored here — it stays in the AI_API_KEY env var of the service.
+    # Changing these takes effect immediately (the settings router clears the
+    # cached AIConfig), no redeploy needed.
+    ai_model: str = ""
+    # OpenAI-compatible base URL, e.g. https://opencode.ai/zen/go/v1 — the
+    # client appends /chat/completions. A pasted full endpoint is trimmed back
+    # to the base by AIConfig (the 2026-09-07 404 mistake).
+    ai_base_url: str = ""
+
     def effective_assets(self) -> list[str]:
         """Sanitized tradable list — validated against SUPPORTED_ASSETS.
 

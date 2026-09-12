@@ -181,6 +181,19 @@ class TestHealth:
         assert "db" in body and "ai" in body
 
     @pytest.mark.asyncio
+    async def test_health_reports_which_ai_model_is_live(self):
+        """`/health.ai_config` must let the user see whether the Settings-page
+        override is in force (settings) or the file default (config-file)."""
+        set_state(None)
+        app.state.scheduler = None
+        body = (await call("GET", "/health")).json()
+        info = body["ai_config"]
+        assert set(info) >= {"provider", "model", "base_url",
+                             "model_source", "url_source", "configured"}
+        assert info["model_source"] in ("settings", "config-file")
+        assert info["url_source"] in ("settings", "config-file")
+
+    @pytest.mark.asyncio
     async def test_health_reports_running_when_scheduler_set(self):
         set_state(None)
         app.state.scheduler = SimpleNamespace(get_jobs=lambda: [SimpleNamespace(id="j1")])
@@ -2005,3 +2018,86 @@ class TestExtendedOpen:
         assert body["final_decision"].startswith("TRADE")
         assert any("market" in str(r) for r in body.get("rejects", []))
         assert db.rows.get("paper_trades", []) == []
+
+
+# ---------------------------------------------------------------------------
+# /api/ai/test — the Settings page "ทดสอบการเชื่อมต่อ" button
+# ---------------------------------------------------------------------------
+class TestAITestEndpoint:
+    @pytest.mark.asyncio
+    async def test_bad_base_url_rejected_before_touching_the_model(self, monkeypatch):
+        """A half-typed URL (no scheme) must fail fast with the Thai hint —
+        the provider must not even be built, or every AI call in the running
+        process would inherit the broken URL."""
+        from app.api.routes import ai as ai_route
+
+        built = {"n": 0}
+
+        def boom():
+            built["n"] += 1
+            raise AssertionError("provider must not be built")
+
+        monkeypatch.setattr(ai_route, "get_ai_provider", boom)
+        body = (await call("POST", "/api/ai/test",
+                           {"base_url": "api.deepseek.com"})).json()
+        assert body["ok"] is False
+        assert "http://" in body["error"]
+        assert built["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_typed_values_are_live_during_the_call_then_restored(self, monkeypatch):
+        """The test button proves the values TYPED IN THE FORM (unsaved)."""
+        from app.api.routes import ai as ai_route
+        from app.core.ai_config import clear_ai_overrides, describe_ai_config
+
+        clear_ai_overrides()
+        before = describe_ai_config()
+        seen: dict = {}
+
+        class FakeProvider:
+            name = "fake"
+            model = "fake-model"
+            base_url = "https://fake/v1"
+
+            async def chat(self, messages, temperature=0.3):
+                from app.core.ai_config import get_ai_config
+                cfg = get_ai_config()
+                seen["model"] = cfg.model
+                seen["url"] = cfg.base_url
+                return "พร้อมใช้งาน (โมเดล: my-temp-model)"
+
+        monkeypatch.setattr(ai_route, "get_ai_provider",
+                            lambda: FakeProvider())
+        body = (await call("POST", "/api/ai/test", {
+            "model": "my-temp-model",
+            "base_url": "https://gateway.example/v1/chat/completions",
+        })).json()
+
+        assert body["ok"] is True
+        assert body["reply"].startswith("พร้อมใช้งาน")
+        # live during the call, with the pasted full endpoint trimmed
+        assert seen == {"model": "my-temp-model",
+                        "url": "https://gateway.example/v1"}
+        # and the running config is back on the saved values afterwards
+        after = describe_ai_config()
+        assert after["model"] == before["model"]
+        assert after["base_url"] == before["base_url"]
+        assert after["model_source"] == "config-file"
+
+    @pytest.mark.asyncio
+    async def test_provider_error_returns_ok_false_not_a_500(self, monkeypatch):
+        from app.api.routes import ai as ai_route
+
+        class Dead:
+            name = "dead"
+            model = "m"
+            base_url = "https://x"
+
+            async def chat(self, messages, temperature=0.3):
+                return "[AI ERROR] 401 unauthorized"
+
+        monkeypatch.setattr(ai_route, "get_ai_provider", lambda: Dead())
+        body = (await call("POST", "/api/ai/test", {})).json()
+        assert body["ok"] is False
+        assert body["provider"] == "dead"
+        assert "401" in body["error"]

@@ -1,13 +1,18 @@
 "use client";
 
 /**
- * BackgroundPicker — อัปโหลดรูปพื้นหลังของแอปจากเครื่องผู้ใช้
+ * BackgroundPicker — อัปโหลดรูปพื้นหลังจากเครื่องผู้ใช้ (ใช้ 2 จุดใน Settings)
  *
- * เก็บรูปฝั่ง client เป็น data URL ใน localStorage (key: tdapp_bg_image)
+ *   variant="app"  (ค่าเริ่มต้น) พื้นหลังแอปทุกหน้า — BackgroundLayer อ่านไปวาดแบบ fixed
+ *   variant="hero"               แบบด์ "image zoom" หน้าแรก — ScrollZoomHero อ่านไปใช้
+ *
+ * เก็บรูปฝั่ง client เป็น data URL ใน localStorage (แยกคีย์ตาม variant)
  * เพราะ frontend เป็น static export และ Render FS ไม่ persistent — อัปโหลดไฟล์ขึ้น server ไม่ได้
- * รูปจะถูกย่อ/บีบ (max 1600px, JPEG q0.72) ผ่าน <canvas> ก่อนเก็บ เพื่อจำกัดขนาด localStorage (~5MB)
- * layout.tsx อ่านค่านี้ตอน mount และรับรู้การเปลี่ยนแปลงผ่าน event "tdapp:bg-changed"
+ * รูปจะถูกย่อ/บีบ (max 1600px, ฮีโร่ 1920px, JPEG q0.72) ผ่าน <canvas> ก่อนเก็บ
+ * เพื่อจำกัดขนาด localStorage (~5MB); ผู้ใช้ปลายทางอ่านค่ารูปและรับรู้การเปลี่ยนแปลง
+ * ผ่าน event ประจำ variant (BackgroundLayer → "tdapp:bg-changed", ScrollZoomHero → "tdapp:hero-changed")
  * ความสว่าง (ความเข้ม scrim ดำ) เก็บแยกใน localStorage (key: tdapp_bg_dim) — ปรับได้จาก slider
+ * (เฉพาะ variant="app")
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -16,18 +21,72 @@ import Icon from "@/components/Icon";
 const BG_KEY = "tdapp_bg_image";
 const BG_EVENT = "tdapp:bg-changed";
 const BG_DIM_KEY = "tdapp_bg_dim";
-const MAX_DIM = 1600; // px — ด้านยาวสุด
+// ฮีโร่ image zoom หน้าแรก — คีย์/อีเวนต์แยกจากพื้นหลังแอป (ตั้งค่าอิสระต่อกัน)
+const HERO_KEY = "tdapp_hero_image";
+const HERO_EVENT = "tdapp:hero-changed";
+const MAX_DIM = 1600; // px — ด้านยาวสุดของพื้นหลังแอป
+const MAX_DIM_HERO = 1920; // ฮีโร่เป็นแบบด์กว้างเต็มจอ + ถูกซูมขยาย — เก็บรายละเอียดมากกว่า
 const MAX_STORED_BYTES = 2_800_000; // ~2.8MB data URL — ปลอดภัยกับ quota localStorage ส่วนใหญ่ (5MB)
+
+/** variant ของ picker — แยกคีย์ที่เก็บ/อีเวนต์/ข้อความให้ตรงกับที่ใช้งาน */
+type PickerVariant = "app" | "hero";
+
+const VARIANTS: Record<
+  PickerVariant,
+  {
+    key: string;
+    event: string;
+    dimKey: string;
+    maxDim: number;
+    showDim: boolean;
+    /** พรีวิวตอนยังไม่ตั้งรูปเอง — ฮีโร่โชว์ภาพเริ่มต้นในตัว */
+    defaultPreview?: string;
+    emptyText: string;
+    defaultText: string;
+    currentText: string;
+    doneText: string;
+    clearedText: string;
+    hint: string;
+  }
+> = {
+  app: {
+    key: BG_KEY,
+    event: BG_EVENT,
+    dimKey: BG_DIM_KEY,
+    maxDim: MAX_DIM,
+    showDim: true,
+    emptyText: "ยังไม่มีรูปพื้นหลัง — ใช้พื้นหลัง default (aurora)",
+    defaultText: "",
+    currentText: "รูปพื้นหลังปัจจุบัน",
+    doneText: "ตั้งรูปพื้นหลังเรียบร้อย",
+    clearedText: "ลบรูปพื้นหลังแล้ว — กลับไปใช้ default",
+    hint: "รูปจะถูกย่อเหลือด้านยาวสุด 1600px และเก็บไว้ในเครื่องนี้ (localStorage) — แสดงหลัง login ทุกหน้า",
+  },
+  hero: {
+    key: HERO_KEY,
+    event: HERO_EVENT,
+    dimKey: BG_DIM_KEY,
+    maxDim: MAX_DIM_HERO,
+    showDim: false,
+    defaultPreview: "/scroll-zoom.svg",
+    emptyText: "ใช้ภาพเริ่มต้นในตัวอยู่",
+    defaultText: "ภาพเริ่มต้น (Scroll Zoom)",
+    currentText: "รูปที่ใช้เป็นแบบด์ด้านบน",
+    doneText: "ตั้งรูปแบบด์ด้านบนเรียบร้อย",
+    clearedText: "ลบรูปแล้ว — กลับไปใช้ภาพเริ่มต้น",
+    hint: "รูปจะถูกย่อเหลือด้านยาวสุด 1920px และเก็บไว้ในเครื่องนี้ (localStorage) — แสดงเป็นแบบด์บนสุดของหน้าหลักเท่านั้น",
+  },
+};
 
 /** ความเข้ม scrim ดำทับรูปพื้นหลัง (0 = สว่างสุด ... 0.85 = มืดสุด) — default 0.55 */
 export const BG_DIM_DEFAULT = 0.55;
 export const BG_DIM_MIN = 0;
 export const BG_DIM_MAX = 0.85;
 
-export function readStoredBgDim(): number {
+export function readStoredDim(key: string = BG_DIM_KEY): number {
   if (typeof window === "undefined") return BG_DIM_DEFAULT;
   try {
-    const raw = window.localStorage.getItem(BG_DIM_KEY);
+    const raw = window.localStorage.getItem(key);
     if (raw === null) return BG_DIM_DEFAULT;
     const n = Number(raw);
     if (!Number.isFinite(n)) return BG_DIM_DEFAULT;
@@ -37,16 +96,34 @@ export function readStoredBgDim(): number {
   }
 }
 
-export function readStoredBg(): string | null {
+export function readStoredBgDim(): number {
+  return readStoredDim(BG_DIM_KEY);
+}
+
+/** อ่าน data URL ของรูปที่ผู้ใช้ตั้งไว้ (คีย์ไหนก็ได้) — null = ยังไม่ตั้ง/อ่านไม่ได้ */
+export function readStoredImage(key: string): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return window.localStorage.getItem(BG_KEY);
+    return window.localStorage.getItem(key);
   } catch {
     return null; // private mode / storage disabled
   }
 }
 
-export default function BackgroundPicker() {
+export function readStoredBg(): string | null {
+  return readStoredImage(BG_KEY);
+}
+
+/** รูปแบบด์ image zoom หน้าแรก (ตั้งใน Settings) — null = ใช้ภาพเริ่มต้น /scroll-zoom.svg */
+export function readStoredHero(): string | null {
+  return readStoredImage(HERO_KEY);
+}
+
+/** ชื่อ event ที่ picker ยิงเมื่อรูป/ความสว่างเปลี่ยน — ใช้ให้ component ปลายทาง listen */
+export const HERO_IMAGE_EVENT = HERO_EVENT;
+
+export default function BackgroundPicker({ variant = "app" }: { variant?: PickerVariant }) {
+  const cfg = VARIANTS[variant];
   const [preview, setPreview] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -54,20 +131,20 @@ export default function BackgroundPicker() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setPreview(readStoredBg());
-    setDim(readStoredBgDim());
-  }, []);
+    setPreview(readStoredImage(cfg.key));
+    setDim(readStoredDim(cfg.dimKey));
+  }, [cfg.key, cfg.dimKey]);
 
   const apply = (dataUrl: string | null) => {
     try {
-      if (dataUrl) window.localStorage.setItem(BG_KEY, dataUrl);
-      else window.localStorage.removeItem(BG_KEY);
+      if (dataUrl) window.localStorage.setItem(cfg.key, dataUrl);
+      else window.localStorage.removeItem(cfg.key);
     } catch {
       setMsg("พื้นที่จัดเก็บไม่พอ — ลองใช้รูปที่เล็กกว่านี้");
       return;
     }
     setPreview(dataUrl);
-    window.dispatchEvent(new Event(BG_EVENT));
+    window.dispatchEvent(new Event(cfg.event));
   };
 
   /** ย่อรูปผ่าน canvas → JPEG data URL (รักษาสัดส่วน, crop ไม่ต้อง — ให้ CSS cover จัดการ) */
@@ -76,7 +153,7 @@ export default function BackgroundPicker() {
       const img = new Image();
       const url = URL.createObjectURL(file);
       img.onload = () => {
-        const scale = Math.min(1, MAX_DIM / Math.max(img.width, img.height));
+        const scale = Math.min(1, cfg.maxDim / Math.max(img.width, img.height));
         const w = Math.max(1, Math.round(img.width * scale));
         const h = Math.max(1, Math.round(img.height * scale));
         const canvas = document.createElement("canvas");
@@ -116,7 +193,7 @@ export default function BackgroundPicker() {
         return;
       }
       apply(dataUrl);
-      setMsg("ตั้งรูปพื้นหลังเรียบร้อย");
+      setMsg(cfg.doneText);
     } catch (err) {
       setMsg(`${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -127,13 +204,16 @@ export default function BackgroundPicker() {
   const setBgDim = (value: number) => {
     const clamped = Math.min(BG_DIM_MAX, Math.max(BG_DIM_MIN, value));
     try {
-      window.localStorage.setItem(BG_DIM_KEY, String(clamped));
+      window.localStorage.setItem(cfg.dimKey, String(clamped));
     } catch {
       // private mode — ยังอัปเดต UI ให้เห็นผลทันทีแม้เก็บไม่ได้
     }
     setDim(clamped);
-    window.dispatchEvent(new Event(BG_EVENT));
+    window.dispatchEvent(new Event(cfg.event));
   };
+
+  // พรีวิว = รูปที่ผู้ใช้ตั้งไว้ หรือภาพเริ่มต้นในตัว (เฉพาะฮีโร่)
+  const previewSrc = preview ?? cfg.defaultPreview ?? null;
 
   return (
     <div className="space-y-3">
@@ -141,19 +221,24 @@ export default function BackgroundPicker() {
       <div
         className="rounded-lg border border-slate-700 h-24 bg-cover bg-center relative overflow-hidden"
         style={
-          preview
-            ? { backgroundImage: `url(${preview})` }
+          previewSrc
+            ? { backgroundImage: `url(${previewSrc})` }
             : undefined
         }
       >
-        {!preview && (
+        {!previewSrc && (
           <div className="absolute inset-0 bg-surface flex items-center justify-center text-xs text-slate-500">
-            ยังไม่มีรูปพื้นหลัง — ใช้พื้นหลัง default (aurora)
+            {cfg.emptyText}
           </div>
         )}
         {preview && (
           <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-            <span className="text-xs text-white/90 font-medium">รูปพื้นหลังปัจจุบัน</span>
+            <span className="text-xs text-white/90 font-medium">{cfg.currentText}</span>
+          </div>
+        )}
+        {!preview && cfg.defaultPreview && (
+          <div className="absolute inset-0 bg-black/45 flex items-center justify-center">
+            <span className="text-xs text-white/90 font-medium">{cfg.defaultText}</span>
           </div>
         )}
       </div>
@@ -172,7 +257,7 @@ export default function BackgroundPicker() {
         </button>
         {preview && (
           <button
-            onClick={() => { apply(null); setMsg("ลบรูปพื้นหลังแล้ว — กลับไปใช้ default"); }}
+            onClick={() => { apply(null); setMsg(cfg.clearedText); }}
             className="border border-slate-700 text-slate-300 rounded px-4 py-2 text-sm active:bg-slate-800"
           >
             ลบรูปพื้นหลัง
@@ -188,7 +273,9 @@ export default function BackgroundPicker() {
         onChange={onPick}
       />
 
-      {/* ปรับความสว่างของพื้นหลัง — ยิ่งเลื่อนขวา ยิ่ง scrim ดำเข้ม รูปยิ่งมืด */}
+      {/* ปรับความสว่างของพื้นหลัง — ยิ่งเลื่อนขวา ยิ่ง scrim ดำเข้ม รูปยิ่งมืด
+          (เฉพาะพื้นหลังแอป — แบบด์ฮีโร่มีความสว่างคุมด้วย vignette ของตัวเอง) */}
+      {cfg.showDim && (
       <div className="rounded-lg border border-slate-700 p-3 space-y-2">
         <div className="flex items-center justify-between text-xs">
           <span className="text-slate-300 font-medium">ความสว่างพื้นหลัง</span>
@@ -223,9 +310,10 @@ export default function BackgroundPicker() {
             : "เพิ่มรูปพื้นหลังก่อนจึงจะปรับความสว่างได้"}
         </p>
       </div>
+      )}
 
       <p className="text-xs text-slate-500">
-        {msg || "รูปจะถูกย่อเหลือด้านยาวสุด 1600px และเก็บไว้ในเครื่องนี้ (localStorage) — แสดงหลัง login ทุกหน้า"}
+        {msg || cfg.hint}
       </p>
     </div>
   );

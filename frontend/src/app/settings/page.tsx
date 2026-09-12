@@ -11,7 +11,7 @@ import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
 import {
-  AppSettings, DbCheckResult, DbCounts, LineDiag, LineEventsResponse,
+  AITestResult, AppSettings, DbCheckResult, DbCounts, LineDiag, LineEventsResponse,
   LineSimulateResult, LineTargetsResponse, LineTestResult, PauseStatus,
   PortfolioRecommendation, RiskProfile, SUPPORTED_ASSETS, DEFAULT_ASSETS,
 } from "@/lib/types";
@@ -78,6 +78,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   notify_daily_digest: true,
   notify_daily_summary: true,
   allowed_assets: DEFAULT_ASSETS,
+  // AI chat — ค่าว่าง = ใช้ backend/ai.config.json (ดู migration 034)
+  ai_model: "",
+  ai_base_url: "",
 };
 
 /** LINE notification categories shown on the Settings page — each row maps
@@ -381,6 +384,30 @@ export default function SettingsPage() {
     }
   };
 
+  // --- AI chat (model + base URL) — ทดสอบการเชื่อมต่อก่อนบันทึกได้ ---
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiRes, setAiRes] = useState<AITestResult | null>(null);
+  const [aiMsg, setAiMsg] = useState("");
+
+  // ทดสอบด้วยค่าที่ “กำลังพิมพ์ในฟอร์ม” (ยังไม่ลง DB) → ยืนยันได้ก่อนกดบันทึก
+  const runAiTest = async () => {
+    if (!cfg || aiBusy) return;
+    setAiBusy(true);
+    setAiMsg("");
+    setAiRes(null);
+    try {
+      const res = await api.aiTest({ model: cfg.ai_model, base_url: cfg.ai_base_url });
+      setAiRes(res);
+      setAiMsg(res.ok
+        ? `เชื่อมต่อได้ — provider ${res.provider}`
+        : "เชื่อมต่อไม่สำเร็จ — ดูรายละเอียดด้านล่าง");
+    } catch (e) {
+      setAiMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
 
@@ -539,6 +566,16 @@ export default function SettingsPage() {
         <BackgroundPicker />
       </div>
 
+      {/* ---------------- Hero band (image zoom) image picker ---------------- */}
+      <div className="panel md:col-span-2">
+        <h2 className="panel-title">แบบด์ image zoom หน้าหลัก (Hero)</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          รูปที่ใช้เป็นแถบพื้นหลังบนสุดของหน้าหลัก (ค่อย ๆ ซูมเข้าตอนเลื่อนหน้า) — ไม่ใส่ = ใช้ภาพเริ่มต้นในตัว
+          · เก็บในเครื่องนี้ (localStorage) แยกจากภาพพื้นหลังด้านบน
+        </p>
+        <BackgroundPicker variant="hero" />
+      </div>
+
       {/* ---------------- Trading Configuration ---------------- */}
       <div className="panel md:col-span-2">
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -666,6 +703,83 @@ export default function SettingsPage() {
                 ยังไม่ได้เลือกคู่ใด — ระบบจะใช้ค่าเริ่มต้น 5 คู่จนกว่าจะบันทึกรายการใหม่
               </p>
             )}
+          </div>
+
+          {/* --- AI Chat: โมเดล + base URL (migration 034) --- */}
+          <div className="mt-4 rounded border border-slate-700/60 bg-surface/40 p-3">
+            <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+              <Icon n="bot" size={13} /> AI Chat — โมเดล &amp; URL
+            </p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              ใช้กับการตอบแชท AI, คำสั่งผ่าน LINE และคำอธิบายสัญญาณ (journal/explain) ·
+              เว้นว่าง = ใช้ค่าจาก <span className="text-slate-400">backend/ai.config.json</span> ·
+              บันทึกแล้วมีผลทันที ไม่ต้อง redeploy
+            </p>
+            <div className="grid md:grid-cols-2 gap-3 mt-3">
+              <label className="block text-sm">
+                ชื่อโมเดล (ai_model)
+                <input value={cfg.ai_model} onChange={(e) => set("ai_model", e.target.value)}
+                  placeholder="ว่าง = ใช้ค่าจาก ai.config.json (เช่น deepseek-chat)"
+                  spellCheck={false} autoComplete="off"
+                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2 min-h-[44px]" />
+                <span className="block text-xs text-slate-500 mt-1">
+                  ต้องเป็นชื่อโมเดลที่ gateway รองรับจริง (เช่น omen-alpha, glm-5.3-flash, deepseek-chat)
+                </span>
+              </label>
+              <label className="block text-sm">
+                Base URL (ai_base_url)
+                <input value={cfg.ai_base_url} onChange={(e) => set("ai_base_url", e.target.value)}
+                  placeholder="ว่าง = ใช้ค่าจาก ai.config.json (เช่น https://api.deepseek.com)"
+                  inputMode="url" spellCheck={false} autoComplete="off"
+                  className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2 min-h-[44px]" />
+                <span className="block text-xs text-slate-500 mt-1">
+                  ไม่ต้องใส่ /chat/completions — ระบบต่อท้ายให้เอง (วางมาเต็มก็ตัดออกให้)
+                </span>
+              </label>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap mt-3">
+              <button type="button" onClick={runAiTest} disabled={aiBusy}
+                aria-busy={aiBusy}
+                title="ยิงคำถามสั้น ๆ ด้วยค่าที่พิมพ์อยู่ในช่องนี้ (ยังไม่ต้องบันทึก) เพื่อเช็คว่าโมเดลตอบจริง"
+                className="text-xs text-slate-200 border border-slate-600 rounded px-3 min-h-[44px] active:bg-slate-800 disabled:opacity-40">
+                <span className="inline-flex items-center gap-1.5">
+                  {aiBusy && <Icon n="spinner" size={13} className="animate-spin" />}
+                  {aiBusy ? "กำลังทดสอบ..." : "ทดสอบการเชื่อมต่อ"}
+                </span>
+              </button>
+              {aiMsg && (
+                <span className={`text-xs ${aiRes ? (aiRes.ok ? "text-profit" : "text-loss") : "text-slate-400"}`}>
+                  {aiMsg}
+                </span>
+              )}
+            </div>
+            {aiRes && (
+              <div className="mt-2 rounded border border-slate-700/60 bg-panel/40 p-2 text-xs space-y-1">
+                <p className="text-slate-400">
+                  provider <span className="text-slate-200">{aiRes.provider}</span>
+                  {" · "}model <span className="text-slate-200">{aiRes.model || "-"}</span>
+                  {" · "}url <span className="text-slate-200 break-all">{aiRes.base_url || "-"}</span>
+                </p>
+                {aiRes.reply && (
+                  <p className="text-slate-300 whitespace-pre-wrap">{aiRes.reply}</p>
+                )}
+                {aiRes.error && (
+                  <p className="text-loss whitespace-pre-wrap break-all">{aiRes.error}</p>
+                )}
+                {aiRes.info && (
+                  <p className="text-slate-500">
+                    แหล่งค่า — model: {aiRes.info.model_source === "settings" ? "จากหน้านี้" : "จาก ai.config.json"}
+                    {" · "}url: {aiRes.info.url_source === "settings" ? "จากหน้านี้" : "จาก ai.config.json"}
+                    {" · "}คีย์: {aiRes.info.configured === "yes" ? "ตั้งไว้แล้ว (AI_API_KEY)" : "ยังไม่ได้ตั้ง (AI_API_KEY)"}
+                  </p>
+                )}
+              </div>
+            )}
+            <p className="text-xs text-slate-500 mt-2">
+              การทดสอบใช้ค่าที่ <span className="text-slate-300">พิมพ์อยู่ในช่องนี้</span> และคืนค่าเดิมกลับหลังทดสอบเสร็จ —
+              ถ้าผ่านแล้วอย่าลืมกด “บันทึกการตั้งค่า” ด้านบนเพื่อเก็บลง DB ·
+              คีย์ API ไม่เก็บใน DB ยังอยู่ที่ env var <span className="text-slate-400">AI_API_KEY</span> ของ service
+            </p>
           </div>
           <div className="mt-4 grid md:grid-cols-2 xl:grid-cols-3 gap-4">
             {/* --- Profile & signal gates --- */}

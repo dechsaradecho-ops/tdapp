@@ -7,6 +7,19 @@
   color-scheme: dark;
 }
 
+/* แบ็กกราวด์ฮีโร่ด้านบน (.zoom-hero) — แบนด์อยู่ระดับเอกสาร (absolute,
+   containing block = viewport) และใช้ inset-x-0 (ไม่ใช้ 100vw เพราะ 100vw
+   นับความกว้าง scrollbar ด้วย → ล้นขอบจอ ~4px ทำให้ก้นจอขยับได้)
+   ยัง clip overflow แนวนอนไว้ทั้ง html และ body เป็นเกราะชั้นสองกัน
+   หน้าอื่น/คอมโพเนนต์อื่นที่อาจล้น (ทดสอบในเบราว์เซอร์แล้ว: clip ข้างเดียว
+   ไม่พอ) ใช้ clip ไม่ใช้ hidden เพราะ clip ไม่สร้าง scroll container
+   → position: sticky ของ DesktopNav ยังทำงาน (ทดสอบแล้ว: top คงที่ 14px
+   ขณะ scroll) ส่วน hidden ที่ body = body กลายเป็น scroll container → sticky พัง */
+html,
+body {
+  overflow-x: clip;
+}
+
 body {
   @apply bg-surface text-slate-200;
   /* กัน iOS ซูมอัตโนมัติเมื่อแตะ input ครั้งเดียว (font-size < 16px) */
@@ -686,6 +699,107 @@ button:not(:disabled):active {
   main .grid > .panel:not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(table)):not(:has(iframe)):not(:has(canvas))
 ):active::after {
   opacity: 0.85;
+}
+
+/* ---------- ScrollZoomHero: GSAP ScrollTrigger image zoom (effect #26) ----------
+   แบ็กกราวด์ด้านบนสุดของหน้าแรก — แบนด์เต็มความกว้างจอ ติดขอบบนสุด
+   (y = 0 ต่อจาก header เลย) ไม่กินพื้นที่ layout (position:absolute)
+   และไม่รับ pointer event ใด ๆ
+   การ์ดทุกใบในหน้า (page.tsx ห่อไว้ด้วย relative z-10) จึงลอยทับอยู่ข้างบน
+
+   "กล้องค่อย ๆ ซูมเข้า" ตามการเลื่อนหน้า — ภาพพื้นหลังขยายพร้อมกับเลเยอร์
+   แสง (ไกล) · กริด HUD (กลาง) · โบเก้ (ใกล้) ที่ขยายด้วยอัตราต่างกัน
+   ต่างกันเท่าไร = ความลึก 3D มากขึ้นเท่านั้น (ไม่ใช่ย่อทั้งบล็อกพร้อมกัน)
+   GSAP เป็นตัวขับ transform ทั้งหมด (โหลดแบบ dynamic import ในคอมโพเนนต์)
+   ค่าที่เขียนไว้ที่นี่ = ภาพนิ่งก่อน hydrate และเป็น fallback ตอน
+   prefers-reduced-motion (JS จะไม่แตะเลยถ้าผู้ใช้ปิดอนิเมชัน)
+
+   เลเยอร์: [ล่างสุด] แบ็กกราวด์เดิมของแอป (body aurora + BackgroundLayer
+   ที่ผู้ใช้อัปโหลด — fixed z ลบ)  →  [บน] แบนด์ฮีโร่นี้  →  [บนสุด] เนื้อหา
+   ปลายล่างของแบนด์จึงใช้ mask จางหายเป็น alpha (ไม่ทับด้วยสีดำ)
+   → แบ็กกราวด์เดิมยังเป็นชั้นล่างสุดและมองเห็นได้ต่อเนื่อง */
+.zoom-hero {
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    #000 0%,
+    #000 56%,
+    rgba(0, 0, 0, 0.55) 80%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    180deg,
+    #000 0%,
+    #000 56%,
+    rgba(0, 0, 0, 0.55) 80%,
+    transparent 100%
+  );
+}
+.zoom-hero-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* จุดหมุนเยื้องไปทางขวา+บน = ซูมเข้าหา "ดวงไฟขอบฟ้า" ในภาพ ไม่ใช่กลางภาพเป๊ะ */
+  transform-origin: 62% 46%;
+  will-change: transform;
+  backface-visibility: hidden;
+}
+.zoom-hero-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transform-origin: 62% 46%;
+  will-change: transform;
+  backface-visibility: hidden;
+}
+.zoom-hero-glow {
+  background:
+    radial-gradient(58% 62% at 24% 30%, rgba(10, 132, 255, 0.34), transparent 70%),
+    radial-gradient(50% 56% at 78% 22%, rgba(140, 90, 255, 0.28), transparent 72%),
+    radial-gradient(64% 50% at 62% 94%, rgba(255, 159, 10, 0.22), transparent 76%);
+  mix-blend-mode: screen;
+}
+.zoom-hero-grid {
+  background-image:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.13) 0 1px, transparent 1px 76px),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.09) 0 1px, transparent 1px 76px);
+  -webkit-mask-image: radial-gradient(122% 92% at 60% 56%, #000 0%, transparent 74%);
+  mask-image: radial-gradient(122% 92% at 60% 56%, #000 0%, transparent 74%);
+}
+.zoom-hero-bokeh {
+  background-image:
+    radial-gradient(circle at 12% 78%, rgba(255, 255, 255, 0.5) 0 6px, transparent 7px),
+    radial-gradient(circle at 26% 62%, rgba(10, 132, 255, 0.6) 0 9px, transparent 10px),
+    radial-gradient(circle at 47% 84%, rgba(255, 212, 121, 0.55) 0 5px, transparent 6px),
+    radial-gradient(circle at 68% 58%, rgba(255, 255, 255, 0.4) 0 8px, transparent 9px),
+    radial-gradient(circle at 86% 76%, rgba(140, 90, 255, 0.5) 0 7px, transparent 8px);
+  filter: blur(0.6px);
+}
+/* รูปที่ผู้ใช้ตั้งใน Settings (.zoom-hero--custom = ภาพถ่าย ไม่ใช่ภาพวาดประกอบ)
+   → ลดแสงบรรยากาศลง (ไม่ให้ย้อมสีรูปจนเพี้ยน) และซูมจากกลางภาพ
+   เพราะจุดสนใจของภาพถ่ายมักอยู่กลางภาพ ไม่เหมือนดวงไฟในภาพวาดเริ่มต้น
+   ส่วน grid/bokeh ถูกตัดออกตั้งแต่ใน JSX (ไม่ render) */
+.zoom-hero--custom .zoom-hero-glow {
+  background:
+    radial-gradient(60% 64% at 30% 32%, rgba(10, 132, 255, 0.16), transparent 72%),
+    radial-gradient(52% 58% at 76% 26%, rgba(140, 90, 255, 0.14), transparent 74%),
+    radial-gradient(66% 52% at 58% 94%, rgba(255, 159, 10, 0.1), transparent 78%);
+}
+.zoom-hero--custom .zoom-hero-img {
+  transform-origin: 50% 45%;
+}
+/* ชั้นนิ่ง (ไม่ซูม) — ขอบมืดด้านบนให้การ์ดแถวบนสุดอ่านออกบนภาพที่สว่าง */
+.zoom-hero-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.72) 0%,
+    rgba(0, 0, 0, 0.22) 26%,
+    rgba(0, 0, 0, 0) 52%
+  );
 }
 
 @keyframes lg-fade-in {

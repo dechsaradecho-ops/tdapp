@@ -73,6 +73,8 @@ body {
 
 ⚠️ **ห้ามเบลอรูปพื้นหลังทั้งใบ** — เดิมเคยใส่ `filter: blur(14px)` บนตัวรูปเพื่อชดเชย backdrop-filter ที่ดับบน Android แต่ user ต้องการเห็นรูปชัด → ลดเหลือ `blur(2px)` + `scale(1.03)` (กันขอบรูปขาวเพราะเบลอ) เท่านั้น ความฝ้าของแก้วให้มาจาก backdrop-filter ของ `.panel`/dock เอง + scrim ดำ
 
+**แบบด์ image zoom หน้าหลัก (ScrollZoomHero):** `position: absolute; inset-x-0; top: 0` — mount ผ่าน `<HomeHero />` ใน `app/layout.tsx` **ก่อน `<DesktopNav />` และนอก `<main>`** เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้า ตรงกับ header (ถ้าอยู่ใน `<main>` จะโดน padding `py-4/sm:py-5` ของ main + ความสูง sticky nav ลงมาอีก ~90px) · `HomeHero` เป็น client component ที่ gate ด้วย `usePathname() === "/"` (หน้าอื่น return `null`; ตอน prerender แต่ละหน้ามี pathname ของตัวเอง จึงได้แถบมาใน HTML แรก) · ไม่กิน layout (absolute) + `pointer-events-none` → เนื้อหาห่อด้วย `relative z-10` ให้ลอยอยู่ข้างบน · ปลายล่างจางเป็น alpha ด้วย `mask-image` (ไม่ทับด้วยสีดำ) เพื่อคง BackgroundLayer/aurora เป็นชั้นล่างสุด · GSAP ScrollTrigger scrub `top top` → `bottom 25%` ขับ "camera dolly-in" (ภาพ + เลเยอร์แสง/กริด/โบเก้ ซูมคนละอัตรา) · เปลี่ยนรูปได้ใน Settings → "แบบด์ image zoom หน้าหลัก (Hero)" = `BackgroundPicker variant="hero"` เก็บ localStorage key `tdapp_hero_image` (1920px, JPEG q0.72, dim slider ปิด) + event `tdapp:hero-changed`; ใส่รูปเองแล้วจะตัด grid/bokeh ออกและซูมจากกลางภาพ (เหลือ glow จาง + vignette) · ใช้ `inset-x-0` **ไม่ใช่ `w-screen`** (100vw นับ scrollbar ทำให้เกิด scroll แนวนอน) และต้องมี `html { overflow-x: clip }` (ห้าม `hidden` — จะสร้าง scroll container แล้วพัง `position: sticky` ของ DesktopNav)
+
 ---
 
 ## 4. การ์ดแก้ว — `.panel` (สูตรหลักของทั้งเว็บ)

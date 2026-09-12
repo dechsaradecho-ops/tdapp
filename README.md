@@ -14,7 +14,7 @@ AI-driven market analysis, goal feasibility assessment, risk management, and LIN
 | Backend | FastAPI (Python 3.11+) |
 | Database | Supabase PostgreSQL — single source of truth for account data |
 | Auth | 6-digit PIN (server-side hashed), in-memory sessions + Bearer token |
-| AI Provider | DeepSeek or GLM (pluggable via `ai.config.json`) |
+| AI Provider | DeepSeek or GLM — model + base URL configurable from the Settings page (falls back to `ai.config.json`) |
 | Trading | Paper-trading engine; broker adapters (MT5 / OANDA / IB) behind an adapter interface |
 | Notifications | LINE Messaging API |
 | Deployment | Render.com — `tdapp-api` (web, workers embedded) + `tdapp-web` (static) |
@@ -43,8 +43,8 @@ tdapp/
 │   │   ├── services/         # DB access, execution (paper trades), PIN auth, quote log
 │   │   └── workers/          # Market Scanner, News Analysis, Auto Trader, Notifier, ...
 │   ├── scripts/              # Ops probes: check_*.py, poll_*.py, smoke_stream.py, ...
-│   └── tests/                # Pytest suite (415 tests)
-├── database/                 # Supabase migrations 001–020 (run manually in SQL Editor)
+│   └── tests/                # Pytest suite (676 tests)
+├── database/                 # Supabase migrations 001–034 (run manually in SQL Editor)
 ├── UI-DESIGN-SYSTEM.md       # iOS Liquid Glass Dark — hard rules for UI work
 ├── docker-compose.yml        # Local infra (redis)
 └── render.yaml               # Render.com blueprint (api + workers + static web)
@@ -150,7 +150,8 @@ Single-user dashboard — no Supabase Auth:
 | Capital, PnL, equity snapshots, paper trades, signals | Supabase (source of truth) |
 | App settings + risk limits | `trading_settings` row (Supabase) |
 | Monitor / signals refresh intervals | `trading_settings` (migration 019 — moved out of localStorage) |
-| Wallpaper, session token, AI chat history | `localStorage` — device-local UI state only |
+| AI model name + base URL | `trading_settings` (migration 034 — `ai_model`, `ai_base_url`) |
+| Wallpaper + hero image, hero dim, session token, AI chat history | `localStorage` — device-local UI state only |
 
 - Portfolio numbers come from `/api/trading/monitor` (unrealized PnL computed from open positions).
 - รีเซ็ตสถิติ (stats reset) deletes closed trades and wipes + reseeds `equity_snapshots` to capital.
@@ -166,6 +167,18 @@ Single-user dashboard — no Supabase Auth:
 - While waiting: bouncing-dots "AI กำลังคิด..." indicator with an elapsed-seconds counter,
   visible for the entire stream.
 
+### Model & base URL (Settings → "AI Chat — โมเดล & URL")
+
+- **Precedence:** Settings page (DB) → `backend/ai.config.json` → provider default. Leaving a
+  field blank keeps whatever the file says. Applies to the chat, LINE commands and the
+  explain/journal calls — **immediately, no redeploy** (`get_ai_provider()` is built per request).
+- The **API key is never stored in the DB** — it stays in the `AI_API_KEY` env var of the service.
+- `POST /api/ai/test` powers the "ทดสอบการเชื่อมต่อ" button: it uses the values **typed in the
+  form (still unsaved)**, does a one-line round trip and restores the saved config afterwards,
+  so a new gateway/model can be verified before saving. Exposed as `GET /health` → `ai_config`
+  (`model_source` / `url_source` = `settings` | `config-file`).
+- Base URL accepts a pasted full endpoint — a trailing `/chat/completions` is trimmed.
+
 ## Deployment (Render.com)
 
 `render.yaml` blueprint — 2 services:
@@ -178,9 +191,10 @@ Single-user dashboard — no Supabase Auth:
 - แยก worker service (tdapp-workers) ถูกตัดออกแล้ว — ถ้ารันคู่กับ ENABLE_WORKERS=1 จะยิง
   order/แจ้งเตือนซ้ำสองเท่า (ดู comment ใน render.yaml หากต้องการเปิดกลับ)
 
-Database migrations (`database/001–020`) are run manually in the Supabase SQL Editor.
-Latest: `020_notification_categories.sql` — per-category LINE notification toggles
-(`notify_*` booleans on `trading_settings` + `skipped` enum value + `notifications.error`).
+Database migrations (`database/001–034`) are run manually in the Supabase SQL Editor.
+Latest: `034_ai_chat_settings.sql` — `ai_model` + `ai_base_url` on `trading_settings`
+(AI chat model/base URL editable from the Settings page). Until it is applied, saving still
+works — the settings PUT skips unknown columns on PostgREST `PGRST204` and says so in the reply.
 
 ## Development Rules (AI safety contract)
 

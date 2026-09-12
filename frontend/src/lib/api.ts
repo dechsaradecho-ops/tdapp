@@ -1,5 +1,6 @@
 import {
   API_BASE,
+  AITestResult,
   AppSettings,
   BacktestConfig,
   BacktestResult,
@@ -220,6 +221,13 @@ export const api = {
 
   applyRiskPreset: (profile: string) =>
     post<SettingsSaveResult>(`/api/settings/preset/${profile}`, {}),
+
+  // ---------- AI chat (Settings page) ----------
+  // POST /api/ai/test — ยิงคำถามสั้น ๆ ไปยัง model/base URL ที่ตั้งไว้ เพื่อ
+  // เช็คว่าใช้งานได้จริงก่อนบันทึก (ส่งค่าที่กำลังพิมพ์ในฟอร์มไปด้วยได้ →
+  // ทดสอบได้โดยยังไม่ต้อง save) — backend คืน 200 เสมอ, อ่าน ok/error
+  aiTest: (opts?: { model?: string; base_url?: string }) =>
+    post<AITestResult>("/api/ai/test", opts ?? {}),
 
   // ---------- Execution switch (Phase 1) ----------
   getTradingPause: () => get<PauseStatus>("/api/trading/pause"),

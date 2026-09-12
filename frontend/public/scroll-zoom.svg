@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" preserveAspectRatio="xMidYMid slice">
+  <!--
+    ภาพ backdrop สำหรับ ScrollZoomHero (effects #26, GSAP ScrollTrigger image zoom)
+    ธีมเดียวกับแอป: ท้องฟ้า liquid glass + แนวเทือกเขาที่ไล่ระดับความลึก 3 ชั้น
+    (ไกล → กลาง → ใกล้) + เทียนไข่ปลาเทรด + เส้นกริด perspective
+    ทำเป็น SVG เพราะซูมเท่าไรก็ไม่แตก (เวกเตอร์) และไฟล์เล็กกว่า PNG มาก
+  -->
+  <defs>
+    <linearGradient id="z-sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#03050a" />
+      <stop offset="0.42" stop-color="#060c1a" />
+      <stop offset="0.72" stop-color="#0a1426" />
+      <stop offset="1" stop-color="#050810" />
+    </linearGradient>
+    <radialGradient id="z-aurora-blue" cx="0.28" cy="0.34" r="0.62">
+      <stop offset="0" stop-color="#0a84ff" stop-opacity="0.55" />
+      <stop offset="1" stop-color="#0a84ff" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="z-aurora-violet" cx="0.72" cy="0.22" r="0.58">
+      <stop offset="0" stop-color="#8c5aff" stop-opacity="0.42" />
+      <stop offset="1" stop-color="#8c5aff" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="z-aurora-emerald" cx="0.5" cy="0.8" r="0.5">
+      <stop offset="0" stop-color="#30d158" stop-opacity="0.22" />
+      <stop offset="1" stop-color="#30d158" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="z-orb" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff4d6" />
+      <stop offset="0.32" stop-color="#ffd479" stop-opacity="0.95" />
+      <stop offset="0.62" stop-color="#ff9f0a" stop-opacity="0.42" />
+      <stop offset="1" stop-color="#ff9f0a" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="z-far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2942" />
+      <stop offset="1" stop-color="#0d1730" />
+    </linearGradient>
+    <linearGradient id="z-mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#101b2f" />
+      <stop offset="1" stop-color="#070c18" />
+    </linearGradient>
+    <linearGradient id="z-near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0f1c" />
+      <stop offset="1" stop-color="#02040a" />
+    </linearGradient>
+    <linearGradient id="z-floor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a84ff" stop-opacity="0.16" />
+      <stop offset="1" stop-color="#0a84ff" stop-opacity="0" />
+    </linearGradient>
+    <linearGradient id="z-vignette" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.55" />
+      <stop offset="0.35" stop-color="#000000" stop-opacity="0" />
+      <stop offset="0.72" stop-color="#000000" stop-opacity="0" />
+      <stop offset="1" stop-color="#000000" stop-opacity="0.72" />
+    </linearGradient>
+    <filter id="z-blur-lg" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="46" />
+    </filter>
+    <filter id="z-blur-sm" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" />
+    </filter>
+    <filter id="z-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="4" />
+    </filter>
+  </defs>
+
+  <!-- ===== ชั้นไกลสุด: ท้องฟ้า + ออโรร่า ===== -->
+  <rect width="1600" height="900" fill="url(#z-sky)" />
+  <g filter="url(#z-blur-lg)">
+    <ellipse cx="430" cy="300" rx="620" ry="330" fill="url(#z-aurora-blue)" />
+    <ellipse cx="1160" cy="200" rx="560" ry="300" fill="url(#z-aurora-violet)" />
+    <ellipse cx="860" cy="740" rx="700" ry="280" fill="url(#z-aurora-emerald)" />
+  </g>
+
+  <!-- ดาว -->
+  <g fill="#e8f1ff">
+    <circle cx="120" cy="96" r="1.6" opacity="0.75" />
+    <circle cx="214" cy="182" r="1.1" opacity="0.5" />
+    <circle cx="318" cy="72" r="1.9" opacity="0.85" />
+    <circle cx="392" cy="246" r="1.2" opacity="0.45" />
+    <circle cx="486" cy="132" r="1.4" opacity="0.65" />
+    <circle cx="566" cy="304" r="1.0" opacity="0.4" />
+    <circle cx="648" cy="98" r="1.7" opacity="0.7" />
+    <circle cx="742" cy="214" r="1.2" opacity="0.48" />
+    <circle cx="836" cy="66" r="1.5" opacity="0.78" />
+    <circle cx="928" cy="286" r="1.1" opacity="0.42" />
+    <circle cx="1012" cy="124" r="1.8" opacity="0.72" />
+    <circle cx="1108" cy="236" r="1.2" opacity="0.5" />
+    <circle cx="1204" cy="88" r="1.4" opacity="0.68" />
+    <circle cx="1298" cy="268" r="1.0" opacity="0.4" />
+    <circle cx="1392" cy="140" r="1.6" opacity="0.66" />
+    <circle cx="1478" cy="298" r="1.2" opacity="0.44" />
+    <circle cx="1560" cy="106" r="1.5" opacity="0.6" />
+    <circle cx="660" cy="368" r="1.0" opacity="0.34" />
+    <circle cx="176" cy="330" r="1.1" opacity="0.36" />
+    <circle cx="1340" cy="386" r="1.0" opacity="0.32" />
+  </g>
+
+  <!-- ดวงไฟขอบฟ้า (gold) -->
+  <g filter="url(#z-blur-sm)">
+    <circle cx="1128" cy="452" r="118" fill="url(#z-orb)" />
+  </g>
+  <circle cx="1128" cy="452" r="26" fill="#fff6e0" opacity="0.92" filter="url(#z-glow)" />
+  <circle cx="1128" cy="452" r="15" fill="#ffffff" opacity="0.95" />
+
+  <!-- ===== ชั้นถัดมา: เทือกเขาไกล ===== -->
+  <path d="M0 640 L120 596 L250 626 L380 566 L520 598 L660 536 L800 568 L940 508 L1080 542 L1220 486 L1360 520 L1500 462 L1600 486 L1600 900 L0 900 Z"
+        fill="url(#z-far)" opacity="0.9" />
+
+  <!-- ===== ชั้นกลาง: เทือกเขาที่มีแสงทองจากขอบ ===== -->
+  <path d="M0 720 L130 676 L260 706 L400 648 L540 682 L690 620 L840 656 L980 596 L1120 632 L1136 630 L1180 574 L1320 610 L1460 552 L1600 586 L1600 900 L0 900 Z"
+        fill="url(#z-mid)" />
+  <path d="M0 720 L130 676 L260 706 L400 648 L540 682 L690 620 L840 656 L980 596 L1120 632 L1136 630 L1180 574 L1320 610 L1460 552 L1600 586"
+        fill="none" stroke="#ffd479" stroke-opacity="0.5" stroke-width="2.4" />
+
+  <!-- ===== เส้นกริด perspective (พื้นตลาด) ===== -->
+  <g stroke="#8fbcff" stroke-opacity="0.16" stroke-width="1.2">
+    <path d="M0 594 H1600" />
+    <path d="M0 608 H1600" />
+    <path d="M0 626 H1600" />
+    <path d="M0 650 H1600" />
+    <path d="M0 682 H1600" />
+    <path d="M0 724 H1600" />
+    <path d="M0 778 H1600" />
+    <path d="M0 846 H1600" />
+    <g stroke-opacity="0.13">
+      <path d="M800 594 L-260 900" />
+      <path d="M800 594 L120 900" />
+      <path d="M800 594 L430 900" />
+      <path d="M800 594 L690 900" />
+      <path d="M800 594 L910 900" />
+      <path d="M800 594 L1170 900" />
+      <path d="M800 594 L1480 900" />
+      <path d="M800 594 L1860 900" />
+    </g>
+  </g>
+  <rect x="0" y="594" width="1600" height="306" fill="url(#z-floor)" />
+
+  <!-- ===== ชั้นใกล้สุด: เทือกเขาดำ + เทียนเทรด ===== -->
+  <path d="M0 828 L150 792 L300 820 L470 762 L640 800 L810 736 L980 776 L1150 714 L1320 756 L1490 696 L1600 726 L1600 900 L0 900 Z"
+        fill="url(#z-near)" />
+
+  <g>
+    <!-- เทียนขาขึ้น (เขียว) / ขาลง (แดง) — วางไล่ระดับขึ้นจากซ้ายไปขวาให้ตรงกับเทรนด์ -->
+    <g stroke-width="3">
+      <g stroke="#30d158" fill="#30d158">
+        <path d="M180 790 V860" /><rect x="167" y="806" width="26" height="40" rx="4" />
+        <path d="M330 764 V842" /><rect x="317" y="784" width="26" height="44" rx="4" />
+        <path d="M480 790 V856" /><rect x="467" y="802" width="26" height="38" rx="4" />
+        <path d="M630 726 V806" /><rect x="617" y="748" width="26" height="42" rx="4" />
+        <path d="M780 760 V830" /><rect x="767" y="774" width="26" height="40" rx="4" />
+        <path d="M930 698 V780" /><rect x="917" y="720" width="26" height="46" rx="4" />
+        <path d="M1080 730 V802" /><rect x="1067" y="744" width="26" height="42" rx="4" />
+        <path d="M1230 668 V750" /><rect x="1217" y="690" width="26" height="44" rx="4" />
+        <path d="M1380 700 V772" /><rect x="1367" y="716" width="26" height="40" rx="4" />
+        <path d="M1520 646 V726" /><rect x="1507" y="666" width="26" height="44" rx="4" />
+      </g>
+      <g stroke="#ff453a" fill="#ff453a" opacity="0.92">
+        <path d="M255 776 V852" /><rect x="242" y="792" width="26" height="42" rx="4" />
+        <path d="M405 756 V830" /><rect x="392" y="776" width="26" height="38" rx="4" />
+        <path d="M555 776 V844" /><rect x="542" y="788" width="26" height="40" rx="4" />
+        <path d="M705 726 V798" /><rect x="692" y="742" width="26" height="38" rx="4" />
+        <path d="M855 748 V820" /><rect x="842" y="762" width="26" height="42" rx="4" />
+        <path d="M1005 700 V772" /><rect x="992" y="716" width="26" height="40" rx="4" />
+        <path d="M1155 726 V796" /><rect x="1142" y="740" width="26" height="38" rx="4" />
+        <path d="M1305 672 V744" /><rect x="1292" y="688" width="26" height="40" rx="4" />
+        <path d="M1455 692 V764" /><rect x="1442" y="706" width="26" height="40" rx="4" />
+        <path d="M1585 650 V722" /><rect x="1572" y="666" width="26" height="38" rx="4" />
+      </g>
+    </g>
+    <!-- เงาสะท้อน/เรืองแสงใต้เทียน -->
+    <g fill="#ffffff" opacity="0.07">
+      <rect x="160" y="862" width="40" height="34" rx="6" />
+      <rect x="310" y="850" width="40" height="46" rx="6" />
+      <rect x="610" y="800" width="40" height="52" rx="6" />
+      <rect x="910" y="772" width="40" height="56" rx="6" />
+      <rect x="1210" y="742" width="40" height="58" rx="6" />
+      <rect x="1500" y="716" width="40" height="60" rx="6" />
+    </g>
+  </g>
+
+  <!-- เส้นเทรนด์เรืองแสงพาดผ่าน (เส้นเดียวกับที่ให้ความรู้สึก "กราฟ") -->
+  <path d="M120 838 L340 800 L560 818 L780 762 L1000 782 L1220 720 L1440 740 L1580 686"
+        fill="none" stroke="#0a84ff" stroke-opacity="0.75" stroke-width="4"
+        stroke-linecap="round" stroke-linejoin="round" filter="url(#z-glow)" />
+
+  <!-- ===== ขอบมืด (vignette) ให้เหมือนเลนส์กล้อง ===== -->
+  <rect width="1600" height="900" fill="url(#z-vignette)" />
+</svg>

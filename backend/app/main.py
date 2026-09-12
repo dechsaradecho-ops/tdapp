@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import (ai, auth, chat, goal, market, portfolio, risk, settings as settings_routes, signals,
                             system, trading, webhook)
+from app.core.ai_config import describe_ai_config, set_ai_overrides
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.integrations.ai_provider import get_ai_provider
@@ -213,6 +214,19 @@ async def lifespan(app: FastAPI):
     # Quote API call log (7-day auto-expiry) writes through this module-level
     # reference — quotes.py logs every external price fetch via quote_log.
     quote_log.set_db(app.state.db)
+
+    # AI model + base URL are configurable from the Settings page and stored in
+    # the trading_settings row (migration 034_ai_chat_settings.sql). Load them
+    # at boot so a restart keeps the user's choice — and so the workers started
+    # further down use the right model from their very first tick. Empty values
+    # fall back to ai.config.json / provider defaults (see app/core/ai_config).
+    try:
+        stored = settings_routes.get_app_settings(app.state.db)
+        set_ai_overrides(url=stored.ai_base_url, model=stored.ai_model)
+        log.info("AI config at boot: %s", describe_ai_config())
+    except Exception:
+        log.exception("load AI overrides from settings failed "
+                      "(continuing with ai.config.json)")
 
     # The PaperBroker book is in-memory — restore any DB rows still marked
     # "open" so position_guard can enforce their SL/TP again after a restart
@@ -419,4 +433,9 @@ async def health() -> dict:
         "db": "ok" if db.available else "unavailable",
         "db_detail": (db.init_error or "connected"),
         "ai": provider.name,
+        # Which model/base URL the AI is ACTUALLY using, plus whether it came
+        # from the Settings page or ai.config.json. A wrong model name used to
+        # be undebuggable from outside the service (the file is not readable
+        # from Render) — now `curl /health | jq .ai_config` answers it.
+        "ai_config": describe_ai_config(),
     }

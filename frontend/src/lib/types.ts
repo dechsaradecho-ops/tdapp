@@ -692,6 +692,13 @@ export interface AppSettings {
   notify_daily_summary: boolean;
   /** Tradable universe — scanner analyses + platform trades these pairs only */
   allowed_assets: string[];
+  /** AI chat model name (Settings page) — "" = use backend/ai.config.json.
+   *  Applies to the chat widget, LINE webhook and journal explanations; takes
+   *  effect immediately after save (no redeploy). */
+  ai_model: string;
+  /** OpenAI-compatible base URL (e.g. https://api.deepseek.com) — "" = use
+   *  ai.config.json. /chat/completions is appended by the backend. */
+  ai_base_url: string;
 }
 
 /** Pairs the price feeds cover (mirror of backend quotes.SUPPORTED_ASSETS).
@@ -711,6 +718,23 @@ export interface SettingsSaveResult {
   ok: boolean;
   settings: AppSettings;
   message: string;
+}
+
+/** Response of POST /api/ai/test — the Settings page "ทดสอบการเชื่อมต่อ"
+ *  button. 200 even on failure: `ok:false` + `error` carry the reason so it
+ *  can be shown inline instead of a toast. `provider`/`model`/`base_url` are
+ *  the values the backend ACTUALLY used for the round trip (so a wrong model
+ *  name or a stale URL is visible at a glance). */
+export interface AITestResult {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  base_url?: string;
+  /** Short reply text from the model (truncated) — proof it really answered */
+  reply?: string;
+  error?: string;
+  /** Effective (non-secret) AI config snapshot from the backend */
+  info?: Record<string, string>;
 }
 
 /** Daily OHLC candle from GET /api/market/candles (oldest-first). */

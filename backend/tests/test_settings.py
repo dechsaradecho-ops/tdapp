@@ -647,7 +647,10 @@ def test_risk_presets_moderate_matches_defaults():
                 "notify_daily_summary", "allowed_assets",
                 # exit-side simulation cost (migration 033) — a realism knob,
                 # not a risk-profile field
-                "paper_exit_spread_mult", "paper_commission_per_lot"}
+                "paper_exit_spread_mult", "paper_commission_per_lot",
+                # AI chat model/base URL (migration 034) — an infrastructure
+                # choice the user owns; a risk preset must never overwrite it
+                "ai_model", "ai_base_url"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded
@@ -709,3 +712,97 @@ async def test_post_preset_applies_and_keeps_identity():
     assert body["settings"]["capital"] == 50_000
     assert body["settings"]["min_lot"] == 0.05
     assert body["settings"]["notify_trade_opened"] is False
+
+
+# ---------------------------------------------------------------------------
+# AI chat model + base URL (migration 034) — changeable from the Settings page
+# ---------------------------------------------------------------------------
+def tearDownModule():                                  # noqa: N802 (pytest hook)
+    # Overrides are module-level process state — never leak them into other
+    # test modules that assert provider/model values.
+    from app.core.ai_config import clear_ai_overrides
+    clear_ai_overrides()
+
+
+@pytest.mark.asyncio
+async def test_put_settings_overrides_ai_model_and_url_immediately():
+    """PUT /api/settings must switch the LIVE AI config (no redeploy), and a
+    pasted full /chat/completions URL is trimmed back to the base."""
+    from app.core.ai_config import clear_ai_overrides, describe_ai_config
+
+    clear_ai_overrides()
+    db = SettingsDatabase(None)
+    set_state(db)
+    base_before = describe_ai_config()
+    assert base_before["model_source"] == "config-file"
+
+    res = await call("PUT", "/api/settings", {
+        "ai_model": "my-test-model",
+        "ai_base_url": "https://gateway.example/v1/chat/completions",
+    })
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["settings"]["ai_model"] == "my-test-model"
+    assert db._client.row["ai_model"] == "my-test-model"
+
+    info = describe_ai_config()
+    assert info["model"] == "my-test-model"
+    assert info["base_url"] == "https://gateway.example/v1"  # trimmed
+    assert info["model_source"] == "settings"
+    assert info["url_source"] == "settings"
+    clear_ai_overrides()
+
+
+@pytest.mark.asyncio
+async def test_put_settings_ignores_non_http_ai_base_url():
+    """A malformed URL must not silently break every AI call — fall back to the
+    file/default value and tell the user in the save message."""
+    from app.core.ai_config import clear_ai_overrides, describe_ai_config
+
+    clear_ai_overrides()
+    before = describe_ai_config()
+    set_state(SettingsDatabase(None))
+    res = await call("PUT", "/api/settings", {"ai_base_url": "api.deepseek.com"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert "ai_base_url" in body["message"]                # warning surfaced
+    assert describe_ai_config()["base_url"] == before["base_url"]
+    clear_ai_overrides()
+
+
+@pytest.mark.asyncio
+async def test_reset_settings_clears_ai_overrides():
+    from app.core.ai_config import clear_ai_overrides, describe_ai_config
+
+    clear_ai_overrides()
+    set_state(SettingsDatabase(None))
+    await call("PUT", "/api/settings", {"ai_model": "temp-model"})
+    assert describe_ai_config()["model_source"] == "settings"
+    res = await call("POST", "/api/settings/reset", {})
+    assert res.status_code == 200
+    assert describe_ai_config()["model_source"] == "config-file"
+
+
+@pytest.mark.asyncio
+async def test_put_settings_survives_both_ai_columns_missing():
+    """PostgREST204 for ai_model AND ai_base_url (migration 034 not applied):
+    both columns are skipped in ONE save — the rest still persists."""
+    from app.core.ai_config import clear_ai_overrides
+
+    clear_ai_overrides()
+    db = SettingsDatabase(None)
+    db._client = FakeSettingsClient(
+        None, fail_columns=("ai_model", "ai_base_url"))
+    set_state(db)
+    res = await call("PUT", "/api/settings",
+                     {"ai_model": "m", "ai_base_url": "https://g.example",
+                      "min_confidence": 75})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert "ai_model" in body["message"] and "ai_base_url" in body["message"]
+    assert db._client.row["min_confidence"] == 75
+    assert "ai_model" not in db._client.row
+    clear_ai_overrides()
