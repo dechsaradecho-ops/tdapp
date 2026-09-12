@@ -878,7 +878,10 @@ export default function MonitorPage() {
                   </Fragment>
                   );
                 })}
-                <tr className="border-t-2 border-slate-700 font-bold whitespace-nowrap">
+                {/* เส้นคั่นแถวรวม uPnL — ต้องหนาเท่าแถวอื่น (border-t = 1px)
+                    เดิมเป็น border-t-2 (2px) ผู้ใช้เห็นเป็น "เส้นล่างสุดหนาเกินไป"
+                    ยังแยกแถวรวมได้ด้วย font-bold + pill เขียว/แดง ไม่ต้องพึ่งความหนาเส้น */}
+                <tr className="border-t border-slate-700 font-bold whitespace-nowrap">
                   <td className="py-2 pr-4" colSpan={7}>รวม uPnL ({snap.open_positions.length} ไม้)</td>
                   <td className="py-2 pr-4">
                     <span className={unrealizedTotal >= 0 ? "text-profit" : "text-loss"}>
