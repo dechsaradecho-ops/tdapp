@@ -196,42 +196,31 @@ input[type="checkbox"] {
   opacity: 0.5;
 }
 
-/* ---------- iOS 26 Liquid Glass dock — เม็ดแก้วเหลว (liquid pill) ----------
-   ตัวชี้แท็บ active ของเมนูล่าง MobileNav — เลื่อนตามแท็บด้วย spring easing
-   (เลียนแบบ Lottie "iOS 26 inspired tab menu" ด้วย CSS ล้วน)
-   ตัวเลข position/width มาจาก JS วัดจริง (style inline ใน MobileNav.tsx) */
-.dock-pill {
-  position: absolute;
-  top: 0.25rem;
-  bottom: 0.25rem;
-  left: 0;
-  border-radius: 1.05rem;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.07) 55%, rgba(255, 255, 255, 0.12));
-  -webkit-backdrop-filter: blur(12px) saturate(180%) brightness(1.12);
-  backdrop-filter: blur(12px) saturate(180%) brightness(1.12);
-  border: 1px solid rgba(255, 255, 255, 0.30);
-  border-top-color: rgba(255, 255, 255, 0.55);
-  box-shadow:
-    0 2px 12px rgba(0, 0, 0, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.35),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.10);
-  /* spring เหลว: overshoot เล็กน้อยแล้วเด้งกลับ — ให้ความรู้สึก "ของเหลว" */
-  transition:
-    transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    width 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    opacity 200ms ease;
-  will-change: transform, width;
+/* ---------- LiquidGlassNav mobile dock (framework: webgl-liquid-glass) ----------
+   Bottom dock ใน MobileNav.tsx = <LiquidGlassNav> จาก package
+   (CSS backdrop-filter + WebGL canvas + spring physics อยู่ในตัว component)
+   ที่นี่เหลือเฉพาะ tuning ที่ package เปิด prop ให้ไม่ได้:
+
+   1) package ตั้ง padding ของแท็บด้วย inline style (6px 20px) → dock 5 แท็บ
+      กว้าง ~373px ซึ่งล้นจอมือถือ ≤ 360px
+   2) แท็บไม่มี flex → ความกว้างไม่เท่ากัน (dock เดิม 5 แท็บเท่ากัน)
+   ต้องใช้ !important เพราะ inline style ชนะ stylesheet ปกติเสมอ
+   หมายเหตุ: pill ของ component วัดจาก getBoundingClientRect ของแท็บจริง
+   → flex ให้เท่ากันแล้ว ยังเลื่อนตรงแท็บทุกขนาดจอ */
+.dock-glass button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-left: 4px !important;
+  padding-right: 4px !important;
 }
-/* glare บนเม็ดแก้ว — แสงวาบด้านบนเหมือนเลนส์ */
-.dock-pill::after {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), transparent 45%);
-  mix-blend-mode: screen;
-  opacity: 0.6;
+/* label (span ตัวสุดท้าย) ต้องบรรทัดเดียว — ความกว้างแท็บแคบลงแล้ว */
+.dock-glass button > span:last-child {
+  white-space: nowrap;
+}
+/* ตัด scale(0.97) ตอนกดของ rule `button:not(:disabled):active` ด้านล่าง —
+   dock มี spring/โมเมนตัมของ package เป็นจังหวะกดของตัวเองอยู่แล้ว */
+.dock-glass button:not(:disabled):active {
+  transform: none;
 }
 
 /* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */
