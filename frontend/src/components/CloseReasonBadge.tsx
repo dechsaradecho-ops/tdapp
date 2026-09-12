@@ -270,7 +270,12 @@ export default function CloseReasonBadge({
         aria-label={title}
         aria-expanded={pop}
         data-close-reason={reason}
-        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-bold cursor-help touch-manipulation ${toneOf(reason, trade.pnl)}`}
+        /* ป้ายต้อง "บรรทัดเดียว" เสมอ — whitespace-nowrap กันชื่อยาว ๆ
+           (เช่น "สัญญาณกลับตัว") ตกบรรทัดแล้วทำให้แถวสูงไม่เท่ากัน;
+           ลด text เป็น 10px + padding แนวนอนแคบลง (px-1.5) ให้ป้ายกระทัดรัด
+           ส่วนความกว้างที่เพิ่มขึ้นให้ overflow-x-auto ของ wrapper จัดการ
+           (รายละเอียดเต็มอยู่ใน popup อยู่แล้ว จึงไม่ต้องตัดคำ) */
+        className={`inline-flex items-center whitespace-nowrap align-middle rounded-full border px-1.5 py-px text-[10px] leading-[15px] font-bold cursor-help touch-manipulation ${toneOf(reason, trade.pnl)}`}
       >
         {label}
       </button>
