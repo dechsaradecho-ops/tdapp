@@ -196,99 +196,168 @@ input[type="checkbox"] {
   opacity: 0.5;
 }
 
-/* ---------- LiquidGlassNav mobile dock (framework: webgl-liquid-glass) ----------
-   Bottom dock ใน MobileNav.tsx = <LiquidGlassNav> จาก package
-   (CSS backdrop-filter + WebGL canvas + spring physics อยู่ในตัว component)
-   ที่นี่เหลือเฉพาะ tuning ที่ package เปิด prop ให้ไม่ได้:
+/* ---------- Mobile bottom dock (เขียนเอง: DOM + CSS ล้วน ไม่มี WebGL) ----------
+   ก่อนหน้านี้ใช้ package `webgl-liquid-glass` แต่ pill ของมันถูกวาดใน fragment
+   shader ด้วย `color = vec3(1.0)` (ขาวล้วน) บวกแถบขอบ `pillEdge * 0.35` กว้าง
+   ~2px → ได้ "กรอบขาว" รอบแท็บที่แก้ไม่ได้เลย เพราะ prop activeColor /
+   inactiveColor ของ package มีผลกับตัวอักษร/ไอคอนใน DOM เท่านั้น ไม่ใช่สี pill
+   จึงเขียน dock เองทั้งหมด: มี pill เดียว ควบคุมหน้าตาได้ 100% และสปริง/ยืดบี้/
+   chromatic aberration/บิดด้วย SVG filter คำนวณใน MobileNav.tsx
+   ข้อดีที่ได้แถม: ไม่มี WebGL → ไม่เจอบั๊ก destroy()/loseContext กับ StrictMode
 
-   1) package ตั้ง padding ของแท็บด้วย inline style (6px 20px) → dock 5 แท็บ
-      กว้าง ~373px ซึ่งล้นจอมือถือ ≤ 360px
-   2) แท็บไม่มี flex → ความกว้างไม่เท่ากัน (dock เดิม 5 แท็บเท่ากัน)
-   ต้องใช้ !important เพราะ inline style ชนะ stylesheet ปกติเสมอ
-   หมายเหตุ: pill ของ component วัดจาก getBoundingClientRect ของแท็บจริง
-   → flex ให้เท่ากันแล้ว ยังเลื่อนตรงแท็บทุกขนาดจอ */
-.dock-glass button {
-  flex: 1 1 0;
-  min-width: 0;
-  padding-left: 4px !important;
-  padding-right: 4px !important;
-}
-/* label (span ตัวสุดท้าย) ต้องบรรทัดเดียว — ความกว้างแท็บแคบลงแล้ว */
-.dock-glass button > span:last-child {
-  white-space: nowrap;
-}
-/* ตัด scale(0.97) ตอนกดของ rule `button:not(:disabled):active` ด้านล่าง —
-   dock มี spring/โมเมนตัมของ package เป็นจังหวะกดของตัวเองอยู่แล้ว */
-.dock-glass button:not(:disabled):active {
-  transform: none;
+   หมายเหตุ: ห้ามใช้ backdrop-filter: url() ที่นี่ — Samsung Internet render dock พัง
+   (บทเรียนเดิมด้านบน) ความ "หักเห" จึงทำด้วย filter: url(#dock-glass-warp) บน
+   artwork ของ pill เอง — browser ไม่รองรับ = แค่ไม่บิด ไม่พัง */
+.dock-glass {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+  transform: translateX(-50%);
+  width: min(28rem, calc(100vw - 1.5rem));
+  height: 56px;
+  /* ต่ำกว่า GlassSelect 48 / AuthGate 50 → modal ยังคลุม dock ได้ */
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.08);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+  /* เงาลึก + ไฮไลต์ขอบบนบาง ๆ — ไม่ใช่วงขอบขาวรอบกล่อง */
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  /* pan-y: ปัดขึ้น/ลงจากโซน dock แล้วหน้าเว็บยังเลื่อนได้ ส่วนแนวนอนกันไว้ให้
+     ลาก pill เปลี่ยนแท็บ (browser จะไม่แย่ง gesture แนวนอนไป scroll) */
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-/* ---------- Fluid drag lens (FluidGlass-style — เขียนเอง ไม่ใช้ three/.glb) ----------
-   เลนส์แก้วเหลวที่ "ตามนิ้วแบบหนืด" ขณะลาก dock — ตำแหน่ง/สปริง/squash/chromatic
-   คำนวณใน MobileNav.tsx (ไม่ใช่ CSS) ที่นี่มีแค่หน้าตา
-   - อยู่ "นอก" <nav> ที่ z-index 41 + pointer-events: none → ไม่แตะ DOM ของ
-     package และไม่แย่ง pointer ของ drag ที่ package ทำอยู่
-   - ห้ามใช้ backdrop-filter: url() ที่ชั้นนี้ — Samsung Internet render dock พัง
-     (บทเรียนเดิมด้านบน) จึงทำ "ความหักเห" ด้วย filter: url(#dock-liquid-warp)
-     บน artwork ของเลนส์เอง ปลอดภัยทุก browser (ไม่รองรับ = แค่ไม่บิด ไม่พัง)
-   - width/height ต้องตรงกับ W/H ใน MobileNav.tsx */
-.dock-liquid__lens,
-.dock-liquid__wake {
+/* --- pill = ตัวแก้ว (mark แท็บ active + เป็นของที่ลาก) ----------------------
+   CSS ซ่อนไว้ก่อนกัน flash ตอน static HTML (ยังไม่มี JS คำนวณตำแหน่ง)
+   MobileNav.tsx จะตั้ง opacity:1 + transform เองหลังวัดตำแหน่งแท็บจริงแล้ว */
+.dock-glass__pill {
   position: absolute;
   left: 0;
   top: 0;
-  width: 84px;
-  height: 48px;
+  width: 56px; /* JS อัปเดต = ความกว้างแท็บจริง - 6 */
+  height: 44px; /* ต้องตรงกับ H ใน MobileNav.tsx */
+  border-radius: 999px;
   opacity: 0;
   pointer-events: none;
-  will-change: transform, opacity;
-  filter: url("#dock-liquid-warp");
+  transform-origin: 50% 50%;
+  will-change: transform;
 }
-/* wake เป็น "ฝ้าหาง" ไม่ใช่ของแข็ง — เบลอเพิ่มให้กลืนกับเลนส์หลัก */
-.dock-liquid__wake {
-  filter: url("#dock-liquid-warp") blur(4px);
+/* บิดเฉพาะตอนลาก — ตอนพักปล่อยให้เป็นแคปซูลคม ๆ */
+.dock-glass__pill.is-fluid {
+  filter: url("#dock-glass-warp");
 }
-/* ::before = ตัวของเหลว ลดจำนวน DOM node */
-.dock-liquid__lens::before {
+/* พื้นแก้ว: แสงรวมด้านบน + ประกายฟ้าด้านล่าง (ไม่ใช้ขอบขาวรอบรูป) */
+.dock-glass__pill::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: 999px;
-  /* แก้วใส: ขอบหักแสง (rim) + แกนกลางบาง ๆ ที่แสงถูกรวบ + ประกายฟ้าขอบล่าง
-     ค่าความทึบตั้งให้ "เห็นหลังแก้ว" ได้ — ลดลงแล้วถ้าดูขุ่นเป็นลูกบอล */
+  border-radius: inherit;
   background:
-    radial-gradient(120% 140% at 50% 0%, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0) 52%),
-    radial-gradient(90% 120% at 50% 55%, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0) 70%),
-    radial-gradient(115% 135% at 50% 110%, rgba(124, 196, 255, 0.26), rgba(124, 196, 255, 0) 64%);
+    radial-gradient(130% 150% at 50% -20%, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 58%),
+    radial-gradient(110% 140% at 50% 120%, rgba(124, 196, 255, 0.2), rgba(124, 196, 255, 0) 66%);
   box-shadow:
-    0 0 22px rgba(124, 196, 255, 0.24),
-    inset 0 0 0 1.5px rgba(255, 255, 255, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    0 0 16px rgba(124, 196, 255, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
-/* หางของเหลว (wake): ฝ้าจาง ๆ ที่ลากตาม — ทำตัวให้แคบและเบลอเพื่อไม่ให้ดูเป็น
-   "ลูกแก้วลูกที่สอง" ซ้อนกับเลนส์หลัก (ตั้งสเกล/ความจางใน MobileNav.tsx) */
-.dock-liquid__wake::before {
+/* เส้นผมรับแสงรอบ pill: เข้มด้านบนจางด้านล่าง = ขอบแก้ว ไม่ใช่กรอบขาวทึบ */
+.dock-glass__pill::after {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: 999px;
-  background: radial-gradient(110% 130% at 50% 60%, rgba(124, 196, 255, 0.2), rgba(124, 196, 255, 0) 70%);
-  box-shadow: 0 0 18px rgba(124, 196, 255, 0.18);
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.34),
+    rgba(255, 255, 255, 0.05) 42%,
+    rgba(124, 196, 255, 0.2)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
 }
-/* ขอบ chromatic aberration (แดง/น้ำเงิน) — ระยะเยื้องตั้งจาก JS ตามความเร็วลาก */
-.dock-liquid__ca {
+/* ขอบ chromatic aberration (แดง/น้ำเงิน) — โผล่เฉพาะตอนลาก ระยะเยื้องจาก JS */
+.dock-glass__rim {
   position: absolute;
   inset: 0;
-  border-radius: 999px;
+  border-radius: inherit;
+  opacity: 0;
   pointer-events: none;
   mix-blend-mode: screen;
+  filter: url("#dock-glass-warp");
 }
-.dock-liquid__ca--r {
-  box-shadow: inset 0 0 0 1.5px rgba(255, 96, 96, 0.55);
+.dock-glass__rim--r {
+  box-shadow: inset 0 0 0 1.25px rgba(255, 92, 92, 0.8);
 }
-.dock-liquid__ca--b {
-  box-shadow: inset 0 0 0 1.5px rgba(96, 170, 255, 0.55);
+.dock-glass__rim--b {
+  box-shadow: inset 0 0 0 1.25px rgba(92, 172, 255, 0.85);
 }
+/* หางของเหลว (wake): ฝ้าจางที่ตามหลัง pill ช้ากว่า — เห็นเฉพาะตอนลาก */
+.dock-glass__wake {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 56px;
+  height: 44px;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+  background: radial-gradient(
+    110% 130% at 50% 60%,
+    rgba(124, 196, 255, 0.32),
+    rgba(124, 196, 255, 0) 72%
+  );
+  filter: url("#dock-glass-warp") blur(5px);
+}
+
+/* --- แท็บ ----------------------------------------------------------------- */
+.dock-glass__tab {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+.dock-glass__icon {
+  display: flex;
+  line-height: 0;
+}
+.dock-glass__label {
+  font-size: 10px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+/* ตัด scale(0.97) ตอนกดของ rule `button:not(:disabled):active` ด้านล่าง —
+   จังหวะกดของ dock คือสปริง/การยืดของ pill อยู่แล้ว */
+.dock-glass__tab:not(:disabled):active {
+  transform: none;
+}
+
+/* (ย้ายมาอยู่ในบล็อก .dock-glass__* ด้านบน — เลนส์เหลวเดิมที่ซ้อนทับ dock ถูก
+   แทนที่ด้วย pill ตัวเดียวของ dock เอง: package เดิมวาด pill ด้วย shader สีขาว
+   ล้วนที่แก้ไม่ได้ จึงไม่เหลือที่ให้เลนส์ซ้อน ดู MobileNav.tsx) */
 
 /* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */
 /* ปุ่มหลัก — สูง >= 44px บนมือถือเพื่อให้แตะง่าย */
