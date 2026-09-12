@@ -327,16 +327,6 @@ export default function MobileNav() {
         ` scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
       orb.style.opacity = alpha.toFixed(3);
 
-      // 👉 เจาะรูใน .dock-glass__frost ให้ตรงกับวงกลม (ดูเหตุผลเต็มใน globals.css)
-      //    แถบ dock ยังเบลอ 20px "เหมือนตอนพัก" แต่ orb ไม่ต้องบิดบนภาพที่เบลอ
-      //    จนเรียบ ⇒ ได้ทั้งเบลอ และ distortion เต็มแรง
-      //    พิกัดเป็น px ในกรอบของ nav (ตัวเดียวกับที่คำนวณ transform ของ orb)
-      //    เขียนเฉพาะตอนลาก เพราะ mask ทำงานเฉพาะตอน .is-warping เท่านั้น
-      if (alpha > 0.02) {
-        nav.style.setProperty("--orb-cx", `${main.p.toFixed(2)}px`);
-        nav.style.setProperty("--orb-cy", `${mainY.p.toFixed(2)}px`);
-      }
-
       // wake = หางของเหลวกลมตามหลัง (over-damped → ตามหลังเสมอ)
       wake.style.transform =
         `translate3d(${(tail.p - ORB / 2).toFixed(2)}px,${(tailY.p - ORB / 2).toFixed(2)}px,0)` +
@@ -358,9 +348,10 @@ export default function MobileNav() {
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
-      // ⚠️ .dock-glass__frost ต้องเบลออยู่ตลอด แม้ระหว่างลาก (ผู้ใช้ยืนยัน)
-      //    สิ่งที่ toggle แทนคือ "การเจาะรู" ตรงตำแหน่งวงกลม (--orb-cx/--orb-cy)
-      //    ⇒ แถบ dock ยังเบลอเหมือนเดิม แต่ orb เห็นหน้าเว็บจริง ⇒ บิดเต็มแรง
+      // is-warping = สถานะ "กำลังลาก" (marker ให้ debug/เทส + ให้ CSS ตรวจสอบได้)
+      // ⚠️ ห้ามใช้คลาสนี้ไป "ซ่อน" หรือ "เจาะรู" .dock-glass__frost เด็ดขาด
+      //    (ลองแล้วทั้ง display:none และ mask เป็นรู — ผู้ใช้ติทั้งคู่)
+      //    แถบต้องเบลอ 20px ทุกพิกเซลตลอดเวลา แล้วให้เลนส์ขยาย "ผิวของแถบ" แทน
       nav.classList.toggle("is-warping", alpha > 0.02);
     };
 
@@ -553,8 +544,8 @@ export default function MobileNav() {
                • backdrop-filter บน nav = backdrop root ⇒ เลนส์ของ orb เห็นภาพเรียบ
                  ⇒ displacement ไม่เกิด (วัดจาก pixel diff แล้ว)
                • pseudo-element + backdrop-filter = ใช้ไม่ได้บน Samsung Internet
-            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/orb และตอนลาก nav.is-warping
-            จะ "เจาะรู" ตรงตำแหน่งวงกลม (ไม่ใช่ซ่อนทั้งแถบ) ⇒ ยังเบลอเหมือนเดิม */}
+            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/แท็บ/orb — แถบนี้ต้องเบลอ
+            20px ทุกพิกเซลตลอดเวลา (ห้ามซ่อน/ห้ามเจาะรู ดูเหตุผลใน globals.css) */}
         <span className="dock-glass__frost" aria-hidden="true" />
 
         {/* filter defs ต้องอยู่ใน DOM จริง (ห้าม display:none) เหมือน #lg-refract
@@ -788,6 +779,28 @@ export default function MobileNav() {
         {/* pill = ตัวแก้วตอนพัก (แคปซูล) — ตอนลากจะจางหายไปให้ orb แทนที่ */}
         <div ref={pillRef} className="dock-glass__pill" aria-hidden="true" />
 
+        {/* แท็บ — ต้องวาด "ก่อน" orb (และห้ามมี z-index เด็ดขาด ดูเหตุผลใน globals.css)
+            เพราะ backdrop ของ orb = ทุกอย่างที่วาดก่อนหน้า ⇒ ตัวหนังสือ/ไอคอน
+            ของแท็บถูกนับเป็นฉากหลังของเลนส์ ⇒ แว่นขยาย "ขยายตัวหนังสือบนแถบ"
+            เหมือนของจริง แทนที่จะทะลุไปเห็นหน้าเว็บด้านหลังแถบ
+            (ก่อนหน้านี้แท็บอยู่ "หลัง" orb + z-index: 1 ⇒ ตัวหนังสือลอยทับวง
+             คม ๆ ไม่อยู่ในฉากหลังของเลนส์) */}
+        {MENU.map((l, i) => (
+          <button
+            key={l.href}
+            type="button"
+            className="dock-glass__tab"
+            aria-current={i === activeIdx ? "page" : undefined}
+            style={{
+              color: i === activeIdx ? "#7cc4ff" : "rgba(148, 163, 184, 0.92)",
+            }}
+            onClick={() => go(l.href)}
+          >
+            <span className="dock-glass__icon">{ICON[l.icon]}</span>
+            <span className="dock-glass__label">{l.label}</span>
+          </button>
+        ))}
+
         {/* orb = วงกลมแก้วตอนลาก: หักเหฉากหลังจริง (distortion) + แถบแสง/ประกาย
             + 3 rim สีเพี้ยน (rim อยู่ข้างในวง → ใช้ border-radius: inherit = 50%)
             ⚠️ เอา .dock-glass__orb-edge (ชั้นที่เบลอฉากหลังซ้อนเฉพาะโซนขอบ) ออก:
@@ -808,22 +821,6 @@ export default function MobileNav() {
           <span ref={rimGRef} className="dock-glass__rim dock-glass__rim--g" />
           <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
         </span>
-
-        {MENU.map((l, i) => (
-          <button
-            key={l.href}
-            type="button"
-            className="dock-glass__tab"
-            aria-current={i === activeIdx ? "page" : undefined}
-            style={{
-              color: i === activeIdx ? "#7cc4ff" : "rgba(148, 163, 184, 0.92)",
-            }}
-            onClick={() => go(l.href)}
-          >
-            <span className="dock-glass__icon">{ICON[l.icon]}</span>
-            <span className="dock-glass__label">{l.label}</span>
-          </button>
-        ))}
       </nav>
     </div>
   );
