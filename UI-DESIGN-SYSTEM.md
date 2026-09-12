@@ -73,7 +73,7 @@ body {
 
 ⚠️ **ห้ามเบลอรูปพื้นหลังทั้งใบ** — เดิมเคยใส่ `filter: blur(14px)` บนตัวรูปเพื่อชดเชย backdrop-filter ที่ดับบน Android แต่ user ต้องการเห็นรูปชัด → ลดเหลือ `blur(2px)` + `scale(1.03)` (กันขอบรูปขาวเพราะเบลอ) เท่านั้น ความฝ้าของแก้วให้มาจาก backdrop-filter ของ `.panel`/dock เอง + scrim ดำ
 
-**แบบด์ image zoom แบ็กกราวด์ (ScrollZoomHero) — โชว์ "ทุกหน้า":** `position: absolute; inset-x-0; top: 0` — mount ผ่าน `<AppHero />` ใน `app/layout.tsx` **ก่อน `<DesktopNav />` และนอก `<main>`** เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้า ตรงกับ header (ถ้าอยู่ใน `<main>` จะโดน padding `py-4/sm:py-5` ของ main + ความสูง sticky nav ลงมาอีก ~90px) · **เดิมชื่อ `HomeHero` และ gate ด้วย `usePathname() === "/"` (โชว์แค่หน้าหลัก) — ตอนนี้แสดงทุกหน้าแล้ว** (`AppHero` เป็น client component บาง ๆ ที่คืน `<ScrollZoomHero />` ตรง ๆ; ตอน `output: export` แต่ละหน้าจึงมีแถบอยู่ใน HTML แรกของตัวเอง) · ไม่กิน layout (absolute) + `pointer-events-none` −− **เนื้อหาทุกหน้าลอยทับอยู่แล้วเพราะแถบตั้ง `z-index: -1`** (ต่ำกว่า in-flow block ทั้งหมด แต่สูงกว่า BackgroundLayer เพราะอยู่หลังใน DOM) → **ไม่ต้องใส่ `relative z-10` ที่หน้าไหนเลย** · ปลายล่างจางเป็น alpha ด้วย `mask-image` (ไม่ทับด้วยสีดำ) เพื่อคง BackgroundLayer/aurora เป็นชั้นล่างสุด · **ความสูง `h-[clamp(360px,85vh,780px)]`** (เดิม `clamp(320px,70vh,660px)`) = กินพื้นที่ลงมาถึงการ์ดแถวที่ 2-3 บนมือถือ (วัด 390×844 ได้ 717px, 1280×900 ได้ 765px) — แบนด์เป็น absolute จึงไม่ดันเนื้อหา และเพราะ ScrollTrigger ใช้ `start: "top top"` / `end: "bottom 25%"` ระยะซูมจึงยาวขึ้นตามความสูงเองโดยไม่ต้องแก้ timeline · GSAP ScrollTrigger scrub ขับ "camera dolly-in" (ภาพ + เลเยอร์แสง/กริด/โบเก้ ซูมคนละอัตรา) · เปลี่ยนรูปได้ใน Settings → "Image zoom (Hero)" = `BackgroundPicker variant="hero"` เก็บ localStorage key `tdapp_hero_image` (1920px, JPEG q0.72) + **ความสว่างแยกคีย์ `tdapp_hero_dim`** (scrim ดำ 0–0.85, default 0 = หน้าตาเดิมเป๊ะ, ปรับได้แม้ไม่เปลี่ยนรูป) + **ระดับการซูมแยกคีย์ `tdapp_hero_zoom`** (สไลเดอร์ 0–300%, step 5%, default 100%) + **ความยาวแบบด์แยกคีย์ `tdapp_hero_height`** (สไลเดอร์ 50–200%, step 5%, default 100%) + event `tdapp:hero-changed` (ตัวเดียวคุมทั้งรูป/ความสว่าง/ระดับการซูม/ความยาวแบบด์); ใส่รูปเองแล้วจะตัด grid/bokeh ออกและซูมจากกลางภาพ (เหลือ glow จาง + vignette) · ใช้ `inset-x-0` **ไม่ใช่ `w-screen`** (100vw นับ scrollbar ทำให้เกิด scroll แนวนอน) และต้องมี `html { overflow-x: clip }` (ห้าม `hidden` — จะสร้าง scroll container แล้วพัง `position: sticky` ของ DesktopNav)
+**แบบด์ image zoom แบ็กกราวด์ (ScrollZoomHero) — โชว์ "ทุกหน้า":** `position: absolute; inset-x-0; top: 0` — mount ผ่าน `<AppHero />` ใน `app/layout.tsx` **ก่อน `<DesktopNav />` และนอก `<main>`** เพื่อให้แถบเริ่มที่ขอบบนสุดของหน้า ตรงกับ header (ถ้าอยู่ใน `<main>` จะโดน padding `py-4/sm:py-5` ของ main + ความสูง sticky nav ลงมาอีก ~90px) · **เดิมชื่อ `HomeHero` และ gate ด้วย `usePathname() === "/"` (โชว์แค่หน้าหลัก) — ตอนนี้แสดงทุกหน้าแล้ว** (`AppHero` เป็น client component บาง ๆ ที่คืน `<ScrollZoomHero />` ตรง ๆ; ตอน `output: export` แต่ละหน้าจึงมีแถบอยู่ใน HTML แรกของตัวเอง) · ไม่กิน layout (absolute) + `pointer-events-none` −− **เนื้อหาทุกหน้าลอยทับอยู่แล้วเพราะแถบตั้ง `z-index: -1`** (ต่ำกว่า in-flow block ทั้งหมด แต่สูงกว่า BackgroundLayer เพราะอยู่หลังใน DOM) → **ไม่ต้องใส่ `relative z-10` ที่หน้าไหนเลย** · ปลายล่างจางเป็น alpha ด้วย `mask-image` (ไม่ทับด้วยสีดำ) เพื่อคง BackgroundLayer/aurora เป็นชั้นล่างสุด · **ความสูง `h-[clamp(360px,85vh,780px)]`** (เดิม `clamp(320px,70vh,660px)`) = กินพื้นที่ลงมาถึงการ์ดแถวที่ 2-3 บนมือถือ (วัด 390×844 ได้ 717px, 1280×900 ได้ 765px) — แบนด์เป็น absolute จึงไม่ดันเนื้อหา และเพราะ ScrollTrigger ใช้ `start: "top top"` / `end: "bottom 25%"` ระยะซูมจึงยาวขึ้นตามความสูงเองโดยไม่ต้องแก้ timeline · GSAP ScrollTrigger scrub ขับ "camera dolly-in" (ภาพ + เลเยอร์แสง/กริด/โบเก้ ซูมคนละอัตรา) · เปลี่ยนรูปได้ใน Settings → หมวด "ตกแต่ง (Appearance)" › บล็อก "Image zoom (Hero)" = `BackgroundPicker variant="hero"` เก็บ localStorage key `tdapp_hero_image` (1920px, JPEG q0.72) + **ความสว่างแยกคีย์ `tdapp_hero_dim`** (scrim ดำ 0–0.85, default 0 = หน้าตาเดิมเป๊ะ, ปรับได้แม้ไม่เปลี่ยนรูป) + **ระดับการซูมแยกคีย์ `tdapp_hero_zoom`** (สไลเดอร์ 0–300%, step 5%, default 100%) + **ความยาวแบบด์แยกคีย์ `tdapp_hero_height`** (สไลเดอร์ 50–200%, step 5%, default 100%) + event `tdapp:hero-changed` (ตัวเดียวคุมทั้งรูป/ความสว่าง/ระดับการซูม/ความยาวแบบด์); ใส่รูปเองแล้วจะตัด grid/bokeh ออกและซูมจากกลางภาพ (เหลือ glow จาง + vignette) · ใช้ `inset-x-0` **ไม่ใช่ `w-screen`** (100vw นับ scrollbar ทำให้เกิด scroll แนวนอน) และต้องมี `html { overflow-x: clip }` (ห้าม `hidden` — จะสร้าง scroll container แล้วพัง `position: sticky` ของ DesktopNav)
 
 ⚠️ **"ระดับการซูม" คูณ "ช่วงซูม" (end − start) ไม่ใช่คูณ scale ตรง ๆ** — `zoomScale(start, end, k) = start + (end − start) × k` ใน `ScrollZoomHero.tsx` (สไลเดอร์: 0% = k 0, 100% = k 1, 300% = k 3) → ค่า 100% ให้ตัวเลขเดิมเป๊ะทุกชั้น (img 1.18→1.62, glow 1.06→1.24, grid 1→1.46, bokeh 1.1→2.3) ไม่มี regression, 0% = ทุกชั้นนิ่ง, 300% = ช่วงซูมกว้าง 3 เท่า (img → 2.5, glow → 1.6, grid → 2.38, bokeh → 4.7) และ **สัดส่วนความลึก 3D ระหว่างชั้นคงเดิมทุกค่า k** · เพิ่มเลเยอร์ใหม่ = ต้องใส่คู่ start/end ผ่าน `zoomScale` ห้าม hardcode ค่า end
 
@@ -432,8 +432,9 @@ td .text-loss, td .text-red-400 {
 @keyframes lg-pop-in   { from { opacity: 0; transform: scale(0.94) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 @keyframes lg-rise-in  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes lg-slide-down { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes lg-slide-up   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
-
+@keyframes lg-slide-up   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }/* การ์ดพับได้ (§17) — เปิดตัวเนื้อในตอนกาง */
+@keyframes collapse-open { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+.collapse-body { animation: collapse-open 0.22s cubic-bezier(0.32, 0.72, 0, 1) both; }
 .animate-fade  { animation: lg-fade-in .2s ease-out both; }
 .animate-sheet { animation: lg-sheet-up .32s cubic-bezier(0.32, 0.72, 0, 1) both; }  /* iOS spring */
 .animate-pop   { animation: lg-pop-in .25s cubic-bezier(0.32, 0.72, 0, 1) both; }
@@ -520,6 +521,7 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 12. ☐ Safe-area, tap-highlight, scrollbar, viewport (§13)
 13. ☐ ไอคอนทุกจุดใช้ `Icon.tsx` — ห้าม emoji ใน UI (§15)
 14. ☐ สวิตช์ on/off ใช้ pattern iOS toggle (§16)
+15. ☐ หมวดตั้งค่าที่ "ไม่ใช่หัวใจการเทรด" (พื้นหลัง/ภาพ) ให้ใช้การ์ดพับได้ `CollapsePanel` + `defaultOpen = false` (§17)
 
 ---
 
@@ -569,3 +571,29 @@ import Icon from "@/components/Icon";
 - ตัวอย่างการใช้จริง: หมวดหมู่การแจ้งเตือน LINE ในหน้า Settings — แถวละ 1 หมวด (icon วงกลม tint + ชื่อหมวด + คำอธิบาย + สวิตช์), ค่าเก็บใน `trading_settings` (`notify_*` booleans) ตามหมวด
 - ✅ **Verified บน prod 2026-09-06 (a13eb36)**: 6 สวิตช์แสดงครบ โหลดค่าจาก API ถูกต้อง (เริ่มต้น ON ทุกหมวด), toggle ปิด/เปิด "ไม้เปิด" บันทึกสำเร็จทั้งสองครั้ง (feedback "บันทึกการแจ้งเตือนแล้ว"), migration 020 รันแล้ว (เดิมชื่อ 012 — rename เพราะชนเบอร์) — PUT `notify_*` ผ่าน (ถ้ายังไม่รัน PostgREST จะ error หาคอลัมน์)
 - 🚨 บทเรียน Playwright: กดสวิตช์แล้ว re-render ขณะ feedback หาย ทำให้ click ปกติ timeout ("waiting for element to be visible, enabled and stable") — ใช้ `click({ force: true })` แก้ได้ และอ่านสถานะจาก `aria-checked` เสมอ
+
+---
+
+## 17. การ์ดพับได้ — `CollapsePanel` (Settings → "ตกแต่ง (Appearance)")
+
+`frontend/src/components/CollapsePanel.tsx` — การ์ดแก้ว `.panel` ที่ **ทั้งแถวหัวเป็นปุ่มกาง/พับ** ใช้เมื่อหมวดตั้งค่ายาวเกินไปและบางกลุ่ม "ไม่ใช่หัวใจการเทรด" ไม่ควรกินที่ตลอดเวลา
+
+```tsx
+<CollapsePanel className="md:col-span-2" title="ตกแต่ง (Appearance)" icon="bulb"
+  hint="รูปพื้นหลังแอป · แบบด์ image-zoom (ความสว่าง · ความยาวแบบด์ · ระดับการซูม) — เก็บในเครื่องนี้เท่านั้น">
+  <div className="rounded border border-slate-700/60 bg-surface/40 p-3">…ภาพพื้นหลัง (Background)…</div>
+  <div className="rounded border border-slate-700/60 bg-surface/40 p-3">…Image zoom (Hero)…</div>
+</CollapsePanel>
+```
+
+- **Props:** `title` · `icon?: IconName` (§15) · `hint?: string` (บรรทัดอธิบายใต้หัว ช่วยให้รู้ว่าข้างในมีอะไรตอนพับอยู่) · `defaultOpen = false` · `className` (ส่ง `md:col-span-2` จากหน้าการตั้งค่า) · `children`
+- 🚨 **ต้อง default = พับ (`false`) เสมอตามคำขอ user และ "ห้าม persist สถานะพับลง localStorage"** — เปิดหน้ามาทีไรต้องเจอแบบพับเหมือนกันทุกครั้ง (จำสถานะไว้ = ครั้งต่อไปที่เปิดหน้าจะเจอแบบกาง ซึ่งขัดกับคำขอ)
+- **`<h2>` ห่อ `<button type="button">` เต็มความกว้าง `min-h-[44px]`** + `aria-expanded={open}` + `aria-controls={bodyId}` (`useId()`) — แตะตรงไหนของแถวหัวก็ได้ บนมือถือถึง 44px ตาม §8
+- ป้ายบอกสถานะเป็นข้อความ **"ขยาย" / "ย่อ"** คู่ลูกศร `›` ที่หมุน 90° (`transition-transform`) — **ห้ามใช้คำว่า "ค่าเริ่มต้น"** เพราะในหน้านี้มีปุ่ม "ค่าเริ่มต้น" ของสไลเดอร์ฮีโร่ 3 ปุ่มอยู่ข้างใน (คำซ้ำจะทำให้ผู้ใช้เข้าใจผิดว่ากดแล้วรีเซ็ตค่า)
+- 🚨 **เนื้อในถูก render "เฉพาะตอนกาง"** (`{open && <div className="collapse-body">…</div>}`) ไม่ใช่ซ่อนด้วย CSS → ค่าที่ผู้ใช้แก้แล้วยังอยู่เพราะ `BackgroundPicker` เขียนลง localStorage ทันทีทุกครั้งที่ขยับสไลเดอร์ จึง remount ได้ปลอดภัย ไม่มี state ที่ต้องเก็บในหน่วยความจำ
+- 🚨 **ห้ามเอา `.panel` ซ้อนใน `.panel`** — ลูกของการ์ดพับได้ต้องเป็นบล็อกมีขอบ `rounded border border-slate-700/60 bg-surface/40 p-3` เท่านั้น (`.panel` มี `backdrop-filter` → ซ้อนกันจะเบลอซ้อนเบลอ หนักเครื่องและสีเพี้ยน)
+- แอนิเมชันเปิดเนื้อใน `.collapse-body { animation: collapse-open 0.22s cubic-bezier(0.32,0.72,0,1) both; }` — **ประกาศใน `globals.css` หลังกฎ `.panel { animation: lg-rise-in … }`** ไม่งั้นจะโดนทับ · ไม่ใช้ `max-height` transition เพราะความสูงเนื้อในไม่คงที่ · `prefers-reduced-motion` ปิดให้อัตโนมัติตาม §12
+- **ผลข้างเคียงที่ยอมรับ:** ดาวน์ `lg-press` (กดแล้วยุบ) ยกเว้นการ์ดที่มี input/select/textarea/table — ตอน **พับ** การ์ดนี้ยังเข้าเงื่อนไข (ยังไม่มี input) จึงยุบตอนแตะ ส่วนตอน **กาง** จะไม่ยุบ · ถ้าไม่ต้องการให้ยุบเลยให้เพิ่ม `.panel:has(> h2 > button[aria-controls])` เข้าไปในลิสต์ `:not()` ของกฎ `lg-press` ทั้ง 4 บล็อก
+- **หน้าการตั้งค่าปัจจุบัน:** การ์ด "ตกแต่ง (Appearance)" วางระหว่าง "Portfolio Recommendation" กับ "การตั้งค่าระบบเทรด (ใช้จริงทั้งระบบ)" · ข้างในมี 2 บล็อก = `ภาพพื้นหลัง (Background)` (พื้นหลังแอป + สไลเดอร์ความสว่าง) และ `Image zoom (Hero)` (รูปฮีโร่ + ความสว่างแบบด์ + `ความยาวแบบด์` 50–200% + `ระดับการซูม` 0–300%) — **เดิมสองเรื่องนี้เป็นการ์ด `.panel` แยกกันคนละใบที่หัวหน้าการตั้งค่า ตอนนี้รวมเป็นการ์ดพับได้ใบเดียวแล้ว**
+- ✅ **Verified 2026-09-12 (390 / 1280 px):** พับอยู่ `h2` = 6 ใบตามลำดับ, `aria-expanded="false"`, ความสูงการ์ด ~78px (หัว 44px + hint 1 บรรทัด), ไม่มีสไลเดอร์/เนื้อในใน DOM · กดกาง → 4 สไลเดอร์ครบ, `collapse-open 0.22s` ทำงาน, ลูกศร `matrix(0,1,-1,0,0,0)` (= rotate 90°), ป้ายเปลี่ยนเป็น "ย่อ" · จอ 1280 → `grid-column: span 2 / span 2`, กว้าง 1224px (grid 2 คอลัมน์ 604+604)
+

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import BackgroundPicker from "@/components/BackgroundPicker";
+import CollapsePanel from "@/components/CollapsePanel";
 import GlassSelect from "@/components/GlassSelect";
 import Icon from "@/components/Icon";
 import LoadingGraphic from "@/components/LoadingGraphic";
@@ -557,26 +558,45 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* ---------------- Background image picker ---------------- */}
-      <div className="panel md:col-span-2">
-        <h2 className="panel-title">ภาพพื้นหลัง (Background)</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          อัปโหลดรูปจากเครื่องเพื่อใช้เป็นพื้นหลังของแอปทุกหน้า — เก็บในเครื่องนี้ (localStorage) ไม่เกี่ยวกับบัญชี
-        </p>
-        <BackgroundPicker />
-      </div>
+      {/* ---------------- ตกแต่ง (Appearance) — รวบ setting background ทุกตัว ----------------
+          พับไว้เป็นค่าเริ่มต้น (CollapsePanel defaultOpen = false) เพราะเป็นงานตกแต่งล้วน
+          ไม่กระทบการเทรด — การ์ดที่ตั้งค่าจริงจึงอยู่ใกล้มือกว่า
+          ⚠️ ข้างในเป็นบล็อกมีขอบ ไม่ใช่ .panel ซ้อน .panel (backdrop-filter ซ้อนกัน = แก้วเพี้ยน) */}
+      <CollapsePanel
+        className="md:col-span-2"
+        title="ตกแต่ง (Appearance)"
+        icon="bulb"
+        hint="รูปพื้นหลังแอป · แบบด์ image-zoom (ความสว่าง · ความยาวแบบด์ · ระดับการซูม) — เก็บในเครื่องนี้เท่านั้น"
+      >
+        {/* --- พื้นหลังแอปทุกหน้า --- */}
+        <div className="rounded border border-slate-700/60 bg-surface/40 p-3">
+          <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+            <Icon n="waves" size={13} /> ภาพพื้นหลัง (Background)
+          </p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            อัปโหลดรูปจากเครื่องเพื่อใช้เป็นพื้นหลังของแอปทุกหน้า — เก็บในเครื่องนี้ (localStorage) ไม่เกี่ยวกับบัญชี
+          </p>
+          <div className="mt-3">
+            <BackgroundPicker />
+          </div>
+        </div>
 
-      {/* ---------------- Hero band (image zoom) image picker ---------------- */}
-      <div className="panel md:col-span-2">
-        <h2 className="panel-title">Image zoom (Hero)</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          รูปที่ใช้เป็นแถบพื้นหลังบนสุดของ "ทุกหน้า" (ค่อย ๆ ซูมเข้าตอนเลื่อนหน้า) — ไม่ใส่ = ใช้ภาพเริ่มต้นในตัว
-          · เก็บในเครื่องนี้ (localStorage) แยกจากภาพพื้นหลังด้านบน
-          · สไลเดอร์ 3 ตัวด้านล่าง: ความสว่างของแบบด์ · ความยาวของแบบด์ · ระดับการซูม
-          (ใช้ได้ทันทีทุกหน้าภายในหน้าเดียว แม้ยังไม่เปลี่ยนรูป)
-        </p>
-        <BackgroundPicker variant="hero" />
-      </div>
+        {/* --- แบบด์ฮีโร่ (image zoom) --- */}
+        <div className="rounded border border-slate-700/60 bg-surface/40 p-3">
+          <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+            <Icon n="trendUp" size={13} /> Image zoom (Hero)
+          </p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            รูปที่ใช้เป็นแถบพื้นหลังบนสุดของ "ทุกหน้า" (ค่อย ๆ ซูมเข้าตอนเลื่อนหน้า) — ไม่ใส่ = ใช้ภาพเริ่มต้นในตัว
+            · เก็บในเครื่องนี้ (localStorage) แยกจากภาพพื้นหลังด้านบน
+            · สไลเดอร์ 3 ตัวด้านล่าง: ความสว่างของแบบด์ · ความยาวของแบบด์ · ระดับการซูม
+            (ใช้ได้ทันทีทุกหน้าภายในหน้าเดียว แม้ยังไม่เปลี่ยนรูป)
+          </p>
+          <div className="mt-3">
+            <BackgroundPicker variant="hero" />
+          </div>
+        </div>
+      </CollapsePanel>
 
       {/* ---------------- Trading Configuration ---------------- */}
       <div className="panel md:col-span-2">

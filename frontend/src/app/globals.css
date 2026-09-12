@@ -1303,6 +1303,19 @@ button:not(:disabled):active {
   animation: lg-rise-in 0.35s ease-out backwards;
 }
 
+/* ---------- การ์ดแบบพับได้ (Settings → "ตกแต่ง") ----------
+   เนื้อหาที่กางออก: fade + เลื่อนลงเล็กน้อย ให้รู้ว่ามีอะไรโผล่มา
+   (.panel มี animation ของตัวเองอยู่แล้ว — ชั้นนี้ต้องประกาศ "หลัง" .panel เพื่อไม่ถูกทับ)
+   ห้ามใช้ max-height transition: ความสูงของเนื้อหาข้างในไม่คงที่ (รูป/สไลเดอร์/ข้อความไทยยาว)
+   ผู้ใช้ที่ปิดอนิเมชันถูกจัดการโดย @media (prefers-reduced-motion) ท้ายไฟล์อยู่แล้ว */
+@keyframes collapse-open {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.collapse-body {
+  animation: collapse-open 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
 /* ---------- Site-wide entrance stagger ----------
    header เข้าก่อน → แท็บบาร์ลอยขึ้น → การ์ดใน grid โผล่ทีละใบ ทำให้ทุกหน้ารู้สึก "ขยับ" ทั้งเว็บ */
 @keyframes lg-slide-down {
