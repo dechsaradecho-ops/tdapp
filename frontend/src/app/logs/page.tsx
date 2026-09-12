@@ -1231,7 +1231,13 @@ export default function LogsPage() {
               <th className="py-2 pr-3">สินทรัพย์</th>
               <th className="py-2 pr-3">ความมั่นใจ</th>
               <th className="py-2 pr-3">ที่มา</th>
-              <th className="py-2">บทวิเคราะห์</th>
+              {/* บทวิเคราะห์: ต้องมี min-width — ตาราง auto-layout + overflow-x-auto
+                  บีบคอลัมน์นี้เหลือ ~96px บนมือถือ (ข้อความยาวต่อเนื่องหักบรรทัดได้
+                  ทุกจุด) ทำให้บทวิเคราะห์ยาว 2-3 บรรทัดกลายเป็น 26 บรรทัด
+                  แถวสูง 433px; ใส่ min-width แล้วตารางกว้างเกินจอ → wrapper เลื่อน
+                  แนวนอนแทน (280px = อ่านสบาย วัดจริงเหลือ 8 บรรทัด / แถว 145px)
+                  และยกเพดานเดิม 420px → 640px ให้เดสก์ท็อปอ่านสบายขึ้น */}
+              <th className="py-2 min-w-[280px]">บทวิเคราะห์</th>
             </tr>
           </thead>
           <tbody>
@@ -1270,7 +1276,7 @@ export default function LogsPage() {
                     {isHeuristic ? "heuristic" : "พาดหัวจริง"}
                   </span>
                 </td>
-                <td className="py-2 max-w-[420px] text-slate-300" style={{ whiteSpace: "pre-wrap" }}>
+                <td className="py-2 min-w-[280px] max-w-[640px] text-slate-300" style={{ whiteSpace: "pre-wrap" }}>
                   {n.analysis || "—"}
                 </td>
               </tr>
