@@ -81,14 +81,18 @@ const go = (href: string) => {
 /* ---- แผนที่ดิสเพลสเรเดียล (radial displacement map) ------------------------
    feDisplacementMap อ่าน "ทิศทาง + ขนาด" ของการดึงภาพจากค่า R (แกน x) และ G
    (แกน y) ของแผนที่: offset = scale × (ค่า/255 − 0.5) ⇒ 128 = ไม่ดึง
-   อยากได้เลนส์ที่ "บิดแรงสุดที่ขอบวง แล้วไล่ลงมาเรื่อย ๆ จนนิ่งที่กลางวง"
-   ⇒ สร้างสนามเวกเตอร์เรเดียลเอง:
+   อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงภาพ
+   "นิ่งเกือบเท่าเดิม" (~1x) แล้วบีบอัดแรงเฉพาะแถบขอบวง + ขอบแยกสีรุ้ง
+   ⇒ สร้างสนามเวกเตอร์เรเดียลเอง (เครื่องหมายลบ = ดึงจุด sample เข้าหากลางวง
+     ⇒ เลนส์นูน; เดิมเป็นบวก = ดึงออกนอก ⇒ ภาพหดแบบเลนส์เว้า):
         t = min(r / R, 1)        (r = ระยะจากกลางวง, R = รัศมีวง)
-        f = t^P                  (P = 2.2 → แทบไม่ขยับที่กลางวง โตเร็วใกล้ขอบ)
-        R = 0.5 + 0.5·(u/r)·f
-        G = 0.5 + 0.5·(v/r)·f
-   ⇒ ดิสเพลสเป็น 0 ที่กลางวง, โต monotonic, และ f อิ่มตัวเป็น 1 พอ r ≥ R
-     (แรงสุดพอดีที่ขอบวง ไม่มีรอยกระโดด)
+        f = t^P                  (P = 3.0 → กลางแบน (~1x) ขอบชัน = หยดน้ำ)
+        R = 0.5 − 0.5·(u/r)·f
+        G = 0.5 − 0.5·(v/r)·f
+   ⇒ ดิสเพลสเป็น 0 ที่จุดกลางวงและสโลปก็ ~0 (กลางไม่ขยาย), โต monotonic,
+     ชันสุดแถบขอบวง แล้ว f อิ่มตัวเป็น 1 พอ r ≥ R (แรงสุดพอดีที่ขอบวง
+     ไม่มีรอยกระโดด) — ต่างจากแว่นขยาย (P = 1.0) ที่ขยายเท่ากันทั้งวง
+   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 18, R_px 42 ⇒ ขอบบีบ ~±9px
 
    ⚠️ ทำไมต้องวาดเองด้วย canvas: feTurbulence ให้สนามที่ไม่เป็นเรเดียล (บิด
       ทั้งวงเป็นก้อน) และ feDiffuseLighting ก็ให้เรเดียลที่ยอดไม่ตรงขอบ
@@ -102,7 +106,7 @@ const go = (href: string) => {
       (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
       ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
 const LENS_MAP_N = 160; // ความละเอียดพอ — ค่าถูก interpolate ตอนใช้
-const LENS_MAP_P = 2.2; // เลขชี้กำลังของแรมป์ (ยิ่งมาก ยิ่งกองที่ขอบ)
+const LENS_MAP_P = 3.0; // เลขชี้กำลังของแรมป์: 3.0 = กลางแบน (~1x) ขอบชัน (หยดน้ำ); 1.0 = ขยายทั้งวง (แว่นขยาย — ไม่ใช้)
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
 const buildLensMap = (): string | null => {
   if (typeof document === "undefined") return null; // กัน SSR ตอน build
@@ -120,8 +124,9 @@ const buildLensMap = (): string | null => {
       const r = Math.sqrt(u * u + v * v) || 1e-6; // กันหารศูนย์ที่กลางวง
       const f = Math.pow(Math.min(r, 1), LENS_MAP_P);
       const i = (y * LENS_MAP_N + x) * 4;
-      d[i] = Math.round((0.5 + 0.5 * (u / r) * f) * 255);
-      d[i + 1] = Math.round((0.5 + 0.5 * (v / r) * f) * 255);
+      // ลบ = sample เข้าหากลางวง ⇒ ขยาย (เลนส์นูน); ห้ามกลับเป็นบวก (ภาพจะหด)
+      d[i] = Math.round((0.5 - 0.5 * (u / r) * f) * 255);
+      d[i + 1] = Math.round((0.5 - 0.5 * (v / r) * f) * 255);
       d[i + 2] = 128; // ไม่ใช้ช่อง B แต่ต้องมีค่า (128 = กลาง)
       d[i + 3] = 255;
     }
@@ -716,11 +721,11 @@ export default function MobileNav() {
               />
               {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
                     = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
-                    วัดจาก scale: ขอบวงถูกดึงออก ±(scale/2) px
-                      R 10 = ±5px · G 14 = ±7px · B 18 = ±9px
-                    ⇒ ที่ขอบวงสีแยกกัน 4px = เห็นขอบสีรุ้งชัด
-                    (เทียบให้เห็นภาพ: scale 0.87R ของ G = 7px = 17% ของรัศมี 42px
-                     ⇒ ความยืดแนวรัศมีที่ขอบวง ≈ 1 + (S·P)/(2R) = 1.37 เท่า)
+                    วัดจาก scale: ขอบวงถูกดึงเข้า ±(scale/2) px
+                      R 14 = ±7px · G 18 = ±9px · B 22 = ±11px
+                    ⇒ ที่ขอบวงสีแยกกัน ~4px = เห็นขอบสีรุ้งชัด
+                    (กลางวง ~1x ไม่ขยาย — ภาพนิ่งกลาง บีบแรงเฉพาะแถบขอบ
+                     แบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
                     feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
                     แล้ว feBlend mode=screen รวมกลับ (ช่องไม่ทับกัน → ได้ค่าเดิม)
                     ⚠️ ห้ามเร่งสเกลเกิน ~24: displacement เป็นสัดส่วนกับระยะจาก
@@ -746,7 +751,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chR"
                 in2="map"
-                scale="10"
+                scale="14"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dR"
@@ -754,7 +759,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chG"
                 in2="map"
-                scale="14"
+                scale="18"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dG"
@@ -762,7 +767,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chB"
                 in2="map"
-                scale="18"
+                scale="22"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dB"
@@ -781,8 +786,8 @@ export default function MobileNav() {
 
         {/* แท็บ — ต้องวาด "ก่อน" orb (และห้ามมี z-index เด็ดขาด ดูเหตุผลใน globals.css)
             เพราะ backdrop ของ orb = ทุกอย่างที่วาดก่อนหน้า ⇒ ตัวหนังสือ/ไอคอน
-            ของแท็บถูกนับเป็นฉากหลังของเลนส์ ⇒ แว่นขยาย "ขยายตัวหนังสือบนแถบ"
-            เหมือนของจริง แทนที่จะทะลุไปเห็นหน้าเว็บด้านหลังแถบ
+            ของแท็บถูกนับเป็นฉากหลังของเลนส์ ⇒ หยดน้ำ "บีบตัวหนังสือบนแถบ"
+            เฉพาะแถบขอบ (กลางนิ่ง) เหมือนของจริง แทนที่จะทะลุไปเห็นหน้าเว็บด้านหลังแถบ
             (ก่อนหน้านี้แท็บอยู่ "หลัง" orb + z-index: 1 ⇒ ตัวหนังสือลอยทับวง
              คม ๆ ไม่อยู่ในฉากหลังของเลนส์) */}
         {MENU.map((l, i) => (
@@ -811,6 +816,9 @@ export default function MobileNav() {
         <span ref={orbRef} className="dock-glass__orb" aria-hidden="true">
           <span className="dock-glass__orb-sheen" />
           <span className="dock-glass__orb-caustic" />
+          {/* glare = ประกายแสงสะท้อนมุมซ้ายบนแบบเลนส์ Fluid Glass (วาดทับเฉย ๆ
+              ไม่แตะ backdrop — อยู่ใต้ disperse/rim เพื่อให้ขอบสียังคม) */}
+          <span className="dock-glass__orb-glare" />
           {/* แยกสีที่ขอบวง: แดงในสุด → เขียวกึ่งกลาง → น้าเงินนอกสุด */}
           <span ref={dispRef} className="dock-glass__disperse">
             <span className="dock-glass__disperse--r" />

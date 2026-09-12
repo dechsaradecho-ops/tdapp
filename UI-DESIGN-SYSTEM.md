@@ -250,6 +250,8 @@ document.fonts?.ready?.then(center)  // center ซ้ำหลัง font swap (
 
 ⚠️ **ห้ามใส่ `.lg-refract` กลับบน dock โดยไม่ทดสอบ Samsung เครื่องจริง** — เดิม dock ใช้ `.lg-refract` (SVG displacement บน ::before) แล้วบน Samsung Internet วาดเป็น "กรอบซ้อน" เพี้ยน ๆ (commit 9c355bd เอาออก) — dock ปัจจุบันใช้ inline blur บนตัว nav เอง ซึ่ง Samsung รองรับปกติ
 
+**Drag orb = เลนส์หยดน้ำ Fluid Glass (กลางนิ่ง + ขอบบีบ + glare + ขอบคม):** `MobileNav.tsx` วาด radial displacement map ลง canvas (`buildLensMap`, `LENS_MAP_P = 3.0` กลางแบน ขอบชัน, เครื่องหมายลบ = ดึง sample เข้าหาศูนย์กลาง) → `feImage` → `feDisplacementMap` แยกช่องสี R14/G18/B22 ผ่าน `backdrop-filter: url("#dock-glass-lens")` บน `.dock-glass__orb` เท่านั้น — กลางวงภาพนิ่ง ~1x บีบแรงเฉพาะแถบขอบแบบหยดน้ำ (ไม่ใช่แว่นขยายทั้งวง) (ห้ามปน blur/saturate — Chromium ทิ้ง url ทั้งตัว; ห้ามมี backdrop-filter บน `<nav>` หรือบรรพบุรุษ — สร้าง backdrop root ฆ่า displacement) · ชั้นประกาย `.dock-glass__orb-glare` วาดหย่อมแสงขาว ~10 นาฬิกา (`at 32% 26%`, screen blend, ห้าม filter:url) อยู่ใต้ disperse/rim · ขอบคมแบบตัวอย่าง: rim 1px ไม่เบลอ, disperse ไม่เบลอ วงแคบ 87%→พีค 91.5%→จาง 96%, hairline 94%→96.8%→98.6% (~1.5px), mask เลนส์ทึบถึง 92% เฟดใน 8% สุดท้าย
+
 ---
 
 ## 8. ระบบปุ่ม (4 บทบาท — แก้วใส tinted ทั้งหมด)
