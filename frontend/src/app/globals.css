@@ -804,6 +804,17 @@ button:not(:disabled):active {
 .zoom-hero--custom .zoom-hero-img {
   transform-origin: 50% 45%;
 }
+/* ชั้นนิ่ง (ไม่ซูม) — scrim ดำคุม "ความสว่าง" ของแบบด์
+   (Settings → slider "ความสว่างแบบด์ image zoom", localStorage tdapp_hero_dim)
+   ตั้งใจวางไว้ "ใต้" .zoom-hero-vignette → หรี่ภาพ/HUD ได้ตามใจ
+   แต่ความเข้มของ vignette ที่ช่วยให้การ์ดแถวบนสุดอ่านออกจะไม่ถูกตัดทอนไปด้วย
+   default 0 (ไม่มี scrim) = หน้าตาเดิมเป๊ะ · ใช้ rgba ผ่าน inline style จาก JS */
+.zoom-hero-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: background 0.25s ease;
+}
 /* ชั้นนิ่ง (ไม่ซูม) — ขอบมืดด้านบนให้การ์ดแถวบนสุดอ่านออกบนภาพที่สว่าง */
 .zoom-hero-vignette {
   position: absolute;

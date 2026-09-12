@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { HERO_IMAGE_EVENT, readStoredHero } from "@/components/BackgroundPicker";
+import { HERO_DIM_DEFAULT, HERO_IMAGE_EVENT, readStoredHero, readStoredHeroDim } from "@/components/BackgroundPicker";
 
 /**
  * ScrollZoomHero — แบ็กกราวด์ด้านบนสุดของหน้าแรก เลียนแบบ effect #26
@@ -50,6 +50,10 @@ import { HERO_IMAGE_EVENT, readStoredHero } from "@/components/BackgroundPicker"
  *   • เปลี่ยนรูปแล้วอัปเดตทันทีผ่าน event tdapp:hero-changed
  *   • ผู้ใช้ที่ปิดอนิเมชัน (prefers-reduced-motion) ก็ยังเห็นรูปที่ตั้งไว้ (ภาพนิ่ง)
  *
+ * ความสว่าง: Settings → slider "ความสว่างแบบด์ image zoom" (localStorage tdapp_hero_dim)
+ * → scrim ดำทับ "เฉพาะภาพ + HUD" (อยู่ใต้ vignette) ยิ่งค่ามาก แบบด์ยิ่งมืด
+ *   default = 0 (หน้าตาเดิมเป๊ะ) · ปรับแล้วเห็นผลทันทีทุกหน้าผ่าน event เดียวกัน
+ *
  * ทำไมไม่ import gsap ตรง ๆ ด้านบน: หน้าแรกเป็น dashboard ที่ผู้ใช้เปิดบ่อย
  * GSAP + ScrollTrigger ~90KB ก่อน gzip — dynamic import ทำให้มันไปอยู่ใน chunk
  * แยกที่โหลดหลัง hydrate เสร็จ แล้ว first paint ของการ์ดข้อมูลไม่ถูกถ่วง
@@ -68,12 +72,17 @@ export default function ScrollZoomHero() {
   const nearRef = useRef<HTMLDivElement>(null);
   // รูปที่ผู้ใช้ตั้งใน Settings (data URL ใน localStorage) — null = ใช้ภาพเริ่มต้นในตัว
   const [src, setSrc] = useState<string | null>(null);
+  // ความสว่างของแบบด์ (ความเข้ม scrim ดำ 0–0.85) — ตั้งใน Settings, default 0 = หน้าตาเดิม
+  const [dim, setDim] = useState(HERO_DIM_DEFAULT);
   const custom = src !== null;
 
-  // อ่านรูปที่ตั้งไว้ + ฟัง event ให้เปลี่ยนได้ทันทีโดยไม่ต้องรีโหลดหน้า
+  // อ่านรูป/ความสว่างที่ตั้งไว้ + ฟัง event ให้เปลี่ยนได้ทันทีโดยไม่ต้องรีโหลดหน้า
   // (แยก effect จากตัว GSAP เพราะต้องทำงานแม้ผู้ใช้ปิดอนิเมชัน)
   useEffect(() => {
-    const read = () => setSrc(readStoredHero());
+    const read = () => {
+      setSrc(readStoredHero());
+      setDim(readStoredHeroDim());
+    };
     read();
     window.addEventListener(HERO_IMAGE_EVENT, read);
     return () => window.removeEventListener(HERO_IMAGE_EVENT, read);
@@ -225,6 +234,11 @@ export default function ScrollZoomHero() {
             </div>
           </>
         )}
+
+        {/* ชั้นนิ่ง: ความสว่างของแบบด์ (slider ใน Settings) — scrim ดำทับภาพ+HUD
+            วาง "ใต้" vignette ตั้งใจ: หรี่รูปได้ตามใจ แต่ความเข้มของ vignette
+            ที่ช่วยให้การ์ดแถวบนสุดอ่านออกจะไม่ถูกตัดทอนไปด้วย */}
+        <div className="zoom-hero-scrim" style={{ background: `rgba(0,0,0,${dim})` }} />
 
         {/* ชั้นนิ่ง: ขอบมืดด้านบน (การ์ดอ่านออก) — ปลายล่างปล่อยให้ mask ของ
             .zoom-hero จางหายเป็น alpha เอง เพื่อคงแบ็กกราวด์เดิมของแอปไว้ชั้นล่างสุด */}

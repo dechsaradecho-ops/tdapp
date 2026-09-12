@@ -4,15 +4,15 @@
  * BackgroundPicker — อัปโหลดรูปพื้นหลังจากเครื่องผู้ใช้ (ใช้ 2 จุดใน Settings)
  *
  *   variant="app"  (ค่าเริ่มต้น) พื้นหลังแอปทุกหน้า — BackgroundLayer อ่านไปวาดแบบ fixed
- *   variant="hero"               แบบด์ "image zoom" หน้าแรก — ScrollZoomHero อ่านไปใช้
+ *   variant="hero"               แบบด์ "image zoom" ทุกหน้า — ScrollZoomHero อ่านไปใช้
  *
  * เก็บรูปฝั่ง client เป็น data URL ใน localStorage (แยกคีย์ตาม variant)
  * เพราะ frontend เป็น static export และ Render FS ไม่ persistent — อัปโหลดไฟล์ขึ้น server ไม่ได้
  * รูปจะถูกย่อ/บีบ (max 1600px, ฮีโร่ 1920px, JPEG q0.72) ผ่าน <canvas> ก่อนเก็บ
  * เพื่อจำกัดขนาด localStorage (~5MB); ผู้ใช้ปลายทางอ่านค่ารูปและรับรู้การเปลี่ยนแปลง
  * ผ่าน event ประจำ variant (BackgroundLayer → "tdapp:bg-changed", ScrollZoomHero → "tdapp:hero-changed")
- * ความสว่าง (ความเข้ม scrim ดำ) เก็บแยกใน localStorage (key: tdapp_bg_dim) — ปรับได้จาก slider
- * (เฉพาะ variant="app")
+ * ความสว่าง (ความเข้ม scrim ดำ) เก็บแยกใน localStorage — ปรับได้จาก slider ทั้ง 2 variant
+ * (key: tdapp_bg_dim สำหรับพื้นหลังแอป · tdapp_hero_dim สำหรับแบบด์ image zoom)
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -21,9 +21,10 @@ import Icon from "@/components/Icon";
 const BG_KEY = "tdapp_bg_image";
 const BG_EVENT = "tdapp:bg-changed";
 const BG_DIM_KEY = "tdapp_bg_dim";
-// ฮีโร่ image zoom หน้าแรก — คีย์/อีเวนต์แยกจากพื้นหลังแอป (ตั้งค่าอิสระต่อกัน)
+// ฮีโร่ image zoom ทุกหน้า — คีย์/อีเวนต์แยกจากพื้นหลังแอป (ตั้งค่าอิสระต่อกัน)
 const HERO_KEY = "tdapp_hero_image";
 const HERO_EVENT = "tdapp:hero-changed";
+const HERO_DIM_KEY = "tdapp_hero_dim";
 const MAX_DIM = 1600; // px — ด้านยาวสุดของพื้นหลังแอป
 const MAX_DIM_HERO = 1920; // ฮีโร่เป็นแบบด์กว้างเต็มจอ + ถูกซูมขยาย — เก็บรายละเอียดมากกว่า
 const MAX_STORED_BYTES = 2_800_000; // ~2.8MB data URL — ปลอดภัยกับ quota localStorage ส่วนใหญ่ (5MB)
@@ -31,14 +32,27 @@ const MAX_STORED_BYTES = 2_800_000; // ~2.8MB data URL — ปลอดภัย
 /** variant ของ picker — แยกคีย์ที่เก็บ/อีเวนต์/ข้อความให้ตรงกับที่ใช้งาน */
 type PickerVariant = "app" | "hero";
 
+/** ความเข้ม scrim ดำทับรูป (0 = สว่างสุด ... 0.85 = มืดสุด)
+ *  พื้นหลังแอป default 0.55 (ใช้คู่กับ glow เยอะ จึงต้องหรี่พอให้ตัวหนังสืออ่านออก)
+ *  แบบด์ฮีโร่ default 0 = รูปร่างเดิมเป๊ะ (มี vignette ช่วยอยู่แล้ว) แล้วให้ผู้ใช้หรี่เพิ่มเองได้ */
+export const BG_DIM_DEFAULT = 0.55;
+export const BG_DIM_MIN = 0;
+export const BG_DIM_MAX = 0.85;
+export const HERO_DIM_DEFAULT = 0;
+
 const VARIANTS: Record<
   PickerVariant,
   {
     key: string;
     event: string;
     dimKey: string;
+    /** ความเข้ม scrim เริ่มต้นของ variant นี้ (ใช้เป็นค่าเมื่อยังไม่เคยตั้ง + ค่าของปุ่ม "ค่าเริ่มต้น") */
+    dimDefault: number;
     maxDim: number;
     showDim: boolean;
+    dimLabel: string;
+    dimHintOn: string;
+    dimHintOff: string;
     /** พรีวิวตอนยังไม่ตั้งรูปเอง — ฮีโร่โชว์ภาพเริ่มต้นในตัว */
     defaultPreview?: string;
     emptyText: string;
@@ -53,8 +67,12 @@ const VARIANTS: Record<
     key: BG_KEY,
     event: BG_EVENT,
     dimKey: BG_DIM_KEY,
+    dimDefault: BG_DIM_DEFAULT,
     maxDim: MAX_DIM,
     showDim: true,
+    dimLabel: "ความสว่างพื้นหลัง",
+    dimHintOn: "เลื่อนไปขวา = รูปพื้นหลังมืดลง (ตัวหนังสืออ่านง่ายขึ้น) · ปรับแล้วใช้ได้ทันทีทุกหน้า",
+    dimHintOff: "เพิ่มรูปพื้นหลังก่อนจึงจะปรับความสว่างได้",
     emptyText: "ยังไม่มีรูปพื้นหลัง — ใช้พื้นหลัง default (aurora)",
     defaultText: "",
     currentText: "รูปพื้นหลังปัจจุบัน",
@@ -65,9 +83,13 @@ const VARIANTS: Record<
   hero: {
     key: HERO_KEY,
     event: HERO_EVENT,
-    dimKey: BG_DIM_KEY,
+    dimKey: HERO_DIM_KEY,
+    dimDefault: HERO_DIM_DEFAULT,
     maxDim: MAX_DIM_HERO,
-    showDim: false,
+    showDim: true,
+    dimLabel: "ความสว่างแบบด์ image zoom",
+    dimHintOn: "เลื่อนไปขวา = แบบด์ด้านบนมืดลง (การ์ด/ตัวหนังสืออ่านง่ายขึ้น) · ปรับแล้วใช้ได้ทันทีทุกหน้า",
+    dimHintOff: "",
     defaultPreview: "/scroll-zoom.svg",
     emptyText: "ใช้ภาพเริ่มต้นในตัวอยู่",
     defaultText: "ภาพเริ่มต้น (Scroll Zoom)",
@@ -78,26 +100,27 @@ const VARIANTS: Record<
   },
 };
 
-/** ความเข้ม scrim ดำทับรูปพื้นหลัง (0 = สว่างสุด ... 0.85 = มืดสุด) — default 0.55 */
-export const BG_DIM_DEFAULT = 0.55;
-export const BG_DIM_MIN = 0;
-export const BG_DIM_MAX = 0.85;
-
-export function readStoredDim(key: string = BG_DIM_KEY): number {
-  if (typeof window === "undefined") return BG_DIM_DEFAULT;
+/** อ่านความเข้ม scrim — ค่าที่เก็บไว้ หรือ fallback ตาม variant (private mode → fallback) */
+export function readStoredDim(key: string = BG_DIM_KEY, fallback: number = BG_DIM_DEFAULT): number {
+  if (typeof window === "undefined") return fallback;
   try {
     const raw = window.localStorage.getItem(key);
-    if (raw === null) return BG_DIM_DEFAULT;
+    if (raw === null) return fallback;
     const n = Number(raw);
-    if (!Number.isFinite(n)) return BG_DIM_DEFAULT;
+    if (!Number.isFinite(n)) return fallback;
     return Math.min(BG_DIM_MAX, Math.max(BG_DIM_MIN, n));
   } catch {
-    return BG_DIM_DEFAULT; // private mode / storage disabled
+    return fallback; // private mode / storage disabled
   }
 }
 
 export function readStoredBgDim(): number {
-  return readStoredDim(BG_DIM_KEY);
+  return readStoredDim(BG_DIM_KEY, BG_DIM_DEFAULT);
+}
+
+/** ความสว่างของแบบด์ image zoom (ตั้งใน Settings) — ใช้โดย ScrollZoomHero */
+export function readStoredHeroDim(): number {
+  return readStoredDim(HERO_DIM_KEY, HERO_DIM_DEFAULT);
 }
 
 /** อ่าน data URL ของรูปที่ผู้ใช้ตั้งไว้ (คีย์ไหนก็ได้) — null = ยังไม่ตั้ง/อ่านไม่ได้ */
@@ -132,8 +155,8 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
 
   useEffect(() => {
     setPreview(readStoredImage(cfg.key));
-    setDim(readStoredDim(cfg.dimKey));
-  }, [cfg.key, cfg.dimKey]);
+    setDim(readStoredDim(cfg.dimKey, cfg.dimDefault));
+  }, [cfg.key, cfg.dimKey, cfg.dimDefault]);
 
   const apply = (dataUrl: string | null) => {
     try {
@@ -214,6 +237,9 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
 
   // พรีวิว = รูปที่ผู้ใช้ตั้งไว้ หรือภาพเริ่มต้นในตัว (เฉพาะฮีโร่)
   const previewSrc = preview ?? cfg.defaultPreview ?? null;
+  // พื้นหลังแอป: ต้องมีรูปก่อนจึงจะปรับความสว่างได้
+  // แบบด์ฮีโร่: มีภาพเริ่มต้นในตัวเสมอ → ปรับได้ทันทีโดยไม่ต้องอัปโหลดรูป
+  const dimEnabled = cfg.showDim && previewSrc !== null;
 
   return (
     <div className="space-y-3">
@@ -273,19 +299,19 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
         onChange={onPick}
       />
 
-      {/* ปรับความสว่างของพื้นหลัง — ยิ่งเลื่อนขวา ยิ่ง scrim ดำเข้ม รูปยิ่งมืด
-          (เฉพาะพื้นหลังแอป — แบบด์ฮีโร่มีความสว่างคุมด้วย vignette ของตัวเอง) */}
+      {/* ปรับความสว่างของแบ็กกราวด์ — ยิ่งเลื่อนขวา ยิ่ง scrim ดำเข้ม ภาพยิ่งมืด
+          ใช้ทั้งพื้นหลังแอป (tdapp_bg_dim) และแบบด์ image zoom (tdapp_hero_dim) */}
       {cfg.showDim && (
       <div className="rounded-lg border border-slate-700 p-3 space-y-2">
         <div className="flex items-center justify-between text-xs">
-          <span className="text-slate-300 font-medium">ความสว่างพื้นหลัง</span>
+          <span className="text-slate-300 font-medium">{cfg.dimLabel}</span>
           <div className="flex items-center gap-2">
             <span className="text-slate-400 tabular-nums">
-              {preview ? `${Math.round((1 - dim) * 100)}%` : "—"}
+              {dimEnabled ? `${Math.round((1 - dim) * 100)}%` : "—"}
             </span>
-            {preview && dim !== BG_DIM_DEFAULT && (
+            {dimEnabled && dim !== cfg.dimDefault && (
               <button
-                onClick={() => setBgDim(BG_DIM_DEFAULT)}
+                onClick={() => setBgDim(cfg.dimDefault)}
                 className="text-[11px] text-slate-400 border border-slate-700 rounded px-2 min-h-[28px] active:bg-slate-800"
               >
                 ค่าเริ่มต้น
@@ -299,15 +325,13 @@ export default function BackgroundPicker({ variant = "app" }: { variant?: Picker
           max={BG_DIM_MAX}
           step={0.05}
           value={dim}
-          disabled={!preview}
+          disabled={!dimEnabled}
           onChange={(e) => setBgDim(Number(e.target.value))}
           className="bg-dim-slider w-full"
-          aria-label="ปรับความสว่างพื้นหลัง"
+          aria-label={cfg.dimLabel}
         />
         <p className="text-[11px] text-slate-500">
-          {preview
-            ? "เลื่อนไปขวา = รูปพื้นหลังมืดลง (ตัวหนังสืออ่านง่ายขึ้น) · ปรับแล้วใช้ได้ทันทีทุกหน้า"
-            : "เพิ่มรูปพื้นหลังก่อนจึงจะปรับความสว่างได้"}
+          {dimEnabled ? cfg.dimHintOn : cfg.dimHintOff}
         </p>
       </div>
       )}
