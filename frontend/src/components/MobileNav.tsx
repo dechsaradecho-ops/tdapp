@@ -81,8 +81,10 @@ const go = (href: string) => {
 export default function MobileNav() {
   const [path, setPath] = useState("/");
   const navRef = useRef<HTMLElement>(null);
-  // pill = ตัวแก้วยืดหดที่ลากได้ / wake = หางของเหลว / rim = ขอบ chromatic aberration
+  // pill = ตัวแก้วตอนพัก / orb = วงกลมแก้วตอนลาก / wake = หางของเหลว
+  // rim = ขอบ chromatic aberration (อยู่ใน orb — โผล่เฉพาะตอนลาก)
   const pillRef = useRef<HTMLDivElement>(null);
+  const orbRef = useRef<HTMLSpanElement>(null);
   const wakeRef = useRef<HTMLDivElement>(null);
   const rimRRef = useRef<HTMLSpanElement>(null);
   const rimBRef = useRef<HTMLSpanElement>(null);
@@ -107,10 +109,12 @@ export default function MobileNav() {
     syncRef.current?.();
   }, [activeIdx]);
 
-  // ---- ฟิสิกส์ของเหลวของ pill (สปริง + ยืดบี้ + chromatic aberration + warp) ----
+  // ---- ฟิสิกส์ของเหลวของ pill/orb (สปริง + ยืดบี้ + chromatic aberration + warp) ----
   // หัวใจของ "แก้วเหลว" แบบ FluidGlass: pill ไม่ได้กระโดดตามนิ้ว แต่ "ไหล" ตาม
   // ด้วยสปริง underdamped (ตามช้าแล้วส่ายเข้าที่) + ยืดตามความเร็ว + ขอบสีเพี้ยน
   // คิดเป็น px/วินาที ทั้งหมด → เฟรมเรตเท่าไรก็ให้ความรู้สึกเดียวกัน
+  // ตอนลาก pill แคปซูลจะจางหาย แล้วมี "วงกลมแก้ว" (orb) โผล่แทน: ขอบฟุ้ง
+  // + backdrop-filter หักเหฉากหลัง + แถบแสงหักเห/ประกายบิดด้วย SVG filter 2 ความถี่
   //
   // ทำไมไม่ใช้ FluidGlass ตรง ๆ: มันไม่มี drag interaction เลย (mode = lens/cube/
   // bar) และต้องใช้ three + @react-three/fiber (peer React 19) + ไฟล์ .glb ที่
@@ -118,22 +122,29 @@ export default function MobileNav() {
   useEffect(() => {
     const nav = navRef.current;
     const pill = pillRef.current;
+    const orb = orbRef.current;
     const wake = wakeRef.current;
     const rimR = rimRRef.current;
     const rimB = rimBRef.current;
-    if (!nav || !pill || !wake || !rimR || !rimB) return;
+    if (!nav || !pill || !orb || !wake || !rimR || !rimB) return;
 
     // ผู้ใช้ที่ปิดอนิเมชัน → pill ยัง mark แท็บ active แต่นิ่ง ไม่มีสปริง/การลาก
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     // เผย pill (CSS ซ่อนไว้กัน flash ก่อน JS วัดตำแหน่งเสร็จ)
     pill.style.opacity = "1";
+    orb.style.opacity = "0";
     wake.style.opacity = "0";
     rimR.style.opacity = "0";
     rimB.style.opacity = "0";
 
     const H = 44; // ต้องตรงกับ height ของ .dock-glass__pill ใน globals.css
     const INSET = 3; // ระยะห่างซ้าย/ขวาของ pill จากขอบแท็บ
+    const ORB = 84; // ต้องตรงกับ --dock-orb ของ .dock-glass
+    // ยอมให้วงกลมล้นขอบ dock ได้นิดหน่อย: แนวนอนเพื่อให้ไปถึงกลางแท็บสุดท้าย
+    // (pill กว้าง ~65 → ครึ่งวง 42 จะเลยขอบ) แนวตั้งให้ "ไหล" ตามนิ้วออกนอกได้
+    const OVER_X = 18;
+    const OVER_Y = 34;
 
     // สปริงตัวหลัก: underdamped (ζ = 0.88) → ตามนิ้วช้าแล้วส่ายเข้าที่นิดหนึ่ง
     // = ความ "เหลว/หนืด" แบบ FluidGlass แต่เฟรมเรตอิสระ
@@ -195,7 +206,7 @@ export default function MobileNav() {
         const r = btn.getBoundingClientRect();
         pillW = Math.max(36, r.width - INSET * 2);
         pill.style.width = `${pillW}px`;
-        wake.style.width = `${pillW}px`;
+        // wake/orb เป็นวงกลมขนาดคงที่ (var(--dock-orb)) — ไม่ตั้งขนาดจาก JS
         restX = r.left - nr.left + r.width / 2;
       }
       return nr;
@@ -205,19 +216,30 @@ export default function MobileNav() {
     const render = () => {
       // squash & stretch ตามความเร็ว (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
       const spd = Math.min(Math.abs(main.v) / 3200, 0.25);
-      const sx = 1 + spd * 0.8;
-      const sy = 1 - spd * 0.42;
       // chromatic aberration: ขอบแดง/น้ำเงินเยื้องออกตามความเร็วการลาก
       const ca = 0.6 + spd * 11;
 
+      // pill (แคปซูล) ยืด/บี้ชัด ๆ ตอนลาก แล้วจางหายไปให้วงกลมแทนที่
+      const sx = 1 + spd * 0.8;
+      const sy = 1 - spd * 0.42;
       pill.style.transform =
         `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
         ` scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
+      pill.style.opacity = (1 - alpha).toFixed(3);
 
+      // orb (วงกลม) — ยืดบี้น้อยกว่า pill เพราะโจทย์คือ "ให้เป็นวงกลม"
+      const osx = 1 + spd * 0.42;
+      const osy = 1 - spd * 0.26;
+      orb.style.transform =
+        `translate3d(${(main.p - ORB / 2).toFixed(2)}px,${(mainY.p - ORB / 2).toFixed(2)}px,0)` +
+        ` scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
+      orb.style.opacity = alpha.toFixed(3);
+
+      // wake = หางของเหลวกลมตามหลัง (over-damped → ตามหลังเสมอ)
       wake.style.transform =
-        `translate3d(${(tail.p - pillW / 2).toFixed(2)}px,${(tailY.p - H / 2).toFixed(2)}px,0)` +
-        ` scale(${(0.55 + spd * 0.6).toFixed(3)})`;
-      wake.style.opacity = (alpha * 0.4).toFixed(3);
+        `translate3d(${(tail.p - ORB / 2).toFixed(2)}px,${(tailY.p - ORB / 2).toFixed(2)}px,0)` +
+        ` scale(${(0.5 + spd * 0.7).toFixed(3)})`;
+      wake.style.opacity = (alpha * 0.36).toFixed(3);
 
       const rimA = Math.min(alpha * 1.4, 1).toFixed(3);
       rimR.style.opacity = rimA;
@@ -339,8 +361,8 @@ export default function MobileNav() {
       startY = e.clientY;
       pressIdx = idxAtX(e.clientX - nr.left);
       targetAlpha = 1;
-      targetX = clamp(e.clientX - nr.left, pillW / 2 - 4, nr.width - pillW / 2 + 4);
-      targetY = clamp(e.clientY - nr.top, H / 2, nr.height - H / 2);
+      targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
+      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_Y, nr.height - ORB / 2 + OVER_Y);
       startLoop();
     };
 
@@ -350,8 +372,8 @@ export default function MobileNav() {
         moved = true;
       }
       const nr = nav.getBoundingClientRect();
-      targetX = clamp(e.clientX - nr.left, pillW / 2 - 4, nr.width - pillW / 2 + 4);
-      targetY = clamp(e.clientY - nr.top, H / 2, nr.height - H / 2);
+      targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
+      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_Y, nr.height - ORB / 2 + OVER_Y);
     };
 
     const onUp = (e: PointerEvent) => {
@@ -421,28 +443,55 @@ export default function MobileNav() {
           style={{ position: "absolute" }}
         >
           <defs>
+            {/* คลื่นยาว + blur กว้าง = ขอบวงกลมนุ่ม (ไม่หยักเป็นฟันปลา)
+                scale ยิ่งสูง ยิ่งเห็นแสง "หักเห" ในวงชัด */}
             <filter
               id="dock-glass-warp"
               x="-40%"
-              y="-60%"
+              y="-40%"
               width="180%"
-              height="220%"
+              height="180%"
               colorInterpolationFilters="sRGB"
             >
-              {/* baseFrequency ต่ำ = ลูกคลื่นยาวกว่าตัว pill → pill บิดเป็นก้อน
-                  ของเหลว ไม่ใช่ขอบหยักเป็นคลื่นความถี่สูง */}
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.02 0.03"
+                baseFrequency="0.022 0.028"
                 numOctaves="2"
-                seed="7"
+                seed="13"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="1" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="3.4" result="soft" />
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="6"
+                scale="15"
+                xChannelSelector="R"
+                yChannelSelector="G"
+              />
+            </filter>
+
+            {/* คลื่นถี่ scale เล็ก — ใช้กับชั้นในวงเท่านั้น (ประกาย/โคสติก)
+                เพื่อเพิ่มการหักเหโดยไม่ทำให้ขอบวงสั่น */}
+            <filter
+              id="dock-glass-caustic"
+              x="-30%"
+              y="-30%"
+              width="160%"
+              height="160%"
+              colorInterpolationFilters="sRGB"
+            >
+              <feTurbulence
+                type="fractalNoise"
+                baseFrequency="0.075 0.09"
+                numOctaves="2"
+                seed="29"
+                result="noise"
+              />
+              <feGaussianBlur in="noise" stdDeviation="1.4" result="soft" />
+              <feDisplacementMap
+                in="SourceGraphic"
+                in2="soft"
+                scale="9"
                 xChannelSelector="R"
                 yChannelSelector="G"
               />
@@ -450,14 +499,20 @@ export default function MobileNav() {
           </defs>
         </svg>
 
-        {/* wake มาก่อน pill → วาดใต้ pill (หางของเหลวที่ตามหลัง) */}
+        {/* wake มาก่อน orb/pill → วาดใต้ทั้งคู่ (หางของเหลวที่ตามหลัง) */}
         <div ref={wakeRef} className="dock-glass__wake" aria-hidden="true" />
 
-        {/* pill = ตัวแก้ว: พื้น/ขอบ hairline มาจาก CSS, 2 rim = ขอบสีเพี้ยน */}
-        <div ref={pillRef} className="dock-glass__pill" aria-hidden="true">
+        {/* pill = ตัวแก้วตอนพัก (แคปซูล) — ตอนลากจะจางหายไปให้ orb แทนที่ */}
+        <div ref={pillRef} className="dock-glass__pill" aria-hidden="true" />
+
+        {/* orb = วงกลมแก้วตอนลาก: ขอบฟุ้ง + หักเหฉากหลัง + แถบแสงหักเห/ประกาย
+            + 2 rim สีเพี้ยน (rim อยู่ข้างในวง → ใช้ border-radius: inherit = 50%) */}
+        <span ref={orbRef} className="dock-glass__orb" aria-hidden="true">
+          <span className="dock-glass__orb-sheen" />
+          <span className="dock-glass__orb-caustic" />
           <span ref={rimRRef} className="dock-glass__rim dock-glass__rim--r" />
           <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
-        </div>
+        </span>
 
         {MENU.map((l, i) => (
           <button

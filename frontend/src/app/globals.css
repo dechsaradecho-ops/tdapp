@@ -209,6 +209,8 @@ input[type="checkbox"] {
    (บทเรียนเดิมด้านบน) ความ "หักเห" จึงทำด้วย filter: url(#dock-glass-warp) บน
    artwork ของ pill เอง — browser ไม่รองรับ = แค่ไม่บิด ไม่พัง */
 .dock-glass {
+  /* เส้นผ่านศูนย์กลาง "วงกลมแก้ว" ตอนลาก — ต้องตรงกับ ORB ใน MobileNav.tsx */
+  --dock-orb: 84px;
   position: fixed;
   left: 50%;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
@@ -249,7 +251,7 @@ input[type="checkbox"] {
   opacity: 0;
   pointer-events: none;
   transform-origin: 50% 50%;
-  will-change: transform;
+  will-change: transform, opacity;
 }
 /* บิดเฉพาะตอนลาก — ตอนพักปล่อยให้เป็นแคปซูลคม ๆ */
 .dock-glass__pill.is-fluid {
@@ -286,7 +288,9 @@ input[type="checkbox"] {
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
 }
-/* ขอบ chromatic aberration (แดง/น้ำเงิน) — โผล่เฉพาะตอนลาก ระยะเยื้องจาก JS */
+/* ขอบ chromatic aberration (แดง/น้ำเงิน) — โผล่เฉพาะตอนลาก อยู่ในวงกลม orb
+   (border-radius: inherit → 50%) ระยะเยื้องมาจาก JS + blur นิดให้ขอบนุ่ม
+   ความเข้มลดลงจากเดิมเพราะ "ขอบวง" ตอนนี้ทำหน้าที่หักเหแสงแทนเส้นคม */
 .dock-glass__rim {
   position: absolute;
   inset: 0;
@@ -294,32 +298,114 @@ input[type="checkbox"] {
   opacity: 0;
   pointer-events: none;
   mix-blend-mode: screen;
-  filter: url("#dock-glass-warp");
+  filter: url("#dock-glass-warp") blur(0.6px);
 }
 .dock-glass__rim--r {
-  box-shadow: inset 0 0 0 1.25px rgba(255, 92, 92, 0.8);
+  box-shadow: inset 0 0 0 2px rgba(255, 92, 92, 0.55);
 }
 .dock-glass__rim--b {
-  box-shadow: inset 0 0 0 1.25px rgba(92, 172, 255, 0.85);
+  box-shadow: inset 0 0 0 2px rgba(92, 172, 255, 0.6);
 }
-/* หางของเหลว (wake): ฝ้าจางที่ตามหลัง pill ช้ากว่า — เห็นเฉพาะตอนลาก */
+
+/* --- วงกลมแก้วตอนลาก (orb) ------------------------------------------------
+   ตอนลาก pill จะจางหายไป แล้วมี "วงกลมแก้ว" โผล่มาแทนที่:
+     1. .dock-glass__orb         = ตัวแก้วกลม + backdrop-filter (หักเหฉากหลังจริง)
+                                   + mask radial → ขอบฟุ้ง ไม่เป็นวงกลมตัดคม
+     2. .dock-glass__orb-sheen   = แถบแสงหักเหกลางวง + ไฮไลต์ + โคสติก บิดด้วย
+                                   คลื่นยาว (baseFrequency ต่ำ) → ขอบวงนุ่ม
+     3. .dock-glass__orb-caustic = ประกาย/แสงรวมตัวในแก้ว บิดด้วยคลื่นถี่ scale เล็ก
+                                   (อยู่ลึกในวง ≥50% รัศมี ไม่ทำขอบหยัก)
+   ห้ามใช้ backdrop-filter: url() — Samsung Internet render dock พัง (บทเรียนด้านบน) */
+.dock-glass__orb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--dock-orb);
+  height: var(--dock-orb);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+  /* เบลอ + อิ่มสี + สว่างขึ้น = ฉากหลังที่มองผ่านเนื้อแก้ว */
+  background: radial-gradient(
+    closest-side,
+    rgba(255, 255, 255, 0.1),
+    rgba(255, 255, 255, 0.035) 60%,
+    rgba(255, 255, 255, 0.11) 84%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  -webkit-backdrop-filter: blur(4px) saturate(215%) brightness(1.24) contrast(1.06);
+  backdrop-filter: blur(4px) saturate(215%) brightness(1.24) contrast(1.06);
+  /* ขอบฟุ้ง: fade ความทึบทั้งวง (รวมเงาที่ backdrop-filter ทำไว้)
+     แกนทึบกว้างขึ้นเป็น 64% → วงในแน่น แต่ขอบยังนุ่ม (ไม่ตัดคมเป็นกรอบ) */
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    #000 64%,
+    rgba(0, 0, 0, 0.72) 84%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    closest-side,
+    #000 64%,
+    rgba(0, 0, 0, 0.72) 84%,
+    transparent 100%
+  );
+}
+/* ชั้นหักเหหลัก — ลำดับบนลงล่าง = ไฮไลต์บนซ้าย, โคสติกล่างขวา, แถบหักเหกลางวง */
+.dock-glass__orb-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  filter: url("#dock-glass-warp");
+  background:
+    radial-gradient(closest-side at 32% 24%, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0) 52%),
+    radial-gradient(closest-side at 66% 84%, rgba(124, 196, 255, 0.6), rgba(124, 196, 255, 0) 68%),
+    radial-gradient(
+      closest-side,
+      rgba(255, 255, 255, 0) 38%,
+      rgba(255, 255, 255, 0.2) 60%,
+      rgba(150, 205, 255, 0.34) 78%,
+      rgba(255, 255, 255, 0) 96%
+    ),
+    radial-gradient(closest-side, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0) 72%);
+}
+/* ชั้นประกายในวง (คลื่นถี่ scale เล็ก) = แสงที่หักเหรวมตัวในเนื้อแก้ว */
+.dock-glass__orb-caustic {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  filter: url("#dock-glass-caustic");
+  background:
+    radial-gradient(closest-side at 40% 66%, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0) 30%),
+    radial-gradient(closest-side at 72% 40%, rgba(170, 220, 255, 0.6), rgba(170, 220, 255, 0) 28%),
+    radial-gradient(
+      closest-side,
+      rgba(255, 255, 255, 0) 48%,
+      rgba(255, 255, 255, 0.22) 60%,
+      rgba(255, 255, 255, 0) 70%
+    );
+}
+/* หางของเหลว (wake): ฝ้ากลมจาง ๆ ที่ตามหลัง orb ช้ากว่า — เห็นเฉพาะตอนลาก */
 .dock-glass__wake {
   position: absolute;
   left: 0;
   top: 0;
-  width: 56px;
-  height: 44px;
-  border-radius: 999px;
+  width: var(--dock-orb);
+  height: var(--dock-orb);
+  border-radius: 50%;
   opacity: 0;
   pointer-events: none;
   transform-origin: 50% 50%;
   will-change: transform, opacity;
   background: radial-gradient(
-    110% 130% at 50% 60%,
-    rgba(124, 196, 255, 0.32),
-    rgba(124, 196, 255, 0) 72%
+    closest-side,
+    rgba(124, 196, 255, 0.34),
+    rgba(124, 196, 255, 0) 76%
   );
-  filter: url("#dock-glass-warp") blur(5px);
+  filter: url("#dock-glass-warp") blur(7px);
 }
 
 /* --- แท็บ ----------------------------------------------------------------- */
