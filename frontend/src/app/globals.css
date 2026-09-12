@@ -84,6 +84,30 @@ input[type="checkbox"] {
   display: none;
 }
 
+/* ตารางที่ปัดแนวนอนได้ (ตารางกว้างเกินจอ — ต้องปัดดูคอลัมน์ที่เหลือ)
+   แถบเลื่อนมาตรฐานหนา 8px โผล่ใต้ตารางเป็น "เส้นหนาสีอ่อน" อ่านเป็นเส้นตาราง
+   หนาเกินไป (feedback หน้า monitor) → ทำบางเป็น 4px + จางลง แต่ยังเห็น
+   เพื่อบอกผู้ใช้ว่ายังปัดดูคอลัมน์อื่นได้ (ไม่ใช้ .no-scrollbar ที่ซ่อนสนิท)
+   หมายเหตุ: ห้ามใส่ scrollbar-width: thin ลอย ๆ — Chrome รองรับแล้ว และค่าของ
+   UA (thin = 10px) จะ override ::-webkit-scrollbar ทับ (วัดแล้วหนาขึ้น 8→10px)
+   จึงกันไว้ให้เฉพาะ engine ที่ไม่มี ::-webkit-scrollbar (Firefox) */
+.scroll-x-thin::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.scroll-x-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+.scroll-x-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+@supports not (selector(::-webkit-scrollbar)) {
+  .scroll-x-thin {
+    scrollbar-width: thin;
+  }
+}
+
 /* รองรับจอมี notch (iPhone) — เว้นระยะ safe area */
 .safe-top {
   padding-top: env(safe-area-inset-top, 0px);

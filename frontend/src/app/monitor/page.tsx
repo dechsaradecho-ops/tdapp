@@ -792,7 +792,7 @@ export default function MonitorPage() {
           <p className="text-slate-500 text-sm mt-3">ไม่มีไม้เปิดค้าง — auto trader จะยิงเมื่อเจอ signal ที่ผ่าน gate</p>
         )}
         {snap && snap.open_positions.length > 0 && (
-          <div className="overflow-x-auto mt-3 -mx-4 px-4">
+          <div className="overflow-x-auto scroll-x-thin mt-3 -mx-4 px-4">
             <table className="w-full text-sm min-w-max md:min-w-0">
               <thead>
                 <tr className="text-left text-xs text-slate-500 uppercase tracking-wide whitespace-nowrap">
@@ -934,7 +934,7 @@ export default function MonitorPage() {
           <p className="text-slate-500 text-sm mt-3">ยังไม่มีประวัติ — รอ signal แรกผ่าน gate</p>
         )}
         {snap && snap.recent.length > 0 && (
-          <div className="overflow-x-auto mt-3">
+          <div className="overflow-x-auto scroll-x-thin mt-3">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500 uppercase tracking-wide">
