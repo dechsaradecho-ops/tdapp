@@ -207,7 +207,20 @@ input[type="checkbox"] {
 
    หมายเหตุ: ห้ามใช้ backdrop-filter: url() ที่นี่ — Samsung Internet render dock พัง
    (บทเรียนเดิมด้านบน) ความ "หักเห" จึงทำด้วย filter: url(#dock-glass-warp) บน
-   artwork ของ pill เอง — browser ไม่รองรับ = แค่ไม่บิด ไม่พัง */
+   artwork ของ pill เอง — browser ไม่รองรับ = แค่ไม่บิด ไม่พัง
+
+   ⚠️⚠️ ห้ามใส่ backdrop-filter ใด ๆ ที่ <nav> นี้ "เด็ดขาด"
+   element ที่มี backdrop-filter จะกลายเป็น "backdrop root" ของลูกทุกตัว
+   ⇒ backdrop-filter ของ .dock-glass__orb (url(#dock-glass-lens)) และของ
+     .dock-glass__orb-edge จะเห็นฉากหลังเป็น "ผลลัพธ์ที่ nav กรองไปแล้ว"
+     (ภาพเรียบ ๆ) ไม่ใช่ตัวหน้าเว็บ ⇒ displacement ไม่เกิดจริง
+   หลักฐานจากการวัด (pixel diff ของภาพหน้าจอจริง):
+     • ตอน nav ยังมี blur(20px): เปลี่ยน scale ของ feDisplacementMap 34 → 0
+       ภาพต่างกันแค่ mean 0.11 / max 7 (เท่ากับสัญญาณรบกวน) = "ไม่มีอะไรเกิดขึ้น"
+     • พอตั้ง backdrop-filter: none ที่ nav แล้ววัดซ้ำ
+       ต่างกัน mean 0.91 / max 36 / 3.8% ของพิกเซล (หนาแน่นกลางวง mean 7.45)
+       = เห็นการบิดจริง
+   งาน "เบลอฉากหลังของแถบ dock" จึงย้ายไปที่ลูก .dock-glass__frost (ด้านล่าง) */
 .dock-glass {
   /* เส้นผ่านศูนย์กลาง "วงกลมแก้ว" ตอนลาก — ต้องตรงกับ ORB ใน MobileNav.tsx */
   --dock-orb: 84px;
@@ -224,8 +237,8 @@ input[type="checkbox"] {
   padding: 0 6px;
   border-radius: 28px;
   background: rgba(255, 255, 255, 0.08);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  backdrop-filter: blur(20px) saturate(160%);
+  /* ⚠️⚠️ ไม่มี backdrop-filter ที่นี่โดยเจตนา — ดูเหตุผลยาวด้านบน (backdrop root)
+     ความฟุ้งของแถบ dock ย้ายไปที่ .dock-glass__frost ซึ่งเป็น "ลูก" */
   /* เงาลึก + ไฮไลต์ขอบบนบาง ๆ — ไม่ใช่วงขอบขาวรอบกล่อง */
   box-shadow:
     0 8px 32px rgba(0, 0, 0, 0.35),
@@ -236,6 +249,32 @@ input[type="checkbox"] {
   user-select: none;
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* --- frost = เบลอฉากหลังของ "แถบ dock" -------------------------------------
+   เดิมความฟุ้งนี้อยู่บน <nav> แต่ backdrop-filter บน nav กลายเป็น backdrop root
+   ที่ทำให้ backdrop-filter ของ orb (เลนส์บิด) เห็นฉากหลังเป็นภาพเรียบ ⇒ เลนส์
+   ไม่ทำงาน วัดจาก pixel diff แล้วชัดเจน (ดูคอมเมนต์ยาวที่ .dock-glass)
+   ⇒ ย้ายมาเป็น "ลูก" ที่วาดเป็นตัวแรกสุด (ใต้ wake/pill/orb)
+
+   ⚠️ ต้องเป็น element จริง ไม่ใช่ ::before/::after — pseudo-element ที่มี
+      backdrop-filter ใช้ไม่ได้บน Samsung Internet (บทเรียนเดิมด้านบน)
+   ⚠️ ตอนลาก (nav.is-warping) ต้อง display:none เสมอ
+      ถ้าปล่อยให้วาดอยู่ ภาพที่เบลอ 20px แล้วจะถูก composited เข้า backdrop ของ orb
+      ในโซนที่ทับกันกับแถบ dock ⇒ ส่วนกลางวง (โซนทับ) ไม่บิด แต่ครึ่งบน/ล่างบิด
+      = เลนส์ดู "พังครึ่งวง" และการบิดจะอ่อนลงเพราะดิสเพลสบนภาพที่เบลอจนเรียบ
+      display:none = หลุดจาก layout/backdrop ทั้งหมด ⇒ orb กลับไปเห็นหน้าเว็บจริง
+      (แถบ dock จะดูลายคมขึ้นเฉพาะระหว่างลาก ซึ่งเป็นจังหวะที่ผู้ใช้สนใจวงกลมอยู่แล้ว) */
+.dock-glass__frost {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+}
+.dock-glass.is-warping .dock-glass__frost {
+  display: none;
 }
 
 /* --- pill = ตัวแก้ว (mark แท็บ active + เป็นของที่ลาก) ----------------------
@@ -301,14 +340,17 @@ input[type="checkbox"] {
   mix-blend-mode: screen;
   filter: blur(0.8px);
 }
+/* ⚠️ เส้นต้อง "หนาพอ" — mask ของ .dock-glass__orb จางลงตามรัศมี เส้นบาง 2px
+   อยู่ที่รัศมี ~95–100% ซึ่งโดนหรี่เกือบหมด (นี่คือเหตุผลที่ขอบสีเพี้ยนไม่โผล่)
+   หนา 4–5px ⇒ ส่วนใน (รัศมี ~88%) ยังพ้นโซนจาง อ่านเป็นขอบปริซึมได้ */
 .dock-glass__rim--r {
-  box-shadow: inset 0 0 0 2px rgba(255, 92, 92, 0.6);
+  box-shadow: inset 0 0 0 5px rgba(255, 92, 92, 0.78);
 }
 .dock-glass__rim--g {
-  box-shadow: inset 0 0 0 1.5px rgba(120, 255, 200, 0.38);
+  box-shadow: inset 0 0 0 4px rgba(120, 255, 200, 0.5);
 }
 .dock-glass__rim--b {
-  box-shadow: inset 0 0 0 2px rgba(92, 172, 255, 0.68);
+  box-shadow: inset 0 0 0 5px rgba(92, 172, 255, 0.88);
 }
 
 /* --- วงกลมแก้วตอนลาก (orb) ------------------------------------------------
@@ -343,33 +385,42 @@ input[type="checkbox"] {
     closest-side,
     rgba(255, 255, 255, 0.09),
     rgba(255, 255, 255, 0.04) 62%,
-    rgba(255, 255, 255, 0.09) 86%,
+    rgba(255, 255, 255, 0.06) 86%,
     rgba(255, 255, 255, 0) 100%
   );
   -webkit-backdrop-filter: blur(7px) saturate(145%) brightness(1.18);
   backdrop-filter: blur(7px) saturate(145%) brightness(1.18);
-  /* ขอบฟุ้ง: fade ความทึบทั้งวง (รวมเงาที่ backdrop-filter ทำไว้)
-     แกนทึบกว้างขึ้นเป็น 64% → วงในแน่น แต่ขอบยังนุ่ม (ไม่ตัดคมเป็นกรอบ) */
+  /* ⚠️⚠️ mask ของ element นี้ "คลุมลูกทุกตัว" (sheen / caustic / disperse /
+     rim / orb-edge) ห้ามตั้งให้จางเร็วเด็ดขาด
+     ของเดิม fade เริ่มที่ 64% → จบที่ 100% ⇒ โซน 84–100% ซึ่งเป็นที่อยู่ของ
+     "วงแหวนหักเหสี" (disperse) และ "chromatic rim" ทั้งหมด ถูกหรี่จน ~0
+     ผลคือตาไม่เห็นการหักเหของสีเลยแม้แต่ที่ขอบวง
+     อีกทั้งตอนลาก "นิ้วบังวงกลมตรงกลาง" — ส่วนเดียวที่ผู้ใช้เห็นจริงคือขอบวง
+     จึงต้องโปร่งใสพอให้ของที่วาดไว้ที่ 74–92% โผล่จริง */
   -webkit-mask-image: radial-gradient(
     closest-side,
-    #000 64%,
-    rgba(0, 0, 0, 0.72) 84%,
+    #000 68%,
+    rgba(0, 0, 0, 0.8) 88%,
+    rgba(0, 0, 0, 0.3) 96%,
     transparent 100%
   );
   mask-image: radial-gradient(
     closest-side,
-    #000 64%,
-    rgba(0, 0, 0, 0.72) 84%,
+    #000 68%,
+    rgba(0, 0, 0, 0.8) 88%,
+    rgba(0, 0, 0, 0.3) 96%,
     transparent 100%
   );
 }
 
 /* --- เลนส์บิดเบี้ยวภาพหลังแก้ว (lens distortion) --------------------------
-   ชั้นนี้ทำให้ "ภาพ/ตัวหนังสือที่อยู่หลังวงกลม" ถูกดึงบิดตามวงจริง ๆ ไม่ใช่แค่
-   วาดแถบแสงทับ (แบบที่ .dock-glass__orb-sheen/caustic ทำ)
-   กลไก: feTurbulence คลื่นยาว (1 รอบต่อวง) → blur → feDisplacementMap
-   หมายเหตุ: feImage ใช้เป็นแผนที่ displacement ไม่ได้ใน Chromium (ทดสอบแล้ว
-   ให้ผลเป็น uniform/ว่างเปล่า) จึงต้องใช้ feTurbulence เป็นตัวสร้างสนาม
+   ชั้นนี้ทำให้ "ภาพ/ตัวหนังสือที่อยู่หลังวงกลม" ถูกดึงบิดตามวงจริง ๆ (ไม่ใช่
+   วาดแถบแสงทับแบบ .dock-glass__orb-sheen/caustic)
+   กลไก: แผนที่ดิสเพลสเรเดียลที่วาดด้วย canvas (ดู buildLensMap ใน MobileNav)
+          → feImage → feDisplacementMap ต่อช่องสี R/G/B คนละ scale
+   ผลลัพธ์: อ่อนที่กลางวง → แรงสุดที่ขอบวง + ขอบสีรุ้ง (chromatic aberration)
+   ⚠️ ไม่มี blur ในตัวกรองนี้เลย — ผู้ใช้ระบุ "วงกลมต้องไม่เบลอ ใส่แค่ distortion"
+      (เดิมความฟุ้งถูกย้ายเข้าไปอยู่ใน feGaussianBlur ข้างใน filter แล้ว)
    ⚠️ gate ด้วย .dock-glass--lens (MobileNav ติดให้เมื่อ CSS.supports ผ่าน)
       — ถอดคลาสเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรพัง */
 .dock-glass--lens .dock-glass__orb {
@@ -380,6 +431,24 @@ input[type="checkbox"] {
      ถ้าถอดคลาส .dock-glass--lens ออก วงกลมกลับไปใช้ blur(7px) ธรรมดาทันที */
   -webkit-backdrop-filter: url("#dock-glass-lens");
   backdrop-filter: url("#dock-glass-lens");
+  /* ⚠️ mask นี้มาสก์ "ผลของการบิด" ด้วย — การบิดแรงสุดที่ 0.87R–1R (รัศมี
+     อิ่มตัวที่ขอบวง) ⇒ ถ้าใช้ mask แบบ fallback (จางที่ 96%) โซนที่แรงสุดจะ
+     ถูกหรี่เหลือ ~0.3 พอดี · จึงทึบจนถึง ~94% แล้วค่อยเฟดใน 6% สุดท้าย
+     (ยังไม่เป็นวงตัดดับ — เหลือขอบนุ่มให้อ่านเป็นขอบแก้ว) */
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    #000 86%,
+    rgba(0, 0, 0, 0.92) 94%,
+    rgba(0, 0, 0, 0.5) 98%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    closest-side,
+    #000 86%,
+    rgba(0, 0, 0, 0.92) 94%,
+    rgba(0, 0, 0, 0.5) 98%,
+    transparent 100%
+  );
 }
 /* ชั้นหักเหหลัก — วงแหวนกลมรอบขอบวง "เท่ากันทุกมุม"
    ใช้ radial-gradient(closest-side) ที่จัดกึ่งกลางล้วน ๆ → ระยะห่างจากขอบเท่ากัน
@@ -448,7 +517,10 @@ input[type="checkbox"] {
   mix-blend-mode: screen;
   will-change: opacity;
   --sp: 0;
-  --spx: calc(0.015 + var(--sp) * 0.045);
+  /* ⚠️ ระยะเยื้องต้อง "เห็นได้ด้วยตา" ตั้งแต่เริ่มลาก
+     ของเดิม 1.5% ของรัศมี 42px = ~0.6px → จมอยู่ในความฟุ้ง มองไม่เห็น
+     ใหม่: 4% = ~1.7px ตอนเริ่มลาก และไต่ถึง 9% = ~3.8px ตอนลากเร็ว */
+  --spx: calc(0.04 + var(--sp) * 0.05);
 }
 .dock-glass__disperse > span {
   position: absolute;
@@ -458,13 +530,15 @@ input[type="checkbox"] {
   filter: blur(0.7px);
 }
 /* แดง: รัศมีเล็กสุด (หักเหน้อยสุด) */
+/* วงแหวนทั้งสามเริ่มที่ 78% (ไม่ใช่ 84%) — เลื่อนเข้ามาในโซนที่ mask ยังทึบ
+   ~0.9 ⇒ ความสว่างที่ตาเห็นจริงต่างจากเดิมหลายเท่า */
 .dock-glass__disperse > .dock-glass__disperse--r {
   transform: scale(calc(1 - var(--spx)));
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0) 84%,
-    rgba(255, 88, 96, 0.34) 92%,
-    rgba(255, 140, 110, 0.14) 97%,
+    rgba(255, 255, 255, 0) 78%,
+    rgba(255, 88, 96, 0.6) 88%,
+    rgba(255, 140, 110, 0.24) 95%,
     rgba(255, 255, 255, 0) 100%
   );
 }
@@ -472,8 +546,8 @@ input[type="checkbox"] {
 .dock-glass__disperse > .dock-glass__disperse--g {
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0) 84%,
-    rgba(120, 255, 200, 0.2) 92%,
+    rgba(255, 255, 255, 0) 78%,
+    rgba(120, 255, 200, 0.34) 88%,
     rgba(255, 255, 255, 0) 100%
   );
 }
@@ -482,9 +556,9 @@ input[type="checkbox"] {
   transform: scale(calc(1 + var(--spx)));
   background: radial-gradient(
     closest-side,
-    rgba(255, 255, 255, 0) 84%,
-    rgba(86, 156, 255, 0.42) 92%,
-    rgba(128, 190, 255, 0.18) 98%,
+    rgba(255, 255, 255, 0) 78%,
+    rgba(86, 156, 255, 0.72) 88%,
+    rgba(128, 190, 255, 0.3) 96%,
     rgba(255, 255, 255, 0) 100%
   );
 }
