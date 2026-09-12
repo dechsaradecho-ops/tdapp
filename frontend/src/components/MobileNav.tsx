@@ -136,6 +136,18 @@ export default function MobileNav() {
     // ผู้ใช้ที่ปิดอนิเมชัน → pill ยัง mark แท็บ active แต่นิ่ง ไม่มีสปริง/การลาก
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+    // เลนส์บิดเบี้ยวภาพหลังแก้ว (backdrop-filter: url()) เปิดเฉพาะ browser
+    // ที่รองรับจริง และ "ไม่ใช่ Samsung Internet"
+    // (บทเรียนใน globals.css: Samsung render dock พังเมื่อเจอ backdrop-filter: url())
+    // ถอดคลาสออกเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรเสียหาย
+    const lensOk =
+      typeof CSS !== "undefined" &&
+      typeof CSS.supports === "function" &&
+      (CSS.supports("backdrop-filter", 'url("#dock-glass-lens")') ||
+        CSS.supports("-webkit-backdrop-filter", 'url("#dock-glass-lens")')) &&
+      !/SamsungBrowser/i.test(navigator.userAgent);
+    if (lensOk) nav.classList.add("dock-glass--lens");
+
     // เผย pill (CSS ซ่อนไว้กัน flash ก่อน JS วัดตำแหน่งเสร็จ)
     pill.style.opacity = "1";
     orb.style.opacity = "0";
@@ -440,6 +452,7 @@ export default function MobileNav() {
       window.removeEventListener("resize", sync);
       window.removeEventListener("orientationchange", sync);
       window.removeEventListener("load", sync);
+      nav.classList.remove("dock-glass--lens");
       ro?.disconnect();
       if (syncRef.current === sync) syncRef.current = null;
     };
@@ -557,6 +570,73 @@ export default function MobileNav() {
                 result="chRG"
               />
               <feBlend in="chRG" in2="chB" mode="screen" />
+            </filter>
+
+            {/* เลนส์บิดเบี้ยว "ภาพหลังแก้ว": คนละหน้าที่กับ 2 ตัวบน
+                - dock-glass-warp/caustic = บิด "แถบแสงที่เราวาดเอง" (filter:)
+                - dock-glass-lens        = บิด "ภาพจริงที่อยู่ข้างหลังวงกลม"
+                                           (ใช้ผ่าน backdrop-filter: ของ orb)
+
+                ⚠️⚠️ backdrop-filter ต้องมี url() "ตัวเดียว" เท่านั้น
+                   วัดแล้ว (harness + diff พิกเซล): ถ้ามี blur()/saturate() ปนอยู่
+                   Chromium จะทิ้ง url() ทั้งตัว → ได้แค่ blur เฉย ๆ ไม่มีการบิด
+                   (cfg sweep 5 ค่า baseFrequency + สลับลำดับ blur/lens → เหมือนเดิม)
+                   ดังนั้นความฟุ้ง/อิ่มสี/ความสว่างของ "ฉากหลัง" ต้องทำในฟิลเตอร์นี้
+                   ด้วย feGaussianBlur/feColorMatrix/feComponentTransfer แทน
+
+                ลำดับ: เตรียมฉากหลัง (เบลอ→อิ่มสี→สว่าง) แล้วค่อยดิสเพลส
+                (เบลอทีหลังจะทับรอยบิดให้หายไป)
+
+                สนามดิสเพลส: feTurbulence คลื่นยาว (คาบ ~1/0.014 ≈ 70px ≈ 1 รอบ
+                ต่อวง 84px) → blur ให้เป็นสนามนุ่ม → เป็น "โป่ง" ก้อนเดียว
+                scale 28 → ดึงได้สูงสุด ±14px (≈ 17% ของเส้นผ่านศูนย์กลางวง)
+
+                ⚠️ เปลี่ยน baseFrequency/numOctaves เมื่อไร → bump seed ด้วย
+                ⚠️ feImage ใช้เป็นแผนที่ไม่ได้ (Chromium ให้ผล uniform) จึงต้อง
+                   ใช้ feTurbulence เป็นตัวสร้างสนามแทน */}
+            <filter
+              id="dock-glass-lens"
+              x="-20%"
+              y="-20%"
+              width="140%"
+              height="140%"
+              colorInterpolationFilters="sRGB"
+            >
+              {/* 1) ฉากหลังหลังผ่านแก้ว: เบลอ 4px (เทียบเท่า blur(7px) เดิมที่ตา
+                    มองเพราะการบิดช่วยพรางรอยคม) → อิ่มสี 1.45 → สว่าง 1.18 */}
+              <feGaussianBlur
+                in="SourceGraphic"
+                stdDeviation="4"
+                result="bg0"
+              />
+              <feColorMatrix
+                in="bg0"
+                type="saturate"
+                values="1.45"
+                result="bg1"
+              />
+              <feComponentTransfer in="bg1" result="bg2">
+                <feFuncR type="linear" slope="1.18" />
+                <feFuncG type="linear" slope="1.18" />
+                <feFuncB type="linear" slope="1.18" />
+              </feComponentTransfer>
+              {/* 2) สนามดิสเพลส (ต้อง "ไม่สม่ำเสมอ" ในวง — ถ้าสนามนิ่งเกินไป
+                    จะกลายเป็นเลื่อนภาพทั้งวง ซึ่งมองไม่เห็นบนฉากหลังที่เบลอ) */}
+              <feTurbulence
+                type="fractalNoise"
+                baseFrequency="0.014 0.017"
+                numOctaves="2"
+                seed="93"
+                result="bulge"
+              />
+              <feGaussianBlur in="bulge" stdDeviation="9" result="soft" />
+              <feDisplacementMap
+                in="bg2"
+                in2="soft"
+                scale="28"
+                xChannelSelector="R"
+                yChannelSelector="G"
+              />
             </filter>
           </defs>
         </svg>

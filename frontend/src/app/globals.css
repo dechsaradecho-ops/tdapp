@@ -319,7 +319,8 @@ input[type="checkbox"] {
      3. .dock-glass__orb-caustic = ประกายในเนื้อแก้ว กระจายสม่ำเสมอทั้งวง
    ⚠️ ทุก gradient ต้องจัดกึ่งกลาง (closest-side เปล่า ๆ) ห้ามใส่ `at X% Y%`
       ไม่งั้นแสงจะไปกองเป็นหย่อม ๆ ที่มุมเดียว ไม่เป็นวงกลมรอบขอบ
-   ห้ามใช้ backdrop-filter: url() — Samsung Internet render dock พัง (บทเรียนด้านบน) */
+   ⚠️ ห้ามใส่ backdrop-filter: url() ที่ตัว .dock-glass__orb ตรง ๆ — Samsung
+      Internet render dock พัง (บทเรียนด้านบน) ใช้ .dock-glass--lens เป็นตัว gate */
 .dock-glass__orb {
   position: absolute;
   left: 0;
@@ -357,6 +358,24 @@ input[type="checkbox"] {
     rgba(0, 0, 0, 0.72) 84%,
     transparent 100%
   );
+}
+
+/* --- เลนส์บิดเบี้ยวภาพหลังแก้ว (lens distortion) --------------------------
+   ชั้นนี้ทำให้ "ภาพ/ตัวหนังสือที่อยู่หลังวงกลม" ถูกดึงบิดตามวงจริง ๆ ไม่ใช่แค่
+   วาดแถบแสงทับ (แบบที่ .dock-glass__orb-sheen/caustic ทำ)
+   กลไก: feTurbulence คลื่นยาว (1 รอบต่อวง) → blur → feDisplacementMap
+   หมายเหตุ: feImage ใช้เป็นแผนที่ displacement ไม่ได้ใน Chromium (ทดสอบแล้ว
+   ให้ผลเป็น uniform/ว่างเปล่า) จึงต้องใช้ feTurbulence เป็นตัวสร้างสนาม
+   ⚠️ gate ด้วย .dock-glass--lens (ใส่จาก MobileNav เมื่อไม่ใช่ Samsung Internet)
+      — ถอดคลาสเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรพัง */
+.dock-glass--lens .dock-glass__orb {
+  /* ⚠️ ต้องมี url() ตัวเดียวเท่านั้น — ถ้าใส่ blur()/saturate() ปนไปด้วย
+     Chromium จะทิ้ง url() ทั้งตัว (วัดจาก pixel diff แล้ว: "blur(3px) url(#lens)"
+     ให้ผลเหมือน "blur(3px)" เป๊ะ — ต่างกันแค่ 0.1% ของพิกเซล)
+     จึงย้ายความฟุ้ง/อิ่มสี/ความสว่างของฉากหลังเข้าไปทำใน filter ข้างในแทน
+     ถ้าถอดคลาส .dock-glass--lens ออก วงกลมกลับไปใช้ blur(7px) ธรรมดาทันที */
+  -webkit-backdrop-filter: url("#dock-glass-lens");
+  backdrop-filter: url("#dock-glass-lens");
 }
 /* ชั้นหักเหหลัก — วงแหวนกลมรอบขอบวง "เท่ากันทุกมุม"
    ใช้ radial-gradient(closest-side) ที่จัดกึ่งกลางล้วน ๆ → ระยะห่างจากขอบเท่ากัน
