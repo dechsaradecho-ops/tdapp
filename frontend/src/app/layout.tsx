@@ -67,8 +67,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* pb-24 clears the fixed mobile tab bar (57px) + iOS safe area (≤34px).
             Do NOT add safe-bottom here — .safe-bottom (env(safe-area-inset-bottom))
             appears after Tailwind utilities in globals.css and overrides pb-* to 0,
-            which let the bottom nav cover the last content block on every page. */}
-        <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto pb-24 md:pb-5">
+            which let the bottom nav cover the last content block on every page.
+
+            pt-0 บนมือถือ (< md): มือถือไม่มี header (DesktopNav เป็น `hidden md:flex`)
+            จึงไม่มีอะไรกินพื้นที่บรรทัดแรก — เหลือแต่ py-4 = 16px ที่เห็นเป็น "ช่องว่าง
+            ข้างบน" ทึบ ๆ (ด้านหลังคือขอบบนของ .zoom-hero ที่เกือบดำจาก vignette)
+            จึงดันเนื้อหาขึ้นชิดขอบบนสุด ให้ตรงกับที่ DesktopNav ชิดขอบบนบนเดสก์ท็อป
+            ใช้ md ไม่ใช่ sm เพราะ breakpoint ที่หัวเว็บโผล่คือ md (768px) — มือถือ
+            แนวนอน (เช่น 844×390) กว้างเกิน 640 จึงยังต้องได้ pt-0 ด้วย
+            (ยังคง py/pb รอบข้าง: px-3 กันการ์ดชนขอบจอ, pb-24 กัน dock ทับ)
+            ลำดับคลาสสำคัญ: `pt-0` ต้องชนะ `py-4` (Tailwind ออก CSS ของ pt หลัง py)
+            และ `md:py-5` (อยู่ใน media block ซึ่งมาหลัง base) คืน pt ให้แท็บเล็ต/เดสก์ท็อป */}
+        <main className="px-3 py-4 pt-0 sm:px-6 md:py-5 max-w-7xl mx-auto pb-24 md:pb-5">
           <AuthGate>{children}</AuthGate>
         </main>
         <MobileNav />

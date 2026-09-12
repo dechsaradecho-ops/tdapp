@@ -17,6 +17,13 @@ import { HERO_IMAGE_EVENT, readStoredHero } from "@/components/BackgroundPicker"
  * แบนด์นี้อยู่ระดับเอกสาร (containing block = viewport) ดังนั้น inset-x-0
  * ให้ความกว้าง = viewport จริง → ชนขอบจอทั้งสองข้างพอดี
  *
+ * ความสูงแบนด์: clamp(360px, 85vh, 780px) — 85vh ทำให้มือถือได้แบนด์สูงเกือบ
+ * เต็มจอ (780px = เพดานกันจอ desktop สูงเกินไป) ตั้งใจให้แบนด์ "กินพื้นที่ลงมา"
+ * ถึงการ์ดแถวที่ 2-3 ไม่ใช่แค่แถวแรก เพื่อให้เห็นการซูมของภาพชัดขึ้น
+ * แบนด์เป็น absolute จึงไม่ดันเนื้อหา — เนื้อหาลอยทับอยู่ข้างบน (main pt-0 บนมือถือ)
+ * และระยะ ScrollTrigger (start top top → end bottom 25%) ยึดความสูงนี้
+ * → แบนด์สูงขึ้น = ระยะซูมยาวขึ้นตามไปด้วย ไม่ต้องแก้ timeline
+ *
  * ไม่กินพื้นที่ใน layout (absolute) และไม่รับ pointer event
  * → เนื้อหาทุกอย่างในหน้า (การ์ด/ฟอร์ม/กราฟ) วางทับอยู่ข้างบนตามปกติ
  * เนื่องจากแบนด์เริ่มที่ y=0 พร้อมหน้า จึงอยู่ "หลัง" sticky DesktopNav (z-30)
@@ -164,7 +171,7 @@ export default function ScrollZoomHero() {
     <section
       ref={rootRef}
       aria-hidden="true"
-      className={`zoom-hero pointer-events-none absolute inset-x-0 top-0 h-[clamp(320px,70vh,660px)] overflow-hidden${
+      className={`zoom-hero pointer-events-none absolute inset-x-0 top-0 h-[clamp(360px,85vh,780px)] overflow-hidden${
         custom ? " zoom-hero--custom" : ""
       }`}
     >
