@@ -87,7 +87,10 @@ export default function MobileNav() {
   const orbRef = useRef<HTMLSpanElement>(null);
   const wakeRef = useRef<HTMLDivElement>(null);
   const rimRRef = useRef<HTMLSpanElement>(null);
+  const rimGRef = useRef<HTMLSpanElement>(null);
   const rimBRef = useRef<HTMLSpanElement>(null);
+  // disperse = ชั้นแยกสี (แดง/เขียว/น้าเงิน คนละรัศมี) = การหักเหของสี
+  const dispRef = useRef<HTMLSpanElement>(null);
   // ให้ effect หลัก (deps []) วัดตำแหน่งใหม่ได้เมื่อแท็บ active เปลี่ยน
   const syncRef = useRef<(() => void) | null>(null);
 
@@ -125,8 +128,10 @@ export default function MobileNav() {
     const orb = orbRef.current;
     const wake = wakeRef.current;
     const rimR = rimRRef.current;
+    const rimG = rimGRef.current;
     const rimB = rimBRef.current;
-    if (!nav || !pill || !orb || !wake || !rimR || !rimB) return;
+    const disp = dispRef.current;
+    if (!nav || !pill || !orb || !wake || !rimR || !rimG || !rimB || !disp) return;
 
     // ผู้ใช้ที่ปิดอนิเมชัน → pill ยัง mark แท็บ active แต่นิ่ง ไม่มีสปริง/การลาก
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -136,7 +141,9 @@ export default function MobileNav() {
     orb.style.opacity = "0";
     wake.style.opacity = "0";
     rimR.style.opacity = "0";
+    rimG.style.opacity = "0";
     rimB.style.opacity = "0";
+    disp.style.opacity = "0";
 
     const H = 44; // ต้องตรงกับ height ของ .dock-glass__pill ใน globals.css
     const INSET = 3; // ระยะห่างซ้าย/ขวาของ pill จากขอบแท็บ
@@ -216,8 +223,9 @@ export default function MobileNav() {
     const render = () => {
       // squash & stretch ตามความเร็ว (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
       const spd = Math.min(Math.abs(main.v) / 3200, 0.25);
-      // chromatic aberration: ขอบแดง/น้ำเงินเยื้องออกตามความเร็วการลาก
-      const ca = 0.6 + spd * 11;
+      // chromatic aberration: ขอบแดง/เขียว/น้าเงินเยื้องออกตามความเร็วการลาก
+      // (การหักเหของสี — ยิ่งลากเร็ว สีแยกออกจากกันยิ่งชัด)
+      const ca = 0.8 + spd * 16;
 
       // pill (แคปซูล) ยืด/บี้ชัด ๆ ตอนลาก แล้วจางหายไปให้วงกลมแทนที่
       const sx = 1 + spd * 0.8;
@@ -241,11 +249,18 @@ export default function MobileNav() {
         ` scale(${(0.5 + spd * 0.7).toFixed(3)})`;
       wake.style.opacity = (alpha * 0.36).toFixed(3);
 
-      const rimA = Math.min(alpha * 1.4, 1).toFixed(3);
+      const rimA = Math.min(alpha * 1.5, 1).toFixed(3);
       rimR.style.opacity = rimA;
+      rimG.style.opacity = rimA;
       rimB.style.opacity = rimA;
-      rimR.style.transform = `translate3d(${(-ca).toFixed(2)}px,0,0)`;
-      rimB.style.transform = `translate3d(${ca.toFixed(2)}px,0,0)`;
+      // แยกสีแบบปริซึม: แดงเยื้องซ้าย / น้าเงินเยื้องขวา / เขียวขยายวงตรงกลาง
+      rimR.style.transform = `translate3d(${(-ca * 1.3).toFixed(2)}px,0,0)`;
+      rimG.style.transform = `scale(${(1 + ca * 0.0035).toFixed(4)})`;
+      rimB.style.transform = `translate3d(${(ca * 1.3).toFixed(2)}px,0,0)`;
+
+      // ชั้นหักเหของสี: จาง-เข้มตาม alpha และ "แยกสี" ตามความเร็ว (--sp 0→1)
+      disp.style.opacity = Math.min(alpha * 1.15, 1).toFixed(3);
+      disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
@@ -443,8 +458,8 @@ export default function MobileNav() {
           style={{ position: "absolute" }}
         >
           <defs>
-            {/* คลื่นยาว + blur กว้าง = ขอบวงกลมนุ่ม (ไม่หยักเป็นฟันปลา)
-                scale ยิ่งสูง ยิ่งเห็นแสง "หักเห" ในวงชัด */}
+            {/* คลื่นยาว (baseFrequency ต่ำ) + แอมพลิจูดน้อย (scale ต่ำ) → บิดนุ่ม
+                Glow ให้เส้นรอบวงยังเท่ากันทั้งวง ไม่หยักเป็นหย่อม ๆ */}
             <filter
               id="dock-glass-warp"
               x="-40%"
@@ -455,23 +470,25 @@ export default function MobileNav() {
             >
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.022 0.028"
+                baseFrequency="0.012 0.016"
                 numOctaves="2"
-                seed="13"
+                seed="71"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="3.4" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="6" result="soft" />
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="15"
+                scale="6"
                 xChannelSelector="R"
                 yChannelSelector="G"
               />
             </filter>
 
-            {/* คลื่นถี่ scale เล็ก — ใช้กับชั้นในวงเท่านั้น (ประกาย/โคสติก)
-                เพื่อเพิ่มการหักเหโดยไม่ทำให้ขอบวงสั่น */}
+            {/* คลื่นประกายในเนื้อแก้ว + "การหักเหของสี": แยกช่องสี R/G/B
+                แล้วดิสเพลสคนละสเกล (แดงน้อยสุด → น้าเงินมากสุด เหมือนแก้วจริง)
+                แล้ว screen กลับ — ได้ประกายที่มีขอบสีรุ้งในเนื้อแก้ว
+                ใช้กับ "เนื้อใน" เท่านั้น จึงไม่ทําให้เส้นรอบวงหยัก */}
             <filter
               id="dock-glass-caustic"
               x="-30%"
@@ -482,19 +499,64 @@ export default function MobileNav() {
             >
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.075 0.09"
+                baseFrequency="0.05 0.06"
                 numOctaves="2"
-                seed="29"
+                seed="53"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="1.4" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="2.6" result="soft" />
+              {/* red */}
+              <feDisplacementMap
+                in="SourceGraphic"
+                in2="soft"
+                scale="3"
+                xChannelSelector="R"
+                yChannelSelector="G"
+                result="dispR"
+              />
+              <feColorMatrix
+                in="dispR"
+                type="matrix"
+                values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
+                result="chR"
+              />
+              {/* green */}
+              <feDisplacementMap
+                in="SourceGraphic"
+                in2="soft"
+                scale="6"
+                xChannelSelector="R"
+                yChannelSelector="G"
+                result="dispG"
+              />
+              <feColorMatrix
+                in="dispG"
+                type="matrix"
+                values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"
+                result="chG"
+              />
+              {/* blue */}
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
                 scale="9"
                 xChannelSelector="R"
                 yChannelSelector="G"
+                result="dispB"
               />
+              <feColorMatrix
+                in="dispB"
+                type="matrix"
+                values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"
+                result="chB"
+              />
+              <feBlend
+                in="chR"
+                in2="chG"
+                mode="screen"
+                result="chRG"
+              />
+              <feBlend in="chRG" in2="chB" mode="screen" />
             </filter>
           </defs>
         </svg>
@@ -510,7 +572,14 @@ export default function MobileNav() {
         <span ref={orbRef} className="dock-glass__orb" aria-hidden="true">
           <span className="dock-glass__orb-sheen" />
           <span className="dock-glass__orb-caustic" />
+          {/* แยกสีที่ขอบวง: แดงในสุด → เขียวกึ่งกลาง → น้าเงินนอกสุด */}
+          <span ref={dispRef} className="dock-glass__disperse">
+            <span className="dock-glass__disperse--r" />
+            <span className="dock-glass__disperse--g" />
+            <span className="dock-glass__disperse--b" />
+          </span>
           <span ref={rimRRef} className="dock-glass__rim dock-glass__rim--r" />
+          <span ref={rimGRef} className="dock-glass__rim dock-glass__rim--g" />
           <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
         </span>
 
