@@ -81,18 +81,14 @@ const go = (href: string) => {
 /* ---- แผนที่ดิสเพลสเรเดียล (radial displacement map) ------------------------
    feDisplacementMap อ่าน "ทิศทาง + ขนาด" ของการดึงภาพจากค่า R (แกน x) และ G
    (แกน y) ของแผนที่: offset = scale × (ค่า/255 − 0.5) ⇒ 128 = ไม่ดึง
-   อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงภาพ
-   "นิ่งเกือบเท่าเดิม" (~1x) แล้วบีบอัดแรงเฉพาะแถบขอบวง + ขอบแยกสีรุ้ง
-   ⇒ สร้างสนามเวกเตอร์เรเดียลเอง (เครื่องหมายลบ = ดึงจุด sample เข้าหากลางวง
-     ⇒ เลนส์นูน; เดิมเป็นบวก = ดึงออกนอก ⇒ ภาพหดแบบเลนส์เว้า):
+   อยากได้เลนส์ที่ "บิดแรงสุดที่ขอบวง แล้วไล่ลงมาเรื่อย ๆ จนนิ่งที่กลางวง"
+   ⇒ สร้างสนามเวกเตอร์เรเดียลเอง:
         t = min(r / R, 1)        (r = ระยะจากกลางวง, R = รัศมีวง)
-        f = t^P                  (P = 3.0 → กลางแบน (~1x) ขอบชัน = หยดน้ำ)
-        R = 0.5 − 0.5·(u/r)·f
-        G = 0.5 − 0.5·(v/r)·f
-   ⇒ ดิสเพลสเป็น 0 ที่จุดกลางวงและสโลปก็ ~0 (กลางไม่ขยาย), โต monotonic,
-     ชันสุดแถบขอบวง แล้ว f อิ่มตัวเป็น 1 พอ r ≥ R (แรงสุดพอดีที่ขอบวง
-     ไม่มีรอยกระโดด) — ต่างจากแว่นขยาย (P = 1.0) ที่ขยายเท่ากันทั้งวง
-   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 18, R_px 42 ⇒ ขอบบีบ ~±9px
+        f = t^P                  (P = 2.2 → แทบไม่ขยับที่กลางวง โตเร็วใกล้ขอบ)
+        R = 0.5 + 0.5·(u/r)·f
+        G = 0.5 + 0.5·(v/r)·f
+   ⇒ ดิสเพลสเป็น 0 ที่กลางวง, โต monotonic, และ f อิ่มตัวเป็น 1 พอ r ≥ R
+     (แรงสุดพอดีที่ขอบวง ไม่มีรอยกระโดด)
 
    ⚠️ ทำไมต้องวาดเองด้วย canvas: feTurbulence ให้สนามที่ไม่เป็นเรเดียล (บิด
       ทั้งวงเป็นก้อน) และ feDiffuseLighting ก็ให้เรเดียลที่ยอดไม่ตรงขอบ
@@ -106,7 +102,7 @@ const go = (href: string) => {
       (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
       ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
 const LENS_MAP_N = 160; // ความละเอียดพอ — ค่าถูก interpolate ตอนใช้
-const LENS_MAP_P = 3.0; // เลขชี้กำลังของแรมป์: 3.0 = กลางแบน (~1x) ขอบชัน (หยดน้ำ); 1.0 = ขยายทั้งวง (แว่นขยาย — ไม่ใช้)
+const LENS_MAP_P = 2.2; // เลขชี้กำลังของแรมป์ (ยิ่งมาก ยิ่งกองที่ขอบ)
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
 const buildLensMap = (): string | null => {
   if (typeof document === "undefined") return null; // กัน SSR ตอน build
@@ -124,9 +120,8 @@ const buildLensMap = (): string | null => {
       const r = Math.sqrt(u * u + v * v) || 1e-6; // กันหารศูนย์ที่กลางวง
       const f = Math.pow(Math.min(r, 1), LENS_MAP_P);
       const i = (y * LENS_MAP_N + x) * 4;
-      // ลบ = sample เข้าหากลางวง ⇒ ขยาย (เลนส์นูน); ห้ามกลับเป็นบวก (ภาพจะหด)
-      d[i] = Math.round((0.5 - 0.5 * (u / r) * f) * 255);
-      d[i + 1] = Math.round((0.5 - 0.5 * (v / r) * f) * 255);
+      d[i] = Math.round((0.5 + 0.5 * (u / r) * f) * 255);
+      d[i + 1] = Math.round((0.5 + 0.5 * (v / r) * f) * 255);
       d[i + 2] = 128; // ไม่ใช้ช่อง B แต่ต้องมีค่า (128 = กลาง)
       d[i + 3] = 255;
     }
@@ -239,14 +234,8 @@ export default function MobileNav() {
     const ORB = 84; // ต้องตรงกับ --dock-orb ของ .dock-glass
     // ยอมให้วงกลมล้นขอบ dock ได้นิดหน่อย: แนวนอนเพื่อให้ไปถึงกลางแท็บสุดท้าย
     // (pill กว้าง ~65 → ครึ่งวง 42 จะเลยขอบ) แนวตั้งให้ "ไหล" ตามนิ้วออกนอกได้
-    // ⚠️ เพดานกันวงล้นขอบจอ (เคยหลุดขอบขวาในภาพถ่าย): ขอบซ้าย/ขวาของ dock ห่าง
-    // ขอบ viewport ข้างละ ~12px (width = 100vw − 1.5rem จัดกึ่งกลาง) ⇒ OVER_X
-    // ต้อง ≤ 12 ไม่งั้นขอบวงเลยจอ (OVER_X = 18 เคยล้น ~6px) — ใช้ 8 เหลือร่น 4px
-    // แนวตั้งไม่สมมาตร: ด้านบนที่ว่างเยอะให้ 34px ได้ แต่ด้านล่าง dock ห่างก้นจอ
-    // แค่ ~12px ⇒ ลากลงเกิน 12px วงจะจมขอบจอ — แยกบน/ล่างแทนค่าเดียว
-    const OVER_X = 8;
-    const OVER_TOP = 34;
-    const OVER_BOTTOM = 10;
+    const OVER_X = 18;
+    const OVER_Y = 34;
 
     // สปริงตัวหลัก: underdamped (ζ = 0.88) → ตามนิ้วช้าแล้วส่ายเข้าที่นิดหนึ่ง
     // = ความ "เหลว/หนืด" แบบ FluidGlass แต่เฟรมเรตอิสระ
@@ -273,12 +262,6 @@ export default function MobileNav() {
     let moved = false;
     let startX = 0;
     let startY = 0;
-    // จุดกดนิ้ว (พิกัดใน <nav>) — อ้างอิงทิศลากจริง (นิ้วอยู่ไหนเทียบจุดกด)
-    // ⚠️ เดิมใช้ target-rest (จุดพัก = กลางแท็บ active) ⇒ กดแท็บ Monitor บนหน้า
-    // Home แล้วลากซ้าย/ขวา เวกเตอร์ชี้จาก Home→Monitor เหมือนกันทั้งคู่
-    // (วัดจริง dang -11.1° vs -7.6° แทบไม่ต่าง) ⇒ รุ้งไม่ตามนิ้ว
-    let startLocalX = 0;
-    let startLocalY = 28;
     let pressIdx = 0;
     let raf = 0;
     let last = 0;
@@ -323,21 +306,7 @@ export default function MobileNav() {
     // เขียนผลลง DOM — เรียกจาก rAF, ตอน snap และตอน resize
     const render = () => {
       // squash & stretch ตามความเร็ว (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
-      // ใช้ velocity 2 มิติ (x + y) — หยดน้ำกระเจิงแสงตาม "ทิศที่ลากจริง"
-      // ไม่ใช่แค่แนวนอน (เดิมอ่านแค่ main.v ⇒ ลากขึ้นลงไม่มีผล)
-      const vmag = Math.sqrt(main.v * main.v + mainY.v * mainY.v);
-      const spd = Math.min(vmag / 3200, 0.25);
-      // ทิศการลาก (unit vector) — ขณะเคลื่อนใช้ velocity; พอนิ่งแล้ว (vmag ตก)
-      // ใช้ทิศ "นิ้วอยู่ตรงไหนเทียบจุดกด" แทน ⇒ ความไม่สมมาตรยังค้างให้เห็น
-      // ตอนถือค้าง ไม่หายพร้อมความเร็ว (ภาพถ่ายตอนลากจึงยังเห็นรุ้งเป็นลิ่ม)
-      // ⚠️ ต้องเทียบจุดกด ไม่ใช่จุดพัก (rest = กลางแท็บ active — กดแท็บเดียว
-      // แล้วลากซ้าย/ขวา เวกเตอร์ rest เหมือนกันทั้งคู่ ⇒ รุ้งไม่ตามนิ้ว)
-      const tdx = targetX - startLocalX;
-      const tdy = targetY - startLocalY;
-      const tmag = Math.sqrt(tdx * tdx + tdy * tdy);
-      const dx = vmag > 40 ? main.v / vmag : tmag > 8 ? tdx / tmag : 1;
-      const dy = vmag > 40 ? mainY.v / vmag : tmag > 8 ? tdy / tmag : 0;
-      // ปริมาณการกระเจิง: ผสมความเร็วกับระยะลาก (อย่างใดอย่างหนึ่งแรงก็กระเจิง)
+      const spd = Math.min(Math.abs(main.v) / 3200, 0.25);
       // chromatic aberration: ขอบแดง/เขียว/น้าเงินเยื้องออกตามความเร็วการลาก
       // (การหักเหของสี — ยิ่งลากเร็ว สีแยกออกจากกันยิ่งชัด)
       const ca = 0.8 + spd * 16;
@@ -368,43 +337,20 @@ export default function MobileNav() {
       rimR.style.opacity = rimA;
       rimG.style.opacity = rimA;
       rimB.style.opacity = rimA;
-      // แยกสีแบบปริซึม "ตามทิศลาก" (ไม่สมมาตร): แดงสวนทางนิ้ว / น้าเงินตามนิ้ว /
-      // เขียวขยายวงตรงกลาง — หยดน้ำจริงกระเจิงแรงสุดตามแนวเคลื่อนที่ ไม่ใช่ซ้ายขวาเสมอ
-      // ⚠️ shift จำกัด ~0.6–2.6px: วง 1px ถ้าเยื้องเกินนี้จะหลุดเป็นขอบซ้อน (เคย ~6px)
-      const rimShift = 0.6 + spd * 8;
-      rimR.style.transform = `translate3d(${(-dx * rimShift).toFixed(2)}px,${(-dy * rimShift).toFixed(2)}px,0)`;
+      // แยกสีแบบปริซึม: แดงเยื้องซ้าย / น้าเงินเยื้องขวา / เขียวขยายวงตรงกลาง
+      rimR.style.transform = `translate3d(${(-ca * 1.3).toFixed(2)}px,0,0)`;
       rimG.style.transform = `scale(${(1 + ca * 0.0035).toFixed(4)})`;
-      rimB.style.transform = `translate3d(${(dx * rimShift).toFixed(2)}px,${(dy * rimShift).toFixed(2)}px,0)`;
+      rimB.style.transform = `translate3d(${(ca * 1.3).toFixed(2)}px,0,0)`;
 
       // ชั้นหักเหของสี: จาง-เข้มตาม alpha และ "แยกสี" ตามความเร็ว (--sp 0→1)
-      // --sdx/--sdy = เยื้องวงแหวนแดง/น้าเงินสวนกันตามทิศลาก (เขียวเป็นอ้างอิงกลาง)
-      // ปริมาณ = ความเร็ว (spd) + ระยะลากจากจุดพัก ⇒ ถือค้างไว้เฉย ๆ ก็ยังกระเจิง
-      const dragDist = Math.min(
-        Math.sqrt(
-          (targetX - startLocalX) * (targetX - startLocalX) +
-            (targetY - startLocalY) * (targetY - startLocalY),
-        ) / 120,
-        1,
-      );
-      const sway = Math.min(spd / 0.25, 1) * 0.6 + dragDist * 0.4;
       disp.style.opacity = Math.min(alpha * 1.15, 1).toFixed(3);
       disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
-      disp.style.setProperty("--sdx", (-dx * sway * 2.5).toFixed(2) + "px");
-      disp.style.setProperty("--sdy", (-dy * sway * 2.5).toFixed(2) + "px");
-      // หมุนรุ้ง/แสงขอบให้ด้านเข้มสุดอยู่ตามทิศลาก (conic `from` = มุมเริ่มไล่สี
-      // ⇒ ลากไปทางไหน ด้านนั้นรุ้งชัด ตรงข้ามจาง = ไม่สมมาตรตามนิ้วจริง)
-      // atan2(dy,dx) เป็นมุมเวกเตอร์ลาก (deg) ใช้ตรง ๆ ได้เลยกับ conic
-      disp.style.setProperty(
-        "--dang",
-        `${((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1)}deg`,
-      );
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
-      // is-warping = สถานะ "กำลังลาก" (marker ให้ debug/เทส + ให้ CSS ตรวจสอบได้)
-      // ⚠️ ห้ามใช้คลาสนี้ไป "ซ่อน" หรือ "เจาะรู" .dock-glass__frost เด็ดขาด
-      //    (ลองแล้วทั้ง display:none และ mask เป็นรู — ผู้ใช้ติทั้งคู่)
-      //    แถบต้องเบลอ 20px ทุกพิกเซลตลอดเวลา แล้วให้เลนส์ขยาย "ผิวของแถบ" แทน
+      // ⚠️ ต้องปิด .dock-glass__frost ระหว่างลาก — ไม่งั้นภาพที่เบลอ 20px จะถูก
+      // composited เข้า backdrop ของ orb ในโซนที่ทับกับแถบ dock ⇒ เลนส์บิดได้
+      // แค่ครึ่งวงบน/ล่าง ส่วนกลางวงเรียบ (ดูเหตุผลที่ globals.css)
       nav.classList.toggle("is-warping", alpha > 0.02);
     };
 
@@ -516,12 +462,10 @@ export default function MobileNav() {
       moved = false;
       startX = e.clientX;
       startY = e.clientY;
-      startLocalX = e.clientX - nr.left;
-      startLocalY = e.clientY - nr.top;
       pressIdx = idxAtX(e.clientX - nr.left);
       targetAlpha = 1;
       targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
-      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_TOP, nr.height - ORB / 2 + OVER_BOTTOM);
+      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_Y, nr.height - ORB / 2 + OVER_Y);
       startLoop();
     };
 
@@ -532,7 +476,7 @@ export default function MobileNav() {
       }
       const nr = nav.getBoundingClientRect();
       targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
-      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_TOP, nr.height - ORB / 2 + OVER_BOTTOM);
+      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_Y, nr.height - ORB / 2 + OVER_Y);
     };
 
     const onUp = (e: PointerEvent) => {
@@ -599,8 +543,7 @@ export default function MobileNav() {
                • backdrop-filter บน nav = backdrop root ⇒ เลนส์ของ orb เห็นภาพเรียบ
                  ⇒ displacement ไม่เกิด (วัดจาก pixel diff แล้ว)
                • pseudo-element + backdrop-filter = ใช้ไม่ได้บน Samsung Internet
-            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/แท็บ/orb — แถบนี้ต้องเบลอ
-            20px ทุกพิกเซลตลอดเวลา (ห้ามซ่อน/ห้ามเจาะรู ดูเหตุผลใน globals.css) */}
+            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/orb และ nav.is-warping ซ่อนมัน */}
         <span className="dock-glass__frost" aria-hidden="true" />
 
         {/* filter defs ต้องอยู่ใน DOM จริง (ห้าม display:none) เหมือน #lg-refract
@@ -771,13 +714,11 @@ export default function MobileNav() {
               />
               {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
                     = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
-                    วัดจาก scale: ขอบวงถูกดึงเข้า ±(scale/2) px
-                      R 7 = ±3.5px · G 9 = ±4.5px · B 11 = ±5.5px
-                    ⇒ ที่ขอบวงสีแยกกัน ~2px = เห็นขอบสีรุ้งบาง ไม่เป็นวงขาวหนา
-                    (เทียบ D0–D3: scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็น
-                     วงขาวหนา ~10px — ลดครึ่งหนึ่งแล้ววงใส เหลือแค่รุ้งขอบบาง)
-                    (กลางวง ~1x ไม่ขยาย — ภาพนิ่งกลาง บีบแรงเฉพาะแถบขอบ
-                     แบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
+                    วัดจาก scale: ขอบวงถูกดึงออก ±(scale/2) px
+                      R 10 = ±5px · G 14 = ±7px · B 18 = ±9px
+                    ⇒ ที่ขอบวงสีแยกกัน 4px = เห็นขอบสีรุ้งชัด
+                    (เทียบให้เห็นภาพ: scale 0.87R ของ G = 7px = 17% ของรัศมี 42px
+                     ⇒ ความยืดแนวรัศมีที่ขอบวง ≈ 1 + (S·P)/(2R) = 1.37 เท่า)
                     feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
                     แล้ว feBlend mode=screen รวมกลับ (ช่องไม่ทับกัน → ได้ค่าเดิม)
                     ⚠️ ห้ามเร่งสเกลเกิน ~24: displacement เป็นสัดส่วนกับระยะจาก
@@ -803,7 +744,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chR"
                 in2="map"
-                scale="7"
+                scale="10"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dR"
@@ -811,7 +752,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chG"
                 in2="map"
-                scale="9"
+                scale="14"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dG"
@@ -819,7 +760,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="chB"
                 in2="map"
-                scale="11"
+                scale="18"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dB"
@@ -836,12 +777,27 @@ export default function MobileNav() {
         {/* pill = ตัวแก้วตอนพัก (แคปซูล) — ตอนลากจะจางหายไปให้ orb แทนที่ */}
         <div ref={pillRef} className="dock-glass__pill" aria-hidden="true" />
 
-        {/* แท็บ — ต้องวาด "ก่อน" orb (และห้ามมี z-index เด็ดขาด ดูเหตุผลใน globals.css)
-            เพราะ backdrop ของ orb = ทุกอย่างที่วาดก่อนหน้า ⇒ ตัวหนังสือ/ไอคอน
-            ของแท็บถูกนับเป็นฉากหลังของเลนส์ ⇒ หยดน้ำ "บีบตัวหนังสือบนแถบ"
-            เฉพาะแถบขอบ (กลางนิ่ง) เหมือนของจริง แทนที่จะทะลุไปเห็นหน้าเว็บด้านหลังแถบ
-            (ก่อนหน้านี้แท็บอยู่ "หลัง" orb + z-index: 1 ⇒ ตัวหนังสือลอยทับวง
-             คม ๆ ไม่อยู่ในฉากหลังของเลนส์) */}
+        {/* orb = วงกลมแก้วตอนลาก: หักเหฉากหลังจริง (distortion) + แถบแสง/ประกาย
+            + 3 rim สีเพี้ยน (rim อยู่ข้างในวง → ใช้ border-radius: inherit = 50%)
+            ⚠️ เอา .dock-glass__orb-edge (ชั้นที่เบลอฉากหลังซ้อนเฉพาะโซนขอบ) ออก:
+               มันเป็นลูกของ orb ⇒ backdrop ของมันคือ "ผลลัพธ์ที่ orb บิดแล้ว"
+               ⇒ ไปเบลอทับบริเวณที่การบิดแรงที่สุด (โซนขอบ) พอดี = ตาเห็นเป็น
+               รอยฟุ้ง ไม่เห็นการบิด · ตอนนี้การบิดมาจากตัวกรองเลนส์ล้วน ๆ
+               (ผู้ใช้ระบุ: "วงกลมต้องไม่เบลอ ใส่แค่ distortion") */}
+        <span ref={orbRef} className="dock-glass__orb" aria-hidden="true">
+          <span className="dock-glass__orb-sheen" />
+          <span className="dock-glass__orb-caustic" />
+          {/* แยกสีที่ขอบวง: แดงในสุด → เขียวกึ่งกลาง → น้าเงินนอกสุด */}
+          <span ref={dispRef} className="dock-glass__disperse">
+            <span className="dock-glass__disperse--r" />
+            <span className="dock-glass__disperse--g" />
+            <span className="dock-glass__disperse--b" />
+          </span>
+          <span ref={rimRRef} className="dock-glass__rim dock-glass__rim--r" />
+          <span ref={rimGRef} className="dock-glass__rim dock-glass__rim--g" />
+          <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
+        </span>
+
         {MENU.map((l, i) => (
           <button
             key={l.href}
@@ -857,32 +813,6 @@ export default function MobileNav() {
             <span className="dock-glass__label">{l.label}</span>
           </button>
         ))}
-
-        {/* orb = วงกลมแก้วตอนลาก: หักเหฉากหลังจริง (distortion) + แถบแสง/ประกาย
-            + 3 rim สีเพี้ยน (rim อยู่ข้างในวง → ใช้ border-radius: inherit = 50%)
-            ⚠️ เอา .dock-glass__orb-edge (ชั้นที่เบลอฉากหลังซ้อนเฉพาะโซนขอบ) ออก:
-               มันเป็นลูกของ orb ⇒ backdrop ของมันคือ "ผลลัพธ์ที่ orb บิดแล้ว"
-               ⇒ ไปเบลอทับบริเวณที่การบิดแรงที่สุด (โซนขอบ) พอดี = ตาเห็นเป็น
-               รอยฟุ้ง ไม่เห็นการบิด · ตอนนี้การบิดมาจากตัวกรองเลนส์ล้วน ๆ
-               (ผู้ใช้ระบุ: "วงกลมต้องไม่เบลอ ใส่แค่ distortion") */}
-        <span ref={orbRef} className="dock-glass__orb" aria-hidden="true">
-          <span className="dock-glass__orb-sheen" />
-          <span className="dock-glass__orb-caustic" />
-          {/* scatter = แสงกระเจิงไม่สมมาตรในเนื้อหยดน้ำ (วาดทับเฉย ๆ ไม่แตะ backdrop) */}
-          <span className="dock-glass__scatter" />
-          {/* แยกสีที่ขอบวง: แดงในสุด → เขียวกึ่งกลาง → น้าเงินนอกสุด
-              + รุ้ง/แสงขอบแบบไม่สมมาตร (อยู่ใน disperse จึงจาง-เข้มพร้อมกัน) */}
-          <span ref={dispRef} className="dock-glass__disperse">
-            <span className="dock-glass__disperse--r" />
-            <span className="dock-glass__disperse--g" />
-            <span className="dock-glass__disperse--b" />
-            <span className="dock-glass__irid" />
-            <span className="dock-glass__edge-light" />
-          </span>
-          <span ref={rimRRef} className="dock-glass__rim dock-glass__rim--r" />
-          <span ref={rimGRef} className="dock-glass__rim dock-glass__rim--g" />
-          <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
-        </span>
       </nav>
     </div>
   );
