@@ -78,73 +78,14 @@ const go = (href: string) => {
   window.location.assign(href);
 };
 
-/* ---- แผนที่ดิสเพลสเรเดียล (radial displacement map) ------------------------
-   feDisplacementMap อ่าน "ทิศทาง + ขนาด" ของการดึงภาพจากค่า R (แกน x) และ G
-   (แกน y) ของแผนที่: offset = scale × (ค่า/255 − 0.5) ⇒ 128 = ไม่ดึง
-   อยากได้เลนส์ที่ "บิดแรงสุดที่ขอบวง แล้วไล่ลงมาเรื่อย ๆ จนนิ่งที่กลางวง"
-   ⇒ สร้างสนามเวกเตอร์เรเดียลเอง:
-        t = min(r / R, 1)        (r = ระยะจากกลางวง, R = รัศมีวง)
-        f = t^P                  (P = 2.2 → แทบไม่ขยับที่กลางวง โตเร็วใกล้ขอบ)
-        R = 0.5 + 0.5·(u/r)·f
-        G = 0.5 + 0.5·(v/r)·f
-   ⇒ ดิสเพลสเป็น 0 ที่กลางวง, โต monotonic, และ f อิ่มตัวเป็น 1 พอ r ≥ R
-     (แรงสุดพอดีที่ขอบวง ไม่มีรอยกระโดด)
-
-   ⚠️ ทำไมต้องวาดเองด้วย canvas: feTurbulence ให้สนามที่ไม่เป็นเรเดียล (บิด
-      ทั้งวงเป็นก้อน) และ feDiffuseLighting ก็ให้เรเดียลที่ยอดไม่ตรงขอบ
-      (ยอดจริงอยู่ที่ ~0.8R แล้ว "ขึ้นอีกครั้ง" ที่ขอบ filter region) ⇒ ใช้เป็น
-      แรมป์ขอบไม่ได้ ทดลองแล้วทั้งคู่ (ดูแผนที่เรเดียลนี้ทำงานจริง: pixel diff
-      max 244 เทียบกับตอนไม่ใส่แผนที่)
-   ⚠️ feImage + href เป็น data URI ทำงานใน backdrop-filter ของ Chromium ได้
-      (แผนที่จากไฟล์เดียวกันก็ได้) ⇒ เลือกวาดใน JS เพื่อไม่ต้องมีไฟล์ภาพใน
-      public/ ที่ต้องคอยซิงก์กับ --dock-orb และไม่ผูกกับ basePath ของ deployment
-   ⚠️ SPAN ต้องเท่ากับ "ครึ่งหนึ่งของ filter region" ของ #dock-glass-lens
-      (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
-      ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
-const LENS_MAP_N = 160; // ความละเอียดพอ — ค่าถูก interpolate ตอนใช้
-const LENS_MAP_P = 2.2; // เลขชี้กำลังของแรมป์ (ยิ่งมาก ยิ่งกองที่ขอบ)
-const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
-const buildLensMap = (): string | null => {
-  if (typeof document === "undefined") return null; // กัน SSR ตอน build
-  const cv = document.createElement("canvas");
-  cv.width = LENS_MAP_N;
-  cv.height = LENS_MAP_N;
-  const ctx = cv.getContext("2d");
-  if (!ctx) return null;
-  const img = ctx.createImageData(LENS_MAP_N, LENS_MAP_N);
-  const d = img.data;
-  for (let y = 0; y < LENS_MAP_N; y++) {
-    for (let x = 0; x < LENS_MAP_N; x++) {
-      const u = (((x + 0.5) / LENS_MAP_N) * 2 - 1) * LENS_MAP_SPAN;
-      const v = (((y + 0.5) / LENS_MAP_N) * 2 - 1) * LENS_MAP_SPAN;
-      const r = Math.sqrt(u * u + v * v) || 1e-6; // กันหารศูนย์ที่กลางวง
-      const f = Math.pow(Math.min(r, 1), LENS_MAP_P);
-      const i = (y * LENS_MAP_N + x) * 4;
-      d[i] = Math.round((0.5 + 0.5 * (u / r) * f) * 255);
-      d[i + 1] = Math.round((0.5 + 0.5 * (v / r) * f) * 255);
-      d[i + 2] = 128; // ไม่ใช้ช่อง B แต่ต้องมีค่า (128 = กลาง)
-      d[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  return cv.toDataURL("image/png");
-};
-
 export default function MobileNav() {
   const [path, setPath] = useState("/");
   const navRef = useRef<HTMLElement>(null);
-  // pill = ตัวแก้วตอนพัก / orb = วงกลมแก้วตอนลาก / wake = หางของเหลว
-  // rim = ขอบ chromatic aberration (อยู่ใน orb — โผล่เฉพาะตอนลาก)
+  // pill = ตัวแก้วยืดหดที่ลากได้ / wake = หางของเหลว / rim = ขอบ chromatic aberration
   const pillRef = useRef<HTMLDivElement>(null);
-  const orbRef = useRef<HTMLSpanElement>(null);
   const wakeRef = useRef<HTMLDivElement>(null);
   const rimRRef = useRef<HTMLSpanElement>(null);
-  const rimGRef = useRef<HTMLSpanElement>(null);
   const rimBRef = useRef<HTMLSpanElement>(null);
-  // disperse = ชั้นแยกสี (แดง/เขียว/น้าเงิน คนละรัศมี) = การหักเหของสี
-  const dispRef = useRef<HTMLSpanElement>(null);
-  // feImage ในตัวกรองเลนส์ — effect หลักเป็นคนยัด href (data URI) ให้
-  const mapRef = useRef<SVGFEImageElement>(null);
   // ให้ effect หลัก (deps []) วัดตำแหน่งใหม่ได้เมื่อแท็บ active เปลี่ยน
   const syncRef = useRef<(() => void) | null>(null);
 
@@ -166,12 +107,10 @@ export default function MobileNav() {
     syncRef.current?.();
   }, [activeIdx]);
 
-  // ---- ฟิสิกส์ของเหลวของ pill/orb (สปริง + ยืดบี้ + chromatic aberration + warp) ----
+  // ---- ฟิสิกส์ของเหลวของ pill (สปริง + ยืดบี้ + chromatic aberration + warp) ----
   // หัวใจของ "แก้วเหลว" แบบ FluidGlass: pill ไม่ได้กระโดดตามนิ้ว แต่ "ไหล" ตาม
   // ด้วยสปริง underdamped (ตามช้าแล้วส่ายเข้าที่) + ยืดตามความเร็ว + ขอบสีเพี้ยน
   // คิดเป็น px/วินาที ทั้งหมด → เฟรมเรตเท่าไรก็ให้ความรู้สึกเดียวกัน
-  // ตอนลาก pill แคปซูลจะจางหาย แล้วมี "วงกลมแก้ว" (orb) โผล่แทน: ขอบฟุ้ง
-  // + backdrop-filter หักเหฉากหลัง + แถบแสงหักเห/ประกายบิดด้วย SVG filter 2 ความถี่
   //
   // ทำไมไม่ใช้ FluidGlass ตรง ๆ: มันไม่มี drag interaction เลย (mode = lens/cube/
   // bar) และต้องใช้ three + @react-three/fiber (peer React 19) + ไฟล์ .glb ที่
@@ -179,63 +118,22 @@ export default function MobileNav() {
   useEffect(() => {
     const nav = navRef.current;
     const pill = pillRef.current;
-    const orb = orbRef.current;
     const wake = wakeRef.current;
     const rimR = rimRRef.current;
-    const rimG = rimGRef.current;
     const rimB = rimBRef.current;
-    const disp = dispRef.current;
-    if (!nav || !pill || !orb || !wake || !rimR || !rimG || !rimB || !disp) return;
+    if (!nav || !pill || !wake || !rimR || !rimB) return;
 
     // ผู้ใช้ที่ปิดอนิเมชัน → pill ยัง mark แท็บ active แต่นิ่ง ไม่มีสปริง/การลาก
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    // แผนที่ดิสเพลสของเลนส์: วาดเป็น bitmap แล้วยัดเป็น data URI ให้ <feImage>
-    // (ต้องตั้ง href "ก่อน" ติดคลาสที่ทำให้ตัวกรองถูกใช้จริง ไม่งั้นเฟรมแรก
-    //  ตัวกรองจะไม่เห็นแผนที่)
-    const mapEl = mapRef.current;
-    const mapHref = buildLensMap();
-    if (mapEl && mapHref) {
-      mapEl.setAttribute("href", mapHref);
-      mapEl.setAttributeNS(
-        "http://www.w3.org/1999/xlink",
-        "xlink:href",
-        mapHref,
-      );
-    }
-
-    // เลนส์บิดเบี้ยวภาพหลังแก้ว (backdrop-filter: url()) เปิดตามความสามารถจริง
-    // ของ browser เท่านั้น — เช็คแค่ CSS.supports ไม่กรอง UA
-    //
-    // (เดิมเคยกั้น Samsung Internet ไว้ เพราะบทเรียนเก่าที่ใส่ url() บน <nav>
-    //  ทั้งแถบแล้ว Samsung render เป็นเฟรมซ้อน ตอนนี้ url() ย้ายมาอยู่บน
-    //  .dock-glass__orb ซึ่ง opacity:0 ตอนพักและโผล่แค่ 84px ตอนลาก
-    //  พื้นที่เสี่ยงจึงเหลือน้อยมาก — เลือกแลกให้ Samsung ได้เอฟเฟคนี้ไปด้วย)
-    // ถอดคลาสออกเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรเสียหาย
-    const lensOk =
-      !!mapHref &&
-      typeof CSS !== "undefined" &&
-      typeof CSS.supports === "function" &&
-      (CSS.supports("backdrop-filter", 'url("#dock-glass-lens")') ||
-        CSS.supports("-webkit-backdrop-filter", 'url("#dock-glass-lens")'));
-    if (lensOk) nav.classList.add("dock-glass--lens");
-
     // เผย pill (CSS ซ่อนไว้กัน flash ก่อน JS วัดตำแหน่งเสร็จ)
     pill.style.opacity = "1";
-    orb.style.opacity = "0";
     wake.style.opacity = "0";
     rimR.style.opacity = "0";
-    rimG.style.opacity = "0";
     rimB.style.opacity = "0";
-    disp.style.opacity = "0";
 
     const H = 44; // ต้องตรงกับ height ของ .dock-glass__pill ใน globals.css
     const INSET = 3; // ระยะห่างซ้าย/ขวาของ pill จากขอบแท็บ
-    const ORB = 84; // ต้องตรงกับ --dock-orb ของ .dock-glass
-    // ยอมให้วงกลมล้นขอบ dock ได้นิดหน่อย: แนวนอนเพื่อให้ไปถึงกลางแท็บสุดท้าย
-    // (pill กว้าง ~65 → ครึ่งวง 42 จะเลยขอบ) แนวตั้งให้ "ไหล" ตามนิ้วออกนอกได้
-    const OVER_X = 18;
-    const OVER_Y = 34;
 
     // สปริงตัวหลัก: underdamped (ζ = 0.88) → ตามนิ้วช้าแล้วส่ายเข้าที่นิดหนึ่ง
     // = ความ "เหลว/หนืด" แบบ FluidGlass แต่เฟรมเรตอิสระ
@@ -297,7 +195,7 @@ export default function MobileNav() {
         const r = btn.getBoundingClientRect();
         pillW = Math.max(36, r.width - INSET * 2);
         pill.style.width = `${pillW}px`;
-        // wake/orb เป็นวงกลมขนาดคงที่ (var(--dock-orb)) — ไม่ตั้งขนาดจาก JS
+        wake.style.width = `${pillW}px`;
         restX = r.left - nr.left + r.width / 2;
       }
       return nr;
@@ -307,51 +205,28 @@ export default function MobileNav() {
     const render = () => {
       // squash & stretch ตามความเร็ว (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
       const spd = Math.min(Math.abs(main.v) / 3200, 0.25);
-      // chromatic aberration: ขอบแดง/เขียว/น้าเงินเยื้องออกตามความเร็วการลาก
-      // (การหักเหของสี — ยิ่งลากเร็ว สีแยกออกจากกันยิ่งชัด)
-      const ca = 0.8 + spd * 16;
-
-      // pill (แคปซูล) ยืด/บี้ชัด ๆ ตอนลาก แล้วจางหายไปให้วงกลมแทนที่
       const sx = 1 + spd * 0.8;
       const sy = 1 - spd * 0.42;
+      // chromatic aberration: ขอบแดง/น้ำเงินเยื้องออกตามความเร็วการลาก
+      const ca = 0.6 + spd * 11;
+
       pill.style.transform =
         `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
         ` scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
-      pill.style.opacity = (1 - alpha).toFixed(3);
 
-      // orb (วงกลม) — ยืดบี้น้อยกว่า pill เพราะโจทย์คือ "ให้เป็นวงกลม"
-      const osx = 1 + spd * 0.42;
-      const osy = 1 - spd * 0.26;
-      orb.style.transform =
-        `translate3d(${(main.p - ORB / 2).toFixed(2)}px,${(mainY.p - ORB / 2).toFixed(2)}px,0)` +
-        ` scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
-      orb.style.opacity = alpha.toFixed(3);
-
-      // wake = หางของเหลวกลมตามหลัง (over-damped → ตามหลังเสมอ)
       wake.style.transform =
-        `translate3d(${(tail.p - ORB / 2).toFixed(2)}px,${(tailY.p - ORB / 2).toFixed(2)}px,0)` +
-        ` scale(${(0.5 + spd * 0.7).toFixed(3)})`;
-      wake.style.opacity = (alpha * 0.36).toFixed(3);
+        `translate3d(${(tail.p - pillW / 2).toFixed(2)}px,${(tailY.p - H / 2).toFixed(2)}px,0)` +
+        ` scale(${(0.55 + spd * 0.6).toFixed(3)})`;
+      wake.style.opacity = (alpha * 0.4).toFixed(3);
 
-      const rimA = Math.min(alpha * 1.5, 1).toFixed(3);
+      const rimA = Math.min(alpha * 1.4, 1).toFixed(3);
       rimR.style.opacity = rimA;
-      rimG.style.opacity = rimA;
       rimB.style.opacity = rimA;
-      // แยกสีแบบปริซึม: แดงเยื้องซ้าย / น้าเงินเยื้องขวา / เขียวขยายวงตรงกลาง
-      rimR.style.transform = `translate3d(${(-ca * 1.3).toFixed(2)}px,0,0)`;
-      rimG.style.transform = `scale(${(1 + ca * 0.0035).toFixed(4)})`;
-      rimB.style.transform = `translate3d(${(ca * 1.3).toFixed(2)}px,0,0)`;
-
-      // ชั้นหักเหของสี: จาง-เข้มตาม alpha และ "แยกสี" ตามความเร็ว (--sp 0→1)
-      disp.style.opacity = Math.min(alpha * 1.15, 1).toFixed(3);
-      disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
+      rimR.style.transform = `translate3d(${(-ca).toFixed(2)}px,0,0)`;
+      rimB.style.transform = `translate3d(${ca.toFixed(2)}px,0,0)`;
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
-      // ⚠️ ต้องปิด .dock-glass__frost ระหว่างลาก — ไม่งั้นภาพที่เบลอ 20px จะถูก
-      // composited เข้า backdrop ของ orb ในโซนที่ทับกับแถบ dock ⇒ เลนส์บิดได้
-      // แค่ครึ่งวงบน/ล่าง ส่วนกลางวงเรียบ (ดูเหตุผลที่ globals.css)
-      nav.classList.toggle("is-warping", alpha > 0.02);
     };
 
     const tick = (t: number) => {
@@ -464,8 +339,8 @@ export default function MobileNav() {
       startY = e.clientY;
       pressIdx = idxAtX(e.clientX - nr.left);
       targetAlpha = 1;
-      targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
-      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_Y, nr.height - ORB / 2 + OVER_Y);
+      targetX = clamp(e.clientX - nr.left, pillW / 2 - 4, nr.width - pillW / 2 + 4);
+      targetY = clamp(e.clientY - nr.top, H / 2, nr.height - H / 2);
       startLoop();
     };
 
@@ -475,8 +350,8 @@ export default function MobileNav() {
         moved = true;
       }
       const nr = nav.getBoundingClientRect();
-      targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
-      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_Y, nr.height - ORB / 2 + OVER_Y);
+      targetX = clamp(e.clientX - nr.left, pillW / 2 - 4, nr.width - pillW / 2 + 4);
+      targetY = clamp(e.clientY - nr.top, H / 2, nr.height - H / 2);
     };
 
     const onUp = (e: PointerEvent) => {
@@ -528,8 +403,6 @@ export default function MobileNav() {
       window.removeEventListener("resize", sync);
       window.removeEventListener("orientationchange", sync);
       window.removeEventListener("load", sync);
-      nav.classList.remove("dock-glass--lens");
-      nav.classList.remove("is-warping");
       ro?.disconnect();
       if (syncRef.current === sync) syncRef.current = null;
     };
@@ -538,14 +411,6 @@ export default function MobileNav() {
   return (
     <div className="md:hidden">
       <nav ref={navRef} aria-label="เมนูหลัก" className="dock-glass">
-        {/* frost = เบลอฉากหลังของแถบ dock (ย้ายมาจาก backdrop-filter ของ <nav>)
-            ⚠️ ห้ามย้ายกลับไปที่ <nav> และห้ามเป็น pseudo-element:
-               • backdrop-filter บน nav = backdrop root ⇒ เลนส์ของ orb เห็นภาพเรียบ
-                 ⇒ displacement ไม่เกิด (วัดจาก pixel diff แล้ว)
-               • pseudo-element + backdrop-filter = ใช้ไม่ได้บน Samsung Internet
-            เป็นลูกตัวแรกสุดเพื่อให้วาดใต้ wake/pill/orb และ nav.is-warping ซ่อนมัน */}
-        <span className="dock-glass__frost" aria-hidden="true" />
-
         {/* filter defs ต้องอยู่ใน DOM จริง (ห้าม display:none) เหมือน #lg-refract
             ใน layout.tsx ไม่งั้นบาง browser จะไม่ resolve filter ให้ */}
         <svg
@@ -556,24 +421,24 @@ export default function MobileNav() {
           style={{ position: "absolute" }}
         >
           <defs>
-            {/* คลื่นยาว (baseFrequency ต่ำ) + แอมพลิจูดน้อย (scale ต่ำ) → บิดนุ่ม
-                Glow ให้เส้นรอบวงยังเท่ากันทั้งวง ไม่หยักเป็นหย่อม ๆ */}
             <filter
               id="dock-glass-warp"
               x="-40%"
-              y="-40%"
+              y="-60%"
               width="180%"
-              height="180%"
+              height="220%"
               colorInterpolationFilters="sRGB"
             >
+              {/* baseFrequency ต่ำ = ลูกคลื่นยาวกว่าตัว pill → pill บิดเป็นก้อน
+                  ของเหลว ไม่ใช่ขอบหยักเป็นคลื่นความถี่สูง */}
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.012 0.016"
+                baseFrequency="0.02 0.03"
                 numOctaves="2"
-                seed="71"
+                seed="7"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="6" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="1" result="soft" />
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
@@ -581,222 +446,18 @@ export default function MobileNav() {
                 xChannelSelector="R"
                 yChannelSelector="G"
               />
-            </filter>
-
-            {/* คลื่นประกายในเนื้อแก้ว + "การหักเหของสี": แยกช่องสี R/G/B
-                แล้วดิสเพลสคนละสเกล (แดงน้อยสุด → น้าเงินมากสุด เหมือนแก้วจริง)
-                แล้ว screen กลับ — ได้ประกายที่มีขอบสีรุ้งในเนื้อแก้ว
-                ใช้กับ "เนื้อใน" เท่านั้น จึงไม่ทําให้เส้นรอบวงหยัก */}
-            <filter
-              id="dock-glass-caustic"
-              x="-30%"
-              y="-30%"
-              width="160%"
-              height="160%"
-              colorInterpolationFilters="sRGB"
-            >
-              <feTurbulence
-                type="fractalNoise"
-                baseFrequency="0.05 0.06"
-                numOctaves="2"
-                seed="53"
-                result="noise"
-              />
-              <feGaussianBlur in="noise" stdDeviation="2.6" result="soft" />
-              {/* red */}
-              <feDisplacementMap
-                in="SourceGraphic"
-                in2="soft"
-                scale="3"
-                xChannelSelector="R"
-                yChannelSelector="G"
-                result="dispR"
-              />
-              <feColorMatrix
-                in="dispR"
-                type="matrix"
-                values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                result="chR"
-              />
-              {/* green */}
-              <feDisplacementMap
-                in="SourceGraphic"
-                in2="soft"
-                scale="6"
-                xChannelSelector="R"
-                yChannelSelector="G"
-                result="dispG"
-              />
-              <feColorMatrix
-                in="dispG"
-                type="matrix"
-                values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                result="chG"
-              />
-              {/* blue */}
-              <feDisplacementMap
-                in="SourceGraphic"
-                in2="soft"
-                scale="9"
-                xChannelSelector="R"
-                yChannelSelector="G"
-                result="dispB"
-              />
-              <feColorMatrix
-                in="dispB"
-                type="matrix"
-                values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"
-                result="chB"
-              />
-              <feBlend
-                in="chR"
-                in2="chG"
-                mode="screen"
-                result="chRG"
-              />
-              <feBlend in="chRG" in2="chB" mode="screen" />
-            </filter>
-
-            {/* เลนส์บิดเบี้ยว "ภาพหลังแก้ว": คนละหน้าที่กับ 2 ตัวบน
-                - dock-glass-warp/caustic = บิด "แถบแสงที่เราวาดเอง" (filter:)
-                - dock-glass-lens        = บิด "ภาพจริงที่อยู่ข้างหลังวงกลม"
-                                           (ใช้ผ่าน backdrop-filter: ของ orb)
-
-                ⚙️ กลไก: feImage (แผนที่เรเดียลที่วาดด้วย canvas ใน MobileNav)
-                   → feDisplacementMap ⇒ ดึงภาพฉากหลังเป็นแนวเรเดียล
-                   อ่อนที่กลางวง → แรงสุดที่ขอบวง (ดูสูตร/เหตุผลใน buildLensMap)
-                   วัดผลในหน้านี้จริง: scale 26 ให้ pixel diff สูงสุด 244
-                   (ต่างกันเป็นวงชัดเจน) เทียบกับตอนไม่ใส่แผนที่ (mean 0.11/max 7)
-
-                ⚠️⚠️ backdrop-filter ต้องมี url() "ตัวเดียว" เท่านั้น
-                   วัดแล้ว (harness + diff พิกเซล): ถ้ามี blur()/saturate() ปนอยู่
-                   Chromium จะทิ้ง url() ทั้งตัว → ได้แค่ blur เฉย ๆ ไม่มีการบิด
-                   (cfg sweep 5 ค่า baseFrequency + สลับลำดับ blur/lens → เหมือนเดิม)
-                   ⇒ ห้ามใส่ blur() ลงใน backdrop-filter ของ orb เด็ดขาด
-                   (ผู้ใช้ระบุชัด: วงกลมต้องไม่เบลอ ใส่แค่ distortion)
-
-                ⚠️⚠️ ตัวที่จะทำให้ทุกอย่างข้างบนไม่เกิดผลเลย: backdrop-filter บน <nav>
-                   (หรือบรรพบุรุษใด ๆ ของ orb) — จะสร้าง backdrop root ทำให้ที่นี่
-                   รับภาพที่กรองแล้วของ nav (= เรียบ) ⇒ ตัวกรองทำงานแต่
-                   feDisplacementMap เห็นภาพเรียบจึงไม่ปรากฏ (วัดแล้ว: เปลี่ยน
-                   scale 34→0 ภาพต่างกัน mean 0.11/max 7 = สัญญาณรบกวน)
-                   ย้ายความฟุ้งของแถบ dock ไปที่ .dock-glass__frost แล้ว ⇒ ปัจจุบัน
-                   วัดซ้ำได้ mean 0.91/max 36/3.8% ของพิกเซล
-
-                ⚠️ ลูกของ orb ที่มี backdrop-filter เอง (เช่น orb-edge ที่เพิ่งถอดออก)
-                   จะได้ backdrop = "ผลที่ตัวกรองนี้บิดแล้ว" ⇒ ถ้าไป blur ทับ ก็ลบ
-                   รอยบิดทิ้งในโซนขอบซึ่งเป็นโซนที่แรงที่สุด · อย่าเพิ่มกลับ
-                ⚠️ เดิมใช้ feTurbulence เป็นสนาม (คาบ 43–53px + blur 7 + scale 34)
-                   แต่สนามแบบนั้น "ไม่" เรเดียล — ได้การบิดทั้งวงเป็นก้อน ๆ
-                   และ feDiffuseLighting ก็ให้ยอดที่ ~0.8R ไม่ใช่ที่ขอบวง
-                   ⇒ เปลี่ยนมาใช้แผนที่เรเดียลที่เขียนเอง (buildLensMap)
-                   ถ้าอนาคตจะมี feTurbulence กลับมา → bump seed ทุกครั้งที่แก้ */}
-            <filter
-              id="dock-glass-lens"
-              x="-20%"
-              y="-20%"
-              width="140%"
-              height="140%"
-              colorInterpolationFilters="sRGB"
-            >
-              {/* 1) แผนที่ดิสเพลส (href ถูกยัดเป็น data URI ตอน mount)
-                    x/y/width/height="100%" = ยืดแผนที่ให้เต็ม filter region
-                    ⇒ ครึ่งหนึ่งของ region (70% ของกล่อง = 1.4 เท่าของรัศมี)
-                      ต้องตรงกับ LENS_MAP_SPAN พอดี (ดู buildLensMap) */}
-              <feImage
-                ref={mapRef}
-                x="0"
-                y="0"
-                width="100%"
-                height="100%"
-                preserveAspectRatio="none"
-                result="map"
-              />
-              {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
-                    = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
-                    วัดจาก scale: ขอบวงถูกดึงออก ±(scale/2) px
-                      R 10 = ±5px · G 14 = ±7px · B 18 = ±9px
-                    ⇒ ที่ขอบวงสีแยกกัน 4px = เห็นขอบสีรุ้งชัด
-                    (เทียบให้เห็นภาพ: scale 0.87R ของ G = 7px = 17% ของรัศมี 42px
-                     ⇒ ความยืดแนวรัศมีที่ขอบวง ≈ 1 + (S·P)/(2R) = 1.37 เท่า)
-                    feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
-                    แล้ว feBlend mode=screen รวมกลับ (ช่องไม่ทับกัน → ได้ค่าเดิม)
-                    ⚠️ ห้ามเร่งสเกลเกิน ~24: displacement เป็นสัดส่วนกับระยะจาก
-                       กลางวง ⇒ โซนขอบจะถูกดึงเป็นวงซ้อน ๆ (onion ring) แตก */}
-              <feColorMatrix
-                in="SourceGraphic"
-                type="matrix"
-                values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                result="chR"
-              />
-              <feColorMatrix
-                in="SourceGraphic"
-                type="matrix"
-                values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                result="chG"
-              />
-              <feColorMatrix
-                in="SourceGraphic"
-                type="matrix"
-                values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"
-                result="chB"
-              />
-              <feDisplacementMap
-                in="chR"
-                in2="map"
-                scale="10"
-                xChannelSelector="R"
-                yChannelSelector="G"
-                result="dR"
-              />
-              <feDisplacementMap
-                in="chG"
-                in2="map"
-                scale="14"
-                xChannelSelector="R"
-                yChannelSelector="G"
-                result="dG"
-              />
-              <feDisplacementMap
-                in="chB"
-                in2="map"
-                scale="18"
-                xChannelSelector="R"
-                yChannelSelector="G"
-                result="dB"
-              />
-              <feBlend in="dR" in2="dG" mode="screen" result="dRG" />
-              <feBlend in="dRG" in2="dB" mode="screen" />
             </filter>
           </defs>
         </svg>
 
-        {/* wake มาก่อน orb/pill → วาดใต้ทั้งคู่ (หางของเหลวที่ตามหลัง) */}
+        {/* wake มาก่อน pill → วาดใต้ pill (หางของเหลวที่ตามหลัง) */}
         <div ref={wakeRef} className="dock-glass__wake" aria-hidden="true" />
 
-        {/* pill = ตัวแก้วตอนพัก (แคปซูล) — ตอนลากจะจางหายไปให้ orb แทนที่ */}
-        <div ref={pillRef} className="dock-glass__pill" aria-hidden="true" />
-
-        {/* orb = วงกลมแก้วตอนลาก: หักเหฉากหลังจริง (distortion) + แถบแสง/ประกาย
-            + 3 rim สีเพี้ยน (rim อยู่ข้างในวง → ใช้ border-radius: inherit = 50%)
-            ⚠️ เอา .dock-glass__orb-edge (ชั้นที่เบลอฉากหลังซ้อนเฉพาะโซนขอบ) ออก:
-               มันเป็นลูกของ orb ⇒ backdrop ของมันคือ "ผลลัพธ์ที่ orb บิดแล้ว"
-               ⇒ ไปเบลอทับบริเวณที่การบิดแรงที่สุด (โซนขอบ) พอดี = ตาเห็นเป็น
-               รอยฟุ้ง ไม่เห็นการบิด · ตอนนี้การบิดมาจากตัวกรองเลนส์ล้วน ๆ
-               (ผู้ใช้ระบุ: "วงกลมต้องไม่เบลอ ใส่แค่ distortion") */}
-        <span ref={orbRef} className="dock-glass__orb" aria-hidden="true">
-          <span className="dock-glass__orb-sheen" />
-          <span className="dock-glass__orb-caustic" />
-          {/* แยกสีที่ขอบวง: แดงในสุด → เขียวกึ่งกลาง → น้าเงินนอกสุด */}
-          <span ref={dispRef} className="dock-glass__disperse">
-            <span className="dock-glass__disperse--r" />
-            <span className="dock-glass__disperse--g" />
-            <span className="dock-glass__disperse--b" />
-          </span>
+        {/* pill = ตัวแก้ว: พื้น/ขอบ hairline มาจาก CSS, 2 rim = ขอบสีเพี้ยน */}
+        <div ref={pillRef} className="dock-glass__pill" aria-hidden="true">
           <span ref={rimRRef} className="dock-glass__rim dock-glass__rim--r" />
-          <span ref={rimGRef} className="dock-glass__rim dock-glass__rim--g" />
           <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
-        </span>
+        </div>
 
         {MENU.map((l, i) => (
           <button
