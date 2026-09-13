@@ -623,17 +623,25 @@ export default function MobileNav() {
       startLocalX = e.clientX - nr.left;
       startLocalY = e.clientY - nr.top;
       pressIdx = idxAtX(e.clientX - nr.left);
-      targetAlpha = 1;
-      targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
-      targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_TOP, nr.height - ORB / 2 + OVER_BOTTOM);
-      startLoop();
+      // แตะเฉย ๆ ยังไม่เปิดเลเยอร์ของเหลว (targetAlpha/target ค้างที่พัก)
+      // → tap ตรง ๆ (signal>monitor) ไม่มี orb/warp วาบก่อน navigate
+      // ของเหลวติดก็ต่อเมื่อขยับเกิน threshold ใน onMove เท่านั้น
     };
 
     const onMove = (e: PointerEvent) => {
       if (!dragging) return;
-      if (Math.abs(e.clientX - startX) > 6 || Math.abs(e.clientY - startY) > 6) {
+      if (
+        !moved &&
+        (Math.abs(e.clientX - startX) > 6 ||
+          Math.abs(e.clientY - startY) > 6)
+      ) {
+        // เริ่มลากจริงครั้งแรก: ค่อยเปิดของเหลว + วิ่ง loop (tap ที่ไม่ขยับ
+        // มาไม่ถึงจุดนี้ ⇒ ไม่มี flash)
         moved = true;
+        targetAlpha = 1;
+        startLoop();
       }
+      if (!moved) return;
       const nr = nav.getBoundingClientRect();
       targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
       targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_TOP, nr.height - ORB / 2 + OVER_BOTTOM);
@@ -642,13 +650,22 @@ export default function MobileNav() {
     const onUp = (e: PointerEvent) => {
       if (!dragging) return;
       dragging = false;
+      if (!moved) {
+        // tap ตรง ๆ (ไม่ขยับ): pill/orb ไม่เคยขยับออกจากที่พักอยู่แล้ว
+        // ⇒ ไม่ต้องขยับอะไร ปล่อยให้ click นำทางปกติ หน้าใหม่ mount pill
+        // ตรงแท็บใหม่ทันที ไม่มีสปริงค้างกลางทางให้เพี้ยน
+        targetAlpha = 0;
+        targetX = restX;
+        targetY = restY;
+        return;
+      }
       targetAlpha = 0;
       targetY = restY;
 
       const nr = nav.getBoundingClientRect();
-      const idx = moved ? idxAtX(e.clientX - nr.left) : pressIdx;
+      const idx = idxAtX(e.clientX - nr.left);
 
-      if (moved && idx !== activeTabIdx() && MENU[idx]) {
+      if (idx !== activeTabIdx() && MENU[idx]) {
         // ปล่อยนิ้วเหนือแท็บอื่น → เปลี่ยนแท็บเอง (browser ไม่ยิง click ของแท็บ
         // เพราะ pointerdown/up คนละ element) แล้วหยุดสปริงที่แท็บนั้นเลย
         restX = centreOf(idx);
