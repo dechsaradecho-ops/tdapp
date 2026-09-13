@@ -220,43 +220,589 @@ input[type="checkbox"] {
   opacity: 0.5;
 }
 
-/* ---------- iOS 26 Liquid Glass dock — เม็ดแก้วเหลว (liquid pill) ----------
-   ตัวชี้แท็บ active ของเมนูล่าง MobileNav — เลื่อนตามแท็บด้วย spring easing
-   (เลียนแบบ Lottie "iOS 26 inspired tab menu" ด้วย CSS ล้วน)
-   ตัวเลข position/width มาจาก JS วัดจริง (style inline ใน MobileNav.tsx) */
-.dock-pill {
-  position: absolute;
-  top: 0.25rem;
-  bottom: 0.25rem;
-  left: 0;
-  border-radius: 1.05rem;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.07) 55%, rgba(255, 255, 255, 0.12));
-  -webkit-backdrop-filter: blur(12px) saturate(180%) brightness(1.12);
-  backdrop-filter: blur(12px) saturate(180%) brightness(1.12);
-  border: 1px solid rgba(255, 255, 255, 0.30);
-  border-top-color: rgba(255, 255, 255, 0.55);
+/* ---------- Mobile bottom dock (เขียนเอง: DOM + CSS ล้วน ไม่มี WebGL) ----------
+   ก่อนหน้านี้ใช้ package `webgl-liquid-glass` แต่ pill ของมันถูกวาดใน fragment
+   shader ด้วย `color = vec3(1.0)` (ขาวล้วน) บวกแถบขอบ `pillEdge * 0.35` กว้าง
+   ~2px → ได้ "กรอบขาว" รอบแท็บที่แก้ไม่ได้เลย เพราะ prop activeColor /
+   inactiveColor ของ package มีผลกับตัวอักษร/ไอคอนใน DOM เท่านั้น ไม่ใช่สี pill
+   จึงเขียน dock เองทั้งหมด: มี pill เดียว ควบคุมหน้าตาได้ 100% และสปริง/ยืดบี้/
+   chromatic aberration/บิดด้วย SVG filter คำนวณใน MobileNav.tsx
+   ข้อดีที่ได้แถม: ไม่มี WebGL → ไม่เจอบั๊ก destroy()/loseContext กับ StrictMode
+
+   หมายเหตุ: ห้ามใช้ backdrop-filter: url() ที่นี่ — Samsung Internet render dock พัง
+   (บทเรียนเดิมด้านบน) ความ "หักเห" จึงทำด้วย filter: url(#dock-glass-warp) บน
+   artwork ของ pill เอง — browser ไม่รองรับ = แค่ไม่บิด ไม่พัง
+
+   ⚠️⚠️ ห้ามใส่ backdrop-filter ใด ๆ ที่ <nav> นี้ "เด็ดขาด"
+   element ที่มี backdrop-filter จะกลายเป็น "backdrop root" ของลูกทุกตัว
+   ⇒ backdrop-filter ของ .dock-glass__orb (url(#dock-glass-lens)) และของ
+     .dock-glass__orb-edge จะเห็นฉากหลังเป็น "ผลลัพธ์ที่ nav กรองไปแล้ว"
+     (ภาพเรียบ ๆ) ไม่ใช่ตัวหน้าเว็บ ⇒ displacement ไม่เกิดจริง
+   หลักฐานจากการวัด (pixel diff ของภาพหน้าจอจริง):
+     • ตอน nav ยังมี blur(20px): เปลี่ยน scale ของ feDisplacementMap 34 → 0
+       ภาพต่างกันแค่ mean 0.11 / max 7 (เท่ากับสัญญาณรบกวน) = "ไม่มีอะไรเกิดขึ้น"
+     • พอตั้ง backdrop-filter: none ที่ nav แล้ววัดซ้ำ
+       ต่างกัน mean 0.91 / max 36 / 3.8% ของพิกเซล (หนาแน่นกลางวง mean 7.45)
+       = เห็นการบิดจริง
+   งาน "เบลอฉากหลังของแถบ dock" จึงย้ายไปที่ลูก .dock-glass__frost (ด้านล่าง) */
+.dock-glass {
+  /* เส้นผ่านศูนย์กลาง "วงกลมแก้ว" ตอนลาก — ต้องตรงกับ ORB ใน MobileNav.tsx */
+  --dock-orb: 84px;
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+  transform: translateX(-50%);
+  width: min(28rem, calc(100vw - 1.5rem));
+  height: 56px;
+  /* ต่ำกว่า GlassSelect 48 / AuthGate 50 → modal ยังคลุม dock ได้ */
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.08);
+  /* ⚠️⚠️ ไม่มี backdrop-filter ที่นี่โดยเจตนา — ดูเหตุผลยาวด้านบน (backdrop root)
+     ความฟุ้งของแถบ dock ย้ายไปที่ .dock-glass__frost ซึ่งเป็น "ลูก" */
+  /* เงาลึก + ไฮไลต์ขอบบนบาง ๆ — ไม่ใช่วงขอบขาวรอบกล่อง */
   box-shadow:
-    0 2px 12px rgba(0, 0, 0, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.35),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.10);
-  /* spring เหลว: overshoot เล็กน้อยแล้วเด้งกลับ — ให้ความรู้สึก "ของเหลว" */
-  transition:
-    transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    width 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    opacity 200ms ease;
-  will-change: transform, width;
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  /* pan-y: ปัดขึ้น/ลงจากโซน dock แล้วหน้าเว็บยังเลื่อนได้ ส่วนแนวนอนกันไว้ให้
+     ลาก pill เปลี่ยนแท็บ (browser จะไม่แย่ง gesture แนวนอนไป scroll) */
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
-/* glare บนเม็ดแก้ว — แสงวาบด้านบนเหมือนเลนส์ */
-.dock-pill::after {
+
+/* --- frost = เบลอฉากหลังของ "แถบ dock" -------------------------------------
+   เดิมความฟุ้งนี้อยู่บน <nav> แต่ backdrop-filter บน nav กลายเป็น backdrop root
+   ที่ทำให้ backdrop-filter ของ orb (เลนส์บิด) เห็นฉากหลังเป็นภาพเรียบ ⇒ เลนส์
+   ไม่ทำงาน วัดจาก pixel diff แล้วชัดเจน (ดูคอมเมนต์ยาวที่ .dock-glass)
+   ⇒ ย้ายมาเป็น "ลูก" ที่วาดเป็นตัวแรกสุด (ใต้ wake/pill/orb)
+
+   ⚠️ ต้องเป็น element จริง ไม่ใช่ ::before/::after — pseudo-element ที่มี
+      backdrop-filter ใช้ไม่ได้บน Samsung Internet (บทเรียนเดิมด้านบน)
+   ⚠️ ตอนลาก "ห้ามซ่อน" และ "ห้ามเจาะรู" — แถบ dock ต้องเบลอ 20px เหมือนตอนพัก
+      ทุกพิกเซล รวมทั้ง "ใต้ตัววงกลม" ด้วย
+      ประวัติของการแก้วงนี้ (อย่าเผลอกลับไปทำซ้ำ):
+        1. เดิมใช้ display:none ตอนลาก ⇒ แถบคมผิดปกติ (ผู้ใช้ติ) ⇒ เปลี่ยนเป็น
+           "เจาะรู" (mask) ตามตำแหน่งวงกลม เพื่อให้ orb เห็นหน้าเว็บจริงแล้วบิดแรง
+        2. เจาะรูแล้วผู้ใช้ติอีกว่า "ภาพในวงกลมทะลุเมนู" — เห็นหน้าเว็บคม ๆ ลอด
+           แถบออกมาในวง ซึ่งผิดธรรมชาติของ "แว่นขยายที่วางอยู่บนแถบ"
+      ⇒ บทสรุป: แว่นขยายต้องขยาย "ผิวของแถบ" (แก้วฝ้า + ตัวหนังสือ/ไอคอน)
+        ไม่ใช่ทะลุไปดู "สิ่งที่อยู่หลังแถบ" · สิ่งที่ทำให้เห็นการบิดจึงต้องเป็น
+        ชิ้นส่วนของแถบเองที่วาดใต้ orb (ดู .dock-glass__tab ที่ถอด z-index ออก)
+        ไม่ใช่หน้าเว็บ ⇒ frost จึงห้ามมีรูหรือรอยโหว่ใด ๆ */
+.dock-glass__frost {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+}
+
+/* --- pill = ตัวแก้ว (mark แท็บ active + เป็นของที่ลาก) ----------------------
+   CSS ซ่อนไว้ก่อนกัน flash ตอน static HTML (ยังไม่มี JS คำนวณตำแหน่ง)
+   MobileNav.tsx จะตั้ง opacity:1 + transform เองหลังวัดตำแหน่งแท็บจริงแล้ว */
+.dock-glass__pill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 56px; /* JS อัปเดต = ความกว้างแท็บจริง - 6 */
+  height: 44px; /* ต้องตรงกับ H ใน MobileNav.tsx */
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+}
+/* บิดเฉพาะตอนลาก — ตอนพักปล่อยให้เป็นแคปซูลคม ๆ */
+.dock-glass__pill.is-fluid {
+  filter: url("#dock-glass-warp");
+}
+/* พื้นแก้ว: แสงรวมด้านบน + ประกายฟ้าด้านล่าง (ไม่ใช้ขอบขาวรอบรูป) */
+.dock-glass__pill::before {
   content: "";
   position: absolute;
-  inset: 1px;
+  inset: 0;
   border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), transparent 45%);
-  mix-blend-mode: screen;
-  opacity: 0.6;
+  background:
+    radial-gradient(130% 150% at 50% -20%, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 58%),
+    radial-gradient(110% 140% at 50% 120%, rgba(124, 196, 255, 0.2), rgba(124, 196, 255, 0) 66%);
+  box-shadow:
+    0 0 16px rgba(124, 196, 255, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
+/* เส้นผมรับแสงรอบ pill: เข้มด้านบนจางด้านล่าง = ขอบแก้ว ไม่ใช่กรอบขาวทึบ */
+.dock-glass__pill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.34),
+    rgba(255, 255, 255, 0.05) 42%,
+    rgba(124, 196, 255, 0.2)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+/* ขอบ chromatic aberration (แดง/น้ำเงิน) — โผล่เฉพาะตอนลาก อยู่ในวงกลม orb
+   (border-radius: inherit → 50%) ระยะเยื้องมาจาก JS "ตามทิศลาก 2 มิติ"
+   ⇒ กระเจิงไม่สมมาตรตามนิ้ว (แรงสุดตามแนวเคลื่อนที่) แบบหยดน้ำจริง
+   ⚠️ ห้ามใส่ url("#dock-glass-warp") ที่ rim — turbulence จะทําให้ "เส้นขอบวง"
+      บิดไม่เท่ากันเป็นหย่อม ๆ เหลือแค่ blur (Gaussian, สม่ำเสมอทุกมุม) */
+.dock-glass__rim {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  /* Fluid Glass ขอบคม: ห้ามเบลอเส้นขอบ — ความนุ่มให้มาจาก gradient/AA อย่างเดียว */
+  filter: none;
+}
+/* ⚠️ ขอบวงต้อง "บาง" — ผู้ใช้ระบุ "วงกลมขอบสีขาวหนาเกินไป"
+   วัดจริงแล้ว (แนวผ่านกลางวง, ระหว่างลาก) แถบสว่างเดิมกว้าง 8px peak 178/255
+   ต้นเหตุหลักไม่ใช่ rim แต่คือ "วงแหวน disperse" ที่กว้าง 78%→100% (≈9px)
+   ทับกับ hairline ของ sheen (พีค 96% = r40) ⇒ สองแถบห่างกันแค่ ~3px รวมกัน
+   เป็น "ขอบขาวหนา" ผืนเดียว · rim สามชั้น mix-blend-mode: screen ซ้ำเติมอีก
+   ⇒ แก้โดย: ดึงวงแหวน disperse ไปกองชิดขอบเป็นแถบแคบ 84%→93% (≈3.8px)
+     + ลด hairline ให้เป็นแกน ~2px + rim เหลือ 1.5px
+   ผลวัดจริง: peak 178 → 117 และแถบสว่าง (>100) 8px → 6px
+   ⚠️ สามชั้น screen ที่ alpha สูงพร้อมกันจะบวกกันเป็น "ขาว" — อย่าขึ้น alpha
+      เกิน ~0.6 ถ้าไม่อยากกลับไปเป็นขอบขาวหนาอีก */
+/* ขอบรุ้งหยดน้ำ: เส้น 1px สามสี alpha ต่ำ — แค่ "ย้อมสี" ให้เส้นขอบขาว
+   (hairline ของ sheen) ไม่ใช่เส้นขาวหนาเอง */
+.dock-glass__rim--r {
+  box-shadow: inset 0 0 0 1px rgba(255, 110, 110, 0.55);
+}
+.dock-glass__rim--g {
+  box-shadow: inset 0 0 0 1px rgba(140, 255, 210, 0.26);
+}
+.dock-glass__rim--b {
+  box-shadow: inset 0 0 0 1px rgba(110, 180, 255, 0.58);
+}
+
+/* --- วงกลมแก้วตอนลาก (orb) ------------------------------------------------
+   ตอนลาก pill จะจางหายไป แล้วมี "วงกลมแก้ว" โผล่มาแทนที่:
+     1. .dock-glass__orb         = ตัวแก้วกลม + backdrop-filter (หักเหฉากหลังจริง)
+                                   + mask radial → ขอบฟุ้ง ไม่เป็นวงกลมตัดคม
+     2. .dock-glass__orb-sheen   = วงแหวนหักเหรอบขอบวง (กลมเท่ากันทั้งวง)
+     3. .dock-glass__orb-caustic = ประกายในเนื้อแก้ว กระจายสม่ำเสมอทั้งวง
+   ⚠️ gradient ของ "วงแหวนหักเห/เส้นขอบ" ต้องจัดกึ่งกลาง (closest-side เปล่า ๆ)
+      ไม่งั้นเส้นขอบจะหนาไม่เท่ากัน — แต่ชั้น artwork (scatter / จุดศูนย์
+      disperse) ตั้งใจใช้ `at X% Y%` ให้แสงกระเจิงไม่สมมาตรแบบหยดน้ำ
+   ⚠️ backdrop-filter: url() ใส่ได้ แต่ต้องผ่าน .dock-glass--lens เท่านั้น
+      (MobileNav เป็นคนเช็ค CSS.supports แล้วติดคลาสให้) — ไม่ใส่ตรง ๆ ที่นี่
+      เพื่อให้ถอดคลาสเมื่อไรก็กลับไปใช้ blur() ธรรมดาได้ทันที
+      หมายเหตุ: บทเรียนเก่าเรื่อง Samsung Internet พังนั้นมาจากการใส่ url()
+      บน <nav> ทั้งแถบซึ่งมองเห็นตลอดเวลา — ตอนนี้อยู่บน orb 84px ที่โผล่
+      เฉพาะตอนลาก จึงเลือกไม่กรอง UA อีก (ดู Phase 8 ใน MobileNav) */
+.dock-glass__orb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--dock-orb);
+  height: var(--dock-orb);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+  /* เบลอจัด ๆ ให้เนื้อหากับสีของฉากหลังถูกเกลี่ยเป็นเนื้อเดียว
+     saturate ต่ำ ๆ — ถ้าอิ่มสีจัด สีเทียน/ตัวหนังสือหลังแก้วจะกลายเป็นหย่อมสี
+     ไม่ใส่ contrast() ด้วยเหตุผลเดียวกัน */
+  /* เนื้อเลนส์ต้องเห็นตัวหนังสือ/ฉากหลังที่บิดแล้ว — บนพื้นเข้มเพดานแบบเดิม
+     (0.02) ทำให้วงอ่านเป็นรูดำ จึงเพิ่มเป็น 0.05–0.06 ให้เห็นเนื้อแก้ว
+     (ยัง << ค่าเดิมที่เคยเป็นผืนขาว — รอบนี้ลดอีกให้ใสขึ้น) */
+  background: radial-gradient(
+    closest-side,
+    rgba(255, 255, 255, 0.025),
+    rgba(255, 255, 255, 0.02) 62%,
+    rgba(255, 255, 255, 0.02) 86%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  -webkit-backdrop-filter: blur(7px) saturate(145%) brightness(1.18);
+  backdrop-filter: blur(7px) saturate(145%) brightness(1.18);
+  /* ⚠️⚠️ mask ของ element นี้ "คลุมลูกทุกตัว" (sheen / caustic / disperse /
+     rim / orb-edge) ห้ามตั้งให้จางเร็วเด็ดขาด
+     ของเดิม fade เริ่มที่ 64% → จบที่ 100% ⇒ โซน 84–100% ซึ่งเป็นที่อยู่ของ
+     "วงแหวนหักเหสี" (disperse) และ "chromatic rim" ทั้งหมด ถูกหรี่จน ~0
+     ผลคือตาไม่เห็นการหักเหของสีเลยแม้แต่ที่ขอบวง
+     อีกทั้งตอนลาก "นิ้วบังวงกลมตรงกลาง" — ส่วนเดียวที่ผู้ใช้เห็นจริงคือขอบวง
+     จึงต้องโปร่งใสพอให้ของที่วาดไว้ที่ 74–92% โผล่จริง */
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    #000 76%,
+    rgba(0, 0, 0, 0.85) 90%,
+    rgba(0, 0, 0, 0.35) 97%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    closest-side,
+    #000 76%,
+    rgba(0, 0, 0, 0.85) 90%,
+    rgba(0, 0, 0, 0.35) 97%,
+    transparent 100%
+  );
+}
+
+/* --- เลนส์บิดเบี้ยวภาพหลังแก้ว (lens distortion) --------------------------
+   ชั้นนี้ทำให้ "ภาพ/ตัวหนังสือที่อยู่หลังวงกลม" ถูกดึงบิดตามวงจริง ๆ (ไม่ใช่
+   วาดแถบแสงทับแบบ .dock-glass__orb-sheen/caustic)
+   กลไก: แผนที่ดิสเพลสเรเดียลที่วาดด้วย canvas (ดู buildLensMap ใน MobileNav)
+          → feImage → feDisplacementMap ต่อช่องสี R/G/B คนละ scale
+   ผลลัพธ์: อ่อนที่กลางวง → แรงสุดที่ขอบวง + ขอบสีรุ้ง (chromatic aberration)
+   ⚠️ ไม่มี blur ในตัวกรองนี้เลย — ผู้ใช้ระบุ "วงกลมต้องไม่เบลอ ใส่แค่ distortion"
+      (เดิมความฟุ้งถูกย้ายเข้าไปอยู่ใน feGaussianBlur ข้างใน filter แล้ว)
+   ⚠️ gate ด้วย .dock-glass--lens (MobileNav ติดให้เมื่อ CSS.supports ผ่าน)
+      — ถอดคลาสเมื่อไร วงกลมกลับไปใช้ blur() ธรรมดาทันที ไม่มีอะไรพัง */
+.dock-glass--lens .dock-glass__orb {
+  /* ⚠️ ต้องมี url() ตัวเดียวเท่านั้น — ถ้าใส่ blur()/saturate() ปนไปด้วย
+     Chromium จะทิ้ง url() ทั้งตัว (วัดจาก pixel diff แล้ว: "blur(3px) url(#lens)"
+     ให้ผลเหมือน "blur(3px)" เป๊ะ — ต่างกันแค่ 0.1% ของพิกเซล)
+     จึงย้ายความฟุ้ง/อิ่มสี/ความสว่างของฉากหลังเข้าไปทำใน filter ข้างในแทน
+     ถ้าถอดคลาส .dock-glass--lens ออก วงกลมกลับไปใช้ blur(7px) ธรรมดาทันที */
+  -webkit-backdrop-filter: url("#dock-glass-lens");
+  backdrop-filter: url("#dock-glass-lens");
+  /* ⚠️ mask ของ lens: ตัวหนังสือ/ฉากหลังที่บิดแล้วต้อง "เห็น" ถึงกลางวง —
+     เดิมทึบแค่ 94% หมายถึงโซนกลางกลับไปใช้ backdrop ของ orb ธรรมดา
+     (ใสเกินจนวงอ่านเป็นรู) ⇒ ทึบถึง 96% แล้วเฟดนุ่ม 96→100% (4% ≈ 1.7px)
+     เฟดแคบ 1% เดิมชันเกินจนขอบเป็นรอยหยักตอนซูม — 4% ยังคมเหมือนหยดน้ำ
+     แต่ไล่ alpha นุ่ม ไม่มีขั้นบันได */
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    #000 94%,
+    #000 96%,
+    rgba(0, 0, 0, 0.6) 98.5%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    closest-side,
+    #000 94%,
+    #000 96%,
+    rgba(0, 0, 0, 0.6) 98.5%,
+    transparent 100%
+  );
+}
+/* ชั้นหักเหหลัก — วงแหวนกลมรอบขอบวง "เท่ากันทุกมุม"
+   ใช้ radial-gradient(closest-side) ที่จัดกึ่งกลางล้วน ๆ → ระยะห่างจากขอบเท่ากัน
+   ทั้งวง (ไม่มีไฮไลต์/โคสติกที่มุมใดมุมหนึ่ง = ไม่เป็นหย่อม) */
+.dock-glass__orb-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  filter: url("#dock-glass-warp");
+  background:
+    /* เนื้อแก้วชั้นใน สว่างสม่ำเสมอ — จางมาก แค่พอให้รู้ว่าเป็นแก้ว */
+    radial-gradient(
+      closest-side,
+      rgba(255, 255, 255, 0.025),
+      rgba(255, 255, 255, 0.012) 60%,
+      rgba(255, 255, 255, 0) 76%
+    ),
+    /* วงแหวนแสงใน (inner caustic): แสงที่ขอบหยดน้ำโฟกัสเข้ามา — วงสว่างบาง
+       ชิดด้านในของแถบรุ้ง (พีค ~83%) = "ขอบหยดน้ำ" ชั้นที่สองแบบตัวอย่าง
+       บูสต์รอบแรงต่อเนื่อง 0.18→0.24 ให้เอฟเฟคชัด (ยังบาง ~2px ไม่เป็นผืน) */
+    radial-gradient(
+      closest-side,
+      rgba(255, 255, 255, 0) 74%,
+      rgba(220, 240, 255, 0.04) 79%,
+      rgba(220, 240, 255, 0.08) 83%,
+      rgba(220, 240, 255, 0.04) 86.5%,
+      rgba(255, 255, 255, 0) 90%
+    ),
+    /* วงแหวนหักเหหลัก: ฟ้ารอบวง เท่ากันทั้งวง (ไล่ระดับช้า ๆ ไม่เป็นขั้น)
+       ⚠️ เดิมไล่ 60%→100% (กว้าง ~17px) ทำให้โซนขอบสว่างเป็น "ผืน" ใหญ่
+          ⇒ บีบเป็น 70%→99% แล้ว (พีคบูสต์รอบแรงต่อเนื่อง 0.15→0.20
+          แต่ยังต่ำกว่าค่าเดิมที่เคยเป็นผืนขาว) */
+    radial-gradient(
+      closest-side,
+      rgba(255, 255, 255, 0) 70%,
+      rgba(190, 225, 255, 0.03) 79%,
+      rgba(190, 225, 255, 0.07) 88%,
+      rgba(255, 255, 255, 0.025) 95%,
+      rgba(255, 255, 255, 0) 99%
+    ),
+    /* เส้นแสงคาดขอบ: hairline แบบ Fluid Glass — ไล่นุ่ม 94.5% → พีค 96.5% → จาง
+       99% (≈1.9px ช่วงแสงรวม แกนสว่าง ~1px) แถบแคบเดิม 95→98.2% ชันเกินจน
+       เป็นขั้นบันไดสีตอนซูม — กว้างขึ้นนิดเดียวแต่ไล่ alpha นุ่มทั้งสองข้าง */
+    radial-gradient(
+      closest-side,
+      rgba(255, 255, 255, 0) 94.5%,
+      rgba(255, 255, 255, 0.25) 95.8%,
+      rgba(255, 255, 255, 0.5) 96.5%,
+      rgba(255, 255, 255, 0.25) 97.6%,
+      rgba(255, 255, 255, 0) 99%
+    );
+}
+/* ชั้นประกายในเนื้อแก้ว — กระจายสม่ำเสมอทั้งวง (วาวแบบแก้ว ไม่ใช่หย่อมแสง)
+   คลื่นถี่ใช้กับ "เนื้อใน" เท่านั้น จึงไม่ไปทําให้เส้นรอบวงหยัก */
+.dock-glass__orb-caustic {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  filter: url("#dock-glass-caustic");
+  opacity: 0.35;
+  background: radial-gradient(
+    closest-side,
+    rgba(255, 255, 255, 0.07),
+    rgba(214, 236, 255, 0.04) 52%,
+    rgba(200, 230, 255, 0.025) 74%,
+    rgba(255, 255, 255, 0) 92%
+  );
+}
+/* --- แสงกระเจิงไม่สมมาตร (asymmetric scatter) -------------------------------
+   หยดน้ำจริงกระเจิงแสงไม่เท่ากันรอบวง (ด้านรับแสงแรง/ตรงข้ามอ่อน + สีต่างกัน
+   ตามมุม) — ชั้นนี้เป็น artwork วาดทับ จึงใช้ gradient เบี้ยวศูนย์ได้
+   3 หย่อมจาง screen blend: อุ่นล่างขวา (แสงลอดขอบ) / เย็นบนซ้าย / ม่วงซ้ายล่าง
+   ห้ามใส่ filter: url() — หย่อมแสงต้องนุ่มแบบ Gaussian ไม่ใช่หย่อมบิด ๆ */
+.dock-glass__scatter {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  background:
+    radial-gradient(
+      34% 30% at 62% 68%,
+      rgba(255, 190, 130, 0.1),
+      rgba(255, 190, 130, 0) 70%
+    ),
+    radial-gradient(
+      30% 28% at 36% 30%,
+      rgba(150, 210, 255, 0.09),
+      rgba(150, 210, 255, 0) 70%
+    ),
+    radial-gradient(
+      26% 30% at 30% 62%,
+      rgba(200, 150, 255, 0.07),
+      rgba(200, 150, 255, 0) 70%
+    );
+}
+/* --- การหักเหของสี (chromatic dispersion) ------------------------------------
+   แก้วจริงแยกสีออกจากกันเพราะแต่ละความยาวคลื่นหักเหไม่เท่ากัน — ที่นี่ทำเหมือนกัน:
+   ซ้อน "วงแหวนบาง" ของสี แดง/เขียว/น้ำเงิน ที่รัศมีต่างกันเล็กน้อย (scale ต่างกัน)
+   แล้วรวมด้วย mix-blend-mode: screen → ได้ขอบวงที่ไล่สีแดง (ในสุด) → น้ำเงิน (นอกสุด)
+   ระยะต่าง (--spx) ผูกกับความเร็วการลากผ่าน --sp ที่ JS ตั้ง → ลากเร็วจึงแยกสีมาก
+   ไม่สมมาตร 3 ทาง: (1) .dock-glass__irid — รุ้ง conic รอบวง (สี/เข้มต่างตามมุม)
+   (2) .dock-glass__edge-light — แสงขอบสว่างด้านรับแสง จางด้านตรงข้าม
+   (3) --sdx/--sdy ที่ JS ตั้งตามทิศลาก (ไม่เกิน 2.5px) ดันแดง/น้าเงินสวนกัน
+   ตามนิ้ว (เขียวเป็นอ้างอิงกลาง) — วงแหวน R/G/B เองยังกลมศูนย์กลาง
+   ⚠️ วงแหวนเส้นขอบยังกลม (ไม่ใส่ url() warp ที่ชั้นนี้ เดี๋ยวขอบวงกลายเป็นหย่อม) */
+.dock-glass__disperse {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  will-change: opacity;
+  --sp: 0;
+  /* ระยะเยื้องวงแหวนสี — ฐานบูสต์รอบแรงต่อเนื่อง 6% (~2.5px) + เร็ว 6%
+     (~2.5px) = ไม่เกิน ~5px แยกสีชัดขึ้น แต่ยังต่ำกว่า 5–10% ที่เคยเป็นรุ้งทึบ */
+  --spx: calc(0.06 + var(--sp) * 0.06);
+}
+.dock-glass__disperse > span {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* Fluid Glass ขอบคม: ไม่เบลอวงแหวนสี — ความนุ่มมาจาก gradient เอง */
+  filter: none;
+}
+/* ⚠️ วงแหวนทั้งสามต้อง "แคบ" — เดิมกว้าง 78%→100% (≈9px) ทับกับ hairline
+   ของ sheen จนกลายเป็นแถบขาวหนา 8px (วัดได้ peak 178) ซึ่งเป็นสิ่งที่ผู้ใช้ติ
+   ตอนนี้บีบเป็น 84% → พีค 89% → จาง 93% = แถบสีบาง ~3.8px ชิดขอบใน
+   ⇒ ยังเห็นการแยกสีที่ขอบวง แต่ไม่กลายเป็นผืนขาว */
+/* แดง: รัศมีเล็กสุด (หักเหน้อยสุด) — กลมศูนย์กลาง + translate ตามทิศลาก */
+.dock-glass__disperse > .dock-glass__disperse--r {
+  transform: translate(var(--sdx, 0px), var(--sdy, 0px)) scale(calc(1 - var(--spx)));
+  background: radial-gradient(
+    closest-side,
+    rgba(255, 255, 255, 0) 86.5%,
+    rgba(255, 96, 74, 0.3) 89.5%,
+    rgba(255, 96, 74, 0.58) 91.5%,
+    rgba(255, 96, 74, 0.3) 93.2%,
+    rgba(255, 255, 255, 0) 95%
+  );
+}
+/* เขียว: ตรงกลาง (อ้างอิง) */
+.dock-glass__disperse > .dock-glass__disperse--g {
+  background: radial-gradient(
+    closest-side,
+    rgba(255, 255, 255, 0) 86.5%,
+    rgba(120, 255, 190, 0.17) 89.5%,
+    rgba(120, 255, 190, 0.33) 91.5%,
+    rgba(120, 255, 190, 0.17) 93.2%,
+    rgba(255, 255, 255, 0) 95%
+  );
+}
+/* น้ำเงิน: รัศมีใหญ่สุด (หักเหมากสุด) — กลมศูนย์กลาง + translate สวนทางแดง
+   ตามทิศลาก ⇒ แถบรุ้งเป็นลิ่มปริซึม ไม่ใช่แถบเท่ากันทั้งวง */
+.dock-glass__disperse > .dock-glass__disperse--b {
+  transform: translate(calc(var(--sdx, 0px) * -1), calc(var(--sdy, 0px) * -1)) scale(calc(1 + var(--spx)));
+  background: radial-gradient(
+    closest-side,
+    rgba(255, 255, 255, 0) 86.5%,
+    rgba(96, 148, 255, 0.32) 89.5%,
+    rgba(96, 148, 255, 0.62) 91.5%,
+    rgba(96, 148, 255, 0.32) 93.2%,
+    rgba(255, 255, 255, 0) 95%
+  );
+}
+/* --- รุ้งรอบขอบแบบไม่สมมาตร (iridescent rim) ---------------------------------
+   หยดน้ำจริงเห็นรุ้งเข้มไม่เท่ากันรอบวง (ด้านรับแสงชัด ตรงข้ามจาง + สีต่างตามมุม)
+   conic ไล่สีรอบวง มาสก์เป็นวงแหวนบาง 87–95.5% — อยู่ใน disperse จึงจาง-เข้มพร้อมกัน
+   --dang ที่ JS ตั้งตามทิศลาก (deg) หมุนให้แถบรุ้งเข้มสุดอยู่ตามแนวเคลื่อนที่
+   ไม่ใช่ล็อกมุมเดิมเสมอ ⇒ กระเจิงไม่สมมาตรตามนิ้วจริง
+   ห้ามใส่ filter: url() (วงแหวนต้องกลมเรียบ ไม่หยัก) */
+.dock-glass__disperse > .dock-glass__irid {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  mix-blend-mode: screen;
+  background: conic-gradient(
+    from var(--dang, 210deg) at 50% 50%,
+    rgba(255, 110, 90, 0.64),
+    rgba(255, 180, 80, 0.58) 16%,
+    rgba(240, 255, 160, 0.48) 28%,
+    rgba(120, 255, 190, 0.53) 40%,
+    rgba(110, 180, 255, 0.64) 54%,
+    rgba(190, 140, 255, 0.58) 64%,
+    rgba(190, 140, 255, 0) 80%,
+    rgba(255, 255, 255, 0) 100%,
+    rgba(255, 110, 90, 0.64)
+  );
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    transparent 86%,
+    rgba(0, 0, 0, 0.55) 88.5%,
+    #000 91%,
+    #000 93%,
+    rgba(0, 0, 0, 0.55) 94.5%,
+    transparent 96%
+  );
+  mask-image: radial-gradient(
+    closest-side,
+    transparent 86%,
+    rgba(0, 0, 0, 0.55) 88.5%,
+    #000 91%,
+    #000 93%,
+    rgba(0, 0, 0, 0.55) 94.5%,
+    transparent 96%
+  );
+}
+/* --- แสงขอบไม่สมมาตร (edge light) --------------------------------------------
+   ขอบหยดน้ำด้านรับแสงสว่าง ด้านตรงข้ามจาง — วงแหวนบางชิดขอบนอก 93–99%
+   --dang เดียวกับ irid ⇒ ด้านสว่างหมุนตามทิศลาก ไม่ล็อกบนซ้ายเสมอ
+   สว่างสุดแค่ ~0.12 และแค่ด้านเดียว จึงไม่กลายเป็นขอบขาวทั้งวง */
+.dock-glass__disperse > .dock-glass__edge-light {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  mix-blend-mode: screen;
+  background: conic-gradient(
+    from var(--dang, 200deg) at 50% 50%,
+    rgba(255, 255, 255, 0.55),
+    rgba(255, 255, 255, 0.22) 22%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.17) 78%,
+    rgba(255, 255, 255, 0.55)
+  );
+  -webkit-mask-image: radial-gradient(
+    closest-side,
+    transparent 92%,
+    rgba(0, 0, 0, 0.55) 94%,
+    #000 96%,
+    #000 97.5%,
+    rgba(0, 0, 0, 0.55) 98.7%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    closest-side,
+    transparent 92%,
+    rgba(0, 0, 0, 0.55) 94%,
+    #000 96%,
+    #000 97.5%,
+    rgba(0, 0, 0, 0.55) 98.7%,
+    transparent 100%
+  );
+}
+/* หางของเหลว (wake): ฝ้ากลมจาง ๆ ที่ตามหลัง orb ช้ากว่า — เห็นเฉพาะตอนลาก */
+.dock-glass__wake {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--dock-orb);
+  height: var(--dock-orb);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+  background: radial-gradient(
+    closest-side,
+    rgba(124, 196, 255, 0.34),
+    rgba(124, 196, 255, 0) 76%
+  );
+  filter: url("#dock-glass-warp") blur(7px);
+}
+
+/* --- แท็บ -----------------------------------------------------------------
+   ⚠️⚠️ ห้ามใส่ z-index ที่นี่ (เดิมเป็น z-index: 1)
+      z-index: 1 ⇒ แท็บวาด "ทับ" วงกลม ⇒ ตัวหนังสือ/ไอคอนไม่อยู่ใน backdrop ของ
+      orb เลย ⇒ เลนส์มีแต่ภาพเบลอ ๆ ให้บิด = แว่นขยายไม่ขยายอะไรที่อ่านออก
+      ตอนนี้ปล่อยเป็น z-index: auto (position: relative เท่านั้น) และย้ายแท็บ
+      ไปไว้ "ก่อน" orb ใน MobileNav.tsx ⇒ ลำดับการวาดใน nav (z-index เท่ากันหมด
+      จึงเรียงตาม DOM) เป็น: frost → wake → pill → แท็บ → orb
+        • แท็บยัง "ไม่" ถูก frost เบลอ เพราะ frost เบลอเฉพาะสิ่งที่วาดก่อนมัน
+          (backdrop-filter = เบลอฉากหลังของตัวมันเอง ไม่ใช่ของที่วาดทีหลัง)
+        • แท็บถูกนับเป็น backdrop ของ orb ⇒ feDisplacementMap ดึง "ตัวหนังสือ
+          บนแถบ" ให้บิดเป็นวงเหมือนแว่นขยายจริง
+      ปุ่มยังกดได้ปกติ เพราะ frost/wake/pill/orb เป็น pointer-events: none */
+.dock-glass__tab {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+.dock-glass__icon {
+  display: flex;
+  line-height: 0;
+}
+.dock-glass__label {
+  font-size: 10px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+/* ตัด scale(0.97) ตอนกดของ rule `button:not(:disabled):active` ด้านล่าง —
+   จังหวะกดของ dock คือสปริง/การยืดของ pill อยู่แล้ว */
+.dock-glass__tab:not(:disabled):active {
+  transform: none;
+}
+
+/* (ย้ายมาอยู่ในบล็อก .dock-glass__* ด้านบน — เลนส์เหลวเดิมที่ซ้อนทับ dock ถูก
+   แทนที่ด้วย pill ตัวเดียวของ dock เอง: package เดิมวาด pill ด้วย shader สีขาว
+   ล้วนที่แก้ไม่ได้ จึงไม่เหลือที่ให้เลนส์ซ้อน ดู MobileNav.tsx) */
 
 /* ---------- Shared button classes (ใช้ซ้ำทั้งแอป) ---------- */
 /* ปุ่มหลัก — สูง >= 44px บนมือถือเพื่อให้แตะง่าย */
