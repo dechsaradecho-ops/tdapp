@@ -173,7 +173,12 @@ const buildLensMap = (): string | null => {
 };
 
 export default function MobileNav() {
-  const [path, setPath] = useState("/");
+  // path = null จนกว่า hydrate เสร็จ (static export prerender ทุกหน้าโดยไม่มี
+  // window ⇒ HTML แรกต้องเป็นกลาง ไม่มีแท็บไหน active — ไม่งั้นทุกหน้า paint
+  // "Home ฟ้า" ก่อน JS แก้เป็นแท็บจริง = วาบตอนกดเมนูตรง ๆ เช่น signal>monitor)
+  // null → เรนเดอร์แรก client ตรงกับ HTML (ไม่มี mismatch) + pill ยังซ่อน
+  // (opacity 0) จน sync หลังรู้ path จริงค่อยเผย ⇒ ไม่เคยเห็นแท็บผิด/pill ผิดที่
+  const [path, setPath] = useState<string | null>(null);
   const navRef = useRef<HTMLElement>(null);
   // pill = ตัวแก้วตอนพัก / orb = วงกลมแก้วตอนลาก / wake = หางของเหลว
   // rim = ขอบ chromatic aberration (อยู่ใน orb — โผล่เฉพาะตอนลาก)
@@ -206,10 +211,10 @@ export default function MobileNav() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const activeIdx = Math.max(
-    0,
-    MENU.findIndex((l) => isActiveHref(l.href, path)),
-  );
+  // null (prerender/hydrate ครั้งแรก) หรือ path ที่ไม่มีแท็บตรง → -1 = เป็นกลาง
+  // (ไม่ mark แท็บไหน + ไม่เผย pill) กันวาบแท็บผิดก่อนรู้ path จริง
+  const activeIdx =
+    path == null ? -1 : MENU.findIndex((l) => isActiveHref(l.href, path));
 
   // แท็บ active เปลี่ยน → ย้าย pill ไปแท็บใหม่ (position พักเปลี่ยน)
   useEffect(() => {
@@ -270,8 +275,8 @@ export default function MobileNav() {
         CSS.supports("-webkit-backdrop-filter", 'url("#dock-glass-lens")'));
     if (lensOk) nav.classList.add("dock-glass--lens");
 
-    // เผย pill (CSS ซ่อนไว้กัน flash ก่อน JS วัดตำแหน่งเสร็จ)
-    pill.style.opacity = "1";
+    // pill ยังไม่เผยตรงนี้ — รอ sync หลังรู้ path จริง (ดู revealed ใน sync)
+    // ไม่งั้นหน้า /signals, /monitor จะเห็น pill ที่ Home ก่อนหนึ่งเฟรม
     orb.style.opacity = "0";
     wake.style.opacity = "0";
     rimR.style.opacity = "0";
@@ -320,6 +325,12 @@ export default function MobileNav() {
     let targetAlpha = 0;
     let dragging = false;
     let moved = false;
+    // เผย pill แล้วหรือยัง — true ก็ต่อเมื่อ sync เห็น aria-current (รู้ path จริง)
+    // กัน pill โผล่ที่แท็บผิดก่อน hydrate (ดู activeIdx = -1 ตอน path == null)
+    let revealed = false;
+    // ระยะลากสูงสุดจากจุดกด (px, client coords) — onUp ใช้แยก "tap/สะกิดโดน"
+    // (นิ้วสั่น 10-24px) ออกจาก "ลากจริง" (ตั้งใจลากไปแท็บอื่น)
+    let maxDrag = 0;
     let startX = 0;
     let startY = 0;
     // จุดกดนิ้ว (พิกัดใน <nav>) — อ้างอิงทิศลากจริง (นิ้วอยู่ไหนเทียบจุดกด)
@@ -328,7 +339,6 @@ export default function MobileNav() {
     // (วัดจริง dang -11.1° vs -7.6° แทบไม่ต่าง) ⇒ รุ้งไม่ตามนิ้ว
     let startLocalX = 0;
     let startLocalY = 28;
-    let pressIdx = 0;
     let raf = 0;
     let last = 0;
     let clickTimer = 0;
@@ -421,7 +431,8 @@ export default function MobileNav() {
       pill.style.transform =
         `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
         ` rotate(${angDeg}deg) scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
-      pill.style.opacity = (1 - alpha).toFixed(3);
+      // ยังไม่รู้ path จริง (revealed=false) → ซ่อน pill ไว้ก่อน กันโผล่ผิดที่
+      pill.style.opacity = revealed ? (1 - alpha).toFixed(3) : "0";
 
       // orb (หยดน้ำ) — ทรงแปรผันตามโมเมนตัม: ยืดตามทิศแรง + บีบขวาง
       // (teardrop morph: หน้าโป่ง-หลังเรียวผ่าน wake ที่ลากหางสวนทาง)
@@ -576,6 +587,12 @@ export default function MobileNav() {
 
     const sync = () => {
       measure();
+      // รู้แท็บจริงแล้ว (DOM มี aria-current) → ค่อยเผย pill (ครั้งแรกครั้งเดียว)
+      // หน้า prerender ที่ path ยัง null จะไม่มี aria-current ⇒ pill ยังซ่อน
+      if (!revealed && nav.querySelector('[aria-current="page"]')) {
+        revealed = true;
+        pill.style.opacity = "1";
+      }
       if (!dragging) snap();
     };
     syncRef.current = sync;
@@ -618,11 +635,11 @@ export default function MobileNav() {
       const nr = measure();
       dragging = true;
       moved = false;
+      maxDrag = 0;
       startX = e.clientX;
       startY = e.clientY;
       startLocalX = e.clientX - nr.left;
       startLocalY = e.clientY - nr.top;
-      pressIdx = idxAtX(e.clientX - nr.left);
       // แตะเฉย ๆ ยังไม่เปิดเลเยอร์ของเหลว (targetAlpha/target ค้างที่พัก)
       // → tap ตรง ๆ (signal>monitor) ไม่มี orb/warp วาบก่อน navigate
       // ของเหลวติดก็ต่อเมื่อขยับเกิน threshold ใน onMove เท่านั้น
@@ -630,21 +647,26 @@ export default function MobileNav() {
 
     const onMove = (e: PointerEvent) => {
       if (!dragging) return;
-      if (
-        !moved &&
-        (Math.abs(e.clientX - startX) > 6 ||
-          Math.abs(e.clientY - startY) > 6)
-      ) {
-        // เริ่มลากจริงครั้งแรก: ค่อยเปิดของเหลว + วิ่ง loop (tap ที่ไม่ขยับ
-        // มาไม่ถึงจุดนี้ ⇒ ไม่มี flash)
-        moved = true;
-        targetAlpha = 1;
-        startLoop();
+      if (!moved) {
+        // touch slop ~10px: นิ้วสั่น/สะกิดโดนไม่ติดของเหลว
+        // (tap ตรง ๆ signal>monitor มาไม่ถึงจุดนี้ ⇒ ไม่มี orb วาบ)
+        if (
+          Math.abs(e.clientX - startX) > 10 ||
+          Math.abs(e.clientY - startY) > 10
+        ) {
+          // เริ่มลากจริงครั้งแรก: ค่อยเปิดของเหลว + วิ่ง loop
+          moved = true;
+          targetAlpha = 1;
+          startLoop();
+        } else {
+          return;
+        }
       }
-      if (!moved) return;
       const nr = nav.getBoundingClientRect();
       targetX = clamp(e.clientX - nr.left, ORB / 2 - OVER_X, nr.width - ORB / 2 + OVER_X);
       targetY = clamp(e.clientY - nr.top, ORB / 2 - OVER_TOP, nr.height - ORB / 2 + OVER_BOTTOM);
+      const dd = Math.hypot(e.clientX - startX, e.clientY - startY);
+      if (dd > maxDrag) maxDrag = dd;
     };
 
     const onUp = (e: PointerEvent) => {
@@ -665,16 +687,27 @@ export default function MobileNav() {
       const nr = nav.getBoundingClientRect();
       const idx = idxAtX(e.clientX - nr.left);
 
-      if (idx !== activeTabIdx() && MENU[idx]) {
-        // ปล่อยนิ้วเหนือแท็บอื่น → เปลี่ยนแท็บเอง (browser ไม่ยิง click ของแท็บ
-        // เพราะ pointerdown/up คนละ element) แล้วหยุดสปริงที่แท็บนั้นเลย
+      if (idx !== activeTabIdx() && MENU[idx] && maxDrag > 24) {
+        // ลากจริง (>24px) แล้วปล่อยเหนือแท็บอื่น → เปลี่ยนแท็บเอง (browser
+        // ไม่ยิง click ของแท็บเพราะ pointerdown/up คนละ element) แล้วหยุด
+        // สปริงที่แท็บนั้นเลย
         restX = centreOf(idx);
         targetX = restX;
         suppressClick();
         go(MENU[idx].href);
+      } else if (maxDrag <= 24) {
+        // สะกิดโดน/นิ้วสั่น (ขยับแค่ 10-24px): ไม่ใช่การลากจริง → ดับเลเยอร์
+        // ของเหลว + วาง pill กลับที่พักทันที (hard settle ไม่สปริงส่าย)
+        // กัน orb วาบ + pill กระตุกตอน tap ตรง ๆ (เช่น signal>monitor)
+        if (raf) {
+          cancelAnimationFrame(raf);
+          raf = 0;
+        }
+        snap();
+        return;
       } else {
-        // แตะเฉย ๆ: pill ตามไปแท็บที่กด แล้วปล่อยให้ click ของแท็บนำทางปกติ
-        targetX = moved ? restX : centreOf(pressIdx);
+        // ลากจริงแล้ววกกลับแท็บเดิม: สปริงไหลกลับที่พัก (fluid release)
+        targetX = restX;
       }
       startLoop();
     };
@@ -997,9 +1030,12 @@ export default function MobileNav() {
             key={l.href}
             type="button"
             className="dock-glass__tab"
-            aria-current={i === activeIdx ? "page" : undefined}
+            aria-current={activeIdx >= 0 && i === activeIdx ? "page" : undefined}
             style={{
-              color: i === activeIdx ? "#7cc4ff" : "rgba(148, 163, 184, 0.92)",
+              color:
+                activeIdx >= 0 && i === activeIdx
+                  ? "#7cc4ff"
+                  : "rgba(148, 163, 184, 0.92)",
             }}
             onClick={() => go(l.href)}
           >
