@@ -95,7 +95,7 @@ const go = (href: string) => {
    ⇒ ดิสเพลสสโลป ~0.00·2 = 0.00 ที่จุดกลางวง (กลางหักเหน้อยสุด ~1.00x), โต monotonic,
      ชันสุดแถบขอบวง แล้ว f อิ่มตัวเป็น 1 พอ r ≥ R (แรงสุดพอดีที่ขอบวง
      ไม่มีรอยกระโดด) — ต่างจากแว่นขยาย (P = 1.0) ที่ขยายเท่ากันทั้งวง
-   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 37, R_px 42 ⇒ ขอบบีบ ~±18.5px
+   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 41, R_px 42 ⇒ ขอบบีบ ~±20.5px
    (scale จริงถูกคูณด้วย eased alpha ทุกเฟรม — ดู transition ใน render)
 
    ⚠️ ทำไมต้องวาดเองด้วย canvas: feTurbulence ให้สนามที่ไม่เป็นเรเดียล (บิด
@@ -142,7 +142,7 @@ const buildLensMap = (): string | null => {
     }
   }
   ctx.putImageData(img, 0, 0);
-  // เบลอ 1px ฆ่าขั้นบันไดควอนไทซ์ 8-bit (255 ขั้น) — scale 32-43 ขยายขั้นพวกนี้เป็นรอยหยัก/แถบสีที่ขอบวง
+  // เบลอ 1px ฆ่าขั้นบันไดควอนไทซ์ 8-bit (255 ขั้น) — scale 36-47 ขยายขั้นพวกนี้เป็นรอยหยัก/แถบสีที่ขอบวง
   try {
     const soft = document.createElement("canvas");
     soft.width = LENS_MAP_N;
@@ -436,11 +436,11 @@ export default function MobileNav() {
       // ไม่ผ่าน CSS transition (SVG presentation attribute ไม่มี transition)
       const ae = alpha * alpha * alpha * (alpha * (alpha * 6 - 15) + 10);
       if (dispRRef.current)
-        dispRRef.current.setAttribute("scale", (32 * ae).toFixed(2));
+        dispRRef.current.setAttribute("scale", (36 * ae).toFixed(2));
       if (dispGRef.current)
-        dispGRef.current.setAttribute("scale", (37 * ae).toFixed(2));
+        dispGRef.current.setAttribute("scale", (41 * ae).toFixed(2));
       if (dispBRef.current)
-        dispBRef.current.setAttribute("scale", (43 * ae).toFixed(2));
+        dispBRef.current.setAttribute("scale", (47 * ae).toFixed(2));
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
@@ -816,20 +816,20 @@ export default function MobileNav() {
               {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
                     = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
                     วัดจาก scale เต็ม: ขอบวงถูกดึงเข้า ±(scale/2) px
-                      R 32 = ±16px · G 37 = ±18.5px · B 43 = ±21.5px
+                      R 36 = ±18px · G 41 = ±20.5px · B 47 = ±23.5px
                     ⇒ ที่ขอบวงสีแยกกัน ~5.5px = เห็นขอบสีรุ้งชัด ไม่เป็นวงขาวหนา
                     (บูสต์ให้ขอบบีบเห็นชัดตามคำขอ "ขอบยังบีบไม่แรงพอ" — กลาง
                      กดแบนแล้ว (P=3.0/DOME=0.00) จึงเร่งที่ scale ตรง ๆ แทน; เทียบ D0–D3:
                      scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็นวงขาวหนา ~10px
                      แต่รอบนั้นกลางก็นูนด้วย — รอบนี้กลางนิ่งจึงมี headroom มากกว่า)
                     ⚠️ scale เริ่มต้น = 0 (เลนส์แบน) — render() ดันเป็น
-                    32/37/43 ตาม alpha แบบ smootherstep ทุกเฟรม = transition
+                    36/41/47 ตาม alpha แบบ smootherstep ทุกเฟรม = transition
                     นูนตอนเริ่มลาก / ยุบตอนปล่อย (ดู transition ใน render)
                     (กลางวงหักเหน้อยสุด ~1.00x — ภาพกลางนิ่ง ไล่บีบแรงขึ้นทั้งวง
                      บีบแรงเฉพาะแถบขอบแบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
                     feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
                     แล้ว feBlend mode=screen รวมกลับ (ช่องไม่ทับกัน → ได้ค่าเดิม)
-                    ⚠️ ห้ามเร่งสเกลเกิน ~43: displacement เป็นสัดส่วนกับระยะจาก
+                    ⚠️ ห้ามเร่งสเกลเกิน ~47: displacement เป็นสัดส่วนกับระยะจาก
                        กลางวง ⇒ โซนขอบจะถูกดึงเป็นวงซ้อน ๆ (onion ring) แตก */}
               <feColorMatrix
                 in="SourceGraphic"
