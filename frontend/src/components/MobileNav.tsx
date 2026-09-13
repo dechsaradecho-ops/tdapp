@@ -81,21 +81,18 @@ const go = (href: string) => {
 /* ---- แผนที่ดิสเพลสเรเดียล (radial displacement map) ------------------------
    feDisplacementMap อ่าน "ทิศทาง + ขนาด" ของการดึงภาพจากค่า R (แกน x) และ G
    (แกน y) ของแผนที่: offset = scale × (ค่า/255 − 0.5) ⇒ 128 = ไม่ดึง
-   อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงโค้งนูน
-   รับแสง (~1.8x) แล้วบีบอัดแรงเฉพาะแถบขอบวง + ขอบแยกสีรุ้ง
+   อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงภาพ
+   "นิ่งเกือบเท่าเดิม" (~1x) แล้วบีบอัดแรงเฉพาะแถบขอบวง + ขอบแยกสีรุ้ง
    ⇒ สร้างสนามเวกเตอร์เรเดียลเอง (เครื่องหมายลบ = ดึงจุด sample เข้าหากลางวง
      ⇒ เลนส์นูน; เดิมเป็นบวก = ดึงออกนอก ⇒ ภาพหดแบบเลนส์เว้า):
         t = min(r / R, 1)        (r = ระยะจากกลางวง, R = รัศมีวง)
-        f = S(t)^(P/2)·(1-D) + D(t)·D   (D = โดมนุ่ม t·(2-t), DOME = 0.9
-                                   → กลางโค้งรับแสง (~1.8x) ขอบชัน = หยดน้ำนูน
-                                   ไม่แบน, D'(1)=0 จึงไม่มีรอยหักที่ขอบวง)
+        f = t^P                  (P = 3.0 → กลางแบน (~1x) ขอบชัน = หยดน้ำ)
         R = 0.5 − 0.5·(u/r)·f
         G = 0.5 − 0.5·(v/r)·f
-   ⇒ ดิสเพลสสโลป ~0.9·2 = 1.8 ที่จุดกลางวง (กลางนูน ~1.8x ไม่แบน), โต monotonic,
+   ⇒ ดิสเพลสเป็น 0 ที่จุดกลางวงและสโลปก็ ~0 (กลางไม่ขยาย), โต monotonic,
      ชันสุดแถบขอบวง แล้ว f อิ่มตัวเป็น 1 พอ r ≥ R (แรงสุดพอดีที่ขอบวง
      ไม่มีรอยกระโดด) — ต่างจากแว่นขยาย (P = 1.0) ที่ขยายเท่ากันทั้งวง
-   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 20, R_px 42 ⇒ ขอบบีบ ~±10px
-   (scale จริงถูกคูณด้วย eased alpha ทุกเฟรม — ดู transition ใน render)
+   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 18, R_px 42 ⇒ ขอบบีบ ~±9px
 
    ⚠️ ทำไมต้องวาดเองด้วย canvas: feTurbulence ให้สนามที่ไม่เป็นเรเดียล (บิด
       ทั้งวงเป็นก้อน) และ feDiffuseLighting ก็ให้เรเดียลที่ยอดไม่ตรงขอบ
@@ -108,9 +105,8 @@ const go = (href: string) => {
    ⚠️ SPAN ต้องเท่ากับ "ครึ่งหนึ่งของ filter region" ของ #dock-glass-lens
       (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
       ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
-const LENS_MAP_N = 256; // 256px + เบลอ 1px ฆ่าขั้นบันได 8-bit → ขอบเลนส์เรียบ ไม่หยัก (160px เดิมเห็นรอยหยักตอนซูม)
-const LENS_MAP_P = 2.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 1.0): กลางโค้งรับแสง (~1.8x) ขอบชัน (หยดน้ำนูน ไม่แบน) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
-const LENS_MAP_DOME = 0.9; // สัดส่วนโดมนุ่ม D(t)=t*(2-t) ที่ผสมกลับเข้ากลางวง (0 = แบนแบบเดิม, 1 = แว่นขยาย) — กลางนูน ~1.8x แต่ขอบยังชันแบบหยดน้ำ; D'(1)=0 จึงไม่มีรอยหักที่ขอบวง
+const LENS_MAP_N = 160; // ความละเอียดพอ — ค่าถูก interpolate ตอนใช้
+const LENS_MAP_P = 3.0; // เลขชี้กำลังของแรมป์: 3.0 = กลางแบน (~1x) ขอบชัน (หยดน้ำ); 1.0 = ขยายทั้งวง (แว่นขยาย — ไม่ใช้)
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
 const buildLensMap = (): string | null => {
   if (typeof document === "undefined") return null; // กัน SSR ตอน build
@@ -126,11 +122,7 @@ const buildLensMap = (): string | null => {
       const u = (((x + 0.5) / LENS_MAP_N) * 2 - 1) * LENS_MAP_SPAN;
       const v = (((y + 0.5) / LENS_MAP_N) * 2 - 1) * LENS_MAP_SPAN;
       const r = Math.sqrt(u * u + v * v) || 1e-6; // กันหารศูนย์ที่กลางวง
-      // smootherstep S(t) ยกกำลัง P/2 ดันความชันไปชิดขอบแบบหยดน้ำ + ผสมโดมนุ่ม D(t)=t*(2-t) ให้กลางวงโค้งนูน (ไม่แบนราบ)
-      const t = Math.min(r, 1);
-      const s = t * t * t * (t * (t * 6 - 15) + 10);
-      const edge = Math.pow(s, LENS_MAP_P / 2);
-      const f = edge * (1 - LENS_MAP_DOME) + t * (2 - t) * LENS_MAP_DOME;
+      const f = Math.pow(Math.min(r, 1), LENS_MAP_P);
       const i = (y * LENS_MAP_N + x) * 4;
       // ลบ = sample เข้าหากลางวง ⇒ ขยาย (เลนส์นูน); ห้ามกลับเป็นบวก (ภาพจะหด)
       d[i] = Math.round((0.5 - 0.5 * (u / r) * f) * 255);
@@ -140,21 +132,6 @@ const buildLensMap = (): string | null => {
     }
   }
   ctx.putImageData(img, 0, 0);
-  // เบลอ 1px ฆ่าขั้นบันไดควอนไทซ์ 8-bit (255 ขั้น) — scale 17-24 ขยายขั้นพวกนี้เป็นรอยหยัก/แถบสีที่ขอบวง
-  try {
-    const soft = document.createElement("canvas");
-    soft.width = LENS_MAP_N;
-    soft.height = LENS_MAP_N;
-    const sctx = soft.getContext("2d");
-    if (sctx) {
-      (sctx as unknown as { filter: string }).filter = "blur(1px)";
-      sctx.drawImage(cv, 0, 0);
-      ctx.clearRect(0, 0, LENS_MAP_N, LENS_MAP_N);
-      ctx.drawImage(soft, 0, 0);
-    }
-  } catch (e) {
-    void e; // browser ไม่มี canvas filter → ใช้แผนที่ดิบ (ยังดีกว่าไม่มี)
-  }
   return cv.toDataURL("image/png");
 };
 
@@ -173,11 +150,6 @@ export default function MobileNav() {
   const dispRef = useRef<HTMLSpanElement>(null);
   // feImage ในตัวกรองเลนส์ — effect หลักเป็นคนยัด href (data URI) ให้
   const mapRef = useRef<SVGFEImageElement>(null);
-  // feDisplacementMap 3 ช่องสีของเลนส์ — render() ตั้ง scale ตาม alpha ทุกเฟรม
-  // = transition ของเอฟเฟกต์ (เลนส์ค่อย ๆ นูนตอนเริ่มลาก / ยุบตอนปล่อย ไม่ป๊อป)
-  const dispRRef = useRef<SVGFEDisplacementMapElement>(null);
-  const dispGRef = useRef<SVGFEDisplacementMapElement>(null);
-  const dispBRef = useRef<SVGFEDisplacementMapElement>(null);
   // ให้ effect หลัก (deps []) วัดตำแหน่งใหม่ได้เมื่อแท็บ active เปลี่ยน
   const syncRef = useRef<(() => void) | null>(null);
 
@@ -398,9 +370,8 @@ export default function MobileNav() {
       rimB.style.opacity = rimA;
       // แยกสีแบบปริซึม "ตามทิศลาก" (ไม่สมมาตร): แดงสวนทางนิ้ว / น้าเงินตามนิ้ว /
       // เขียวขยายวงตรงกลาง — หยดน้ำจริงกระเจิงแรงสุดตามแนวเคลื่อนที่ ไม่ใช่ซ้ายขวาเสมอ
-      // ⚠️ shift บูสต์รอบแรงต่อเนื่อง 1.2–5.0 → 1.4–5.8px: แยกสีชัดขึ้น แต่ยัง
-      // ต่ำกว่า ~6px ที่เคยหลุดเป็นขอบซ้อน
-      const rimShift = 1.4 + spd * 17;
+      // ⚠️ shift จำกัด ~0.6–2.6px: วง 1px ถ้าเยื้องเกินนี้จะหลุดเป็นขอบซ้อน (เคย ~6px)
+      const rimShift = 0.6 + spd * 8;
       rimR.style.transform = `translate3d(${(-dx * rimShift).toFixed(2)}px,${(-dy * rimShift).toFixed(2)}px,0)`;
       rimG.style.transform = `scale(${(1 + ca * 0.0035).toFixed(4)})`;
       rimB.style.transform = `translate3d(${(dx * rimShift).toFixed(2)}px,${(dy * rimShift).toFixed(2)}px,0)`;
@@ -418,8 +389,8 @@ export default function MobileNav() {
       const sway = Math.min(spd / 0.25, 1) * 0.6 + dragDist * 0.4;
       disp.style.opacity = Math.min(alpha * 1.15, 1).toFixed(3);
       disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
-      disp.style.setProperty("--sdx", (-dx * sway * 5.6).toFixed(2) + "px");
-      disp.style.setProperty("--sdy", (-dy * sway * 5.6).toFixed(2) + "px");
+      disp.style.setProperty("--sdx", (-dx * sway * 2.5).toFixed(2) + "px");
+      disp.style.setProperty("--sdy", (-dy * sway * 2.5).toFixed(2) + "px");
       // หมุนรุ้ง/แสงขอบให้ด้านเข้มสุดอยู่ตามทิศลาก (conic `from` = มุมเริ่มไล่สี
       // ⇒ ลากไปทางไหน ด้านนั้นรุ้งชัด ตรงข้ามจาง = ไม่สมมาตรตามนิ้วจริง)
       // atan2(dy,dx) เป็นมุมเวกเตอร์ลาก (deg) ใช้ตรง ๆ ได้เลยกับ conic
@@ -427,18 +398,6 @@ export default function MobileNav() {
         "--dang",
         `${((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1)}deg`,
       );
-
-      // transition ของเลนส์: scale ดิสเพลสโตตาม alpha แบบ smootherstep
-      // (0→เต็มใน ~1/9 วินาที เท่าความเร็ว alpha) ⇒ เริ่มลากเลนส์ค่อย ๆ นูน
-      // ปล่อยนิ้วค่อย ๆ ยุบ ไม่ป๊อป — setAttribute ต่อเฟรมบน SVG attribute
-      // ไม่ผ่าน CSS transition (SVG presentation attribute ไม่มี transition)
-      const ae = alpha * alpha * alpha * (alpha * (alpha * 6 - 15) + 10);
-      if (dispRRef.current)
-        dispRRef.current.setAttribute("scale", (17 * ae).toFixed(2));
-      if (dispGRef.current)
-        dispGRef.current.setAttribute("scale", (20 * ae).toFixed(2));
-      if (dispBRef.current)
-        dispBRef.current.setAttribute("scale", (24 * ae).toFixed(2));
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
@@ -654,9 +613,8 @@ export default function MobileNav() {
           style={{ position: "absolute" }}
         >
           <defs>
-            {/* คลื่นยาวความถี่เดียว (octave 1) + แอมพลิจูดน้อย → บิดนุ่ม
-                octave 2 เดิมมีความถี่สูงซ้อน ทำให้ hairline 1px เป็นคลื่นถี่
-                อ่านเป็น "รอยหยัก" ตอนซูม ⇒ ตัดออก + เบลอแรงขึ้น + scale 6→4 */}
+            {/* คลื่นยาว (baseFrequency ต่ำ) + แอมพลิจูดน้อย (scale ต่ำ) → บิดนุ่ม
+                Glow ให้เส้นรอบวงยังเท่ากันทั้งวง ไม่หยักเป็นหย่อม ๆ */}
             <filter
               id="dock-glass-warp"
               x="-40%"
@@ -667,16 +625,16 @@ export default function MobileNav() {
             >
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.008 0.01"
-                numOctaves="1"
+                baseFrequency="0.012 0.016"
+                numOctaves="2"
                 seed="71"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="8" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="6" result="soft" />
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="4"
+                scale="6"
                 xChannelSelector="R"
                 yChannelSelector="G"
               />
@@ -696,17 +654,17 @@ export default function MobileNav() {
             >
               <feTurbulence
                 type="fractalNoise"
-                baseFrequency="0.032 0.038"
+                baseFrequency="0.05 0.06"
                 numOctaves="2"
                 seed="53"
                 result="noise"
               />
-              <feGaussianBlur in="noise" stdDeviation="3.5" result="soft" />
+              <feGaussianBlur in="noise" stdDeviation="2.6" result="soft" />
               {/* red */}
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="2"
+                scale="3"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dispR"
@@ -721,7 +679,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="4"
+                scale="6"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dispG"
@@ -736,7 +694,7 @@ export default function MobileNav() {
               <feDisplacementMap
                 in="SourceGraphic"
                 in2="soft"
-                scale="6"
+                scale="9"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dispB"
@@ -813,17 +771,13 @@ export default function MobileNav() {
               />
               {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
                     = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
-                    วัดจาก scale เต็ม: ขอบวงถูกดึงเข้า ±(scale/2) px
-                      R 17 = ±8.5px · G 20 = ±10px · B 24 = ±12px
-                    ⇒ ที่ขอบวงสีแยกกัน ~3.5px = เห็นขอบสีรุ้งชัด ไม่เป็นวงขาวหนา
-                    (บูสต์รอบแรงต่อเนื่องตามคำขอ "เอฟเฟคแรงขึ้น" — เทียบ D0–D3:
-                     scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็นวงขาวหนา ~10px
-                     จึงยังแตะแค่ขอบล่างของเพดานนั้น)
-                    ⚠️ scale เริ่มต้น = 0 (เลนส์แบน) — render() ดันเป็น
-                    17/20/24 ตาม alpha แบบ smootherstep ทุกเฟรม = transition
-                    นูนตอนเริ่มลาก / ยุบตอนปล่อย (ดู transition ใน render)
-                    (กลางวงโค้งนูน ~1.8x ไม่แบน — ภาพกลางขยายรับแสง
-                     บีบแรงเฉพาะแถบขอบแบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
+                    วัดจาก scale: ขอบวงถูกดึงเข้า ±(scale/2) px
+                      R 7 = ±3.5px · G 9 = ±4.5px · B 11 = ±5.5px
+                    ⇒ ที่ขอบวงสีแยกกัน ~2px = เห็นขอบสีรุ้งบาง ไม่เป็นวงขาวหนา
+                    (เทียบ D0–D3: scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็น
+                     วงขาวหนา ~10px — ลดครึ่งหนึ่งแล้ววงใส เหลือแค่รุ้งขอบบาง)
+                    (กลางวง ~1x ไม่ขยาย — ภาพนิ่งกลาง บีบแรงเฉพาะแถบขอบ
+                     แบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
                     feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
                     แล้ว feBlend mode=screen รวมกลับ (ช่องไม่ทับกัน → ได้ค่าเดิม)
                     ⚠️ ห้ามเร่งสเกลเกิน ~24: displacement เป็นสัดส่วนกับระยะจาก
@@ -847,28 +801,25 @@ export default function MobileNav() {
                 result="chB"
               />
               <feDisplacementMap
-                ref={dispRRef}
                 in="chR"
                 in2="map"
-                scale="0"
+                scale="7"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dR"
               />
               <feDisplacementMap
-                ref={dispGRef}
                 in="chG"
                 in2="map"
-                scale="0"
+                scale="9"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dG"
               />
               <feDisplacementMap
-                ref={dispBRef}
                 in="chB"
                 in2="map"
-                scale="0"
+                scale="11"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dB"
