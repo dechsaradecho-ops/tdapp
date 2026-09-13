@@ -29,6 +29,9 @@ Thumbs.db
 # Local assets (wallpapers ทดสอบพื้นหลัง — ไม่ใช่ส่วนของโปรเจค)
 /iPadOS-27-wallpaper-*.png
 
+# auto-generated build version (สร้างตอน prebuild/predev — ห้าม commit เพราะจะล้าหนึ่งคอมมิตเสมอ)
+frontend/src/lib/gitVersion.ts
+
 # Build
 dist/
 build/
