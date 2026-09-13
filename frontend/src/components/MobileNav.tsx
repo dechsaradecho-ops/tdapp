@@ -82,19 +82,20 @@ const go = (href: string) => {
    feDisplacementMap อ่าน "ทิศทาง + ขนาด" ของการดึงภาพจากค่า R (แกน x) และ G
    (แกน y) ของแผนที่: offset = scale × (ค่า/255 − 0.5) ⇒ 128 = ไม่ดึง
    อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงโค้งนูน
-   รับแสง (~1.3x) แล้วบีบอัดแรงเฉพาะแถบขอบวง + ขอบแยกสีรุ้ง
+   รับแสง (~1.45x) แล้วบีบอัดแรงเฉพาะแถบขอบวง + ขอบแยกสีรุ้ง
    ⇒ สร้างสนามเวกเตอร์เรเดียลเอง (เครื่องหมายลบ = ดึงจุด sample เข้าหากลางวง
      ⇒ เลนส์นูน; เดิมเป็นบวก = ดึงออกนอก ⇒ ภาพหดแบบเลนส์เว้า):
         t = min(r / R, 1)        (r = ระยะจากกลางวง, R = รัศมีวง)
-        f = S(t)^(P/2)·(1-D) + D(t)·D   (D = โดมนุ่ม t·(2-t), DOME = 0.5
-                                   → กลางโค้งรับแสง (~1.3x) ขอบชัน = หยดน้ำนูน
+        f = S(t)^(P/2)·(1-D) + D(t)·D   (D = โดมนุ่ม t·(2-t), DOME = 0.65
+                                   → กลางโค้งรับแสง (~1.45x) ขอบชัน = หยดน้ำนูน
                                    ไม่แบน, D'(1)=0 จึงไม่มีรอยหักที่ขอบวง)
         R = 0.5 − 0.5·(u/r)·f
         G = 0.5 − 0.5·(v/r)·f
-   ⇒ ดิสเพลสสโลป ~0.5 ที่จุดกลางวง (กลางนูน ~1.3x ไม่แบน), โต monotonic,
+   ⇒ ดิสเพลสสโลป ~0.65·2 = 1.3 ที่จุดกลางวง (กลางนูน ~1.45x ไม่แบน), โต monotonic,
      ชันสุดแถบขอบวง แล้ว f อิ่มตัวเป็น 1 พอ r ≥ R (แรงสุดพอดีที่ขอบวง
      ไม่มีรอยกระโดด) — ต่างจากแว่นขยาย (P = 1.0) ที่ขยายเท่ากันทั้งวง
-   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 18, R_px 42 ⇒ ขอบบีบ ~±9px
+   ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 20, R_px 42 ⇒ ขอบบีบ ~±10px
+   (scale จริงถูกคูณด้วย eased alpha ทุกเฟรม — ดู transition ใน render)
 
    ⚠️ ทำไมต้องวาดเองด้วย canvas: feTurbulence ให้สนามที่ไม่เป็นเรเดียล (บิด
       ทั้งวงเป็นก้อน) และ feDiffuseLighting ก็ให้เรเดียลที่ยอดไม่ตรงขอบ
@@ -108,8 +109,8 @@ const go = (href: string) => {
       (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
       ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
 const LENS_MAP_N = 256; // 256px + เบลอ 1px ฆ่าขั้นบันได 8-bit → ขอบเลนส์เรียบ ไม่หยัก (160px เดิมเห็นรอยหยักตอนซูม)
-const LENS_MAP_P = 2.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 1.0): กลางโค้งรับแสง (~1.15x) ขอบชัน (หยดน้ำนูน ไม่แบน) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
-const LENS_MAP_DOME = 0.5; // สัดส่วนโดมนุ่ม D(t)=t*(2-t) ที่ผสมกลับเข้ากลางวง (0 = แบนแบบเดิม, 1 = แว่นขยาย) — กลางนูน ~1.3x แต่ขอบยังชันแบบหยดน้ำ; D'(1)=0 จึงไม่มีรอยหักที่ขอบวง
+const LENS_MAP_P = 2.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 1.0): กลางโค้งรับแสง (~1.45x) ขอบชัน (หยดน้ำนูน ไม่แบน) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
+const LENS_MAP_DOME = 0.65; // สัดส่วนโดมนุ่ม D(t)=t*(2-t) ที่ผสมกลับเข้ากลางวง (0 = แบนแบบเดิม, 1 = แว่นขยาย) — กลางนูน ~1.45x แต่ขอบยังชันแบบหยดน้ำ; D'(1)=0 จึงไม่มีรอยหักที่ขอบวง
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
 const buildLensMap = (): string | null => {
   if (typeof document === "undefined") return null; // กัน SSR ตอน build
@@ -172,6 +173,11 @@ export default function MobileNav() {
   const dispRef = useRef<HTMLSpanElement>(null);
   // feImage ในตัวกรองเลนส์ — effect หลักเป็นคนยัด href (data URI) ให้
   const mapRef = useRef<SVGFEImageElement>(null);
+  // feDisplacementMap 3 ช่องสีของเลนส์ — render() ตั้ง scale ตาม alpha ทุกเฟรม
+  // = transition ของเอฟเฟกต์ (เลนส์ค่อย ๆ นูนตอนเริ่มลาก / ยุบตอนปล่อย ไม่ป๊อป)
+  const dispRRef = useRef<SVGFEDisplacementMapElement>(null);
+  const dispGRef = useRef<SVGFEDisplacementMapElement>(null);
+  const dispBRef = useRef<SVGFEDisplacementMapElement>(null);
   // ให้ effect หลัก (deps []) วัดตำแหน่งใหม่ได้เมื่อแท็บ active เปลี่ยน
   const syncRef = useRef<(() => void) | null>(null);
 
@@ -421,6 +427,18 @@ export default function MobileNav() {
         "--dang",
         `${((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1)}deg`,
       );
+
+      // transition ของเลนส์: scale ดิสเพลสโตตาม alpha แบบ smootherstep
+      // (0→เต็มใน ~1/9 วินาที เท่าความเร็ว alpha) ⇒ เริ่มลากเลนส์ค่อย ๆ นูน
+      // ปล่อยนิ้วค่อย ๆ ยุบ ไม่ป๊อป — setAttribute ต่อเฟรมบน SVG attribute
+      // ไม่ผ่าน CSS transition (SVG presentation attribute ไม่มี transition)
+      const ae = alpha * alpha * alpha * (alpha * (alpha * 6 - 15) + 10);
+      if (dispRRef.current)
+        dispRRef.current.setAttribute("scale", (17 * ae).toFixed(2));
+      if (dispGRef.current)
+        dispGRef.current.setAttribute("scale", (20 * ae).toFixed(2));
+      if (dispBRef.current)
+        dispBRef.current.setAttribute("scale", (24 * ae).toFixed(2));
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
@@ -795,13 +813,16 @@ export default function MobileNav() {
               />
               {/* 2) แยก 3 ช่องสีออกมา แล้วดิสเพลสคนละ scale
                     = chromatic aberration จริง (แดงดึงน้อยสุด → น้าเงินดึงมากสุด)
-                    วัดจาก scale: ขอบวงถูกดึงเข้า ±(scale/2) px
-                      R 14 = ±7px · G 17 = ±8.5px · B 20 = ±10px
-                    ⇒ ที่ขอบวงสีแยกกัน ~3px = เห็นขอบสีรุ้งชัด ไม่เป็นวงขาวหนา
+                    วัดจาก scale เต็ม: ขอบวงถูกดึงเข้า ±(scale/2) px
+                      R 17 = ±8.5px · G 20 = ±10px · B 24 = ±12px
+                    ⇒ ที่ขอบวงสีแยกกัน ~3.5px = เห็นขอบสีรุ้งชัด ไม่เป็นวงขาวหนา
                     (บูสต์รอบแรงต่อเนื่องตามคำขอ "เอฟเฟคแรงขึ้น" — เทียบ D0–D3:
                      scale 14/18/22 ดึงไอคอนสว่างหลังวงมาละเลงเป็นวงขาวหนา ~10px
                      จึงยังแตะแค่ขอบล่างของเพดานนั้น)
-                    (กลางวงโค้งนูน ~1.3x ไม่แบน — ภาพกลางขยายรับแสง
+                    ⚠️ scale เริ่มต้น = 0 (เลนส์แบน) — render() ดันเป็น
+                    17/20/24 ตาม alpha แบบ smootherstep ทุกเฟรม = transition
+                    นูนตอนเริ่มลาก / ยุบตอนปล่อย (ดู transition ใน render)
+                    (กลางวงโค้งนูน ~1.45x ไม่แบน — ภาพกลางขยายรับแสง
                      บีบแรงเฉพาะแถบขอบแบบหยดน้ำ/เลนส์นูน Fluid Glass ไม่ใช่แว่นขยาย)
                     feColorMatrix ทำหน้าที่ "เปิดช่องเดียว" (ช่องอื่น = 0)
                     แล้ว feBlend mode=screen รวมกลับ (ช่องไม่ทับกัน → ได้ค่าเดิม)
@@ -826,25 +847,28 @@ export default function MobileNav() {
                 result="chB"
               />
               <feDisplacementMap
+                ref={dispRRef}
                 in="chR"
                 in2="map"
-                scale="17"
+                scale="0"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dR"
               />
               <feDisplacementMap
+                ref={dispGRef}
                 in="chG"
                 in2="map"
-                scale="20"
+                scale="0"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dG"
               />
               <feDisplacementMap
+                ref={dispBRef}
                 in="chB"
                 in2="map"
-                scale="24"
+                scale="0"
                 xChannelSelector="R"
                 yChannelSelector="G"
                 result="dB"
