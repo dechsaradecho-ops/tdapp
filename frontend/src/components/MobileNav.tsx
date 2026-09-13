@@ -2,20 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 
-/** Mobile navigation — bottom dock (< md screens)
+/** Mobile navigation — iOS 26 "Liquid Glass" bottom dock (< md screens).
  *
- *  เขียนเองทั้งหมด (DOM + CSS + SVG filter) — ไม่มี WebGL, ไม่มี dependency
- *
- *  เดิมใช้ package `webgl-liquid-glass` แต่ pill ของมันถูกวาดใน fragment shader
- *  ด้วย `color = vec3(1.0)` (ขาวล้วน) บวกแถบขอบกว้าง ~2px → ได้ "กรอบขาว"
- *  รอบแท็บที่แก้ไม่ได้ (prop activeColor/inactiveColor ของ package มีผลกับตัวอักษร/
- *  ไอคอนใน DOM เท่านั้น ไม่ใช่สี pill) จึงยึดการวาด pill มาไว้เอง: มี pill เดียว
- *  หน้าตาคุมได้ 100% + สปริง/ยืดบี้/chromatic aberration/บิดด้วย SVG filter
- *  ตอนลาก (แบบ FluidGlass ของ React Bits แต่ไม่ใช้ three/.glb)
- *  ได้แถม: ไม่มี WebGL → ไม่เจอบั๊ก destroy()/loseContext กับ StrictMode
- *
- *  Desktop (md+) renders nothing; the inline nav in the header stays.
- *  หน้าตา/ขนาด/ตำแหน่งอยู่ใน .dock-glass* ที่ globals.css
+ * Desktop (md+) renders nothing; the inline nav in the header stays.
+ * Mobile: floating glass dock 5 แท็บเท่ากัน + เม็ดแก้วเหลว (liquid pill)
+ * เลื่อนตามแท็บ active ด้วย spring easing — เลียนแบบ Lottie
+ * "iOS 26 inspired tab menu" ด้วย CSS ล้วน (ไม่โหลด lottie-web ~250KB
+ * และ pill ใช้ธีมแก้วเดิมของแอป) — สไตล์ pill อยู่ที่ .dock-pill ใน globals.css
  */
 // Monotone stroke icons — สีจาก currentColor ของแท็บ (active = accent, ปกติ = slate)
 const ICON = {
@@ -62,418 +55,101 @@ const MENU: { href: string; label: string; icon: keyof typeof ICON }[] = [
   { href: "/settings", label: "Setting", icon: "setting" },
 ];
 
-/** static export เขียนไฟล์เป็น /signals.html → เทียบ path ตรง ๆ ไม่ได้
- *  (production host rewrite เป็น clean URL อยู่แล้ว จึงต้องรองรับทั้งสองแบบ) */
-const normPath = (p: string) => {
-  const s = p.replace(/\/index\.html$/, "/").replace(/\.html$/, "");
-  return s === "" ? "/" : s;
-};
-
-const isActiveHref = (href: string, p: string) =>
-  href === "/" ? p === "/" : p === href || p.startsWith(`${href}/`);
-
-// เปลี่ยนแท็บ = นำทางจริง (static export ไม่มี Next router → ใช้ location)
-const go = (href: string) => {
-  if (normPath(window.location.pathname) === normPath(href)) return;
-  window.location.assign(href);
-};
-
 export default function MobileNav() {
   const [path, setPath] = useState("/");
-  const navRef = useRef<HTMLElement>(null);
-  // pill = ตัวแก้วยืดหดที่ลากได้ / wake = หางของเหลว / rim = ขอบ chromatic aberration
-  const pillRef = useRef<HTMLDivElement>(null);
-  const wakeRef = useRef<HTMLDivElement>(null);
-  const rimRRef = useRef<HTMLSpanElement>(null);
-  const rimBRef = useRef<HTMLSpanElement>(null);
-  // ให้ effect หลัก (deps []) วัดตำแหน่งใหม่ได้เมื่อแท็บ active เปลี่ยน
-  const syncRef = useRef<(() => void) | null>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [pill, setPill] = useState<{ x: number; w: number; anim: boolean } | null>(
+    null,
+  );
 
   // Track current path so the active tab is highlighted.
   useEffect(() => {
-    setPath(normPath(window.location.pathname));
-    const onPop = () => setPath(normPath(window.location.pathname));
+    setPath(window.location.pathname);
+    const onPop = () => setPath(window.location.pathname);
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const activeIdx = Math.max(
-    0,
-    MENU.findIndex((l) => isActiveHref(l.href, path)),
+  const activeIdx = MENU.findIndex((l) =>
+    l.href === "/" ? path === "/" : path.startsWith(l.href),
   );
 
-  // แท็บ active เปลี่ยน → ย้าย pill ไปแท็บใหม่ (position พักเปลี่ยน)
+  // วัดตำแหน่งจริงของแท็บ active → ย้ายเม็ดแก้วไปทับ
+  // วัดซ้ำเมื่อ font swap / resize (ความกว้างแท็บเปลี่ยน)
+  // ครั้งแรก (pill ยัง null) ไม่ animate — กันเม็ดบินจากซ้ายสุดตอนโหลดหน้า
   useEffect(() => {
-    syncRef.current?.();
-  }, [activeIdx]);
-
-  // ---- ฟิสิกส์ของเหลวของ pill (สปริง + ยืดบี้ + chromatic aberration + warp) ----
-  // หัวใจของ "แก้วเหลว" แบบ FluidGlass: pill ไม่ได้กระโดดตามนิ้ว แต่ "ไหล" ตาม
-  // ด้วยสปริง underdamped (ตามช้าแล้วส่ายเข้าที่) + ยืดตามความเร็ว + ขอบสีเพี้ยน
-  // คิดเป็น px/วินาที ทั้งหมด → เฟรมเรตเท่าไรก็ให้ความรู้สึกเดียวกัน
-  //
-  // ทำไมไม่ใช้ FluidGlass ตรง ๆ: มันไม่มี drag interaction เลย (mode = lens/cube/
-  // bar) และต้องใช้ three + @react-three/fiber (peer React 19) + ไฟล์ .glb ที่
-  // ไม่ได้แจกมา → ทำเฉพาะ "ความรู้สึก" ที่เป็นหัวใจด้วยสปริง + SVG filter แทน
-  useEffect(() => {
-    const nav = navRef.current;
-    const pill = pillRef.current;
-    const wake = wakeRef.current;
-    const rimR = rimRRef.current;
-    const rimB = rimBRef.current;
-    if (!nav || !pill || !wake || !rimR || !rimB) return;
-
-    // ผู้ใช้ที่ปิดอนิเมชัน → pill ยัง mark แท็บ active แต่นิ่ง ไม่มีสปริง/การลาก
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    // เผย pill (CSS ซ่อนไว้กัน flash ก่อน JS วัดตำแหน่งเสร็จ)
-    pill.style.opacity = "1";
-    wake.style.opacity = "0";
-    rimR.style.opacity = "0";
-    rimB.style.opacity = "0";
-
-    const H = 44; // ต้องตรงกับ height ของ .dock-glass__pill ใน globals.css
-    const INSET = 3; // ระยะห่างซ้าย/ขวาของ pill จากขอบแท็บ
-
-    // สปริงตัวหลัก: underdamped (ζ = 0.88) → ตามนิ้วช้าแล้วส่ายเข้าที่นิดหนึ่ง
-    // = ความ "เหลว/หนืด" แบบ FluidGlass แต่เฟรมเรตอิสระ
-    const K = 289; // ω² = 17²
-    const C = 29.92; // 2ζω = 2 × 0.88 × 17
-    // สปริงตัวตาม (wake): over-damped (ζ = 1.05) → ไม่ส่าย ตามหลังเสมอ = หางของเหลว
-    const KW = 81; // 9²
-    const CW = 18.9; // 2 × 1.05 × 9
-
-    const main = { p: 0, v: 0 };
-    const mainY = { p: 0, v: 0 };
-    const tail = { p: 0, v: 0 };
-    const tailY = { p: 0, v: 0 };
-
-    let navH = 56;
-    let pillW = 56;
-    let restX = 0; // จุดกึ่งกลาง pill (พิกัดใน <nav>)
-    let restY = 28; // จุดกึ่งกลางแนวตั้ง — pill ใช้ top:0 จึงต้องเป็น "กลาง" ไม่ใช่ offset
-    let targetX = 0;
-    let targetY = 28;
-    let alpha = 0; // ความเข้มของ layer ของเหลว (wake/rim/warp) ตอนลาก
-    let targetAlpha = 0;
-    let dragging = false;
-    let moved = false;
-    let startX = 0;
-    let startY = 0;
-    let pressIdx = 0;
-    let raf = 0;
-    let last = 0;
-    let clickTimer = 0;
-
-    const clamp = (v: number, lo: number, hi: number) =>
-      v < lo ? lo : v > hi ? hi : v;
-
-    const tabs = () =>
-      Array.from(nav.querySelectorAll<HTMLButtonElement>(".dock-glass__tab"));
-
-    const centreOf = (i: number) => {
-      const b = tabs()[i];
-      if (!b) return restX;
-      const nr = nav.getBoundingClientRect();
-      const r = b.getBoundingClientRect();
-      return r.left - nr.left + r.width / 2;
-    };
-
-    const activeTabIdx = () =>
-      tabs().findIndex((b) => b.getAttribute("aria-current") === "page");
-
-    // วัดกล่อง <nav> + ความกว้างแท็บจริง → pill ตรงแท็บทุกขนาดจอโดยไม่ต้อง
-    // hard-code ความกว้าง (nav จัดกึ่งกลางจอ ขนาดเปลี่ยนตาม viewport)
     const measure = () => {
-      const nr = nav.getBoundingClientRect();
-      navH = nr.height;
-      restY = navH / 2;
-      const btn =
-        nav.querySelector<HTMLButtonElement>('[aria-current="page"]') ??
-        tabs()[0];
-      if (btn) {
-        const r = btn.getBoundingClientRect();
-        pillW = Math.max(36, r.width - INSET * 2);
-        pill.style.width = `${pillW}px`;
-        wake.style.width = `${pillW}px`;
-        restX = r.left - nr.left + r.width / 2;
-      }
-      return nr;
+      const el =
+        trackRef.current?.querySelectorAll<HTMLAnchorElement>("a")[activeIdx];
+      if (!el) return;
+      setPill((p) => ({ x: el.offsetLeft, w: el.offsetWidth, anim: p !== null }));
     };
-
-    // เขียนผลลง DOM — เรียกจาก rAF, ตอน snap และตอน resize
-    const render = () => {
-      // squash & stretch ตามความเร็ว (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
-      const spd = Math.min(Math.abs(main.v) / 3200, 0.25);
-      const sx = 1 + spd * 0.8;
-      const sy = 1 - spd * 0.42;
-      // chromatic aberration: ขอบแดง/น้ำเงินเยื้องออกตามความเร็วการลาก
-      const ca = 0.6 + spd * 11;
-
-      pill.style.transform =
-        `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
-        ` scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
-
-      wake.style.transform =
-        `translate3d(${(tail.p - pillW / 2).toFixed(2)}px,${(tailY.p - H / 2).toFixed(2)}px,0)` +
-        ` scale(${(0.55 + spd * 0.6).toFixed(3)})`;
-      wake.style.opacity = (alpha * 0.4).toFixed(3);
-
-      const rimA = Math.min(alpha * 1.4, 1).toFixed(3);
-      rimR.style.opacity = rimA;
-      rimB.style.opacity = rimA;
-      rimR.style.transform = `translate3d(${(-ca).toFixed(2)}px,0,0)`;
-      rimB.style.transform = `translate3d(${ca.toFixed(2)}px,0,0)`;
-
-      // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
-      pill.classList.toggle("is-fluid", alpha > 0.02);
-    };
-
-    const tick = (t: number) => {
-      const dt = last ? Math.min((t - last) / 1000, 0.05) : 1 / 60;
-      last = t;
-
-      main.v += (K * (targetX - main.p) - C * main.v) * dt;
-      main.p += main.v * dt;
-      mainY.v += (K * (targetY - mainY.p) - C * mainY.v) * dt;
-      mainY.p += mainY.v * dt;
-
-      tail.v += (KW * (targetX - tail.p) - CW * tail.v) * dt;
-      tail.p += tail.v * dt;
-      tailY.v += (KW * (targetY - tailY.p) - CW * tailY.v) * dt;
-      tailY.p += tailY.v * dt;
-
-      alpha += (targetAlpha - alpha) * (1 - Math.exp(-9 * dt));
-      if (alpha < 0.004) alpha = 0;
-
-      render();
-
-      // หยุด rAF เมื่อนิ่งแล้ว (ไม่กินแบตเตอรี่ตอนไม่ได้ลาก)
-      const settled =
-        !dragging &&
-        alpha === 0 &&
-        Math.abs(main.v) < 4 &&
-        Math.abs(tail.v) < 5 &&
-        Math.abs(mainY.v) < 4 &&
-        Math.abs(tailY.v) < 4;
-      if (settled) {
-        main.v = 0;
-        tail.v = 0;
-        mainY.v = 0;
-        tailY.v = 0;
-        raf = 0;
-        return;
-      }
-      raf = requestAnimationFrame(tick);
-    };
-
-    const startLoop = () => {
-      if (!raf) {
-        last = 0;
-        raf = requestAnimationFrame(tick);
-      }
-    };
-
-    // วาง pill นิ่ง ๆ ที่ตำแหน่งพัก (ตอน mount / resize / แท็บ active เปลี่ยน)
-    const snap = () => {
-      main.p = restX;
-      main.v = 0;
-      mainY.p = restY;
-      mainY.v = 0;
-      tail.p = restX;
-      tail.v = 0;
-      tailY.p = restY;
-      tailY.v = 0;
-      alpha = 0;
-      targetAlpha = 0;
-      targetX = restX;
-      targetY = restY;
-      render();
-    };
-
-    const sync = () => {
-      measure();
-      if (!dragging) snap();
-    };
-    syncRef.current = sync;
-    sync();
-
-    // แท็บที่จุดกึ่งกลางใกล้ x ที่สุด (พิกัดใน <nav>)
-    const idxAtX = (localX: number) => {
-      const nr = nav.getBoundingClientRect();
-      let best = 0;
-      let bestD = Infinity;
-      tabs().forEach((b, i) => {
-        const r = b.getBoundingClientRect();
-        const d = Math.abs(r.left - nr.left + r.width / 2 - localX);
-        if (d < bestD) {
-          bestD = d;
-          best = i;
-        }
-      });
-      return best;
-    };
-
-    // กัน click ที่ browser ยิงหลังลาก (pointerdown/pointerup คนละแท็บ) ไม่ให้
-    // นำทางซ้ำ/นำทางผิดแท็บ — ถอน listener ใน 400ms กันค้าง
-    const onSwallowClick = (ev: Event) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-    };
-    const suppressClick = () => {
-      window.addEventListener("click", onSwallowClick, true);
-      window.clearTimeout(clickTimer);
-      clickTimer = window.setTimeout(() => {
-        window.removeEventListener("click", onSwallowClick, true);
-        clickTimer = 0;
-      }, 400);
-    };
-
-    const onDown = (e: PointerEvent) => {
-      if (reduce) return;
-      if (e.pointerType === "mouse" && e.button !== 0) return;
-      const nr = measure();
-      dragging = true;
-      moved = false;
-      startX = e.clientX;
-      startY = e.clientY;
-      pressIdx = idxAtX(e.clientX - nr.left);
-      targetAlpha = 1;
-      targetX = clamp(e.clientX - nr.left, pillW / 2 - 4, nr.width - pillW / 2 + 4);
-      targetY = clamp(e.clientY - nr.top, H / 2, nr.height - H / 2);
-      startLoop();
-    };
-
-    const onMove = (e: PointerEvent) => {
-      if (!dragging) return;
-      if (Math.abs(e.clientX - startX) > 6 || Math.abs(e.clientY - startY) > 6) {
-        moved = true;
-      }
-      const nr = nav.getBoundingClientRect();
-      targetX = clamp(e.clientX - nr.left, pillW / 2 - 4, nr.width - pillW / 2 + 4);
-      targetY = clamp(e.clientY - nr.top, H / 2, nr.height - H / 2);
-    };
-
-    const onUp = (e: PointerEvent) => {
-      if (!dragging) return;
-      dragging = false;
-      targetAlpha = 0;
-      targetY = restY;
-
-      const nr = nav.getBoundingClientRect();
-      const idx = moved ? idxAtX(e.clientX - nr.left) : pressIdx;
-
-      if (moved && idx !== activeTabIdx() && MENU[idx]) {
-        // ปล่อยนิ้วเหนือแท็บอื่น → เปลี่ยนแท็บเอง (browser ไม่ยิง click ของแท็บ
-        // เพราะ pointerdown/up คนละ element) แล้วหยุดสปริงที่แท็บนั้นเลย
-        restX = centreOf(idx);
-        targetX = restX;
-        suppressClick();
-        go(MENU[idx].href);
-      } else {
-        // แตะเฉย ๆ: pill ตามไปแท็บที่กด แล้วปล่อยให้ click ของแท็บนำทางปกติ
-        targetX = moved ? restX : centreOf(pressIdx);
-      }
-      startLoop();
-    };
-
-    nav.addEventListener("pointerdown", onDown);
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    window.addEventListener("resize", sync);
-    window.addEventListener("orientationchange", sync);
-    // ต้อง observe <html> ด้วย ไม่ใช่แค่ nav: ตำแหน่งของ nav เปลี่ยนได้โดยขนาดคงเดิม
-    // (เช่น scrollbar ของ layout โผล่ → viewport แคบลง → nav ที่จัดกึ่งกลางเลื่อนตาม)
-    const ro =
-      typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
-    ro?.observe(nav);
-    ro?.observe(document.documentElement);
-    // เลย์เอาต์นิ่งช้า (font/รูปโหลดเสร็จ) → sync อีกครั้งหลังโหลดครบ
-    window.addEventListener("load", sync);
-
-    return () => {
-      if (raf) cancelAnimationFrame(raf);
-      window.clearTimeout(clickTimer);
-      window.removeEventListener("click", onSwallowClick, true);
-      nav.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-      window.removeEventListener("resize", sync);
-      window.removeEventListener("orientationchange", sync);
-      window.removeEventListener("load", sync);
-      ro?.disconnect();
-      if (syncRef.current === sync) syncRef.current = null;
-    };
-  }, []);
+    measure();
+    document.fonts?.ready?.then(measure).catch(() => {});
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [activeIdx]);
 
   return (
     <div className="md:hidden">
-      <nav ref={navRef} aria-label="เมนูหลัก" className="dock-glass">
-        {/* filter defs ต้องอยู่ใน DOM จริง (ห้าม display:none) เหมือน #lg-refract
-            ใน layout.tsx ไม่งั้นบาง browser จะไม่ resolve filter ให้ */}
-        <svg
+      {/* Bottom tab bar — iOS 26 liquid glass dock (จัดกึ่งกลางจอ) */}
+      <nav
+        aria-label="เมนูหลัก"
+        className="lg-refract fixed z-40 border"
+        style={{
+          left: "0.75rem",
+          right: "0.75rem",
+          bottom: "calc(env(safe-area-inset-bottom, 0px) + 0.65rem)",
+          maxWidth: "28rem",
+          marginInline: "auto",
+          background: "rgba(255, 255, 255, 0.06)",
+          WebkitBackdropFilter: "blur(8px) saturate(160%)",
+          backdropFilter: "blur(8px) saturate(160%)",
+          borderColor: "rgba(255,255,255,0.16)",
+          borderRadius: "1.4rem",
+          boxShadow:
+            "0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14)",
+        }}
+      >
+        {/* เม็ดแก้วเหลว — เลื่อนตามแท็บ active (spring transition ใน .dock-pill) */}
+        <span
           aria-hidden="true"
-          focusable="false"
-          width="0"
-          height="0"
-          style={{ position: "absolute" }}
-        >
-          <defs>
-            <filter
-              id="dock-glass-warp"
-              x="-40%"
-              y="-60%"
-              width="180%"
-              height="220%"
-              colorInterpolationFilters="sRGB"
-            >
-              {/* baseFrequency ต่ำ = ลูกคลื่นยาวกว่าตัว pill → pill บิดเป็นก้อน
-                  ของเหลว ไม่ใช่ขอบหยักเป็นคลื่นความถี่สูง */}
-              <feTurbulence
-                type="fractalNoise"
-                baseFrequency="0.02 0.03"
-                numOctaves="2"
-                seed="7"
-                result="noise"
-              />
-              <feGaussianBlur in="noise" stdDeviation="1" result="soft" />
-              <feDisplacementMap
-                in="SourceGraphic"
-                in2="soft"
-                scale="6"
-                xChannelSelector="R"
-                yChannelSelector="G"
-              />
-            </filter>
-          </defs>
-        </svg>
-
-        {/* wake มาก่อน pill → วาดใต้ pill (หางของเหลวที่ตามหลัง) */}
-        <div ref={wakeRef} className="dock-glass__wake" aria-hidden="true" />
-
-        {/* pill = ตัวแก้ว: พื้น/ขอบ hairline มาจาก CSS, 2 rim = ขอบสีเพี้ยน */}
-        <div ref={pillRef} className="dock-glass__pill" aria-hidden="true">
-          <span ref={rimRRef} className="dock-glass__rim dock-glass__rim--r" />
-          <span ref={rimBRef} className="dock-glass__rim dock-glass__rim--b" />
+          className="dock-pill"
+          style={
+            pill
+              ? {
+                  transform: `translateX(${pill.x}px)`,
+                  width: pill.w,
+                  opacity: 1,
+                  ...(pill.anim ? {} : { transition: "none" }),
+                }
+              : { opacity: 0 }
+          }
+        />
+        <div ref={trackRef} className="flex px-1 py-0.5">
+          {MENU.map((l, i) => {
+            const active = i === activeIdx;
+            return (
+              <a
+                key={l.href}
+                href={l.href}
+                aria-current={active ? "page" : undefined}
+                className={`flex flex-1 flex-col items-center justify-center gap-0.5 min-h-[56px] px-1 text-[11px] leading-tight rounded-xl active:bg-white/10 transition-colors ${
+                  active ? "text-accent font-semibold" : "text-slate-400"
+                }`}
+              >
+                <span
+                  className={`transition-transform duration-300 ${
+                    active ? "scale-110 -translate-y-px" : ""
+                  }`}
+                >
+                  {ICON[l.icon]}
+                </span>
+                {l.label}
+              </a>
+            );
+          })}
         </div>
-
-        {MENU.map((l, i) => (
-          <button
-            key={l.href}
-            type="button"
-            className="dock-glass__tab"
-            aria-current={i === activeIdx ? "page" : undefined}
-            style={{
-              color: i === activeIdx ? "#7cc4ff" : "rgba(148, 163, 184, 0.92)",
-            }}
-            onClick={() => go(l.href)}
-          >
-            <span className="dock-glass__icon">{ICON[l.icon]}</span>
-            <span className="dock-glass__label">{l.label}</span>
-          </button>
-        ))}
       </nav>
     </div>
   );
