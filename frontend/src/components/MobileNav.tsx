@@ -420,8 +420,18 @@ export default function MobileNav() {
             : mom.ang;
       // ไล่มุมแบบ shortest-arc (ไม่หมุนอ้อม 350°→10°) + ช้ากว่า magnitude นิด
       // ⇒ เปลี่ยนทิศกระทันหัน (สะบัดนิ้วกลับ) หยดน้ำค่อย ๆ หมุนตาม ไม่วาร์ป
-      const dAng = ((targetAng - mom.ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-      mom.ang += dAng * (1 - Math.exp(-dt / 0.12));
+      // ปล่อยนิ้วแล้ว + ความเร็วต่ำ ⇒ ค่อย ๆ ดึงมุมกลับ 0° (แนวนอน) ให้เห็น
+      // transform กลับตรง — ไม่งั้นกดลากเฉียงที่เมนูเดิมแล้วปล่อย mom.ang จะค้าง
+      // ค่าสุดท้าย (เช่น ~90° จากการลากขึ้น) pill ค้างเอียงไม่กลับปกติ
+      if (!dragging && rawVmag <= 40) {
+        const toZero =
+          ((0 - mom.ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        mom.ang += toZero * (1 - Math.exp(-dt / 0.18));
+      } else {
+        const dAng =
+          ((targetAng - mom.ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        mom.ang += dAng * (1 - Math.exp(-dt / 0.12));
+      }
       mom.spd = spd;
       // dx/dy ไม่ต้องแยก — orb/pill/wake rotate(ang) ทั้งก้อนแล้ว ส่วนลูกใน orb
       // ใช้ local-x อย่างเดียว (ดู rim/disp ข้างล่าง) จึงเหลือแค่ angDeg
@@ -440,6 +450,11 @@ export default function MobileNav() {
       // press ยุบตอนแตะค้าง (smoothstep) — tap ตรง ๆ ก็เห็น transform ตั้งแต่กด
       const pressE = press * press * (3 - 2 * press);
       const ps = 1 - 0.07 * pressE;
+      // pill ที่พักต้องตรงเสมอ (0°): เกทมุมเอียงด้วย morph + ความเร็ว — พักนิ่ง
+      // (morphT=0/spd=0) ได้ 0° เป๊ะแม้ mom.ang ค้างจากการลากเฉียง, ตอนลากได้เต็ม
+      // orb/wake ด้านล่างยังใช้ angDeg เต็ม (จางหายพร้อม alpha อยู่แล้ว)
+      const pillTiltW = Math.min(1, morphT + spdN * 0.5);
+      const pillAngDeg = ((mom.ang * pillTiltW * 180) / Math.PI).toFixed(1);
       // pill (แคปซูล) ยืด/บี้ "ตามทิศโมเมนตัม": rotate ไปตาม ang แล้ว
       // scale แกนยาวตามแรงลาก — flick แรงเห็นยืดชัด ผ่อนเห็นหดกลับนุ่ม
       const sx = 1 + spd * 0.9;
@@ -450,7 +465,7 @@ export default function MobileNav() {
       const pillSY = ((pillMorphH / H) * sy * ps).toFixed(3);
       pill.style.transform =
         `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
-        ` rotate(${angDeg}deg) scale(${pillSX},${pillSY})`;
+        ` rotate(${pillAngDeg}deg) scale(${pillSX},${pillSY})`;
       // ยังไม่รู้ path จริง (revealed=false) → ซ่อน pill ไว้ก่อน กันโผล่ผิดที่
       pill.style.opacity = revealed ? (1 - alpha).toFixed(3) : "0";
 
@@ -605,6 +620,7 @@ export default function MobileNav() {
       tailY.v = 0;
       mom.x = 0;
       mom.y = 0;
+      mom.ang = 0;
       mom.spd = 0;
       press = 0;
       targetPress = 0;
