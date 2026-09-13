@@ -81,17 +81,17 @@ const go = (href: string) => {
 /* ---- แผนที่ดิสเพลสเรเดียล (radial displacement map) ------------------------
    feDisplacementMap อ่าน "ทิศทาง + ขนาด" ของการดึงภาพจากค่า R (แกน x) และ G
    (แกน y) ของแผนที่: offset = scale × (ค่า/255 − 0.5) ⇒ 128 = ไม่ดึง
-   อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงหักเห
-   น้อยสุด (~1.1x) แล้วบีบอัดแรงขึ้นแบบไม่เป็นเชิงเส้นยิ่งใกล้ขอบยิ่งพุ่ง + ขอบแยกสีรุ้ง
+   อยากได้ "เลนส์หยดน้ำแบบ Fluid Glass" (ไม่ใช่แว่นขยาย): กลางวงซูม (~1.3x)
+   แล้วบีบอัดแรงขึ้นแบบไม่เป็นเชิงเส้นยิ่งใกล้ขอบยิ่งพุ่ง + ขอบแยกสีรุ้งนุ่ม
    ⇒ สร้างสนามเวกเตอร์เรเดียลเอง (เครื่องหมายลบ = ดึงจุด sample เข้าหากลางวง
      ⇒ เลนส์นูน; เดิมเป็นบวก = ดึงออกนอก ⇒ ภาพหดแบบเลนส์เว้า):
         t = min(r / R, 1)        (r = ระยะจากกลางวง, R = รัศมีวง)
-        f = S(t)^(P/2)·(1-D) + D(t)·D   (D = โดมนุ่ม t·(2-t), DOME = 0.22, P = 5.0
-                                   → กลางหักเหน้อยสุด (~1.1x) เร่งชันที่ขอบ = หยดน้ำ
+        f = S(t)^(P/2)·(1-D) + D(t)·D   (D = โดมนุ่ม t·(2-t), DOME = 0.5, P = 5.0
+                                   → กลางซูม ~1.3x เร่งชันที่ขอบ = หยดน้ำ
                                    เร่งขอบ, D'(1)=0 จึงไม่มีรอยหักที่ขอบวง)
         R = 0.5 − 0.5·(u/r)·f
         G = 0.5 − 0.5·(v/r)·f
-   ⇒ ดิสเพลสสโลป ~0.22·2 = 0.44 ที่จุดกลางวง (กลางหักเหน้อยสุด ~1.1x), โตแบบไม่เป็นเชิงเส้น
+   ⇒ ดิสเพลสสโลป ~0.5·2 = 1.0 ที่จุดกลางวง (กลางซูม ~1.3x), โตแบบไม่เป็นเชิงเส้น
      (P/2 = 2.5 กดกลางราบ ยิ่งใกล้ขอบยิ่งชัน), ชันสุดแถบขอบวง แล้ว f อิ่มตัวเป็น 1 พอ r ≥ R
      (แรงสุดพอดีที่ขอบวง ไม่มีรอยกระโดด) — ต่างจากแว่นขยาย (P = 1.0) ที่ขยายเท่ากันทั้งวง
    ขอบวงถูกดึงเข้า ±(scale/2) px: scale G 16, R_px 42 ⇒ ขอบบีบ ~±8px (ลด shift ตำแหน่งลง)
@@ -110,8 +110,8 @@ const go = (href: string) => {
       (x=-20% width=140% ⇒ ครึ่งหนึ่ง = 70% ของกล่อง = 1.4 เท่าของรัศมี)
       ถ้าไม่ตรง แรมป์ f=1 จะไปอิ่มตัวผิดที่ (แรงสุดไม่พอดีที่ขอบวง)          */
 const LENS_MAP_N = 256; // 256px + เบลอ 1px ฆ่าขั้นบันได 8-bit → ขอบเลนส์เรียบ ไม่หยัก (160px เดิมเห็นรอยหยักตอนซูม)
-const LENS_MAP_P = 5.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 2.5): กดกลางให้ราบหักเหน้อยสุด (~1.1x) แล้วเร่งชันแบบไม่เป็นเชิงเส้นยิ่งใกล้ขอบยิ่งพุ่ง (หยดน้ำเร่งขอบ) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
-const LENS_MAP_DOME = 0.22; // สัดส่วนโดมนุ่ม D(t)=t*(2-t) ที่ผสมกลับเข้ากลางวง (0 = กลางแบนหักเหน้อยสุด, 1 = แว่นขยาย) — ลดความสูงโดมลง กลาง ~1.1x นิ่ง ขอบบีบแบบหยดน้ำ; D'(1)=0 จึงไม่มีรอยหักที่ขอบวง
+const LENS_MAP_P = 5.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 2.5): กดกลางให้ราบแล้วเร่งชันแบบไม่เป็นเชิงเส้นยิ่งใกล้ขอบยิ่งพุ่ง (หยดน้ำเร่งขอบ) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
+const LENS_MAP_DOME = 0.5; // สัดส่วนโดมนุ่ม D(t)=t*(2-t) — ยกกลางซูมเยอะขึ้น (~1.3x) แต่ P สูงยังกดให้กลางราบแล้วพุ่งที่ขอบแบบไม่เป็นเชิงเส้น; D'(1)=0 จึงไม่มีรอยหักที่ขอบวง
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
 const LENS_MAP_WOB = 0.14; // วาร์ปทรงหยดน้ำ: ภาพบิดไม่สมมาตรตามมุม ±14% (ไม่ใช่แค่ shift — เส้นตรงในวงบิดเป็นคลื่นแบบน้ำ)
 const buildLensMap = (): string | null => {
@@ -134,9 +134,10 @@ const buildLensMap = (): string | null => {
       const edge = Math.pow(s, LENS_MAP_P / 2);
       const fBase = edge * (1 - LENS_MAP_DOME) + t * (2 - t) * LENS_MAP_DOME;
       // วาร์ปทรงหยดน้ำ (image warp ไม่ใช่ shift): ผันแปร f ตามมุม (พู 3 + พู 5)
-      // env = 0 ที่กลาง → 1 ที่ขอบ: กลางไม่เป็นหลุม ขอบต่อเนื่อง (t อิ่มที่ 1 ทั้งใน/นอกวง)
+      // env = 0 ที่กลาง → พีคแถบกลาง-นอก → 0 ที่ขอบพอดี: กลางไม่เป็นหลุม ขอบต่อเนื่อง
+      // (t อิ่มที่ 1 + wobble เท่ากับ 1 ทุกมุมที่ขอบ ⇒ ไม่มีรอยตัดทื่อที่ขอบวง)
       const th = Math.atan2(v, u);
-      const env = Math.sin((Math.PI * t) / 2);
+      const env = Math.sin((Math.PI * t) / 2) * (1 - t * t * t * t);
       const wob =
         1 +
         LENS_MAP_WOB *
@@ -304,6 +305,10 @@ export default function MobileNav() {
     const mainY = { p: 0, v: 0 };
     const tail = { p: 0, v: 0 };
     const tailY = { p: 0, v: 0 };
+    // โมเมนตัมนิ้วแบบ smoothed: กรอง velocity สปริงอีกชั้น (low-pass ~100ms)
+    // ⇒ รูปทรงหยดน้ำแปรผันตาม "แรงลาก" ไม่ใช่ค่าดิบรายเฟรม ทุกการเปลี่ยน
+    // ค่อย ๆ morph เห็น transform ชัด ไม่กระตุก/ป๊อป; ang ไล่แบบ shortest-arc
+    const mom = { x: 0, y: 0, spd: 0, ang: 0 };
 
     let navH = 56;
     let pillW = 56;
@@ -364,49 +369,79 @@ export default function MobileNav() {
       return nr;
     };
 
-    // เขียนผลลง DOM — เรียกจาก rAF, ตอน snap และตอน resize
-    const render = () => {
-      // squash & stretch ตามความเร็ว (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
+    // เขียนผลลง DOM — เรียกจาก rAF (ส่ง dt มาด้วย), ตอน snap และตอน resize
+    const render = (dtRaw?: number) => {
+      const dt = Math.min(Math.max(dtRaw ?? 1 / 60, 1 / 240), 0.05);
+      // ---- โมเมนตัมนิ้วแบบ smoothed (หัวใจโจทย์รอบนี้) ----
+      // velocity ดิบของสปริงกระโดดรายเฟรม (pointermove มาเป็นก้อน + spring
+      // overshoot) ⇒ เอามายืดหยดน้ำตรง ๆ จะกระตุก/ป๊อป มองไม่เห็น transform
+      // ⇒ กรอง low-pass อีกชั้น (TAU ~90ms magnitude / ~120ms angle):
+      // ลากเร็ว = หยดน้ำค่อย ๆ ยืดตามทิศแรง, ผ่อน/หยุด = ค่อย ๆ หดกลับเป็นวงกลม
+      // เห็น morph ชัดทุกการเปลี่ยน (flick แรง ๆ เห็นหดกลับ ~300ms)
+      const rawVmag = Math.sqrt(main.v * main.v + mainY.v * mainY.v);
+      const kMag = 1 - Math.exp(-dt / 0.09);
+      mom.x += (main.v - mom.x) * kMag;
+      mom.y += (mainY.v - mom.y) * kMag;
+      const momMag = Math.sqrt(mom.x * mom.x + mom.y * mom.y);
+      // squash & stretch ตามโมเมนตัม (จำกัดเพดานไม่ให้บิดเกิน) — หัวใจของ "ของเหลว"
       // ใช้ velocity 2 มิติ (x + y) — หยดน้ำกระเจิงแสงตาม "ทิศที่ลากจริง"
       // ไม่ใช่แค่แนวนอน (เดิมอ่านแค่ main.v ⇒ ลากขึ้นลงไม่มีผล)
-      const vmag = Math.sqrt(main.v * main.v + mainY.v * mainY.v);
-      const spd = Math.min(vmag / 3200, 0.25);
-      // ทิศการลาก (unit vector) — ขณะเคลื่อนใช้ velocity; พอนิ่งแล้ว (vmag ตก)
-      // ใช้ทิศ "นิ้วอยู่ตรงไหนเทียบจุดกด" แทน ⇒ ความไม่สมมาตรยังค้างให้เห็น
-      // ตอนถือค้าง ไม่หายพร้อมความเร็ว (ภาพถ่ายตอนลากจึงยังเห็นรุ้งเป็นลิ่ม)
+      const spd = Math.min(momMag / 3200, 0.25);
+      const spdN = Math.min(momMag / 3200, 1); // 0→1 normalized (spd = spdN*0.25)
+      // ทิศเป้าหมาย: เคลื่อนเร็วใช้ทิศ velocity; ช้าใช้ทิศ "นิ้วอยู่ตรงไหนเทียบ
+      // จุดกด" (ถือค้างรุ้งยังค้างตามนิ้ว); นิ่งสนิทคงทิศเดิม (ไม่ snap กลับ 0°)
       // ⚠️ ต้องเทียบจุดกด ไม่ใช่จุดพัก (rest = กลางแท็บ active — กดแท็บเดียว
       // แล้วลากซ้าย/ขวา เวกเตอร์ rest เหมือนกันทั้งคู่ ⇒ รุ้งไม่ตามนิ้ว)
-      const tdx = targetX - startLocalX;
-      const tdy = targetY - startLocalY;
-      const tmag = Math.sqrt(tdx * tdx + tdy * tdy);
-      const dx = vmag > 40 ? main.v / vmag : tmag > 8 ? tdx / tmag : 1;
-      const dy = vmag > 40 ? mainY.v / vmag : tmag > 8 ? tdy / tmag : 0;
+      const tdx0 = targetX - startLocalX;
+      const tdy0 = targetY - startLocalY;
+      const tmag0 = Math.sqrt(tdx0 * tdx0 + tdy0 * tdy0);
+      const targetAng =
+        rawVmag > 40
+          ? Math.atan2(mainY.v, main.v)
+          : tmag0 > 8
+            ? Math.atan2(tdy0, tdx0)
+            : mom.ang;
+      // ไล่มุมแบบ shortest-arc (ไม่หมุนอ้อม 350°→10°) + ช้ากว่า magnitude นิด
+      // ⇒ เปลี่ยนทิศกระทันหัน (สะบัดนิ้วกลับ) หยดน้ำค่อย ๆ หมุนตาม ไม่วาร์ป
+      const dAng = ((targetAng - mom.ang + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      mom.ang += dAng * (1 - Math.exp(-dt / 0.12));
+      mom.spd = spd;
+      // dx/dy ไม่ต้องแยก — orb/pill/wake rotate(ang) ทั้งก้อนแล้ว ส่วนลูกใน orb
+      // ใช้ local-x อย่างเดียว (ดู rim/disp ข้างล่าง) จึงเหลือแค่ angDeg
+      const angDeg = ((mom.ang * 180) / Math.PI).toFixed(1);
       // ปริมาณการกระเจิง: ผสมความเร็วกับระยะลาก (อย่างใดอย่างหนึ่งแรงก็กระเจิง)
       // chromatic aberration: ขอบแดง/เขียว/น้าเงินเยื้องออกตามความเร็วการลาก
       // (การหักเหของสี — ยิ่งลากเร็ว สีแยกออกจากกันยิ่งชัด)
       const ca = 0.8 + spd * 16;
 
-      // pill (แคปซูล) ยืด/บี้ชัด ๆ ตอนลาก แล้วจางหายไปให้วงกลมแทนที่
-      const sx = 1 + spd * 0.8;
-      const sy = 1 - spd * 0.42;
+      // pill (แคปซูล) ยืด/บี้ "ตามทิศโมเมนตัม": rotate ไปตาม ang แล้ว
+      // scale แกนยาวตามแรงลาก — flick แรงเห็นยืดชัด ผ่อนเห็นหดกลับนุ่ม
+      const sx = 1 + spd * 0.9;
+      const sy = 1 - spd * 0.45;
       pill.style.transform =
         `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
-        ` scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
+        ` rotate(${angDeg}deg) scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
       pill.style.opacity = (1 - alpha).toFixed(3);
 
-      // orb (วงกลม) — ยืดบี้น้อยกว่า pill เพราะโจทย์คือ "ให้เป็นวงกลม"
-      const osx = 1 + spd * 0.42;
-      const osy = 1 - spd * 0.26;
+      // orb (หยดน้ำ) — ทรงแปรผันตามโมเมนตัม: ยืดตามทิศแรง + บีบขวาง
+      // (teardrop morph: หน้าโป่ง-หลังเรียวผ่าน wake ที่ลากหางสวนทาง)
+      // rotate+scale ใน transform เดียว ⇒ ทุกเฟรม morph ต่อเนื่อง เห็น transform
+      const elong = spd * 1.5; // spd≤0.25 ⇒ ยืดสุด ~1.38x (ไม่ฉีกเป็นวงรี)
+      const osx = 1 + elong;
+      const osy = 1 - elong * 0.55;
       orb.style.transform =
         `translate3d(${(main.p - ORB / 2).toFixed(2)}px,${(mainY.p - ORB / 2).toFixed(2)}px,0)` +
-        ` scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
+        ` rotate(${angDeg}deg) scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
       orb.style.opacity = alpha.toFixed(3);
 
-      // wake = หางของเหลวกลมตามหลัง (over-damped → ตามหลังเสมอ)
+      // wake = หางหยดน้ำ: ทอดสวนทางโมเมนตัม (หางยาวตามแรง + จางตาม alpha)
+      // ตำแหน่งตาม tail (over-damped ตามหลังเสมอ) + ยืดตามทิศ ang เดียวกัน
+      const wakeLen = 0.5 + spd * 1.6;
+      const wakeWid = 0.62 - spd * 0.5;
       wake.style.transform =
         `translate3d(${(tail.p - ORB / 2).toFixed(2)}px,${(tailY.p - ORB / 2).toFixed(2)}px,0)` +
-        ` scale(${(0.5 + spd * 0.7).toFixed(3)})`;
-      wake.style.opacity = (alpha * 0.36).toFixed(3);
+        ` rotate(${angDeg}deg) scale(${wakeLen.toFixed(3)},${Math.max(wakeWid, 0.3).toFixed(3)})`;
+      wake.style.opacity = (alpha * (0.3 + spdN * 0.35)).toFixed(3);
 
       const rimA = Math.min(alpha * 1.5, 1).toFixed(3);
       rimR.style.opacity = rimA;
@@ -416,10 +451,13 @@ export default function MobileNav() {
       // เขียวขยายวงตรงกลาง — หยดน้ำจริงกระเจิงแรงสุดตามแนวเคลื่อนที่ ไม่ใช่ซ้ายขวาเสมอ
       // ⚠️ shift บูสต์รอบแรงต่อเนื่อง 1.2–5.0 → 1.4–5.8px: แยกสีชัดขึ้น แต่ยัง
       // ต่ำกว่า ~6px ที่เคยหลุดเป็นขอบซ้อน
+      // rim อยู่ใน orb ที่ rotate(ang) แล้ว ⇒ offset ต้องสั่งใน "local axis"
+      // (แกน x หลังหมุน = ทิศโมเมนตัมบนจอ) ไม่งั้นจอได้มุม 2×ang
+      // ⇒ แดงถอยหลัง/น้าเงินนำหน้าตามแนวลากพอดี ไม่หมุนเกิน
       const rimShift = 1.4 + spd * 17;
-      rimR.style.transform = `translate3d(${(-dx * rimShift).toFixed(2)}px,${(-dy * rimShift).toFixed(2)}px,0)`;
+      rimR.style.transform = `translate3d(${(-rimShift).toFixed(2)}px,0px,0)`;
       rimG.style.transform = `scale(${(1 + ca * 0.0035).toFixed(4)})`;
-      rimB.style.transform = `translate3d(${(dx * rimShift).toFixed(2)}px,${(dy * rimShift).toFixed(2)}px,0)`;
+      rimB.style.transform = `translate3d(${(rimShift).toFixed(2)}px,0px,0)`;
 
       // ชั้นหักเหของสี: จาง-เข้มตาม alpha และ "แยกสี" ตามความเร็ว (--sp 0→1)
       // --sdx/--sdy = เยื้องวงแหวนแดง/น้าเงินสวนกันตามทิศลาก (เขียวเป็นอ้างอิงกลาง)
@@ -431,18 +469,17 @@ export default function MobileNav() {
         ) / 120,
         1,
       );
-      const sway = Math.min(spd / 0.25, 1) * 0.6 + dragDist * 0.4;
+      const sway = spdN * 0.6 + dragDist * 0.4;
       disp.style.opacity = Math.min(alpha * 1.15, 1).toFixed(3);
-      disp.style.setProperty("--sp", Math.min(spd / 0.25, 1).toFixed(3));
-      disp.style.setProperty("--sdx", (-dx * sway * 5.6).toFixed(2) + "px");
-      disp.style.setProperty("--sdy", (-dy * sway * 5.6).toFixed(2) + "px");
-      // หมุนรุ้ง/แสงขอบให้ด้านเข้มสุดอยู่ตามทิศลาก (conic `from` = มุมเริ่มไล่สี
-      // ⇒ ลากไปทางไหน ด้านนั้นรุ้งชัด ตรงข้ามจาง = ไม่สมมาตรตามนิ้วจริง)
-      // atan2(dy,dx) เป็นมุมเวกเตอร์ลาก (deg) ใช้ตรง ๆ ได้เลยกับ conic
-      disp.style.setProperty(
-        "--dang",
-        `${((Math.atan2(dy, dx) * 180) / Math.PI).toFixed(1)}deg`,
-      );
+      disp.style.setProperty("--sp", spdN.toFixed(3));
+      // disp อยู่ใน orb ที่ rotate แล้วเช่นกัน ⇒ เยื้องแค่แกน x local
+      // (จอ = ทิศโมเมนตัม), --sdy = 0 ไม่ต้องขยับ 2 แกนซ้อน
+      disp.style.setProperty("--sdx", (-sway * 5.6).toFixed(2) + "px");
+      disp.style.setProperty("--sdy", "0px");
+      // รุ้ง/แสงขอบ (conic `from`) ก็อยู่ใต้ orb ที่ rotate(ang) แล้ว
+      // ⇒ ล็อก --dang = 0 ให้จอได้ from = ang พอดี (ไม่บวกซ้ำเป็น 2×ang)
+      // ทิศเข้มสุดยังตามโมเมนตัมเหมือนเดิม แค่ไม่หมุนเกิน
+      disp.style.setProperty("--dang", "0deg");
 
       // transition ของเลนส์: scale ดิสเพลสโตตาม alpha แบบ smootherstep
       // (0→เต็มใน ~1/9 วินาที เท่าความเร็ว alpha) ⇒ เริ่มลากเลนส์ค่อย ๆ นูน
@@ -457,9 +494,9 @@ export default function MobileNav() {
         dispGRef.current.setAttribute("scale", (16 * ae).toFixed(2));
       if (dispBRef.current)
         dispBRef.current.setAttribute("scale", (22 * ae).toFixed(2));
-      // วาร์ปภาพ (image warp ไม่ใช่ shift): ฐาน 9px + บูสต์ตามความเร็วลากถึง ~18px × ae
+      // วาร์ปภาพ (image warp ไม่ใช่ shift): ฐาน 9px + บูสต์ตามโมเมนตัมถึง ~18px × ae
       // ⇒ ถือค้างนิ่ง ๆ ภาพบิดนุ่ม ลากเร็วคลื่นแรงขึ้นแบบน้ำจริง
-      const spdN = Math.min(spd / 0.25, 1);
+      // (spdN มาจาก mom ที่กรองแล้ว — คลื่นขึ้น/ลงนุ่ม ไม่กระชากตาม pointermove)
       if (warpRef.current)
         warpRef.current.setAttribute("scale", ((9 + 9 * spdN) * ae).toFixed(2));
 
@@ -489,7 +526,7 @@ export default function MobileNav() {
       alpha += (targetAlpha - alpha) * (1 - Math.exp(-9 * dt));
       if (alpha < 0.004) alpha = 0;
 
-      render();
+      render(dt);
 
       // หยุด rAF เมื่อนิ่งแล้ว (ไม่กินแบตเตอรี่ตอนไม่ได้ลาก)
       const settled =
@@ -527,6 +564,9 @@ export default function MobileNav() {
       tail.v = 0;
       tailY.p = restY;
       tailY.v = 0;
+      mom.x = 0;
+      mom.y = 0;
+      mom.spd = 0;
       alpha = 0;
       targetAlpha = 0;
       targetX = restX;
