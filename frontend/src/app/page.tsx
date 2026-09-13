@@ -7,6 +7,7 @@ import GlassSelect from "@/components/GlassSelect";
 import LoadingGraphic from "@/components/LoadingGraphic";
 import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
+import { GIT_SHA } from "@/lib/gitVersion";
 import { api } from "@/lib/api";
 import { fmtMoney, scoreColor } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
@@ -169,6 +170,10 @@ export default function DashboardPage() {
             />
           </div>
         </section>
+        {/* เลขเวอร์ชัน git ตอน build — ตัวเล็กจาง ๆ ล่างสุดของโฮม */}
+        <p className="pt-2 pb-1 text-center text-[10px] leading-none text-slate-600/70 select-none" aria-hidden="true">
+          v{GIT_SHA}
+        </p>
       </div>
     </>
   );

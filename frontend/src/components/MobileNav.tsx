@@ -112,6 +112,7 @@ const LENS_MAP_N = 256; // 256px + เบลอ 1px ฆ่าขั้นบั�
 const LENS_MAP_P = 3.0; // เลขชี้กำลังหลัง smootherstep (ใช้ P/2 = 1.5): กดกลางให้แบนหักเหน้อยสุด (~1.25x) แล้วชันเฉพาะแถบขอบ (หยดน้ำกราดขอบ) + อนุพันธ์เป็น 0 ที่ขอบ (ไม่มีรอยหักแบบ min(r,1)^P)
 const LENS_MAP_DOME = 0.45; // สัดส่วนโดมนุ่ม D(t)=t*(2-t) ที่ผสมกลับเข้ากลางวง (0 = กลางแบนหักเหน้อยสุด, 1 = แว่นขยาย) — กลาง ~1.25x ขอบบีบแรงแบบหยดน้ำ; D'(1)=0 จึงไม่มีรอยหักที่ขอบวง
 const LENS_MAP_SPAN = 1.4; // ครึ่งหนึ่งของ filter region (หน่วย = รัศมีวง)
+const LENS_MAP_WOB = 0.08; // วาร์ปทรงหยดน้ำ: ภาพบิดไม่สมมาตรตามมุม ±8% (ไม่ใช่แค่ shift — เส้นตรงในวงบิดเป็นคลื่นแบบน้ำ)
 const buildLensMap = (): string | null => {
   if (typeof document === "undefined") return null; // กัน SSR ตอน build
   const cv = document.createElement("canvas");
@@ -130,7 +131,18 @@ const buildLensMap = (): string | null => {
       const t = Math.min(r, 1);
       const s = t * t * t * (t * (t * 6 - 15) + 10);
       const edge = Math.pow(s, LENS_MAP_P / 2);
-      const f = edge * (1 - LENS_MAP_DOME) + t * (2 - t) * LENS_MAP_DOME;
+      const fBase = edge * (1 - LENS_MAP_DOME) + t * (2 - t) * LENS_MAP_DOME;
+      // วาร์ปทรงหยดน้ำ (image warp ไม่ใช่ shift): ผันแปร f ตามมุม (พู 3 + พู 5)
+      // env = 0 ที่กลาง → 1 ที่ขอบ: กลางไม่เป็นหลุม ขอบต่อเนื่อง (t อิ่มที่ 1 ทั้งใน/นอกวง)
+      const th = Math.atan2(v, u);
+      const env = Math.sin((Math.PI * t) / 2);
+      const wob =
+        1 +
+        LENS_MAP_WOB *
+          env *
+          (Math.sin(3 * th + 2.5 * r) * 0.65 +
+            Math.sin(5 * th - 3.0 * r + 1.3) * 0.35);
+      const f = fBase * wob;
       const i = (y * LENS_MAP_N + x) * 4;
       // ลบ = sample เข้าหากลางวง ⇒ ขยาย (เลนส์นูน); ห้ามกลับเป็นบวก (ภาพจะหด)
       d[i] = Math.round((0.5 - 0.5 * (u / r) * f) * 255);
@@ -178,6 +190,9 @@ export default function MobileNav() {
   const dispRRef = useRef<SVGFEDisplacementMapElement>(null);
   const dispGRef = useRef<SVGFEDisplacementMapElement>(null);
   const dispBRef = useRef<SVGFEDisplacementMapElement>(null);
+  // warpRef = ดิสเพลสขั้นที่ 2 (turbulence wobble ใน #dock-glass-lens) — วาร์ปภาพจริง
+  // ในหยดน้ำ (เส้นตรงบิดเป็นคลื่น) ไม่ใช่แค่ shift/แยกสีของขั้น radial
+  const warpRef = useRef<SVGFEDisplacementMapElement>(null);
   // ให้ effect หลัก (deps []) วัดตำแหน่งใหม่ได้เมื่อแท็บ active เปลี่ยน
   const syncRef = useRef<(() => void) | null>(null);
 
@@ -439,6 +454,11 @@ export default function MobileNav() {
         dispGRef.current.setAttribute("scale", (20 * ae).toFixed(2));
       if (dispBRef.current)
         dispBRef.current.setAttribute("scale", (24 * ae).toFixed(2));
+      // วาร์ปภาพ (image warp ไม่ใช่ shift): ฐาน 7px + บูสต์ตามความเร็วลากถึง ~14px × ae
+      // ⇒ ถือค้างนิ่ง ๆ ภาพบิดนุ่ม ลากเร็วคลื่นแรงขึ้นแบบน้ำจริง
+      const spdN = Math.min(spd / 0.25, 1);
+      if (warpRef.current)
+        warpRef.current.setAttribute("scale", ((7 + 7 * spdN) * ae).toFixed(2));
 
       // บิดเฉพาะตอนลาก (toggle = no-op ถ้าสถานะเดิม → ไม่ repaint ซ้ำทุกเฟรม)
       pill.classList.toggle("is-fluid", alpha > 0.02);
@@ -874,7 +894,28 @@ export default function MobileNav() {
                 result="dB"
               />
               <feBlend in="dR" in2="dG" mode="screen" result="dRG" />
-              <feBlend in="dRG" in2="dB" mode="screen" />
+              <feBlend in="dRG" in2="dB" mode="screen" result="dRGB" />
+              {/* 3) วาร์ปภาพในหยดน้ำ (image warp — ไม่ใช่แค่ shift/แยกสี):
+                    turbulence ความถี่ต่ำ + เบลอนุ่ม แล้วดิสเพลสซ้อนอีกที
+                    scale เริ่ม 0 — render() ดันเป็น ~7 (นิ่ง) → ~14 (ลากเร็ว) × ae
+                    radial อย่างเดียวให้แค่ขยาย/บีบสมมาตร + ขอบแยกสี ขั้นนี้ทำให้
+                    เส้นตรงในภาพบิดเป็นคลื่นแบบน้ำจริง (orb แค่ 84px ตอนลากจึงไหว) */}
+              <feTurbulence
+                type="fractalNoise"
+                baseFrequency="0.015 0.02"
+                numOctaves="2"
+                seed="7"
+                result="warpNoise"
+              />
+              <feGaussianBlur in="warpNoise" stdDeviation="2.5" result="warpSoft" />
+              <feDisplacementMap
+                ref={warpRef}
+                in="dRGB"
+                in2="warpSoft"
+                scale="0"
+                xChannelSelector="R"
+                yChannelSelector="G"
+              />
             </filter>
           </defs>
         </svg>
