@@ -331,6 +331,13 @@ export default function MobileNav() {
     // ระยะลากสูงสุดจากจุดกด (px, client coords) — onUp ใช้แยก "tap/สะกิดโดน"
     // (นิ้วสั่น 10-24px) ออกจาก "ลากจริง" (ตั้งใจลากไปแท็บอื่น)
     let maxDrag = 0;
+    // press = น้ำหนักกดตอนแตะค้าง (0→1 นุ่ม): pill ยุบเล็กน้อยให้เห็น transform
+    // ตั้งแต่จังหวะกด ไม่ต้องรอลาก — tap ตรง ๆ ก็มี feedback ก่อน navigate
+    let press = 0;
+    let targetPress = 0;
+    // หน่วง navigate หลังเริ่ม transform (tap-slide / drag-morph-back)
+    // ให้เห็นการเปลี่ยนทรงก่อนย้ายหน้าจริง — ไม่ใช่ location.assign ทันที
+    let navTimer = 0;
     let startX = 0;
     let startY = 0;
     // จุดกดนิ้ว (พิกัดใน <nav>) — อ้างอิงทิศลากจริง (นิ้วอยู่ไหนเทียบจุดกด)
@@ -424,13 +431,26 @@ export default function MobileNav() {
       // (การหักเหของสี — ยิ่งลากเร็ว สีแยกออกจากกันยิ่งชัด)
       const ca = 0.8 + spd * 16;
 
+      // morph ทรง capsule<->circle (หัวใจโจทย์รอบนี้): เดิม pill (แคปซูล) กับ
+      // orb (วงกลม) crossfade สวนกันคนละทรง ⇒ ตาเห็นเป็น "วาร์ป" ตอนเปลี่ยน
+      // ⇒ ผูกทรงทั้งคู่เข้ากับ morphT (smootherstep ของ alpha ตัวเดียวกับเลนส์):
+      //   morphT=0 ทั้งคู่เป็นแคปซูลเท่า pill / morphT=1 ทั้งคู่เป็นวงกลม 84px
+      // กลางทางทรงตรงกัน crossfade จึง seamless — ไป/กลับเห็น transform เดียวกัน
+      const morphT = alpha * alpha * alpha * (alpha * (alpha * 6 - 15) + 10);
+      // press ยุบตอนแตะค้าง (smoothstep) — tap ตรง ๆ ก็เห็น transform ตั้งแต่กด
+      const pressE = press * press * (3 - 2 * press);
+      const ps = 1 - 0.07 * pressE;
       // pill (แคปซูล) ยืด/บี้ "ตามทิศโมเมนตัม": rotate ไปตาม ang แล้ว
       // scale แกนยาวตามแรงลาก — flick แรงเห็นยืดชัด ผ่อนเห็นหดกลับนุ่ม
       const sx = 1 + spd * 0.9;
       const sy = 1 - spd * 0.45;
+      const pillMorphW = pillW + (ORB - pillW) * morphT;
+      const pillMorphH = H + (ORB - H) * morphT;
+      const pillSX = ((pillMorphW / pillW) * sx * ps).toFixed(3);
+      const pillSY = ((pillMorphH / H) * sy * ps).toFixed(3);
       pill.style.transform =
         `translate3d(${(main.p - pillW / 2).toFixed(2)}px,${(mainY.p - H / 2).toFixed(2)}px,0)` +
-        ` rotate(${angDeg}deg) scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
+        ` rotate(${angDeg}deg) scale(${pillSX},${pillSY})`;
       // ยังไม่รู้ path จริง (revealed=false) → ซ่อน pill ไว้ก่อน กันโผล่ผิดที่
       pill.style.opacity = revealed ? (1 - alpha).toFixed(3) : "0";
 
@@ -440,9 +460,13 @@ export default function MobileNav() {
       const elong = spd * 1.5; // spd≤0.25 ⇒ ยืดสุด ~1.38x (ไม่ฉีกเป็นวงรี)
       const osx = 1 + elong;
       const osy = 1 - elong * 0.55;
+      // orb เริ่มจากทรงแคปซูลเท่า pill (morphT=0) แล้วค่อยเป็นวงกลม+ยืดตามแรง
+      // (morphT=1) — ครึ่งทางทรงตรงกับ pill พอดี crossfade จึงไม่วาร์ป
+      const orbSX = (pillW / ORB + (osx - pillW / ORB) * morphT).toFixed(3);
+      const orbSY = (H / ORB + (osy - H / ORB) * morphT).toFixed(3);
       orb.style.transform =
         `translate3d(${(main.p - ORB / 2).toFixed(2)}px,${(mainY.p - ORB / 2).toFixed(2)}px,0)` +
-        ` rotate(${angDeg}deg) scale(${osx.toFixed(3)},${osy.toFixed(3)})`;
+        ` rotate(${angDeg}deg) scale(${orbSX},${orbSY})`;
       orb.style.opacity = alpha.toFixed(3);
 
       // wake = หางหยดน้ำ: ทอดสวนทางโมเมนตัม (หางยาวตามแรง + จางตาม alpha)
@@ -536,6 +560,9 @@ export default function MobileNav() {
 
       alpha += (targetAlpha - alpha) * (1 - Math.exp(-9 * dt));
       if (alpha < 0.004) alpha = 0;
+      // press ไล่ตามเป้าแบบนุ่ม (~1/12 วิ) — กดเห็นยุบ ปล่อยเห็นคลาย
+      press += (targetPress - press) * (1 - Math.exp(-12 * dt));
+      if (Math.abs(targetPress - press) < 0.004) press = targetPress;
 
       render(dt);
 
@@ -543,6 +570,7 @@ export default function MobileNav() {
       const settled =
         !dragging &&
         alpha === 0 &&
+        press === targetPress &&
         Math.abs(main.v) < 4 &&
         Math.abs(tail.v) < 5 &&
         Math.abs(mainY.v) < 4 &&
@@ -578,6 +606,8 @@ export default function MobileNav() {
       mom.x = 0;
       mom.y = 0;
       mom.spd = 0;
+      press = 0;
+      targetPress = 0;
       alpha = 0;
       targetAlpha = 0;
       targetX = restX;
@@ -629,6 +659,22 @@ export default function MobileNav() {
       }, 400);
     };
 
+    // ย้าย pill ให้เห็น transform ก่อน navigate จริง (tap-slide / drag-morph-back)
+    // delay สั้น (~180ms / ~220ms ตามลำดับ) — ไม่วาร์ป เพราะสปริงวิ่งให้เห็นก่อน
+    // location.assign ทีหลัง; ถ้า path เดิม (tap แท็บเดิม) ไม่ต้องหน่วง/ไม่ navigate
+    const morphNav = (href: string, peakAlpha: number, delayMs: number) => {
+      if (normPath(window.location.pathname) === normPath(href)) return;
+      suppressClick();
+      targetAlpha = peakAlpha;
+      targetPress = 0;
+      startLoop();
+      window.clearTimeout(navTimer);
+      navTimer = window.setTimeout(() => {
+        navTimer = 0;
+        go(href);
+      }, delayMs);
+    };
+
     const onDown = (e: PointerEvent) => {
       if (reduce) return;
       if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -640,9 +686,13 @@ export default function MobileNav() {
       startY = e.clientY;
       startLocalX = e.clientX - nr.left;
       startLocalY = e.clientY - nr.top;
-      // แตะเฉย ๆ ยังไม่เปิดเลเยอร์ของเหลว (targetAlpha/target ค้างที่พัก)
-      // → tap ตรง ๆ (signal>monitor) ไม่มี orb/warp วาบก่อน navigate
-      // ของเหลวติดก็ต่อเมื่อขยับเกิน threshold ใน onMove เท่านั้น
+      // กด = เริ่ม press-morph ทันที (pill ยุบ ~7% นุ่ม ๆ): tap ตรง ๆ ก็เห็น
+      // transform ตั้งแต่จังหวะกด โดยยังไม่เปิดของเหลว (targetAlpha ค้าง 0)
+      // ⇒ tap (signal>monitor) ไม่วาบ แต่มี feedback ก่อน navigate ใน onUp
+      targetPress = 1;
+      window.clearTimeout(navTimer);
+      navTimer = 0;
+      startLoop();
     };
 
     const onMove = (e: PointerEvent) => {
@@ -669,32 +719,53 @@ export default function MobileNav() {
       if (dd > maxDrag) maxDrag = dd;
     };
 
-    const onUp = (e: PointerEvent) => {
+    const onUp = (e: PointerEvent, cancelled = false) => {
       if (!dragging) return;
       dragging = false;
-      if (!moved) {
-        // tap ตรง ๆ (ไม่ขยับ): pill/orb ไม่เคยขยับออกจากที่พักอยู่แล้ว
-        // ⇒ ไม่ต้องขยับอะไร ปล่อยให้ click นำทางปกติ หน้าใหม่ mount pill
-        // ตรงแท็บใหม่ทันที ไม่มีสปริงค้างกลางทางให้เพี้ยน
+      targetPress = 0;
+      if (cancelled) {
+        // gesture ถูกระบบยกเลิก (สายเข้า/overscroll/เบราว์เซอร์ขโมย pointer)
+        // ⇒ ห้าม navigate เด็ดขาด — แค่คลายของเหลวแล้วไหลกลับที่พักให้เห็น
+        window.clearTimeout(navTimer);
+        navTimer = 0;
         targetAlpha = 0;
         targetX = restX;
         targetY = restY;
+        startLoop();
         return;
       }
-      targetAlpha = 0;
+      if (!moved) {
+        // tap ตรง ๆ: สไลด์สปริงไปแท็บที่แตะให้เห็น transform (~180ms ตามด้วย
+        // morph วงกลมนิด ๆ peak 0.55) แล้วค่อย navigate — ไม่วาร์ปข้ามหน้า
+        // ส่วน click ของปุ่มถูกกลืนโดย suppressClick ใน morphNav
+        const nrTap = nav.getBoundingClientRect();
+        const tapIdx = idxAtX(e.clientX - nrTap.left);
+        if (tapIdx !== activeTabIdx() && MENU[tapIdx]) {
+          restX = centreOf(tapIdx);
+          targetX = restX;
+          targetY = restY;
+          morphNav(MENU[tapIdx].href, 0.55, 180);
+        } else {
+          // tap แท็บเดิม: แค่คลาย press ให้เห็นยุบกลับ (ไม่ navigate)
+          targetAlpha = 0;
+          targetX = restX;
+          targetY = restY;
+          startLoop();
+        }
+        return;
+      }
       targetY = restY;
 
       const nr = nav.getBoundingClientRect();
       const idx = idxAtX(e.clientX - nr.left);
 
       if (idx !== activeTabIdx() && MENU[idx] && maxDrag > 24) {
-        // ลากจริง (>24px) แล้วปล่อยเหนือแท็บอื่น → เปลี่ยนแท็บเอง (browser
-        // ไม่ยิง click ของแท็บเพราะ pointerdown/up คนละ element) แล้วหยุด
-        // สปริงที่แท็บนั้นเลย
+        // ลากจริง (>24px) แล้วปล่อยเหนือแท็บอื่น → morph กลับเป็น capsule
+        // ที่แท็บใหม่ให้เห็น transform (~220ms alpha ค่อย ๆ ลง) แล้วค่อย
+        // navigate (browser ไม่ยิง click เองเพราะ down/up คนละ element)
         restX = centreOf(idx);
         targetX = restX;
-        suppressClick();
-        go(MENU[idx].href);
+        morphNav(MENU[idx].href, 0, 220);
       } else if (maxDrag <= 24) {
         // สะกิดโดน/นิ้วสั่น (ขยับแค่ 10-24px): ไม่ใช่การลากจริง → ดับเลเยอร์
         // ของเหลว + วาง pill กลับที่พักทันที (hard settle ไม่สปริงส่าย)
@@ -706,16 +777,21 @@ export default function MobileNav() {
         snap();
         return;
       } else {
-        // ลากจริงแล้ววกกลับแท็บเดิม: สปริงไหลกลับที่พัก (fluid release)
+        // ลากจริงแล้ววกกลับแท็บเดิม: ดับเลเยอร์ของเหลว + สปริงไหลกลับที่พัก
+        // (fluid release — morph วงกลมกลับเป็น capsule ให้เห็น transform)
+        targetAlpha = 0;
         targetX = restX;
       }
       startLoop();
     };
 
+    const onUpEv = (ev: Event) => onUp(ev as PointerEvent);
+    const onCancelEv = (ev: Event) => onUp(ev as PointerEvent, true);
+
     nav.addEventListener("pointerdown", onDown);
     window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointerup", onUpEv);
+    window.addEventListener("pointercancel", onCancelEv);
     window.addEventListener("resize", sync);
     window.addEventListener("orientationchange", sync);
     // ต้อง observe <html> ด้วย ไม่ใช่แค่ nav: ตำแหน่งของ nav เปลี่ยนได้โดยขนาดคงเดิม
@@ -730,11 +806,12 @@ export default function MobileNav() {
     return () => {
       if (raf) cancelAnimationFrame(raf);
       window.clearTimeout(clickTimer);
+      window.clearTimeout(navTimer);
       window.removeEventListener("click", onSwallowClick, true);
       nav.removeEventListener("pointerdown", onDown);
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("pointerup", onUpEv);
+      window.removeEventListener("pointercancel", onCancelEv);
       window.removeEventListener("resize", sync);
       window.removeEventListener("orientationchange", sync);
       window.removeEventListener("load", sync);
