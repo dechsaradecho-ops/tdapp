@@ -747,11 +747,28 @@ def test_guard_holds_the_emergency_exit_while_the_owner_is_asked(_marks):
     assert db.rows["kill_expand_requests"][0]["status"] == "pending"
 
 
-def test_the_hold_expires_so_silence_cannot_disable_the_safety_net(_marks):
-    """เงียบเกิน EMERGENCY_HOLD_MIN → กลับมาปิดไม้ตามปกติ + บอกเหตุผล"""
+def test_the_hold_lasts_the_whole_confirmation_window(_marks):
+    """"ต้องรอคอมเฟิร์มก่อน" → ยังไม่ตอบ = ยังไม่ปิด แม้จะเลย 30 นาทีไปแล้ว"""
     db = _daily_loss_db()
     db.rows["paper_trades"].append(_open_trade_row())
-    _ask_the_owner(db, mins_ago=limit_expand.EMERGENCY_HOLD_MIN + 15.0)
+    _ask_the_owner(db, mins_ago=limit_expand.PENDING_TTL_MIN - 10.0)
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, notifier, settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 0 and out["emergency_held"] == 1
+    assert closed == [] and notifier.sent == []
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+
+
+def test_the_hold_expires_so_silence_cannot_disable_the_safety_net(_marks):
+    """เลยช่วงยืนยัน + เผื่อ แล้ว → กลับมาปิดไม้ตามปกติ + บอกเหตุผล"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, mins_ago=limit_expand.hold_limit_min(db, _GUARD_SETTINGS)
+                   + 15.0)
     broker, closed = _book()
     notifier = RecordingNotifier()
 
@@ -765,6 +782,35 @@ def test_the_hold_expires_so_silence_cannot_disable_the_safety_net(_marks):
     assert "Emergency Exit" in body
     # ผู้ใช้อาจยังจ้องข้อความที่บอกว่า "ลิมิตยังไม่ถูกแตะต้อง" → ต้องอธิบาย
     assert "เลยกำหนดรอ" in body and "ปิดไม้เพื่อความปลอดภัย" in body
+
+
+def test_the_hold_follows_the_setting_not_a_fixed_cap(_marks):
+    """ช่วงรอ = kill_expand_ttl_min ที่ตั้งไว้ ไม่ใช่ค่าคงที่ในโค้ด"""
+    short = AppSettings(smart_exit_enabled=False, kill_expand_ttl_min=30)
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, mins_ago=60.0)          # ในช่วงของ 180 แต่เลย 30 + เผื่อ
+    broker, closed = _book()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, RecordingNotifier(), settings=short))
+
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    assert out["emergency_held"] == 0
+
+
+def test_an_undateable_request_means_close_not_hold(_marks):
+    """อ่านวันเวลาไม่ได้ → ห้ามถือว่า "เพิ่งขอ" (ไม่งั้นเลื่อนฉุกเฉินตลอดกาล)"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db)["requested_at"] = ""
+    broker, closed = _book()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, RecordingNotifier(), settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    assert out["emergency_held"] == 0
 
 
 def test_guard_closes_when_the_request_was_already_settled(_marks):

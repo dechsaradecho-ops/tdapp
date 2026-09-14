@@ -24,11 +24,14 @@ Flow implemented here:
      the SAME channels, so the widening is never silent. Only the monitor may
      perform this write — see ``auto_apply_expired`` vs ``pending_request``.
   5. while such a request is open, the position guard DEFERS its emergency
-     exit (``emergency_hold`` / ``EMERGENCY_HOLD_MIN``): the prompt promises
-     "ลิมิตยังไม่ถูกแตะต้อง", so the book must not be force-closed out from
-     under the owner's finger (prod 2026-09-14: AUDNZD was closed ~6 s after
-     the prompt). The deferral is bounded — silence must not disable a safety
-     net for the whole window — and SL/TP management keeps running.
+     exit (``emergency_hold``): the prompt promises "ลิมิตยังไม่ถูกแตะต้อง", so
+     the book must not be force-closed out from under the owner's finger (prod
+     2026-09-14: AUDNZD was closed ~6 s after the prompt). Owner decision:
+     "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch ทำงาน" — the guard stands down for the
+     WHOLE confirmation window (+ a short grace for the settle cycle), and
+     SL/TP management keeps running the entire time. Once the window is over
+     the exit runs regardless: a request that can never be settled must not
+     disable the safety net forever.
 
 Only the limits named in the request are touched, and only by
 ``EXPAND_STEP_PCT`` per confirmation; a limit is never written DOWN. The breach
@@ -75,16 +78,24 @@ MAX_TTL_MIN = 10080.0            # 7 days
 REASK_COOLDOWN_MIN = 30.0
 REASK_AFTER_REJECT_MIN = 120.0
 
-# How long the position guard DEFERS its emergency exit while a confirmation
-# request is still open (prod 2026-09-14: the guard closed AUDNZD ~6 SECONDS
-# after the prompt appeared, so the owner never had a chance to press Approve —
-# the prompt promises "ลิมิตยังไม่ถูกแตะต้อง", and closing the book while the
-# owner is deciding breaks that promise).
+# Extra minutes the position guard keeps deferring its emergency exit AFTER the
+# confirmation window has run out. Prod 2026-09-14: the guard closed AUDNZD ~6
+# SECONDS after the prompt appeared, so the owner never had a chance to press
+# Approve — the prompt promises "ลิมิตยังไม่ถูกแตะต้อง", and closing the book
+# while the owner is deciding breaks that promise.
 #
-# It is a DEFERRAL, not a disable: after this long the guard protects the
-# account as usual even without an answer (silence must never switch the
-# safety net off for the whole 180-min window), and the close message says so.
-EMERGENCY_HOLD_MIN = 30.0
+# Owner decision: "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch ทำงาน" → the wait is NOT
+# an arbitrary cap any more, it lasts for the WHOLE confirmation window
+# (Settings → ``kill_expand_ttl_min``, default 180 min). The wait ends when the
+# request is settled, i.e. the moment the owner answers — or the moment the
+# timeout path applies the expansion (which normally clears the breach).
+#
+# This constant is only the GRACE on top of that: the monitor's cycle is what
+# settles a lapsed window, so the guard must not race it. Past window+grace the
+# guard protects the account without an answer — a row that can never be settled
+# (``AUTO_APPLY_ON_EXPIRY`` off, or a write that keeps failing) must not switch
+# the safety net off forever.
+EMERGENCY_HOLD_GRACE_MIN = 15.0
 
 # Owner decision (2026-09-14): "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย".
 # An unanswered request is therefore APPLIED once its window lapses instead of
@@ -328,17 +339,31 @@ def open_request(db, settings: Optional[AppSettings] = None
     return row if row is not None else stale_pending(db, settings=settings)
 
 
+def hold_limit_min(db, settings: Optional[AppSettings] = None) -> float:
+    """How long the guard may keep the emergency exit on hold (minutes).
+
+    The whole confirmation window plus ``EMERGENCY_HOLD_GRACE_MIN`` (default
+    180 + 15 = 195). Owners asked for "รอคอมเฟิร์มก่อน" and the prompt in their
+    hand quotes the same window, so the two must agree: the guard stands down
+    exactly as long as the offer is alive.
+    """
+    return _resolve_ttl(db, settings) + EMERGENCY_HOLD_GRACE_MIN
+
+
 def emergency_hold(db, settings: Optional[AppSettings] = None
                    ) -> Optional[dict]:
     """The open request that MUST put the guard's emergency exit on hold.
 
     The guard calls this only when the kill switch is already engaged. Returns
     the row to report the deferral with, or None when the guard must close as
-    usual (no request at all — e.g. the owner rejected it — or the owner has
-    been silent past ``EMERGENCY_HOLD_MIN``).
+    usual: no request at all (e.g. the owner rejected it, which settles the row
+    and is a plain "no"), or the owner has been silent past
+    ``hold_limit_min`` (window + grace).
 
     Never raises: a DB hiccup must not disable a safety path, so an
-    unreadable table means "close" (fail-safe), not "hold".
+    unreadable table means "close" (fail-safe), not "hold". The same goes for a
+    row we cannot date — an age we cannot measure must not be treated as "brand
+    new", or a corrupt timestamp would hold the exit forever.
     """
     try:
         row = open_request(db, settings=settings)
@@ -347,8 +372,13 @@ def emergency_hold(db, settings: Optional[AppSettings] = None
         return None
     if row is None:
         return None
-    age = _age_min(row.get("requested_at") or row.get("created_at")) or 0.0
-    if age > EMERGENCY_HOLD_MIN:
+    age = _age_min(row.get("requested_at") or row.get("created_at"))
+    if age is None:
+        log.warning("request %s has no readable timestamp — closing instead "
+                    "of holding the emergency exit", row.get("id"))
+        return None
+    limit_min = hold_limit_min(db, settings)
+    if age > limit_min:
         return None
     return row
 

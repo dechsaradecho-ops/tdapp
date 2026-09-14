@@ -12,8 +12,10 @@ SL/TP enforcement + position management loop for the PaperBroker:
 
 Priority 0 is the EMERGENCY EXIT: when the kill switch is engaged every open
 position is closed at once. It is DEFERRED while an unanswered limit-expansion
-request is on the table (the prompt says "ลิมิตยังไม่ถูกแตะต้อง"), for at most
-``limit_expand.EMERGENCY_HOLD_MIN`` minutes — then it runs regardless.
+request is on the table (the prompt says "ลิมิตยังไม่ถูกแตะต้อง") — until the owner
+answers, and for the WHOLE confirmation window (``kill_expand_ttl_min``, default
+180 min) if they stay silent, plus ``limit_expand.EMERGENCY_HOLD_GRACE_MIN``.
+After that it runs regardless.
 
 Real broker adapters (MT5/OANDA) enforce SL/TP server-side; their close events
 still flow through close_trade_rows so the journal stays authoritative.
@@ -553,8 +555,10 @@ async def guard_once(db, broker, notifier: NotificationService,
     # hand says "ลิมิตยังไม่ถูกแตะต้อง". While an unanswered request is on the
     # table the exit is DEFERRED (not disabled): positions keep their SL/TP
     # management from the normal pass below, and the pause stays engaged so no
-    # new order can be opened. ``limit_expand.EMERGENCY_HOLD_MIN`` bounds the
-    # wait — after that the guard protects the account without an answer.
+    # new order can be opened. Owner: "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch
+    # ทำงาน" → the wait lasts for the whole confirmation window
+    # (``limit_expand.hold_limit_min``); it ends the moment the owner answers
+    # or the timeout path applies the expansion, whichever comes first.
     hold_row = None
     hold_note = ""
     if kill_engaged:
@@ -564,9 +568,11 @@ async def guard_once(db, broker, notifier: NotificationService,
             emergency_held = len(positions)
             log.warning(
                 "emergency exit HELD for %d position(s): kill switch is "
-                "engaged (%s) but request %s is still awaiting the owner",
+                "engaged (%s) but request %s is still awaiting the owner "
+                "(%.0f min of %.0f)",
                 emergency_held, "; ".join(kill_triggers)[:120] or "engaged",
-                hold_row.get("id"))
+                hold_row.get("id"), limit_expand.pending_age_min(hold_row),
+                limit_expand.hold_limit_min(db, s))
         else:
             # The deferral ran out (or the switch fired with no request at
             # all). Say WHICH one in the close message: the owner may still be
@@ -578,8 +584,10 @@ async def guard_once(db, broker, notifier: NotificationService,
             if late is not None:
                 hold_note = (
                     "⏳ คำขอยืนยันยังไม่ถูกตอบมา "
-                    f"{limit_expand.pending_age_min(late):.0f} นาที "
-                    f"(เลยกำหนดรอ {limit_expand.EMERGENCY_HOLD_MIN:.0f} นาที)\n"
+                    f"{limit_expand.pending_age_min(late):.0f} นาที\n"
+                    f"(เลยกำหนดรอ {limit_expand.hold_limit_min(db, s):.0f} "
+                    f"นาที = ช่วงยืนยัน {limit_expand.ttl_minutes(s):.0f} "
+                    f"+ เผื่อ {limit_expand.EMERGENCY_HOLD_GRACE_MIN:.0f})\n"
                     "จึงปิดไม้เพื่อความปลอดภัย — ยังกดอนุมัติได้ "
                     "แต่จะไม่หยุดการปิดไม้อีก")
                 log.warning("emergency exit resumed: request %s unanswered for "
