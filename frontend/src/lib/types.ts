@@ -302,7 +302,13 @@ export interface RiskAuditRequest {
   limit_after: number | null;
   requested_at: string | null;
   decided_at: string | null;
-  /** "" = ยังไม่ตัดสิน · "ui"/"line:..." = เจ้าของกดเอง · "auto:expired" = ระบบขยายให้ */
+  /**
+   * "" = ยังไม่ตัดสิน
+   * "ui"/"line:..." = เจ้าของกดเอง
+   * "auto:expired" = ระบบขยายให้ (นโยบายเปิด — ขยายทุกครั้ง)
+   * "auto:once" = ระบบขยายให้เองครั้งเดียวในรอบ 24 ชม. (โควตาขยายอัตโนมัติ)
+   * "auto:capped" = โควตาหมด + นโยบายปิด → ไม่ขยาย ปล่อยให้ kill switch ทำงาน
+   */
   decided_by: string;
   detail: Record<string, unknown>;
 }
@@ -561,12 +567,18 @@ export interface LimitExpandRequestInfo {
   limit_after: number | null;
   requested_at: string | null;
   /** requested_at + kill_expand_ttl_min (ค่า default 180 นาที, ตั้งได้ในหน้า
-   *  Settings) — เลยเวลาแล้วระบบ “ขยายลิมิตให้อัตโนมัติ” ตามนโยบายที่ตั้งไว้
-   *  (คำขอที่ไม่มีลิมิตค้างอยู่จะถูกปิดเป็น expired โดยไม่ขยาย) */
+   *  Settings) — เลยเวลาแล้วระบบตัดสินให้ตามนโยบาย kill_expand_auto_apply
+   *  (ขยายให้เองทุกครั้ง / ครั้งเดียวใน 24 ชม. / ไม่ขยาย → kill switch ปิดไม้)
+   *  คำขอที่ไม่มีลิมิตค้างอยู่จะถูกปิดเป็น expired โดยไม่ขยาย */
   expires_at: string | null;
   age_min: number | null;
   decided_at: string | null;
-  /** "ui" / "line:..." = เจ้าของกดเอง · "auto:expired" = ระบบขยายให้เมื่อพ้นเวลา */
+  /**
+   * "ui" / "line:..." = เจ้าของกดเอง
+   * "auto:expired" = ระบบขยายให้เองเมื่อพ้นเวลา (นโยบายเปิด — ทุกครั้ง)
+   * "auto:once" = ขยายให้เองได้ครั้งเดียวในรอบ 24 ชม.
+   * "auto:capped" = โควตาหมด ระบบไม่ขยายให้อีก
+   */
   decided_by: string;
 }
 
@@ -580,8 +592,8 @@ export interface LimitExpandState {
   pending: boolean;
   /**
    * true = คำขอนี้เลยช่วงยืนยัน (ttl_min) ไปแล้ว แต่ระบบยัง “ตัดสินให้ไม่ได้”
-   * (เขียนค่าลิมิตไม่สำเร็จ หรือปิดนโยบายขยายอัตโนมัติ) → คำขอยังเปิดอยู่
-   * คำตอบยังมีผล และระบบไม่ปิดไม้ระหว่างรอ (เดิมจะพ้นเวลาแล้วปิดไม้ทันที)
+   * (เขียนค่าลิมิตไม่สำเร็จ หรือโควตาขยายอัตโนมัติถูกใช้ไปแล้ว) → คำขอยังเปิดอยู่
+   * คำตอบยังมีผล · ปกติระบบจะขยาย/ปิดแถวให้เองภายในรอบถัดไปของ worker
    */
   lapsed: boolean;
   breach: boolean;
@@ -599,6 +611,14 @@ export interface LimitExpandState {
   reject_command: string;
   kill_engaged: boolean;
   kill_triggers: string[];
+  /** true = นโยบายเปิด: พ้นเวลาแล้วขยายลิมิตให้อัตโนมัติทุกครั้ง (Settings →
+   *  kill_expand_auto_apply) */
+  auto_apply: boolean;
+  /** true = นโยบายปิด: ระบบขยายให้เองได้ “ครั้งเดียวใน 24 ชม.” ต่อคำขอหนึ่งใบ */
+  auto_apply_once: boolean;
+  /** true = นโยบายปิด + มีคำขอค้าง → พ้นเวลาแล้วระบบอาจ “ไม่ขยาย” และ
+   *  kill switch ปิดไม้ทันที (แจ้งเตือนก่อนปิด) */
+  lapsed_closes: boolean;
 }
 
 export interface LimitExpandDecisionResult {
@@ -794,9 +814,13 @@ export interface AppSettings {
   kill_monthly_loss_pct: number;
   drawdown_throttle_pct: number;
   /** นาทีที่รอการยืนยันขยายลิมิตความเสี่ยง (LINE + popup) ก่อนคำขอหมดอายุ —
-   *  default 180; เกินเวลาแล้วแถวเดิมถูกปิดเป็น expired และระบบสร้างคำขอใหม่
-   *  พร้อมตัวเลขล่าสุด (migration 037) */
+   *  default 180; เกินเวลาแล้วระบบตัดสินให้ตามนโยบายด้านล่าง (migration 037) */
   kill_expand_ttl_min: number;
+  /** นโยบายเมื่อคำขอหมดเวลายืนยัน (migration 039) —
+   *  true (default) = ขยายลิมิตให้อัตโนมัติทุกครั้ง,
+   *  false = ขยายให้เองได้ครั้งเดียวใน 24 ชม. หลังจากนั้น “ไม่ขยาย” และ
+   *  ปล่อยให้ kill switch ปิดไม้ตามลิมิตเดิม */
+  kill_expand_auto_apply: boolean;
   news_block_minutes: number;
   news_caution_minutes: number;
   correlation_cap: number;

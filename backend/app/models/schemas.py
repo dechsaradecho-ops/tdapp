@@ -2006,6 +2006,17 @@ class AppSettings(BaseModel):
     # int to match the trading_settings integer column (float JSON like 180.0
     # fails Postgres int cast).
     kill_expand_ttl_min: int = 180
+    # "ขยายอัตโนมัติ 1 ครั้ง" (migration 039) — what the timeout policy does when
+    # NOBODY answers inside ``kill_expand_ttl_min``:
+    #   True  → apply the request as approved EVERY time a window lapses
+    #   False → apply it ONCE (one silent rescue per ONCE_QUOTA_HOURS = 24 h),
+    #           stop asking after that, and let the kill switch close the book if
+    #           the account is STILL over the widened limits — auto-expand must
+    #           not become a permanent exemption. The way back is Settings +
+    #           /resume, never a fresh prompt.
+    # Either way the widening is reported to the owner — a limit never moves
+    # silently. Only a FAILED write keeps deferring the emergency exit.
+    kill_expand_auto_apply: bool = True
 
     # int to match trading_settings integer columns (float JSON like 30.0 fails Postgres int cast)
     news_block_minutes: int = 30

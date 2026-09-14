@@ -44,8 +44,8 @@ tdapp/
 │   │   ├── services/         # DB access, execution (paper trades), PIN auth, quote log
 │   │   └── workers/          # Market Scanner, News Analysis, Auto Trader, Notifier, ...
 │   ├── scripts/              # Ops probes: check_*.py, poll_*.py, smoke_stream.py, ...
-│   └── tests/                # Pytest suite (676 tests)
-├── database/                 # Supabase migrations 001–038 (run manually in SQL Editor)
+│   └── tests/                # Pytest suite (773 tests)
+├── database/                 # Supabase migrations 001–039 (run manually in SQL Editor)
 ├── UI-DESIGN-SYSTEM.md       # iOS Liquid Glass Dark — hard rules for UI work
 ├── docker-compose.yml        # Local infra (redis)
 └── render.yaml               # Render.com blueprint (api + workers + static web)
@@ -192,8 +192,17 @@ Single-user dashboard — no Supabase Auth:
 - แยก worker service (tdapp-workers) ถูกตัดออกแล้ว — ถ้ารันคู่กับ ENABLE_WORKERS=1 จะยิง
   order/แจ้งเตือนซ้ำสองเท่า (ดู comment ใน render.yaml หากต้องการเปิดกลับ)
 
-Database migrations (`database/001–038`) are run manually in the Supabase SQL Editor.
-Latest: `038_risk_events_user_text.sql` — `risk_events.user_id` `uuid` → `text`
+Database migrations (`database/001–039`) are run manually in the Supabase SQL Editor.
+Latest: `039_kill_expand_auto_apply.sql` — `trading_settings.kill_expand_auto_apply`
+(`boolean not null default true`), the toggle for the risk-limit timeout policy.
+**true** (default) = a confirmation window that lapses widens the breached limits
+every time; **false** = the system may widen on its own **once per 24 hours** — after
+that a lapsing request is closed as `expired` with `decided_by = 'auto:capped'`, no
+new prompt is created, and the kill switch closes the book for safety (the guard
+stays the fail-safe: it only closes while the limit is still breached). Until the
+migration is applied the app still works — the settings PUT skips the unknown column
+on PostgREST `PGRST204` and the legacy “widen every time” behaviour stays in place.
+Before it: `038_risk_events_user_text.sql` — `risk_events.user_id` `uuid` → `text`
 (**must be applied or the audit trail stays empty**: the app writes the pseudo-user
 `demo` and the uuid FK rejects it with `22P02`; both write paths now report that error
 instead of swallowing it, and `GET /api/system/risk-logs` returns `audit_hint`).

@@ -564,8 +564,11 @@ async def guard_once(db, broker, notifier: NotificationService,
     # the confirmation window (no fixed cap, no grace), and when it runs out the
     # TIMEOUT POLICY decides — not the guard. No answer means the +5% expansion
     # is applied (owner decision), which normally clears the breach; a window
-    # that CANNOT be applied (write failure / policy off) has not been answered
-    # either, so the hold simply continues (see ``settle.holds`` below).
+    # that CANNOT be applied because the settings write keeps failing has not
+    # been served either, so the hold simply continues (see ``settle.holds``).
+    # With the one-shot policy ON-OFF ("ขยายอัตโนมัติ 1 ครั้ง", migration 039) the
+    # SECOND silence is ``capped``: the policy answered it already, so the guard
+    # closes as usual ("ขยายแล้วยังไม่พอ = ปิดไม้ทันที").
     hold_row = None
     hold_note = ""
     if kill_engaged:
@@ -618,17 +621,18 @@ async def guard_once(db, broker, notifier: NotificationService,
                             "auto-applied (%d position(s) stay open)",
                             emergency_held)
                 if settle is not None and settle.holds:
-                    # The window could NOT be settled: either the settings write
-                    # did not land (the owner's approval is still being honoured
-                    # and retried every cycle) or the auto-apply policy is off so
-                    # only the owner can settle it. Owner decisions 2026-09-14:
-                    # "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" / "ไม่ปิดไม้ รอเจ้าของกด
-                    # อย่างเดียว (SL/TP ยังทำงาน)" → keep DEFERRING instead of
-                    # closing: the row stays open, so the LINE buttons and the
-                    # popup still work, SL/TP keeps protecting the positions, and
+                    # The window could NOT be settled: the settings write did not
+                    # land, so the owner's approval is still being honoured and
+                    # retried every cycle. Owner decision 2026-09-14: "ถ้าเขียน
+                    # DB ไม่สำเร็จห้ามปิดไม้" → keep DEFERRING instead of closing:
+                    # the row stays open, so the LINE buttons and the popup still
+                    # work, SL/TP keeps protecting the positions, and
                     # settle_lapsed_window has already warned the owner (once per
                     # 6 h, the first time immediately). A close here would be an
                     # irreversible answer to a question the owner never lost.
+                    # NOTE: a window the one-shot policy refused (``capped``, the
+                    # auto-expand quota is used up) does NOT hold — that silence
+                    # has been answered already, so the guard closes below.
                     kill_engaged = False
                     emergency_held = len(positions)
                     log.warning(
@@ -661,6 +665,10 @@ async def guard_once(db, broker, notifier: NotificationService,
                     elif kind == "retired":
                         head = (f"⏳ ครบช่วงยืนยัน {ttl:.0f} นาที — คำขอไม่มี"
                                 "ลิมิตให้ขยาย (ยกเลิกคำขอแล้ว) แต่ยังเกินลิมิตอยู่")
+                    elif kind == "capped":
+                        head = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที — "
+                                "ระบบขยายให้เองได้ครั้งเดียว (นโยบายปิด) "
+                                "จึงไม่ขยายให้อีก และยังเกินลิมิตเดิมอยู่")
                     else:
                         head = (f"⏳ คำขอยืนยันยังไม่ถูกตอบมา {age:.0f} นาที "
                                 f"(เลยช่วงยืนยัน {ttl:.0f} นาที) "

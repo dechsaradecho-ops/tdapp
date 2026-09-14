@@ -657,7 +657,12 @@ def test_risk_presets_moderate_matches_defaults():
                 # the Approve/Reject request stays valid. A waiting-time knob,
                 # not a risk-appetite field — a preset switch must not silently
                 # shorten the time the owner has to answer
-                "kill_expand_ttl_min"}
+                "kill_expand_ttl_min",
+                # Timeout POLICY (migration 039): widen the limit on every
+                # silence vs. once per 24h then let the kill switch close the
+                # book. A safety policy the owner owns — a risk preset must
+                # never flip it behind their back
+                "kill_expand_auto_apply"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

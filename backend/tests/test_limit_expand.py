@@ -442,16 +442,56 @@ def test_a_failed_timeout_write_is_retried_and_never_reported():
     assert db.rows["kill_expand_requests"][0]["status"] == "approved"
 
 
-def test_timeout_apply_can_be_switched_off(monkeypatch):
-    """AUTO_APPLY_ON_EXPIRY=False keeps the old "wait for the owner" behaviour."""
-    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
-    db, s = _dd_db(equity=8900.0), AppSettings()
-    limit_expand.request_and_notify(db, s, RecordingNotifier())
+def test_the_one_shot_policy_widens_once_with_its_own_marker():
+    """"ขยายอัตโนมัติ 1 ครั้ง" + ไม่มีคำตอบ → ขยายให้ 1 ครั้ง (auto:once), จบ
+
+    The switch (Settings → ``kill_expand_auto_apply``, migration 039) does NOT
+    mean "never widen": the platform still rescues the account ONCE — with its
+    own ``decided_by`` so the logs can tell it apart from an owner approval — and
+    the report says the NEXT silence belongs to the kill switch.
+    """
+    off = AppSettings(kill_expand_auto_apply=False)
+    db = _dd_db(equity=8900.0)
+    limit_expand.request_and_notify(db, off, RecordingNotifier())
     db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
 
-    assert limit_expand.auto_apply_expired(db, s) is None
-    assert "trading_settings" not in db._client.store
-    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+    assert limit_expand.timeout_plan(db, off) == "once"
+    report = limit_expand.auto_apply_expired(db, off)
+
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "approved"
+    assert row["decided_by"] == limit_expand.AUTO_ONCE_BY == "auto:once"
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+    assert report and "1 ครั้ง" in report
+    assert "นโยบายขยายอัตโนมัติถูกปิดอยู่" in report
+    # …และนับเป็นโควตาที่ใช้ไปแล้ว → หน้าต่างถัดไปคือ capped
+    assert limit_expand.silent_widen_count(db) == 1
+    assert limit_expand.timeout_plan(db, off) == "capped"
+
+
+def test_a_caller_without_the_new_field_keeps_the_legacy_default(monkeypatch):
+    """A settings object WITHOUT ``kill_expand_auto_apply`` → AUTO_APPLY_ON_EXPIRY.
+
+    ``settle_expired`` loads the row itself when it is handed no settings, so the
+    legacy constant only decides for an older caller (a settings object built
+    before migration 039) — and it must keep today's "every lapsed window"
+    behaviour, never silently switch to one-shot.
+    """
+    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    legacy = SimpleNamespace(kill_expand_ttl_min=180)
+    assert limit_expand.auto_apply_enabled(legacy) is False
+    assert limit_expand.timeout_plan(_dd_db(equity=8900.0), legacy) == "once"
+
+    # ไม่ส่ง settings มาเลย → เหมือนกัน (ค่าคงที่เดิม) ไม่ใช่ "apply" เงียบ ๆ
+    db = _dd_db(equity=8900.0)
+    limit_expand.request_and_notify(db, AppSettings(), RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+    assert limit_expand.timeout_plan(db, None) == "once"
+
+    # แต่ settle_expired โหลดแถวจริงเอง → ค่าใน DB (default true) เป็นตัวตัดสิน
+    assert limit_expand.auto_apply_expired(db, None)
+    assert db.rows["kill_expand_requests"][0]["decided_by"] == \
+        limit_expand.AUTO_DECIDED_BY
 
 
 def test_only_the_newest_pending_request_can_be_applied():
@@ -526,17 +566,26 @@ def test_decide_without_a_pending_request():
     assert "ไม่เข้าใจคำสั่ง" in limit_expand.decide(db, "maybe")
 
 
-def test_a_late_reject_still_counts_when_the_policy_cannot_settle(monkeypatch):
-    """ตอบ ❌ หลังหมดช่วงยืนยัน (นโยบายอัตโนมัติปิด) → ลิมิตต้องไม่ถูกขยาย
+def test_a_late_reject_counts_when_the_timeout_write_did_not_land(monkeypatch):
+    """ตอบ ❌ ช้า ขณะที่ระบบขยายเองไม่สำเร็จ → คำตอบ owner ต้องมีผล ไม่ถูกเขียนทับ
 
     Previously a late press fell through "no pending request" and the still-open
     row stayed a timeout candidate: the owner's ❌ would have been overridden by
     the auto-expand they had just refused.
     """
-    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
     db, s = _dd_db(equity=8900.0), AppSettings()
     limit_expand.request_and_notify(db, s, RecordingNotifier())
     db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(195.0)
+    real_write = limit_expand._persist_settings
+    calls = {"n": 0}
+
+    def _write(db_, merged):
+        calls["n"] += 1
+        if calls["n"] == 1:      # รอบหมดเวลาเขียนไม่ลง → แถวยังเปิดอยู่
+            return False
+        return real_write(db_, merged)
+
+    monkeypatch.setattr(limit_expand, "_persist_settings", _write)
 
     reply = limit_expand.decide(db, "/dd_no", decided_by="line:user", settings=s)
 
@@ -548,12 +597,21 @@ def test_a_late_reject_still_counts_when_the_policy_cannot_settle(monkeypatch):
     assert "trading_settings" not in db._client.store
 
 
-def test_a_late_approve_applies_when_the_policy_cannot_settle(monkeypatch):
-    """ตอบ ✅ ช้า (นโยบายปิด หรือเขียนไม่ลง) → ขยายตามที่ขอ ไม่ทิ้งคำตอบ owner"""
-    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+def test_a_late_approve_applies_when_the_timeout_write_did_not_land(monkeypatch):
+    """ตอบ ✅ ช้า (ระบบขยายเองไม่สำเร็จ) → ขยายตามที่ขอ ไม่ทิ้งคำตอบ owner"""
     db, s = _dd_db(equity=8900.0), AppSettings()
     limit_expand.request_and_notify(db, s, RecordingNotifier())
     db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(195.0)
+    real_write = limit_expand._persist_settings
+    calls = {"n": 0}
+
+    def _write(db_, merged):
+        calls["n"] += 1
+        if calls["n"] == 1:      # รอบหมดเวลายังเขียนไม่ลง
+            return False
+        return real_write(db_, merged)
+
+    monkeypatch.setattr(limit_expand, "_persist_settings", _write)
 
     reply = limit_expand.decide(db, "/dd_ok", decided_by="ui:user", settings=s)
 
@@ -730,9 +788,14 @@ def test_monitor_still_asks_when_the_window_is_open():
 # ``kill_expand_ttl_min`` hands the request to the timeout policy — the
 # expansion is applied and reported, and the guard closes only if the account is
 # STILL over the widened limits. A window the policy CANNOT settle (the settings
-# write keeps failing, or the policy is switched off) has not been answered
-# either, so the guard keeps deferring instead of closing (owner decisions
-# 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" / "ไม่ปิดไม้ รอเจ้าของกดอย่างเดียว").
+# write keeps failing) has not been answered either, so the guard keeps deferring
+# instead of closing (owner decision 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้").
+#
+# The one-shot policy ("ขยายอัตโนมัติ 1 ครั้ง", migration 039) changed the OTHER
+# corner: with ``kill_expand_auto_apply`` False the FIRST silence is still
+# widened (``auto:once``), but a SECOND one is ``capped`` — the quota is spent,
+# the owner was told, and the guard closes as usual (owner decision: "ขยายแล้วยัง
+# ไม่พอ = ปิดไม้ทันที").
 # ---------------------------------------------------------------------------
 _GUARD_SETTINGS = AppSettings(smart_exit_enabled=False)  # no snapshot/news feeds
 
@@ -881,58 +944,118 @@ def test_the_hold_follows_the_setting_not_a_fixed_cap(_marks):
     assert db2.rows["kill_expand_requests"][0]["status"] == "pending"
 
 
-def test_guard_holds_when_the_auto_expand_policy_is_off(_marks, monkeypatch):
-    """ปิดนโยบายขยายอัตโนมัติ + ไม่มีคำตอบ → ห้ามปิดไม้ รอเจ้าของกดอย่างเดียว
+def test_the_one_shot_policy_widens_the_first_silence(_marks):
+    """นโยบายปิด + ไม่มีคำตอบรอบแรก → ขยายให้ 1 ครั้ง (auto:once) ไม่ปิดไม้
 
-    Owner decision 2026-09-14: "ไม่ปิดไม้ รอเจ้าของกดอย่างเดียว (SL/TP ยังทำงาน)
-    จนกว่าจะตอบ" — คำขอยังเปิดอยู่ = เจ้าของยังไม่ได้ตอบ เพราะฉะนั้น guard ต้อง
-    เลื่อนการปิดไม้ออกไปเรื่อย ๆ (ไม่ใช่ปิดเพราะระบบขยายให้ไม่ได้)
+    Owner decision 2026-09-14: "ขยายอัตโนมัติ 1 ครั้ง" — the operator already
+    delegated ONE rescue to the platform; the switch only says it must not
+    become a standing exemption (see the capped test below).
     """
-    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    off = AppSettings(smart_exit_enabled=False, kill_expand_auto_apply=False)
     db = _daily_loss_db()
     db.rows["paper_trades"].append(_open_trade_row())
-    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(off) + 15.0)
     broker, closed = _book()
     notifier = RecordingNotifier()
 
-    out = asyncio.run(_guard(db, broker, notifier))
+    out = asyncio.run(_guard(db, broker, notifier, off))
 
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "approved"
+    assert row["decided_by"] == limit_expand.AUTO_ONCE_BY
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
+    # ลิมิตใหม่กว้างพอ → kill switch หลุด → ไม่มีอะไรให้ปิด
     assert out["emergency_closed"] == 0 and closed == []
     assert out["emergency_held"] == 1
-    # คำขอยังไม่ถูกตัดสิน: เจ้าของกดอนุมัติ/ไม่อนุมัติเองได้เสมอ
-    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
-    assert "trading_settings" not in db._client.store
-    assert notifier.of("trade_closed") == []          # ไม่มีข้อความ "ปิดไม้"
-    warn = notifier.of("limit_expand")
-    assert len(warn) == 1 and "ขยายลิมิตอัตโนมัติไม่สำเร็จ" in warn[0]["message"]
-    assert "ระบบยังไม่ปิดไม้" in warn[0]["message"]
-    assert warn[0]["quick_reply"]                     # กดอนุมัติได้จากข้อความเดิม
+    sent = notifier.of("limit_expand")
+    assert len(sent) == 1 and "1 ครั้ง" in sent[0]["message"]
+    assert "นโยบายขยายอัตโนมัติถูกปิดอยู่" in sent[0]["message"]
 
 
-def test_the_hold_and_the_warning_survive_repeated_cycles(_marks, monkeypatch):
-    """"ขยายให้ไม่ได้" = เลื่อนต่อไปเรื่อย ๆ (ไม่ปิดไม้) + เตือนครั้งเดียวต่อคำขอ
+def test_the_second_silence_under_the_one_shot_policy_lets_the_guard_close(
+        _marks):
+    """"ขยายแล้วยังไม่พอ = ปิดไม้ทันที" (นโยบายปิด, โควตาหมดแล้ว)
 
-    Both workers loop every minute, so the warning is throttled to one per
-    request (``AUTO_FAIL_NOTIFY_MIN`` = 6 h) — ไม่ใช่ทุกรอบ.
+    The row that lapsed is NOT widened again: the quota is spent, the owner is
+    warned exactly once, and the emergency exit does its job — the close message
+    has to say WHY, because the old prompt promised nothing would be touched.
     """
-    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    off = AppSettings(smart_exit_enabled=False, kill_expand_auto_apply=False)
     db = _daily_loss_db()
     db.rows["paper_trades"].append(_open_trade_row())
-    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    # the ONE silent rescue already happened 200 min ago (โควตาหมด)
+    db.insert("kill_expand_requests", {
+        "id": "req-0", "status": "approved",
+        "decided_by": limit_expand.AUTO_ONCE_BY,
+        "decided_at": _minutes_ago(199.0),
+        "requested_at": _minutes_ago(200.0),
+        "detail": {"triggers": []}})
+    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(off) + 15.0)
     broker, closed = _book()
     notifier = RecordingNotifier()
 
-    for _ in range(3):
-        out = asyncio.run(_guard(db, broker, notifier))
-        assert out["emergency_closed"] == 0 and out["emergency_held"] == 1
+    assert limit_expand.timeout_plan(db, off) == "capped"
+    out = asyncio.run(_guard(db, broker, notifier, off))
 
-    assert closed == []
-    assert notifier.of("trade_closed") == []
-    assert len(notifier.of("limit_expand")) == 1      # ไม่สแปมแชท
-    # กดอนุมัติซ้ำจากข้อความเตือนได้เสมอ แม้จะเลยช่วงยืนยันไปแล้ว
-    reply = limit_expand.decide(db, "/dd_ok", "line", settings=_GUARD_SETTINGS)
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "expired"
+    assert row["decided_by"] == limit_expand.AUTO_CAPPED_BY == "auto:capped"
+    # ไม่มีการขยายเพิ่มเลย (ลิมิตเดิม 2.0 ยังอยู่)
+    assert "trading_settings" not in db._client.store
+    # เตือนครั้งเดียวต่อคำขอ: ไม่สแปมแชทแม้ทั้งสอง worker จะวนทุกรอบ
+    warn = notifier.of("limit_expand")
+    assert len(warn) == 1
+    assert "ขยายลิมิตอัตโนมัติไม่สำเร็จ" in warn[0]["message"]
+    assert "ครั้งเดียว" in warn[0]["message"]
+    assert "kill switch" in warn[0]["message"]
+    assert warn[0]["quick_reply"]          # ยังกดอนุมัติเองได้จากข้อความเดิม
+    # "ปล่อยให้ kill switch ทำงาน" → ปิดไม้ทันที
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    assert out["emergency_held"] == 0
+    body = notifier.of("trade_closed")[0]["message"]
+    assert "ระบบขยายให้เองได้ครั้งเดียว" in body
+    assert "ปิดไม้เพื่อความปลอดภัย" in body
+    # กดปุ่มซ้ำหลังระบบปิดคำขอแล้ว → คำตอบต้องไม่โกหกว่าจะส่งคำขอใหม่
+    reply = limit_expand.decide(db, "/dd_ok", "line", settings=off)
+    assert "ไม่ขยายลิมิตให้" in reply
+
+
+def test_the_monitor_stops_asking_when_the_one_shot_quota_is_spent():
+    """โควตาหมด + ยังเกินลิมิต → ไม่สร้างคำขอใหม่ (ไม่งั้น hold จะกลับมาอีก)
+
+    A fresh prompt would re-arm ``emergency_hold`` and the book would never be
+    closed — the owner's decision was "ปล่อยให้ kill switch ทำงาน". The report
+    still tells them how to get back in (Settings + /resume).
+    """
+    off = AppSettings(kill_expand_auto_apply=False)
+    db = _daily_loss_db(pnl=-900.0)               # 9% daily vs a 2% limit
+    # monitor_once โหลด settings เองจาก trading_settings (ไม่รับจากผู้เรียก)
+    # → นโยบาย "ขยายครั้งเดียว" ต้องถูกบันทึกไว้ใน DB ก่อน
+    assert limit_expand._persist_settings(db, off) is True
+    limit_expand.request_and_notify(db, off, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    first = RecordingNotifier()
+    out = portfolio_monitor.monitor_once(db, None, first)
+
+    # รอบนี้คือ "1 ครั้ง": ขยายลิมิตที่ค้างทั้งหมดแล้วรายงาน — แต่ยังเกินลิมิตใหม่
+    # (+ บอกทันทีว่าโควตาหมด และจะไม่ส่งคำขอใหม่ให้เองอีก)
+    msgs = [m["message"] for m in first.of("limit_expand")]
+    assert len(msgs) == 2, msgs
+    assert any("หมดเวลายืนยัน" in m for m in msgs)
+    assert any("ครบโควตาขยายลิมิตอัตโนมัติ" in m for m in msgs)
     assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
-    assert "ตอบหลังหมดช่วงยืนยัน" in reply
+    assert len(db.rows["kill_expand_requests"]) == 1
+    assert out["breach"] is True
+
+    # รอบถัดไป (1 นาทีต่อมา): ไม่สร้างคำขอใหม่ และไม่สแปม (throttle 6 ชม.)
+    second = RecordingNotifier()
+    out2 = portfolio_monitor.monitor_once(db, None, second)
+
+    assert out2["breach"] is True
+    assert second.of("limit_expand") == []
+    assert len(db.rows["kill_expand_requests"]) == 1
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
 
 
 def test_guard_holds_when_the_expansion_write_did_not_land(_marks, monkeypatch):
@@ -1364,3 +1487,65 @@ def test_api_popup_approve_survives_a_line_push_failure():
     assert res.status_code == 200
     assert res.json()["applied_decision"] == "approve"
     assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+
+
+# ---------------------------------------------------------------------------
+# "ขยายอัตโนมัติ 1 ครั้ง" — the Settings switch itself (migration 039)
+# ---------------------------------------------------------------------------
+def test_the_auto_expand_switch_round_trips_through_settings():
+    """Settings → ``kill_expand_auto_apply``: what was saved is what is read.
+
+    ``timeout_plan`` consults the PERSISTED value, so a switch that does not come
+    back out of ``trading_settings`` would silently restore the every-silence
+    policy (the legacy ``AUTO_APPLY_ON_EXPIRY`` default).
+    """
+    db = _daily_loss_db()
+    assert AppSettings().kill_expand_auto_apply is True   # default = ทุกครั้ง
+    assert limit_expand.auto_apply_enabled(AppSettings()) is True
+
+    assert limit_expand._persist_settings(
+        db, AppSettings(kill_expand_auto_apply=False)) is True
+
+    stored = db._client.store["trading_settings"][1]
+    assert stored["kill_expand_auto_apply"] is False
+    fresh = execution.get_app_settings(db)
+    assert fresh.kill_expand_auto_apply is False
+    assert limit_expand.auto_apply_enabled(fresh) is False
+
+
+def test_a_missing_039_column_never_blocks_an_approved_expansion():
+    """Without migration 039 the new column is dropped and the write still lands.
+
+    Same rule as 037: a new OPTIONAL column must never stop an owner approval.
+    """
+    from tests.test_settings import FakeSettingsClient
+
+    db, s = _dd_db(equity=8900.0), AppSettings()   # 11% dd → clears at 15%
+    db._client = FakeSettingsClient(
+        None, fail_columns=("kill_expand_auto_apply",))
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+
+    reply = limit_expand.decide(db, "/dd_ok", decided_by="line")
+
+    rows = [r for r in db._client.saved_rows if "max_drawdown_pct" in r]
+    assert rows, db._client.saved_rows
+    assert rows[-1]["max_drawdown_pct"] == 15.0
+    assert "kill_expand_auto_apply" not in rows[-1]   # dropped, not fatal
+    assert "ขยายลิมิตเรียบร้อย" in reply
+
+
+def test_the_state_endpoint_publishes_the_timeout_policy():
+    """The popup copy is built from these flags — they must be honest."""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+
+    on = limit_expand.state(db, s)
+    assert on["pending"] is True
+    assert on["auto_apply"] is True and on["auto_apply_once"] is False
+    assert on["lapsed_closes"] is False        # ทุกครั้งที่หมดเวลา = ไม่ปิดเอง
+
+    off = limit_expand.state(db, AppSettings(kill_expand_auto_apply=False))
+    assert off["auto_apply"] is False and off["auto_apply_once"] is True
+    assert off["lapsed_closes"] is True        # หมดเวลา = ปล่อยให้ kill switch ปิด
+    # การอ่าน state ต้องไม่แตะ DB เลย
+    assert "trading_settings" not in db._client.store

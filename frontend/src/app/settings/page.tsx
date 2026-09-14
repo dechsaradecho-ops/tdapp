@@ -59,6 +59,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   kill_monthly_loss_pct: 8,
   drawdown_throttle_pct: 5,
   kill_expand_ttl_min: 180,
+  kill_expand_auto_apply: true,
   news_block_minutes: 30,
   news_caution_minutes: 120,
   correlation_cap: 80,
@@ -1157,7 +1158,26 @@ export default function SettingsPage() {
                 hint="เตือนก่อน kill — ถึงระดับนี้ระบบลดความถี่เปิดไม้ลง (soft brake)" />
               <NumField label="รอยืนยันขยายลิมิต (นาที)" value={cfg.kill_expand_ttl_min}
                 onChange={(v) => set("kill_expand_ttl_min", v)} step={30}
-                hint="เกินลิมิต ระบบส่งคำขอยืนยัน (LINE + popup) แล้วรอได้นานเท่านี้ — เกินเวลาคำขอหมดอายุ ต้องรอระบบสร้างคำขอใหม่พร้อมตัวเลขล่าสุด (ต่ำสุด 5 นาที / สูงสุด 7 วัน)" />
+                hint="เกินลิมิต ระบบส่งคำขอยืนยัน (LINE + popup) แล้วรอได้นานเท่านี้ — เกินเวลาระบบตัดสินให้ตามนโยบายด้านล่าง (ต่ำสุด 5 นาที / สูงสุด 7 วัน)" />
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1">
+                  <p className="text-sm">ขยายลิมิตอัตโนมัติเมื่อหมดเวลายืนยัน</p>
+                  <p className="text-xs text-slate-500">
+                    เปิด = หมดเวลาแล้วขยายลิมิตให้เองทุกครั้ง — ปิด = ขยายให้เองได้
+                    “ครั้งเดียวใน 24 ชม.” ต่อคำขอ ถ้าหมดโควตาและไม่ตอบ ระบบจะไม่ขยาย
+                    อีก และปล่อยให้ kill switch ปิดไม้เพื่อความปลอดภัย
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.kill_expand_auto_apply}
+                  aria-label="ขยายลิมิตอัตโนมัติเมื่อหมดเวลายืนยัน"
+                  disabled={lineBusy}
+                  onClick={() => toggleNotify("kill_expand_auto_apply", !cfg.kill_expand_auto_apply)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.kill_expand_auto_apply ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.kill_expand_auto_apply ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
             </div>
 
             {/* --- News / correlation / order / backtest --- */}

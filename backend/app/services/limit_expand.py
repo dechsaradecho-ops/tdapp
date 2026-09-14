@@ -24,8 +24,17 @@ Flow implemented here:
      the SAME channels, so the widening is never silent. Whichever mutating
      caller reaches the lapsed row first performs this write (the monitor, or
      the position guard) — see ``settle_lapsed_window`` vs ``pending_request``.
-     A window that could NOT be applied (policy off, or the settings write keeps
-     failing) stays OPEN so the owner can still press: the failure is reported
+     HOW MANY times that may happen is the owner's switch
+     ``kill_expand_auto_apply`` (Settings → "ขยายอัตโนมัติ 1 ครั้ง", migration
+     039): ON (default) = every lapsed window is applied; OFF = exactly ONE
+     lapsed window is applied (``AUTO_ONCE_BY``, one rescue per
+     ``ONCE_QUOTA_HOURS``) and a LATER one is ``capped`` — nothing is widened,
+     the owner is warned once, no new prompt is pushed, and the emergency exit
+     is free to close the book ("ขยายแล้วยังไม่พอ = ปิดไม้"): an unanswered
+     prompt must not become a permanent exemption from the risk limits. The way
+     back in is the Settings page (+ ``/resume``), not a fresh prompt.
+     A window that could NOT be applied (the settings write keeps failing) stays
+     OPEN so the owner can still press: the failure is reported
      once per ``AUTO_FAIL_NOTIFY_MIN`` (6 h), the popup keeps offering it, and
      the emergency exit keeps deferring (point 5).
   5. while such a request is open, the position guard DEFERS its emergency
@@ -36,10 +45,10 @@ Flow implemented here:
      WHOLE confirmation window (no grace), and SL/TP management keeps running
      the entire time. When the window lapses the timeout policy decides first
      (point 4); the guard closes only if the account is STILL over the widened
-     limits. A window that could not be settled is NOT a reason to close — the
-     owner is still owed a decision ("ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้", "ไม่ปิดไม้
-     รอเจ้าของกดอย่างเดียว"), so it keeps deferring and the close message names
-     the outcome whenever a close does happen.
+     limits. A window that could not be settled is NOT a reason to close on its
+     own — but the one-shot policy's ``capped`` outcome IS ("ขยายแล้วยังไม่พอ =
+     ปิดไม้ทันที"), so ``HOLD_KINDS`` covers the write failure only and the close
+     message names the outcome whenever a close does happen.
 
 Only the limits named in the request are touched, and only by
 ``EXPAND_STEP_PCT`` per confirmation; a limit is never written DOWN. The breach
@@ -99,47 +108,78 @@ REASK_AFTER_REJECT_MIN = 120.0
 # There is no separate cap on purpose: a fixed one (the first fix used 30 min)
 # closed the book while the prompt was still valid, and a LARGER one (window +
 # grace) closed it after a window whose policy is to expand. The deferral also
-# survives the case where the request can NEVER be settled (the auto-apply policy
-# is off, or the settings write keeps failing): the owner is still owed a
-# decision there, so the emergency exit keeps deferring and re-warns — owner
-# decisions 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" / "ไม่ปิดไม้ รอเจ้าของ
-# กดอย่างเดียว (SL/TP ยังทำงาน)". Only a window that IS settled (or a row nobody
-# can date, or an unreadable table) lets the guard protect the account as usual.
+# survives the case where the request can NEVER be settled because the settings
+# write keeps failing: the owner is still owed a decision there, so the emergency
+# exit keeps deferring and re-warns — owner decision 2026-09-14: "ถ้าเขียน DB
+# ไม่สำเร็จห้ามปิดไม้". With the one-shot policy OFF a silence that the system
+# already answered ONCE is NOT such a case: nothing is owed any more, so the guard
+# protects the account as usual (owner decision 2026-09-14: "ขยายแล้วยังไม่พอ =
+# ปิดไม้ทันที").
 
 # Owner decision (2026-09-14): "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย".
 # An unanswered request is therefore APPLIED once its window lapses instead of
 # being dropped, which would leave the account paused until someone presses a
-# button that may never come. Flip to False to go back to "expiry = do nothing".
+# button that may never come. This is only the FALLBACK for a caller without a
+# settings row — the live value is ``AppSettings.kill_expand_auto_apply``
+# (Settings page, migration 039). Kept for the older callers/tests that pin it.
 AUTO_APPLY_ON_EXPIRY = True
 
 # ``decided_by`` written by the timeout path (vs "line:user" / "ui"), and the
 # headline of the report that path pushes. Both are greppable in prod.
 AUTO_DECIDED_BY = "auto:expired"
+# Same, for the ONE-SHOT policy (Settings → kill_expand_auto_apply = OFF): the
+# first silence window is still applied for the owner, but only that one. A
+# distinct decided_by so the LOGS page can show WHY a limit moved without an
+# answer (นโยบายปิด + หมดเวลา) and so the quota scan can tell the two rules apart.
+AUTO_ONCE_BY = "auto:once"
+# Every decided_by that means "the timeout policy widened this, not the owner".
+# Used by ``decide`` to recognise a window that silence already answered (and by
+# the older callers that only want "was this one widened?"). NOTE: only
+# ``AUTO_ONCE_BY`` spends the one-shot quota — see ``silent_widen_count``.
+AUTO_WIDEN_BY = (AUTO_DECIDED_BY, AUTO_ONCE_BY)
+# A window the one-shot policy REFUSED to widen: closed exactly like an expired
+# request but with its own marker, so the logs can tell "ขยายให้เอง" apart from
+# "ไม่ขยายให้ เพราะโควตาหมด" (status is ``expired`` → never counts as a widening
+# for ``silent_widen_count``).
+AUTO_CAPPED_BY = "auto:capped"
 TIMEOUT_TITLE = "⏳ หมดเวลายืนยัน — ขยายลิมิตให้อัตโนมัติ"
+# Same, for the one-shot policy: the report says it will not happen again.
+ONCE_TITLE = "⏳ หมดเวลายืนยัน — ขยายลิมิตให้ 1 ครั้ง (นโยบายปิด)"
+# How many rows are scanned to find out whether the one-shot quota is used up.
+# The lookup is a "did any request get widened by the timeout path recently?"
+# question, not an audit — 20 rows cover every window inside the 7-day TTL cap.
+ONCE_SCAN_ROWS = 20
+# How long a silent widening keeps the one-shot quota spent ("ขยายอัตโนมัติ 1
+# ครั้ง"). A DAY, because the limits being widened are mostly daily losses: "ครั้ง
+# ละ" must give the owner one rescue per breach day, not one for the lifetime of
+# the account (a breach a month later would otherwise find the bot mute).
+ONCE_QUOTA_HOURS = 24.0
 # Same, for a window that lapsed while NO limit is breached any more: the
 # request is retired instead of widening a risk limit the account no longer
 # needs (the flow is ask-first, never "widen because time ran out").
 AUTO_NO_BREACH_BY = "auto:expired-no-breach"
 
-# A window the timeout policy could NOT settle (the settings write keeps failing,
-# or the policy is switched off) leaves the account paused with nothing but an
-# OLD prompt in the owner's hand. Every other outcome reports itself, so this one
-# must too — otherwise a limit silently never widens and trading stays stopped
-# until the owner happens to look at /monitor. Throttled per request id: BOTH
-# workers retry every minute and the row stays pending until something succeeds.
+# A window the timeout policy could NOT settle (the settings write keeps failing)
+# or MAY NOT apply (the one-shot quota is used up) leaves the account paused with
+# nothing but an OLD prompt in the owner's hand. Every other outcome reports
+# itself, so these must too — otherwise a limit silently never widens and trading
+# stays stopped until the owner happens to look at /monitor. Throttled per request
+# id: BOTH workers retry every minute and the row stays pending until something
+# succeeds.
 AUTO_FAIL_NOTIFY_MIN = 360.0
 _FAIL_NOTICES: dict[str, float] = {}
 
-# Settle kinds where the emergency exit must keep DEFERRING (a decision is still
-# owed to the owner): the settings write did not land (``failed`` — the owner's
-# approval is still being honoured and it is retried every cycle) or the
-# auto-apply policy is switched off (``off`` — only the owner can settle it).
-# Owner decisions 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" and "ไม่ปิดไม้
-# รอเจ้าของกดอย่างเดียว (SL/TP ยังทำงาน)". Every other kind is a CLOSED window:
-# applied/skipped/no-breach/retired all settle it. A kind outside this tuple and
-# outside ``SettleResult.settled`` falls through to the guard's usual fail-safe
-# close — a bug must not switch the safety net off.
-HOLD_KINDS = ("failed", "off")
+# Settle kinds where the emergency exit must keep DEFERRING: only ``failed`` —
+# the settings write did not land, so the owner's (implicit) approval is still
+# being honoured and it is retried every cycle. Owner decision 2026-09-14:
+# "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้". Every other kind is a CLOSED window:
+# applied/skipped/no-breach/retired all settle it, and ``capped`` (the one-shot
+# quota is used up, so the silence is final) lets the guard protect the account
+# exactly like any other breach — owner decision 2026-09-14: "ขยายแล้วยังไม่พอ =
+# ปิดไม้ทันที". A kind outside this tuple and outside ``SettleResult.settled``
+# falls through to the guard's usual fail-safe close — a bug must not switch the
+# safety net off.
+HOLD_KINDS = ("failed",)
 
 
 def _fail_notice_due(request_id: str) -> bool:
@@ -160,13 +200,25 @@ def _note_fail_notice(request_id: str) -> None:
 
 
 def _fail_notice(kind: str, ttl: float) -> str:
-    """The one-time warning for a window that ran out and could not be applied.
+    """The one-time warning for a window that ran out and was NOT applied.
 
     Words matter here: NOTHING was widened, so the text never claims it was —
     it says the limits still stand and how to get moving again (the same two
     buttons as the original prompt). Same headline for both causes, so the
-    owner learns the one thing that matters ("ขยายอัตโนมัติไม่สำเร็จ") first.
+    owner learns the one thing that matters ("ขยายอัตโนมัติไม่สำเร็จ") first, and
+    a different tail per cause: a failed write is retried (the book is held),
+    while a used-up one-shot quota is FINAL (the book may be closed).
     """
+    if kind == "capped":
+        # The owner's own switch ("ขยายอัตโนมัติ 1 ครั้ง") is why nothing happens
+        # now — and the emergency exit is about to do its job, so say it.
+        return ("⚠️ ขยายลิมิตอัตโนมัติไม่สำเร็จ\n"
+                f"• รอครบ {ttl:.0f} นาที ไม่มีคำตอบ และระบบขยายให้เองได้แค่ "
+                "ครั้งเดียว (นโยบายปิด)\n"
+                "• ลิมิตเดิมยังมีผล และเทรดยังหยุดอยู่\n"
+                "• ครั้งนี้ระบบจะไม่ขยายให้เอง — ปล่อยให้ kill switch ทำงาน "
+                "(ปิดไม้เพื่อความปลอดภัย)\n"
+                "กดอนุมัติในข้อความเดิมเพื่อทำต่อ หรือแก้ลิมิตที่หน้า Settings")
     why = ("ระบบบันทึกค่าใหม่ไม่ลง (จะลองใหม่ทุกรอบ)" if kind == "failed"
            else "นโยบายขยายอัตโนมัติถูกปิดอยู่")
     # The owner must know the emergency exit is NOT closing the book while we
@@ -188,6 +240,25 @@ def _retired_notice(ttl: float) -> str:
             "• ลิมิตเดิมยังมีผล — ถ้ายังเกินลิมิต ระบบจะส่งคำขอใหม่ให้เอง")
 
 
+def build_capped_notice() -> str:
+    """The one-time report for "the platform stops asking" (one-shot policy).
+
+    ``request_and_notify`` refuses to create a NEW prompt once the account has
+    had its single silent widening, so this is the only message the owner gets
+    while the account stays over the old limits: it must say what did NOT happen
+    and what does — trading stays paused, the kill switch protects the book, and
+    the way forward is Settings (+ /resume). Nothing was widened by this cycle,
+    so the text never claims it was.
+    """
+    return ("⚠️ ครบโควตาขยายลิมิตอัตโนมัติแล้ว (นโยบายขยายอัตโนมัติปิดอยู่)\n"
+            "• ไม่มีคำตอบ และระบบขยายให้เองได้แค่ครั้งเดียวใน 24 ชม.\n"
+            "• คำขอใหม่จะไม่ถูกส่งให้เองอีกจนครบ 24 ชม. — ลิมิตเดิมยังมีผล "
+            "เทรดหยุดอยู่\n"
+            "• ยังเกินลิมิต → kill switch ปิดไม้เพื่อความปลอดภัย\n"
+            "• ต้องการเทรดต่อ: แก้ลิมิตเองที่หน้า Settings แล้วใช้ /resume\n"
+            "• ต้องการให้ขยายเองได้ทุกครั้งที่หมดเวลา → เปิดนโยบายที่หน้า Settings")
+
+
 @dataclass(frozen=True)
 class SettleResult:
     """Outcome of ONE attempt to settle a confirmation window that ran out.
@@ -201,7 +272,9 @@ class SettleResult:
       no-breach  no limit is over any more → retired WITHOUT widening
       retired    the row quotes no limit → cannot ever widen, row closed
       failed     the settings write did not land → row KEPT, retry next cycle
-      off        ``AUTO_APPLY_ON_EXPIRY`` is False → nothing was attempted
+      capped     the one-shot quota is used up (``kill_expand_auto_apply`` is
+                 False and the timeout path already widened once) → nothing was
+                 written and nothing will be: the guard may now close the book
       none       no lapsed window to settle (the common case)
     """
     kind: str
@@ -219,11 +292,13 @@ class SettleResult:
 
     @property
     def holds(self) -> bool:
-        """The emergency exit must keep deferring — the owner is still owed one.
+        """The emergency exit must keep deferring — the expansion is still owed.
 
-        True for ``failed`` (the expansion write keeps failing, retried every
-        cycle) and ``off`` (the auto-apply policy is switched off, so only the
-        owner's own press can settle the request). See ``HOLD_KINDS``.
+        True for ``failed`` only: the settings write keeps failing, the owner's
+        (implicit) approval is still being honoured and it is retried every
+        cycle. See ``HOLD_KINDS``. ``capped`` does NOT hold — the one-shot policy
+        answered this silence already, so the guard closes if the account is
+        still over the widened limits.
         """
         return self.kind in HOLD_KINDS
 
@@ -296,6 +371,74 @@ def _resolve_ttl(db, s: Optional[AppSettings] = None) -> float:
     except Exception as exc:
         log.debug("settings lookup for ttl failed, using default: %s", exc)
         return PENDING_TTL_MIN
+
+
+def auto_apply_enabled(s: Optional[AppSettings] = None) -> bool:
+    """Is the timeout path allowed to widen the limits by itself?
+
+    Settings → ``kill_expand_auto_apply`` (migration 039, default True):
+
+      * True  — EVERY lapsed window is applied ("ขยายอัตโนมัติเมื่อหมดเวลา")
+      * False — only the FIRST lapsed window is applied ("ขยายอัตโนมัติ 1 ครั้ง")
+
+    A caller without settings (an un-migrated row, an older caller) falls back
+    to ``AUTO_APPLY_ON_EXPIRY`` so today's behaviour is kept.
+    """
+    raw = getattr(s, "kill_expand_auto_apply", None) if s is not None else None
+    if raw is None:
+        return AUTO_APPLY_ON_EXPIRY
+    return bool(raw)
+
+
+def silent_widen_count(db) -> int:
+    """How many times the ONE-SHOT policy already widened without an answer.
+
+    Answers the only question the one-shot switch needs: "has the system
+    already rescued this account by itself inside the current quota window?".
+    Counts ``approved`` rows whose ``decided_by`` is ``AUTO_ONCE_BY`` (a
+    widening the TIMEOUT path performed while the policy was OFF) among the
+    newest ``ONCE_SCAN_ROWS`` requests, and only when it happened within
+    ``ONCE_QUOTA_HOURS``. An owner press (``line:*``, ``ui:*``) is NOT a silent
+    widening and never spends the quota, and neither does an ``auto:expired``
+    row: that one was widened while the policy was ON, i.e. under a rule the
+    owner has since changed — the fresh OFF policy still gets its ONE rescue.
+
+    The quota window is why the count is time-bounded: "1 ครั้ง" must mean
+    "at most one silent rescue per day", not "never again for this account".
+    Never raises — an unreadable table counts as 0, the LENIENT direction that
+    can only ever allow the single widening, never a repeated one.
+    """
+    try:
+        rows = _select(db, limit=ONCE_SCAN_ROWS)
+    except Exception as exc:          # pragma: no cover - _select swallows too
+        log.debug("one-shot quota lookup failed: %s", exc)
+        return 0
+    total = 0
+    for row in rows:
+        if str(row.get("status") or "") != "approved":
+            continue
+        if str(row.get("decided_by") or "") != AUTO_ONCE_BY:
+            continue
+        age = _age_min(row.get("requested_at") or row.get("created_at"))
+        # An age the table cannot answer is treated as INSIDE the window: the
+        # fail-safe direction for a risk limit is "do not widen again".
+        if age is None or age <= ONCE_QUOTA_HOURS * 60.0:
+            total += 1
+    return total
+
+
+def timeout_plan(db, s: Optional[AppSettings] = None) -> str:
+    """What the timeout path may do with the lapsed window: apply/once/capped.
+
+    * ``apply`` — the policy is ON: every lapsed window is applied
+    * ``once``  — the policy is OFF and the one-shot quota is still available
+    * ``capped``— the policy is OFF and the system already rescued this account
+                  inside ``ONCE_QUOTA_HOURS``, so this window is NOT applied;
+                  the owner is warned and the kill switch may act
+    """
+    if auto_apply_enabled(s):
+        return "apply"
+    return "capped" if silent_widen_count(db) > 0 else "once"
 
 
 def _select(db, filters: dict | None = None, limit: int = 5) -> list[dict]:
@@ -391,8 +534,9 @@ def pending_request(db, allow_stale: bool = False,
 
     This function is READ-ONLY on purpose (popup poll, GET /limit-expand,
     state()). The window that lapsed is not a dead end any more — the mutating
-    callers settle it (``settle_lapsed_window``, policy ``AUTO_APPLY_ON_EXPIRY``)
-    on their own cycle; a passive poll must never widen a limit as a side effect.
+    callers settle it (``settle_lapsed_window``: widened, retired, or capped by
+    the one-shot policy) on their own cycle; a passive poll must never widen a
+    limit as a side effect.
     """
     rows = _select(db, filters={"status": "pending"}, limit=1)
     if not rows:
@@ -457,8 +601,10 @@ def emergency_hold(db, settings: Optional[AppSettings] = None
     owns it then — see ``settle_lapsed_window``), or we cannot read/date the
     row. None is NOT an instruction to close: the guard then settles the lapsed
     window and closes only if the account is still over the WIDENED limits — a
-    window that cannot be settled (write failure, policy off) keeps deferring,
-    because the owner has not answered either way (owner decisions 2026-09-14).
+    window that cannot be settled (write failure) keeps deferring, because the
+    owner has not been served yet (owner decision 2026-09-14: "ถ้าเขียน DB
+    ไม่สำเร็จห้ามปิดไม้"). A window the one-shot policy refused (``capped``) is
+    NOT such a case and is settled/closed by that call.
 
     Never raises: a DB hiccup must not disable a safety path, so an unreadable
     table means "no hold from this call" (the guard's fail-safe is the close),
@@ -569,7 +715,8 @@ def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
 
     if not patch:
         _mark(db, req, "approved", decided_by)
-        _audit(db, "limit_expanded", req, triggers, approved=True)
+        _audit(db, "limit_expanded", req, triggers, approved=True,
+               decided_by=decided_by)
         log.info("kill expand approved by %s — limits already at/above the "
                  "proposal, nothing written", decided_by)
         return ("ℹ️ ลิมิตปัจจุบันสูงกว่าที่คำขอเสนออยู่แล้ว — ไม่มีการเขียนทับ\n"
@@ -591,7 +738,8 @@ def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
             + " (ลิมิตปัจจุบันสูงกว่าที่คำขอเสนออยู่แล้ว)")
 
     _mark(db, req, "approved", decided_by)
-    _audit(db, "limit_expanded", req, written, approved=True)
+    _audit(db, "limit_expanded", req, written, approved=True,
+           decided_by=decided_by)
 
     # Spec: "อัปเดต max_drawdown + resume ทันที" — resume happens BEFORE the
     # re-evaluation, then the fresh kill state decides whether it stays lifted.
@@ -620,6 +768,16 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
     to the same channels, so a limit never widens silently. See ``SettleResult``
     for the kinds; only ``applied`` / ``skipped`` mean a limit was looked at.
 
+    HOW MANY times the silence may widen is the owner's switch
+    (``kill_expand_auto_apply``, migration 039 → ``timeout_plan``):
+
+      * ON (default) → ``apply``: this window is applied (``auto:expired``)
+      * OFF          → ``once`` when the timeout path has not widened yet
+                       (``auto:once`` — "ขยายอัตโนมัติ 1 ครั้ง"), else ``capped``:
+                       nothing is written, the owner gets ONE warning, and the
+                       row is closed so the emergency exit may protect the
+                       account ("ขยายแล้วยังไม่พอ = ปิดไม้ทันที")
+
     Only mutating callers may call this (``portfolio_monitor`` and
     ``position_guard`` via ``settle_lapsed_window``, and ``decide`` when the
     owner answers late). Read paths (``state``, GET /api/trading/limit-expand,
@@ -637,12 +795,19 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
         return SettleResult(kind, report=report, notice=notice, request_id=rid,
                             age_min=age, ttl_min=ttl)
 
-    if not AUTO_APPLY_ON_EXPIRY:
-        # Nothing is attempted (owner's switch), but the ROW is identified so a
-        # caller can tell the owner once instead of leaving them waiting.
-        return _res("off", notice=_fail_notice("off", ttl))
-
     s = settings or execution.get_app_settings(db)
+    plan = timeout_plan(db, s)
+    if plan == "capped":
+        # One-shot policy ("ขยายอัตโนมัติ 1 ครั้ง") and the quota is used up: the
+        # system already widened once instead of an answer, so a SECOND silence
+        # is final. The row is closed (with a decided_by) so it stops being a
+        # candidate every cycle and the guard is free to close the book — the
+        # owner is warned once per window (``settle_lapsed_window``).
+        _mark(db, row, "expired", AUTO_CAPPED_BY)
+        log.warning("kill expand timeout: auto-expand quota used up — request %s "
+                    "closed without widening (one-shot policy)", row.get("id"))
+        return _res("capped", notice=_fail_notice("capped", ttl))
+
     triggers = list((row.get("detail") or {}).get("triggers") or [])
     if not triggers:
         # A request with no quotable limit can never widen anything: retire it
@@ -664,10 +829,19 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
             "ไม่มีลิมิตที่เกินอยู่แล้ว (ค่ากลับมาอยู่ในกรอบ) — ลิมิตเดิมยังมีผล\n"
             "ถ้าเทรดยังหยุดอยู่ ให้พิมพ์ /resume"))
 
+    once = plan == "once"
+    decided_by = AUTO_ONCE_BY if once else AUTO_DECIDED_BY
     note = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที — ระบบขยายลิมิตให้อัตโนมัติ\n"
             "ปรับเวลาในการรอได้ที่หน้า Settings (รูทีนนี้ทำงานทุก ~1 นาที)")
-    reply, outcome = _approve(db, row, AUTO_DECIDED_BY, note=note,
-                              title=TIMEOUT_TITLE, settings=s)
+    if once:
+        note = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที — ระบบขยายลิมิตให้อัตโนมัติ "
+                "1 ครั้ง\n"
+                "นโยบายขยายอัตโนมัติถูกปิดอยู่: ระบบขยายให้เองได้ครั้งเดียว "
+                "ครั้งต่อไปถ้ายังไม่ตอบและยังเกินลิมิตใหม่ = kill switch ปิดไม้\n"
+                "ต้องการให้ขยายเองได้ทุกครั้งที่หมดเวลา → เปิดในหน้า Settings")
+    reply, outcome = _approve(db, row, decided_by, note=note,
+                              title=ONCE_TITLE if once else TIMEOUT_TITLE,
+                              settings=s)
     if outcome == "failed":
         # The row stays OPEN so the next cycle retries; the owner is warned at
         # most once per window (the retry would otherwise repeat every minute).
@@ -678,8 +852,8 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
         log.info("kill expand timeout settled without writing (request %s)",
                  row.get("id"))
         return _res("skipped", report=reply)
-    log.warning("kill expand AUTO-APPLIED after %.0f min of silence (ttl %.0f)",
-                age, ttl)
+    log.warning("kill expand AUTO-APPLIED (%s) after %.0f min of silence "
+                "(ttl %.0f)", decided_by, age, ttl)
     return _res("applied", report=reply)
 
 
@@ -706,10 +880,13 @@ def settle_lapsed_window(db, settings, notifier,
     * settled (``applied``/``skipped``/``no-breach``/``retired``) → the report
       is pushed, and the owner knows exactly what happened (including "nothing
       needed writing", which must NOT be worded as a widening);
-    * NOT settled (``failed``/``off``, see ``HOLD_KINDS``) → a warning is pushed
-      at most once per ``AUTO_FAIL_NOTIFY_MIN`` (both workers retry every
+    * NOT settled and HOLDING (``failed``, see ``HOLD_KINDS``) → a warning is
+      pushed at most once per ``AUTO_FAIL_NOTIFY_MIN`` (both workers retry every
       minute, and the request stays open until it can be settled); callers must
-      keep the emergency exit DEFERRED rather than closing the book.
+      keep the emergency exit DEFERRED rather than closing the book;
+    * NOT settled and NOT holding (``capped`` — the one-shot quota is used up) →
+      the same one-warning-per-window is pushed, the row is CLOSED, and callers
+      may let the guard protect the account as usual.
     """
     res = settle_expired(db, settings)
     if res.settled:
@@ -761,11 +938,18 @@ def decide(db, decision: str, decided_by: str = "line",
         late = req is not None
     if not req:
         last = latest_request(db) or {}
-        if str(last.get("decided_by") or "") == AUTO_DECIDED_BY:
+        if str(last.get("decided_by") or "") in AUTO_WIDEN_BY:
             return ("⏳ คำขอนี้หมดเวลายืนยันและระบบขยายลิมิตไปอัตโนมัติแล้ว\n"
                     f"• ลิมิตล่าสุดที่เขียนไป: {last.get('limit_before')}% → "
                     f"{last.get('limit_after')}%\n"
                     "ถ้าไม่ต้องการ ให้แก้ลิมิตกลับได้ที่หน้า Settings")
+        if str(last.get("decided_by") or "") == AUTO_CAPPED_BY:
+            # One-shot policy: this window was CLOSED without widening, so the
+            # generic reply below ("ระบบจะส่งคำขอใหม่ให้อัตโนมัติ") would be a lie.
+            return ("⏳ คำขอนี้หมดเวลายืนยัน และระบบไม่ขยายลิมิตให้\n"
+                    "• โควตาขยายอัตโนมัติ (1 ครั้ง) ถูกใช้ไปแล้ว และนโยบายปิดอยู่\n"
+                    "• ลิมิตเดิมยังมีผล — แก้ลิมิตเองที่หน้า Settings ได้\n"
+                    "หรือเปิดนโยบายขยายอัตโนมัติที่หน้า Settings")
         ttl = _resolve_ttl(db, settings)
         return ("ℹ️ ไม่มีคำขอขยายลิมิตที่รอการยืนยันอยู่\n"
                 "ถ้ายังเกินลิมิต ระบบจะส่งคำขอใหม่ให้อัตโนมัติ "
@@ -841,8 +1025,8 @@ def state(db, s: AppSettings, paused: bool = False,
     ttl = ttl_minutes(s)
     req = pending_request(db, settings=s)   # read-only; a lapsed row is applied
     # A row whose window LAPSED is normally settled by the timeout policy within
-    # a minute, but when it cannot be (the settings write fails, or the policy is
-    # off) it stays open — and the emergency exit is deferred the whole time. The
+    # a minute, but when it cannot be (the settings write fails) it stays open —
+    # and the emergency exit is deferred the whole time. The
     # owner must still be able to answer from the desk, so keep showing it and
     # flag it as lapsed (the LINE buttons on the original prompt are the other
     # way in). ``decide`` accepts such a press and says so in its reply.
@@ -870,6 +1054,14 @@ def state(db, s: AppSettings, paused: bool = False,
         "setup_required": (not req) and bool(live) and not table_ready(db),
         "step_pct": EXPAND_STEP_PCT,
         "ttl_min": ttl,
+        # What the timeout policy will do with THIS window ("ขยายอัตโนมัติ 1
+        # ครั้ง", migration 039): "apply" = ทุกครั้งที่หมดเวลา, "once" =
+        # ได้อีกครั้งเดียว, "capped" = หมดโควตาแล้ว (ปิดคำขอ + kill switch
+        # ทำงาน). The popup reads these so its copy can never promise a
+        # widening the policy will refuse.
+        "auto_apply": auto_apply_enabled(s),
+        "auto_apply_once": not auto_apply_enabled(s),
+        "lapsed_closes": (not auto_apply_enabled(s)) and bool(req),
         "approve_command": "/dd_ok",
         "reject_command": "/dd_no",
     }
@@ -889,6 +1081,13 @@ def request_and_notify(db, s: AppSettings, notifier, user_id: str = "",
     the breach may already be gone, in which case ``request_expand`` simply
     reports ``no_breach``. A window that could NOT be settled is reported once
     (throttled) and the ``failed`` row is retried on the next cycle.
+
+    One-shot policy (``kill_expand_auto_apply`` False, migration 039): once the
+    account has had its ONE silent widening, this stops asking for more
+    (``reason="auto_capped"``, reported once). A fresh prompt would re-arm the
+    guard's hold and the book would never close — the owner's decision was
+    "ขยายแล้วยังไม่พอ = ปิดไม้ทันที": the silence has been answered, so the
+    emergency exit must be free to act, and the way back in is Settings + /resume.
     """
     target = user_id or DEFAULT_USER
     settle, notified = settle_lapsed_window(db, s, notifier, target)
@@ -897,6 +1096,22 @@ def request_and_notify(db, s: AppSettings, notifier, user_id: str = "",
                 "auto_applied": True, "triggers": [],
                 "request": latest_request(db), "notified": notified,
                 "auto_kind": settle.kind}
+
+    if (not auto_apply_enabled(s)) and silent_widen_count(db) > 0:
+        # The one-shot quota is spent (this window was `capped` or an earlier one
+        # was) → do NOT stack another unanswerable prompt on the owner. The
+        # warning is throttled like the other timeout notices; the settle above
+        # already pushed its own message for the window that just lapsed.
+        if settle.kind != "capped" and _fail_notice_due("auto_capped"):
+            sent = _dispatch(notifier, target, "limit_expand",
+                             build_capped_notice(), quick_reply_items())
+            if sent:
+                _note_fail_notice("auto_capped")
+            notified = notified or sent
+        return {"requested": False, "reason": "auto_capped",
+                "auto_applied": False, "triggers": [],
+                "request": latest_request(db), "notified": notified,
+                "auto_kind": "capped"}
 
     res = request_expand(db, s, source=source)
     reason = res.get("reason")
@@ -974,16 +1189,19 @@ def _persist_settings(db, merged: AppSettings) -> bool:
 
 
 def _audit(db, event_type: str, req: dict, triggers: list[dict],
-           approved: bool) -> None:
+           approved: bool, decided_by: str = "") -> None:
     """risk_events row (same shape monitor writes for limit_breach).
 
     DB.insert swallows errors, and the authoritative audit trail is the
     kill_expand_requests row itself (status/decided_at/decided_by/detail) —
-    this row is for the existing risk-event views.
+    this row is for the existing risk-event views. ``decided_by`` is copied in
+    so the Logs/Audit screen can tell an OWNER approval from a timeout widening
+    (``auto:expired`` / ``auto:once``) without joining the request table.
     """
     write_audit(db, event_type, {
         "request_id": req.get("id"),
         "approved": approved,
+        "decided_by": decided_by or str(req.get("decided_by") or ""),
         "triggers": triggers,
         "requested_at": req.get("requested_at"),
         "limit_before": req.get("limit_before"),
