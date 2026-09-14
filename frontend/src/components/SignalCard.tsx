@@ -5,8 +5,7 @@ import { API_BASE, SignalProposal } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
 import CopyNum from "@/components/CopyNum";
 import Icon from "@/components/Icon";
-import LimitLevels from "@/components/LimitLevels";
-import SltpLevels from "@/components/SltpLevels";
+import SignalLevels from "@/components/SignalLevels";
 import ReasonList from "@/components/ReasonList";
 import CalcNotes from "@/components/CalcNotes";
 
@@ -62,12 +61,6 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         <Field label="Risk / Trade" value={`${signal.risk_per_trade_pct}%`} />
         <Field label="Entry" value={<CopyNum value={signal.entry} />} />
         <Field label="RR" value={`1 : ${signal.expected_rr}`} />
-        {/* ขนาดไม้ที่จะเข้าจริง (lots) — คำนวณ read-time สูตรเดียวกับ order */}
-        <div className="col-span-2">
-          <Field label="ขนาดไม้" value={signal.suggested_lots != null ? (
-            <span className="inline-flex items-center rounded-full bg-accent/30 text-accent px-2 py-0.5">{signal.suggested_lots.toFixed(2)} lots</span>
-          ) : "—"} />
-        </div>
         {/* SL/TP หลักเป็น pill สี (แดง/เขียว) แบบเดียวกับ SltpLevels + SignalLogsPanel */}
         <Field label="Stop Loss" value={<span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5"><CopyNum value={signal.stop_loss} /></span>} />
         <Field label="Take Profit" value={<span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5"><CopyNum value={signal.take_profit} /></span>} />
@@ -86,6 +79,15 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
           )}
         </div>
       )}
+      {/* ขนาดไม้ที่จะเข้าจริง (lots) — คำนวณ read-time สูตรเดียวกับ order */}
+      <div className="mb-2 flex items-center gap-2 rounded border border-accent/30 bg-accent/5 px-2 py-1 text-xs">
+        <span className="text-slate-400">ขนาดไม้</span>
+        {signal.suggested_lots != null ? (
+          <span className="inline-flex items-center rounded-full bg-accent/30 text-accent px-2 py-0.5 font-semibold">{signal.suggested_lots.toFixed(2)} lots</span>
+        ) : (
+          <span className="text-slate-500">—</span>
+        )}
+      </div>
       {signal.approval !== "approved" && signal.expires_min_left != null && (
         // นับถอยหลัง: อีกกี่นาทีก่อนสัญญาณหมดอายุและระบบเริ่มประเมินใหม่
         // (TTL 30 นาที) — เหลือ <10 นาทีเปลี่ยนเป็นสีเตือน
@@ -100,9 +102,8 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
           </span>
         </div>
       )}
-      <LimitLevels signal={signal} />
-      {/* SL/TP ด้านบนคือค่า effective (tier + SL cap = ที่ระบบจะยิงจริง) — 3 ระดับด้านล่างเป็นอ้างอิงแบบพับไว้ */}
-      <SltpLevels signal={signal} />
+      {/* SL/TP ด้านบนคือค่า effective (tier + SL cap = ที่ระบบจะยิงจริง) — 3 ระดับล่างรวมในพับเดียว */}
+      <SignalLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
       <ReasonList reasons={signal.reason} />
       {/* ขั้นตอนคำนวณทีละขั้น (SL/TP/ขนาดไม้/สเปรด) — ไม่เหลือตัวเลขลอยๆ */}
