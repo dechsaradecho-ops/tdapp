@@ -38,6 +38,7 @@ from app.models.schemas import (
     contract_value_for,
     effective_min_confidence,
     effective_min_lot,
+    effective_sl_tp,
     effective_spread,
     risk_to_lot,
     risk_to_lot_for,
@@ -860,24 +861,33 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                      direction, asset, entry, live_price)
             entry = live_price
 
-    # sl_distance_mode: stored signal rows always carry the กลาง (×1.5 ATR)
-    # SL/TP (the default tier). If the user picked สั้น/ยาว in Settings,
-    # re-derive SL/TP for the chosen tier from the entry and the base
-    # (×1.5) distance so the REAL order matches the tier shown on the card.
-    # Sizing also uses the re-derived SL so risk_per_trade_pct stays honest.
+    # Effective SL/TP (single shared math with the signal card): stored
+    # rows carry กลาง (×1.5) prices — re-derive for sl_distance_mode, then
+    # tighten to the risk-budget cap. Skipped for extended-open (explicit
+    # plan-leg volume the user reviewed — SL/TP belong to the plan).
+    # Sizing then runs on the effective SL, so the floor + heat gate see
+    # honest risk and the card preview (same helper) matches.
+    cap_note = ""
     if entry > 0 and stop_loss:
-        base_dist = abs(entry - float(stop_loss))
-        if base_dist > 0 and getattr(s, "sl_distance_mode", "medium") != "medium":
-            sign = 1 if str(direction).upper() == "BUY" else -1
-            tier = {"short": 1.0, "medium": 1.5, "long": 2.0}.get(
-                s.sl_distance_mode, 1.5)
-            dist = base_dist * (tier / 1.5)
-            stop_loss = round(entry - sign * dist, 5)
-            if take_profit:
-                rr = abs(float(take_profit) - entry) / base_dist
-                take_profit = round(entry + sign * dist * rr, 5)
-            log.info("sl_distance_mode=%s → %s %s SL %.5f", s.sl_distance_mode,
-                     direction, asset, stop_loss)
+        try:
+            _eff_sl, _eff_tp, _eff_dist, _tiered, _capped = effective_sl_tp(
+                s, entry, float(stop_loss), float(take_profit or 0),
+                asset, direction,
+                apply_cap=not (volume and float(volume) > 0))
+            if _tiered:
+                log.info("sl_distance_mode=%s → %s %s SL %.5f",
+                         s.sl_distance_mode, direction, asset, _eff_sl)
+            if _tiered or _capped:
+                stop_loss = _eff_sl
+                if take_profit:
+                    take_profit = _eff_tp
+            if _capped:
+                cap_note = (f"SL เกินงบ → รัด {float(stop_loss):g} "
+                            f"(เสี่ยงเท่างบ {float(s.risk_per_trade_pct or 0):g}%)")
+                log.info("sl_cap %s %s: capped SL → %.5f (%s)",
+                         direction, asset, stop_loss, cap_note)
+        except Exception as exc:
+            log.warning("effective_sl_tp failed for %s: %s", asset, exc)
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
                            entry=entry, stop_loss=stop_loss)
     if not report.allowed:
@@ -942,7 +952,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         ticket=str(result.broker_order_id or ""), volume=lots,
         reason=f"เปิดออเดอร์ {direction} {lots:g} lots @ {fill_price:g} (" + (
             "auto" if source == "auto" else "อนุมัติเอง") + ")" + (
-            f" — {reanchor_note}" if reanchor_note else ""))
+            f" — {reanchor_note}" if reanchor_note else "") + (
+            f" — {cap_note}" if cap_note else ""))
     if notifier is not None:
         try:
             await notifier.notify(

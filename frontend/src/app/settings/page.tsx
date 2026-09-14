@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sl_distance_mode: "medium",
   sl_distance_min_pct: 0,
   sl_distance_max_pct: 0,
+  sl_cap_enabled: true,
   default_equity: 10_000,
   paper_virtual_capital: 100_000,
   backtest_days: 120,
@@ -838,6 +839,22 @@ export default function SettingsPage() {
                 บังคับระยะ SL ทุกสัญลักษณ์ให้อยู่ในแถบ % นี้ (0 = ไม่จำกัด) — ใส่ค่าเท่ากันทั้งสองช่อง
                 เช่น 0.8/0.8 เพื่อให้ทุกไม้เสี่ยงระยะเท่ากัน แก้ปัญหา SL ห่างไม่เท่ากันเพราะ ATR ต่างกัน
               </p>
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1">
+                  <p className="text-sm">SL ไม่เกินงบ (sl_cap_enabled)</p>
+                  <p className="text-xs text-slate-500">
+                    เปิด = SL กว้างถูกรัดลงมาให้ floor lot เสี่ยงเท่างบ (TP ขยับตาม RR เดิม) — ปิด = ใช้ SL เดิม เสี่ยงเกินงบได้
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.sl_cap_enabled}
+                  aria-label="SL ไม่เกินงบ"
+                  onClick={() => toggleNotify("sl_cap_enabled", !cfg.sl_cap_enabled)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.sl_cap_enabled ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.sl_cap_enabled ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
               <label className="block text-sm">
                 Risk Profile
                 <div className="flex items-center gap-2 mt-1">

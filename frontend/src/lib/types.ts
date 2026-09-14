@@ -674,6 +674,9 @@ export interface AppSettings {
   /** SL distance clamp (% of price) — 0 disables a bound; min=max forces a fixed distance */
   sl_distance_min_pct: number;
   sl_distance_max_pct: number;
+  /** SL risk cap — tighten a wide SL so the floor-sized order never risks
+   *  over the per-trade budget (false = keep the structural SL) */
+  sl_cap_enabled: boolean;
   default_equity: number;
   paper_virtual_capital: number;
   backtest_days: number;

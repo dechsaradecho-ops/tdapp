@@ -594,6 +594,99 @@ class TestSignalsLatestTiers:
         assert body[0]["live_price"] is None
         assert body[0]["feed_status"]["state"] == "error"
 
+    @pytest.mark.asyncio
+    async def test_card_effective_short_tightens_vs_raw_tiers(self, monkeypatch):
+        """Effective-primary: mode short → การ์ดโชว์ SL รัด (33.3 pips)
+        ส่วน sltp_levels ยังเป็น raw 3 ระดับ (กลาง = ราคาแถวดิบ)."""
+        import app.api.routes.signals as signals_route
+        from app.models.schemas import AppSettings
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", no_spot)
+        monkeypatch.setattr(
+            signals_route, "get_app_settings",
+            lambda _db: AppSettings(sl_distance_mode="short"))
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "EURUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 1.0850, "stop_loss": 1.0800,
+             "take_profit": 1.0950, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        card = body[0]
+        assert card["stop_loss"] == pytest.approx(
+            round(1.0850 - 0.0050 * (1.0 / 1.5), 5), abs=1e-9)
+        assert card["take_profit"] == pytest.approx(
+            round(1.0850 + 0.0050 * (1.0 / 1.5) * 2, 5), abs=1e-4)
+        # 3-tier อ้างอิงยังดิบ: กลาง (index 1) = ราคาแถวเดิม
+        assert len(card["sltp_levels"]) == 3
+        assert card["sltp_levels"][1]["stop_loss"] == pytest.approx(1.0800)
+        # tier สั้น (index 0) ตรงกับค่า effective ด้านบน
+        assert card["sltp_levels"][0]["stop_loss"] == pytest.approx(
+            card["stop_loss"])
+        assert any("Tier SL" in n for n in card["calc_notes"])
+
+    @pytest.mark.asyncio
+    async def test_card_effective_long_widens(self, monkeypatch):
+        """mode long → การ์ดโชว์ SL กว้าง (66.7 pips)."""
+        import app.api.routes.signals as signals_route
+        from app.models.schemas import AppSettings
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", no_spot)
+        monkeypatch.setattr(
+            signals_route, "get_app_settings",
+            lambda _db: AppSettings(sl_distance_mode="long"))
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "EURUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 1.0850, "stop_loss": 1.0800,
+             "take_profit": 1.0950, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["stop_loss"] == pytest.approx(
+            round(1.0850 - 0.0050 * (2.0 / 1.5), 5), abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_card_effective_cap_matches_order(self, monkeypatch):
+        """SL กว้างเกินงบ → การ์ดโชว์ SL รัด + TP ตาม RR + ladder ใช้ระยะ
+        effective (ตรงกับ execute_signal)."""
+        import app.api.routes.signals as signals_route
+        from app.models.schemas import AppSettings
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", no_spot)
+        monkeypatch.setattr(
+            signals_route, "get_app_settings",
+            lambda _db: AppSettings(capital=200.0, risk_per_trade_pct=4.0,
+                                    min_lot=0.02, kill_daily_loss_pct=500.0))
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "AUDNZD", "direction": "buy",
+             "confidence": 85.0, "entry": 1.10000, "stop_loss": 1.09324,
+             "take_profit": 1.11352, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        card = body[0]
+        assert card["stop_loss"] == pytest.approx(1.10000 - 0.00400, abs=1e-9)
+        assert card["take_profit"] == pytest.approx(
+            1.10000 + 0.00400 * 2, abs=1e-4)
+        # raw reference ยังกว้างเหมือนแถวดิบ
+        assert card["sltp_levels"][1]["stop_loss"] == pytest.approx(1.09324)
+        # ladder ใช้ effective: ชั้นแรก = entry − 0.25 × 0.004
+        assert card["limit_levels"][0]["price"] == pytest.approx(
+            round(1.10000 - 0.25 * 0.00400, 5), abs=1e-9)
+        assert any("รัด" in n for n in card["calc_notes"])
+
 
 # ---------------------------------------------------------------------------
 # /api/signals/approve — write path

@@ -657,7 +657,7 @@ def test_risk_presets_moderate_matches_defaults():
 
 
 def test_apply_risk_preset_only_touches_owned_fields():
-    """Preset switch changes the 34 owned fields, keeps user identity."""
+    """Preset switch changes the 37 owned fields, keeps user identity."""
     from app.models.schemas import RISK_PRESET_FIELDS, apply_risk_preset
     base = AppSettings(capital=50_000, min_lot=0.05,
                        allowed_assets=["EURUSD"],
@@ -671,7 +671,7 @@ def test_apply_risk_preset_only_touches_owned_fields():
     assert out.capital == 50_000 and out.min_lot == 0.05
     assert out.allowed_assets == ["EURUSD"]
     assert out.notify_trade_opened is False
-    assert len(RISK_PRESET_FIELDS) == 36
+    assert len(RISK_PRESET_FIELDS) == 37
 
 
 def test_apply_risk_preset_conservative_is_tighter_than_aggressive():

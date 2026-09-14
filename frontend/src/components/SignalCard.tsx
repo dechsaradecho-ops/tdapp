@@ -94,7 +94,7 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         </div>
       )}
       <LimitLevels signal={signal} />
-      {/* ระยะ SL/TP 3 ระดับ (สั้น/กลาง/ยาว) จาก entry เดียวกัน — highlight ตาม sl_distance_mode */}
+      {/* SL/TP ด้านบนคือค่า effective (tier + SL cap = ที่ระบบจะยิงจริง) — 3 ระดับด้านล่างเป็นอ้างอิงแบบพับไว้ */}
       <SltpLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
       <ReasonList reasons={signal.reason} />

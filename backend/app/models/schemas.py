@@ -347,8 +347,8 @@ TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
 # touched, so switching profile changed almost nothing. RISK_PRESETS is the
 # single source of truth: every field the profile owns, per level.
 #
-# Owns (34 fields): frequency ×4, signal gates ×7, position mgmt ×5,
-# Smart Exit ×10, kill/risk/news/correlation ×8.
+# Owns (37 fields): frequency ×4, signal gates ×8, position mgmt ×5,
+# Smart Exit ×12, kill/risk/news/correlation ×8.
 # Deliberately EXCLUDED (user identity, not risk appetite): capital,
 # min_confidence_gold / min_lot_gold overrides, min_lot floor, paper_spread /
 # spread_overrides, order_mode, default_equity / paper_virtual_capital,
@@ -364,7 +364,7 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "min_confidence": 75.0, "min_opportunity": 65.0,
         "gold_breakout_only": True, "sl_distance_mode": "medium",
         "rr_target": 1.5, "sl_distance_min_pct": 0.0,
-        "sl_distance_max_pct": 0.0,
+        "sl_distance_max_pct": 0.0, "sl_cap_enabled": True,
         # position mgmt — protect early, hold briefly
         "breakeven_trigger_r": 0.8, "trail_atr_mult": 1.5,
         "partial_close_pct": 50.0, "partial_trigger_r": 1.0,
@@ -388,7 +388,7 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "min_confidence": 70.0, "min_opportunity": 60.0,
         "gold_breakout_only": True, "sl_distance_mode": "medium",
         "rr_target": 2.0, "sl_distance_min_pct": 0.0,
-        "sl_distance_max_pct": 0.0,
+        "sl_distance_max_pct": 0.0, "sl_cap_enabled": True,
         "breakeven_trigger_r": 1.0, "trail_atr_mult": 2.0,
         "partial_close_pct": 0.0, "partial_trigger_r": 1.0,
         "max_hold_days": 5,
@@ -411,7 +411,7 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "min_confidence": 65.0, "min_opportunity": 55.0,
         "gold_breakout_only": False, "sl_distance_mode": "long",
         "rr_target": 3.0, "sl_distance_min_pct": 0.0,
-        "sl_distance_max_pct": 0.0,
+        "sl_distance_max_pct": 0.0, "sl_cap_enabled": True,
         # position mgmt — let winners run, hold longer
         "breakeven_trigger_r": 1.5, "trail_atr_mult": 3.0,
         "partial_close_pct": 0.0, "partial_trigger_r": 2.0,
@@ -499,6 +499,119 @@ def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
         return base
     gold = getattr(settings, "min_lot_gold", None)
     return base if gold is None else float(gold)
+
+
+def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
+    """Max SL distance (price units) that fits the risk budget at min lot.
+
+    Even the SMALLEST allowed order (effective_min_lot) risks
+    dist × floor × contract — when the signal's SL is wider than this, the
+    floor pushes the real risk over risk_per_trade_pct (prod AUDNZD:
+    0.00676 × 0.02 × 100k = $13.52 = 6.76% vs a 4% budget). Returns 0.0
+    when the cap feature is off or the budget is invalid (callers treat
+    0.0 as "no cap").
+    """
+    try:
+        if not bool(getattr(settings, "sl_cap_enabled", False)):
+            return 0.0
+        budget = float(getattr(settings, "capital", 0) or 0) \
+            * float(getattr(settings, "risk_per_trade_pct", 0) or 0) / 100.0
+        floor = effective_min_lot(settings, asset)
+        contract = contract_value_for(str(asset or ""))
+        if budget <= 0 or floor <= 0 or contract <= 0:
+            return 0.0
+        return budget / (floor * contract)
+    except Exception:
+        return 0.0
+
+
+def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
+                 asset: Optional[str], direction: str = "BUY"
+                 ) -> tuple[float, float, bool]:
+    """Tighten a wide SL down to the risk-budget cap. Returns (sl, dist, capped).
+
+    SL is structural (ATR/breakout/clamp) so it is never WIDENED — only
+    narrowed when sl_cap_enabled AND the distance exceeds sl_cap_distance.
+    TP is re-derived at the same RR so the reward:risk promise holds.
+    (0.0, 0.0, False) when there is nothing to cap.
+    """
+    try:
+        if not entry or not stop_loss:
+            return stop_loss, 0.0, False
+        cap = sl_cap_distance(settings, asset)
+        dist = abs(float(entry) - float(stop_loss))
+        if cap <= 0 or dist <= cap:
+            return stop_loss, dist, False
+        sign = -1.0 if str(direction or "").upper() == "SELL" else 1.0
+        return round(float(entry) - sign * cap, 5), cap, True
+    except Exception:
+        return stop_loss, 0.0, False
+
+
+# Tier multiples for sl_distance_mode — single source so execute_signal and
+# the signal-card preview can never drift apart (stored rows always carry
+# the กลาง ×1.5 prices; short/long re-derive from the base distance).
+SL_TIER_MULT: dict[str, float] = {"short": 1.0, "medium": 1.5, "long": 2.0}
+
+
+def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
+                    take_profit: float, asset: Optional[str],
+                    direction: str = "BUY", apply_cap: bool = True
+                    ) -> tuple[float, float, float, bool, bool]:
+    """One shared math for tier + cap: card preview == real order.
+
+    Stored signal rows always carry the กลาง (×1.5) SL/TP. This applies, in
+    order, the SAME steps execute_signal uses:
+      1. tier re-derive from sl_distance_mode (short ×1.0 / long ×2.0,
+         TP keeps the row's RR),
+      2. SL risk cap (tighten-only, TP re-derived at the tier RR).
+    Returns (sl, tp, dist, tier_applied, capped). Fail-safe: any bad input
+    passes the originals through so a preview never blocks a card.
+    apply_cap=False skips step 2 (extended-open: explicit plan-leg volume
+    the user reviewed — SL/TP belong to the plan).
+    """
+    try:
+        if not entry or not stop_loss:
+            return stop_loss, take_profit, 0.0, False, False
+        base_dist = abs(float(entry) - float(stop_loss))
+        if base_dist <= 0:
+            return stop_loss, take_profit, 0.0, False, False
+        mode = str(getattr(settings, "sl_distance_mode", "medium") or "medium")
+        mult = SL_TIER_MULT.get(mode, 1.5)
+        sign = 1.0 if str(direction or "").upper() == "BUY" else -1.0
+        sl = float(stop_loss)
+        tp = float(take_profit) if take_profit else 0.0
+        dist = base_dist
+        tier_applied = (mode != "medium" and mult != 1.5)
+        if tier_applied:
+            # Same as execute_signal: RR measured from the ROW, TP scaled
+            # proportionally so the reward:risk promise holds.
+            row_rr = (abs(float(take_profit) - float(entry)) / base_dist
+                      if take_profit and base_dist > 0 else 0.0)
+            dist = base_dist * (mult / 1.5)
+            sl = round(float(entry) - sign * dist, 5)
+            if tp and row_rr > 0:
+                tp = round(float(entry) + sign * dist * row_rr, 5)
+        capped = False
+        if apply_cap:
+            # Same as execute_signal: RR measured from the TIER sl/tp
+            # (equals the row RR — the tier preserves it — but recomputed
+            # from the tier values so the two paths can never drift apart).
+            new_sl, cap_dist, capped = apply_sl_cap(
+                settings, float(entry), sl, asset, direction)
+            if capped:
+                rr_keep = (abs(tp - float(entry)) / abs(float(entry) - sl)
+                           if tp and abs(float(entry) - sl) > 0 else 0.0)
+                sl = new_sl
+                dist = cap_dist
+                if tp and rr_keep > 0:
+                    tp = round(float(entry) + sign * cap_dist * rr_keep, 5)
+        return sl, tp, dist, tier_applied, capped
+    except Exception:
+        try:
+            return stop_loss, take_profit, abs(float(entry) - float(stop_loss)), False, False
+        except Exception:
+            return stop_loss, take_profit, 0.0, False, False
 
 
 # ---------- Per-symbol paper spread ----------------------------------------
@@ -1896,6 +2009,15 @@ class AppSettings(BaseModel):
     # to the same value (e.g. 0.8/0.8) to force a fixed SL distance.
     sl_distance_min_pct: float = 0.0
     sl_distance_max_pct: float = 0.0
+    # ---- SL risk cap (SL กว้างแค่ไหนก็ไม่เกินงบ) ---------------------------
+    # The min_lot floor can push the REAL risk over the budget when the SL
+    # is wide (prod AUDNZD: SL 0.00676 x floor 0.02 x 100k = $13.52 = 6.76%
+    # vs a 4% = $8 budget). When True, execute_signal tightens such stops to
+    # budget / (floor x contract) BEFORE sizing (never widens a tight SL),
+    # and TP is re-derived at the same RR. The signal card preview shows the
+    # same capped SL so the card matches the real order. Default True - the
+    # budget promise "risk_per_trade_pct" must hold for every order.
+    sl_cap_enabled: bool = True
     default_equity: float = 10_000.0
     paper_virtual_capital: float = 100_000.0
 

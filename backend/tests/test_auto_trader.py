@@ -463,6 +463,162 @@ class TestGatePipeline:
         assert order.entry_price == pytest.approx(2400.15, abs=1e-3)
 
     @pytest.mark.asyncio
+    async def test_sl_cap_tightens_wide_sl_to_budget(self, broker, notifier):
+        """Option A: SL กว้าง + floor ดันเสี่ยงเกินงบ → รัด SL ลงมาให้พอดีงบ.
+
+        Prod AUDNZD: SL 0.00676 × floor 0.02 × 100k = $13.52 = 6.76% vs
+        งบ 4% = $8 → capped SL 0.00400, TP ขยับตาม RR เดิม, order เสี่ยง $8."""
+        db = FakeDatabase()
+        s = clean_settings(capital=200.0, risk_per_trade_pct=4.0, min_lot=0.02,
+                           kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="AUDNZD", direction="BUY",
+            entry=1.10000, stop_loss=1.09324, take_profit=1.11352,  # SL 0.00676, RR 2
+            confidence=85.0, opportunity=80.0, signal_id="sig-cap", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == pytest.approx(1.10000 - 0.00400, abs=1e-9)
+        assert order.take_profit == pytest.approx(1.10000 + 0.00400 * 2, abs=1e-4)
+        assert order.volume == pytest.approx(0.02, abs=1e-9)
+        risk = abs(order.entry_price - order.stop_loss) * order.volume * 100_000
+        # fill = entry + spread/2 (AUDNZD 0.00035 → +0.000175) so the fill-to-SL
+        # risk is $8.35, not $8.00 — mid-to-SL is exactly on budget:
+        assert abs(entry_risk := (1.10000 - order.stop_loss) * order.volume * 100_000 - 8.0) < 1e-6
+        assert risk <= 8.0 + 0.5
+
+    @pytest.mark.asyncio
+    async def test_sl_cap_off_keeps_wide_sl(self, broker, notifier):
+        """sl_cap_enabled=False → SL เดิมผ่าน (เสี่ยงเกินงบได้, พฤติกรรมเดิม)."""
+        db = FakeDatabase()
+        s = clean_settings(capital=200.0, risk_per_trade_pct=4.0, min_lot=0.02,
+                           sl_cap_enabled=False, kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="AUDNZD", direction="BUY",
+            entry=1.10000, stop_loss=1.09324, take_profit=1.11352,
+            confidence=85.0, opportunity=80.0, signal_id="sig-nocap", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == pytest.approx(1.09324, abs=1e-9)
+        assert order.take_profit == pytest.approx(1.11352, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_sl_cap_never_widens_tight_sl(self, broker, notifier):
+        """SL แคบกว่างบอยู่แล้ว → ไม่แตะ (รัดอย่างเดียว ไม่ขยาย)."""
+        db = FakeDatabase()
+        s = clean_settings()  # capital 10k × 1% = $100, floor 0.01 → cap 0.10
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            confidence=85.0, opportunity=80.0, signal_id="sig-tight", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == 1.0800
+        assert order.volume == pytest.approx(0.2, abs=0.02)
+
+    @pytest.mark.asyncio
+    async def test_sl_cap_skipped_for_extended_open_volume(self, broker, notifier):
+        """extended-open ส่ง volume ชัดเจน → ไม่รัด SL (SL/TP เป็นของแผน)."""
+        db = FakeDatabase()
+        s = clean_settings(capital=200.0, risk_per_trade_pct=4.0, min_lot=0.02,
+                           kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="AUDNZD", direction="BUY",
+            entry=1.10000, stop_loss=1.09324, take_profit=1.11352,
+            confidence=85.0, opportunity=80.0, signal_id="sig-ext", source="extended",
+            volume=0.01,
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        assert order.stop_loss == pytest.approx(1.09324, abs=1e-9)
+        assert order.volume == pytest.approx(0.01, abs=1e-9)
+
+    def test_sl_cap_distance_uses_gold_contract_and_floor(self):
+        """Gold: cap = budget ÷ (floor_gold × 100oz); ปิดสวิตช์ → 0.0."""
+        from app.models.schemas import apply_sl_cap, sl_cap_distance
+        s = clean_settings(capital=10_000.0, risk_per_trade_pct=1.0,
+                           min_lot=0.01, min_lot_gold=0.05)
+        assert sl_cap_distance(s, "XAUUSD") == pytest.approx(100 / (0.05 * 100))
+        assert sl_cap_distance(s, "EURUSD") == pytest.approx(100 / (0.01 * 100_000))
+        off = clean_settings(sl_cap_enabled=False)
+        assert sl_cap_distance(off, "EURUSD") == 0.0
+        # SELL direction: cap เหนือ entry (SL 1.2700 ห่าง 0.185 > ฝา 0.10 → รัดที่ 1.1850)
+        sl, dist, capped = apply_sl_cap(s, 1.0850, 1.2700, "EURUSD", "SELL")
+        assert capped and sl == pytest.approx(1.0850 + 0.10, abs=1e-9)
+        assert dist == pytest.approx(0.10, abs=1e-9)
+
+    def test_effective_sl_tp_short_tightens_and_keeps_rr(self):
+        """effective_sl_tp short: กลาง 50 pips → 33.3 pips, TP ตาม RR เดิม."""
+        from app.models.schemas import effective_sl_tp
+        s = clean_settings(sl_distance_mode="short")
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.0850, 1.0800, 1.0950, "EURUSD", "BUY")
+        assert tiered and not capped
+        assert dist == pytest.approx(0.0050 * (1.0 / 1.5), abs=1e-9)
+        assert sl == pytest.approx(round(1.0850 - 0.0050 * (1.0 / 1.5), 5), abs=1e-9)
+        assert tp == pytest.approx(round(1.0850 + dist * 2, 5), abs=1e-4)
+
+    def test_effective_sl_tp_long_widens(self):
+        """effective_sl_tp long: 50 pips → 66.7 pips."""
+        from app.models.schemas import effective_sl_tp
+        s = clean_settings(sl_distance_mode="long")
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.0850, 1.0800, 1.0950, "EURUSD", "BUY")
+        assert tiered and not capped
+        assert dist == pytest.approx(0.0050 * (2.0 / 1.5), abs=1e-9)
+        assert sl == pytest.approx(round(1.0850 - 0.0050 * (2.0 / 1.5), 5), abs=1e-9)
+
+    def test_effective_sl_tp_medium_passthrough(self):
+        """medium → ราคาเดิมผ่าน, tier_applied False."""
+        from app.models.schemas import effective_sl_tp
+        s = clean_settings(sl_distance_mode="medium")
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.0850, 1.0800, 1.0950, "EURUSD", "BUY")
+        assert (sl, tp, tiered, capped) == (1.0800, 1.0950, False, False)
+        assert dist == pytest.approx(0.0050, abs=1e-9)
+
+    def test_effective_sl_tp_tier_then_cap(self):
+        """tier + cap ต่อกัน: short รัดก่อนแล้ว cap รัดซ้ำ, TP ตาม tier RR."""
+        from app.models.schemas import effective_sl_tp
+        s = clean_settings(capital=200.0, risk_per_trade_pct=4.0, min_lot=0.02,
+                           sl_distance_mode="long", kill_daily_loss_pct=500.0)
+        # row กลาง SL 0.00676 RR2 → long ×(2/1.5) = 0.00901 → cap 0.004 รัด
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.10000, 1.09324, 1.11352, "AUDNZD", "BUY")
+        assert tiered and capped
+        assert dist == pytest.approx(0.00400, abs=1e-9)
+        assert sl == pytest.approx(1.10000 - 0.00400, abs=1e-9)
+        assert tp == pytest.approx(1.10000 + 0.00400 * 2, abs=1e-4)
+
+    def test_effective_sl_tp_sell_and_skip_cap(self):
+        """SELL คิดฝั่งถูก + apply_cap=False ข้าม cap (extended-open)."""
+        from app.models.schemas import effective_sl_tp
+        s = clean_settings(capital=200.0, risk_per_trade_pct=4.0, min_lot=0.02,
+                           kill_daily_loss_pct=500.0)
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.10000, 1.10676, 1.08648, "AUDNZD", "SELL")
+        assert capped and sl == pytest.approx(1.10000 + 0.00400, abs=1e-9)
+        assert tp == pytest.approx(1.10000 - 0.00400 * 2, abs=1e-4)
+        sl2, _, _, _, capped2 = effective_sl_tp(
+            s, 1.10000, 1.10676, 1.08648, "AUDNZD", "SELL",
+            apply_cap=False)
+        assert not capped2 and sl2 == pytest.approx(1.10676, abs=1e-9)
+
+    def test_effective_sl_tp_failsafe_passthrough(self):
+        """input เสีย (entry/SL 0) → ส่งค่าเดิมกลับ ไม่พัง."""
+        from app.models.schemas import effective_sl_tp
+        s = clean_settings()
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 0.0, 0.0, 0.0, "EURUSD", "BUY")
+        assert (sl, tp, dist, tiered, capped) == (0.0, 0.0, 0.0, False, False)
+
+    @pytest.mark.asyncio
     async def test_pause_blocks_execution(self, broker, notifier):
         db = db_with_client()
         execution.set_pause(db, True, "testing")

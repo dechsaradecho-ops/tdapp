@@ -10,7 +10,7 @@ from app.engine.strategy_engine import StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal,
                                 contract_value_for, effective_min_lot,
-                                effective_spread,
+                                effective_sl_tp, effective_spread,
                                 risk_to_lot_for)
 from app.services import execution
 from app.services import signal_log
@@ -140,6 +140,19 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             take_profit = float(r["take_profit"] or 0)
             sl_distance = abs(entry - stop_loss)
             rr = float(r["expected_rr"] or 2.0)
+            # Effective SL/TP (same helper execute_signal uses): the stored
+            # row carries กลาง prices — re-derive for sl_distance_mode, then
+            # tighten to the risk-budget cap. The card's main SL/TP/lots and
+            # the limit ladder below all use the effective values, so the
+            # card matches the real order. _raw_dist feeds ONLY the 3-tier
+            # reference preview (which must stay raw to show all tiers).
+            _eff_dir = str(r.get("direction") or "BUY").upper()
+            _eff_asset = str(r.get("asset") or "").upper()
+            _raw_dist = sl_distance
+            _eff_sl, _eff_tp, _eff_dist, _tiered, _capped = effective_sl_tp(
+                s, entry, stop_loss, take_profit, _eff_asset, _eff_dir)
+            if entry > 0 and sl_distance > 0 and (_tiered or _capped):
+                stop_loss, take_profit, sl_distance = _eff_sl, _eff_tp, _eff_dist
             ladder = (
                 StrategyEngine.limit_ladder(r["direction"].upper(), entry, sl_distance)
                 if entry > 0 and sl_distance > 0 else []
@@ -155,6 +168,21 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     calc_notes.append(
                         f"SL ห่าง {sl_distance:g} ({sl_pct:.2f}% ของ entry "
                         f"{entry:g}) ฝั่ง {str(r.get('direction') or '').upper()}")
+                    # Effective SL/TP notes — values are already effective
+                    # (same helper as execute_signal); only explain here.
+                    if _tiered:
+                        _mode = str(getattr(s, "sl_distance_mode", "medium"))
+                        _th = "สั้น" if _mode == "short" else "ยาว"
+                        _mult = {"short": 1.0, "long": 2.0}.get(_mode, 1.5)
+                        calc_notes.append(
+                            f"Tier SL {_th} (×{_mult:g} ATR) ตาม Settings — "
+                            f"SL {sl_distance:g} นี้คือระยะที่ระบบจะยิงจริง")
+                    if _capped:
+                        calc_notes.append(
+                            f"SL เกินงบความเสี่ยง → รัดเหลือ {sl_distance:g} "
+                            f"(เสี่ยงเท่างบ {float(s.risk_per_trade_pct or 0):g}% "
+                            f"ที่ floor {effective_min_lot(s, asset_u):g} lots, "
+                            f"TP ขยับตาม RR 1:{rr:g})")
                     tp_dist = abs(take_profit - entry) if take_profit else 0
                     calc_notes.append(
                         f"TP ห่าง {tp_dist:g} → RR 1:{rr:g} "
@@ -225,7 +253,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
-                stop_loss=stop_loss, take_profit=float(r["take_profit"] or 0),
+                stop_loss=stop_loss, take_profit=take_profit,
                 expected_rr=float(r["expected_rr"] or 2.0),
                 risk_per_trade_pct=s.risk_per_trade_pct,
                 # explanation เก็บแบบ " | "-joined — แตกกลับเป็นรายข้อเพื่อให้
@@ -234,10 +262,14 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 reason=[p.strip() for p in str(r.get("explanation") or "").split(" | ") if p.strip()],
                 recommendation=FinalDecision.trade,
                 limit_levels=ladder,
+                # 3-tier reference preview — always from the RAW row distance
+                # (not the effective one); the effective SL/TP above is the
+                # primary value the order will use. Folded into a collapsed
+                # block on the card.
                 sltp_levels=StrategyEngine.sltp_preview(
-                    r["direction"].upper(), entry, sl_distance,
+                    r["direction"].upper(), entry, _raw_dist,
                     rr_target=float(r["expected_rr"] or 2.0))
-                if entry > 0 and sl_distance > 0 else [],
+                if entry > 0 and _raw_dist > 0 else [],
                 sl_distance_mode=s.sl_distance_mode,
                 approval=r.get("approval") or "pending",
                 approved_at=r.get("approved_at"),
