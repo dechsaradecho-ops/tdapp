@@ -28,6 +28,19 @@ def _minutes_ago(mins: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=mins)).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_fail_notices():
+    """The once-per-window failure warning is process state — never leak it.
+
+    ``limit_expand._FAIL_NOTICES`` throttles the "ขยายลิมิตอัตโนมัติไม่สำเร็จ"
+    push per request id (both workers retry every minute), so a stale entry from
+    one test would silently suppress the warning in the next one.
+    """
+    limit_expand._FAIL_NOTICES.clear()
+    yield
+    limit_expand._FAIL_NOTICES.clear()
+
+
 class RecordingNotifier:
     """NotificationService stand-in that also accepts the quick_reply kwarg."""
 
@@ -513,6 +526,43 @@ def test_decide_without_a_pending_request():
     assert "ไม่เข้าใจคำสั่ง" in limit_expand.decide(db, "maybe")
 
 
+def test_a_late_reject_still_counts_when_the_policy_cannot_settle(monkeypatch):
+    """ตอบ ❌ หลังหมดช่วงยืนยัน (นโยบายอัตโนมัติปิด) → ลิมิตต้องไม่ถูกขยาย
+
+    Previously a late press fell through "no pending request" and the still-open
+    row stayed a timeout candidate: the owner's ❌ would have been overridden by
+    the auto-expand they had just refused.
+    """
+    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(195.0)
+
+    reply = limit_expand.decide(db, "/dd_no", decided_by="line:user", settings=s)
+
+    assert db.rows["kill_expand_requests"][0]["status"] == "rejected"
+    assert db._client.store["trading_pause"][1]["paused"] is True
+    assert "ตอบหลังหมดช่วงยืนยัน" in reply and "ลิมิตไม่ถูกขยาย" in reply
+    # และแถวที่ owner ปฏิเสธแล้วต้องไม่ถูกนโยบายหมดเวลามาขยายทีหลัง
+    assert limit_expand.auto_apply_expired(db, s) is None
+    assert "trading_settings" not in db._client.store
+
+
+def test_a_late_approve_applies_when_the_policy_cannot_settle(monkeypatch):
+    """ตอบ ✅ ช้า (นโยบายปิด หรือเขียนไม่ลง) → ขยายตามที่ขอ ไม่ทิ้งคำตอบ owner"""
+    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(195.0)
+
+    reply = limit_expand.decide(db, "/dd_ok", decided_by="ui:user", settings=s)
+
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "approved" and row["decided_by"] == "ui:user"
+    assert "ตอบหลังหมดช่วงยืนยัน" in reply
+
+
 def test_handle_postback_maps_buttons_only():
     db, s = _dd_db(equity=8900.0), AppSettings()
     limit_expand.request_and_notify(db, s, RecordingNotifier())
@@ -675,6 +725,14 @@ def test_monitor_still_asks_when_the_window_is_open():
 # the guard emergency-closed AUDNZD (PAPER-000001, pnl -0.56) at 17:34 — about
 # SIX SECONDS later. The owner never got to press Approve, even though the
 # prompt in their hand promises "ลิมิตยังไม่ถูกแตะต้อง".
+#
+# The wait IS the confirmation window (no fixed cap, no grace): silence for
+# ``kill_expand_ttl_min`` hands the request to the timeout policy — the
+# expansion is applied and reported, and the guard closes only if the account is
+# STILL over the widened limits. A window the policy CANNOT settle (the settings
+# write keeps failing, or the policy is switched off) has not been answered
+# either, so the guard keeps deferring instead of closing (owner decisions
+# 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" / "ไม่ปิดไม้ รอเจ้าของกดอย่างเดียว").
 # ---------------------------------------------------------------------------
 _GUARD_SETTINGS = AppSettings(smart_exit_enabled=False)  # no snapshot/news feeds
 
@@ -728,6 +786,19 @@ def _marks(monkeypatch):
     return _set
 
 
+async def _guard(db, broker, notifier, settings=_GUARD_SETTINGS):
+    """guard_once for this section.
+
+    The timeout report is pushed through ``limit_expand._dispatch``, which in a
+    running loop fires a task instead of awaiting it — so give the loop two
+    ticks before the caller asserts on what the owner received.
+    """
+    out = await position_guard.guard_once(db, broker, notifier, settings=settings)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    return out
+
+
 def test_guard_holds_the_emergency_exit_while_the_owner_is_asked(_marks):
     """kill switch engaged + request still open → ปิดไม้ยังไม่เกิด"""
     db = _daily_loss_db()
@@ -763,25 +834,26 @@ def test_the_hold_lasts_the_whole_confirmation_window(_marks):
     assert db.rows["kill_expand_requests"][0]["status"] == "pending"
 
 
-def test_the_hold_expires_so_silence_cannot_disable_the_safety_net(_marks):
-    """เลยช่วงยืนยัน + เผื่อ แล้ว → กลับมาปิดไม้ตามปกติ + บอกเหตุผล"""
+def test_a_lapsed_window_is_auto_expanded_instead_of_closed(_marks):
+    """"ถ้ารอตาม kill_expand_ttl_min แล้วไม่ได้รับการตอบกลับ → ขยายอัตโนมัติ"""
     db = _daily_loss_db()
     db.rows["paper_trades"].append(_open_trade_row())
-    _ask_the_owner(db, mins_ago=limit_expand.hold_limit_min(db, _GUARD_SETTINGS)
-                   + 15.0)
+    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
     broker, closed = _book()
     notifier = RecordingNotifier()
 
-    out = asyncio.run(position_guard.guard_once(
-        db, broker, notifier, settings=_GUARD_SETTINGS))
+    out = asyncio.run(_guard(db, broker, notifier))
 
-    assert out["emergency_closed"] == 1 and closed == ["T1"]
-    assert out["emergency_held"] == 0
-    assert out["closed_assets"] == "AUDNZD:kill"
-    body = notifier.of("trade_closed")[0]["message"]
-    assert "Emergency Exit" in body
-    # ผู้ใช้อาจยังจ้องข้อความที่บอกว่า "ลิมิตยังไม่ถูกแตะต้อง" → ต้องอธิบาย
-    assert "เลยกำหนดรอ" in body and "ปิดไม้เพื่อความปลอดภัย" in body
+    # นโยบายหมดเวลาเป็นคนตัดสิน (ไม่ใช่ guard): ขยาย + ปิดคำขอ + แจ้ง
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "approved" and row["decided_by"] == "auto:expired"
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
+    sent = notifier.of("limit_expand")
+    assert len(sent) == 1 and "หมดเวลายืนยัน" in sent[0]["message"]
+    # ลิมิตใหม่กว้างพอ → kill switch หลุด → ไม่มีเหตุให้ปิดไม้
+    assert out["emergency_closed"] == 0 and closed == []
+    assert out["emergency_held"] == 1
+    assert db._client.store["trading_pause"][1]["paused"] is False
 
 
 def test_the_hold_follows_the_setting_not_a_fixed_cap(_marks):
@@ -789,14 +861,193 @@ def test_the_hold_follows_the_setting_not_a_fixed_cap(_marks):
     short = AppSettings(smart_exit_enabled=False, kill_expand_ttl_min=30)
     db = _daily_loss_db()
     db.rows["paper_trades"].append(_open_trade_row())
-    _ask_the_owner(db, mins_ago=60.0)          # ในช่วงของ 180 แต่เลย 30 + เผื่อ
+    _ask_the_owner(db, mins_ago=60.0)          # เลย 30 แต่ยังไม่ถึง 180
     broker, closed = _book()
 
-    out = asyncio.run(position_guard.guard_once(
-        db, broker, RecordingNotifier(), settings=short))
+    out = asyncio.run(_guard(db, broker, RecordingNotifier(), short))
 
+    assert db.rows["kill_expand_requests"][0]["status"] == "approved"
+    assert out["emergency_closed"] == 0 and closed == []
+
+    # เทียบ: อายุเท่ากัน แต่ช่วงยืนยัน (180) ยังไม่หมด → ยังรอคำตอบอยู่
+    db2 = _daily_loss_db()
+    db2.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db2, mins_ago=60.0)
+    broker2, closed2 = _book()
+
+    out2 = asyncio.run(_guard(db2, broker2, RecordingNotifier()))
+
+    assert out2["emergency_held"] == 1 and closed2 == []
+    assert db2.rows["kill_expand_requests"][0]["status"] == "pending"
+
+
+def test_guard_holds_when_the_auto_expand_policy_is_off(_marks, monkeypatch):
+    """ปิดนโยบายขยายอัตโนมัติ + ไม่มีคำตอบ → ห้ามปิดไม้ รอเจ้าของกดอย่างเดียว
+
+    Owner decision 2026-09-14: "ไม่ปิดไม้ รอเจ้าของกดอย่างเดียว (SL/TP ยังทำงาน)
+    จนกว่าจะตอบ" — คำขอยังเปิดอยู่ = เจ้าของยังไม่ได้ตอบ เพราะฉะนั้น guard ต้อง
+    เลื่อนการปิดไม้ออกไปเรื่อย ๆ (ไม่ใช่ปิดเพราะระบบขยายให้ไม่ได้)
+    """
+    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    out = asyncio.run(_guard(db, broker, notifier))
+
+    assert out["emergency_closed"] == 0 and closed == []
+    assert out["emergency_held"] == 1
+    # คำขอยังไม่ถูกตัดสิน: เจ้าของกดอนุมัติ/ไม่อนุมัติเองได้เสมอ
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+    assert "trading_settings" not in db._client.store
+    assert notifier.of("trade_closed") == []          # ไม่มีข้อความ "ปิดไม้"
+    warn = notifier.of("limit_expand")
+    assert len(warn) == 1 and "ขยายลิมิตอัตโนมัติไม่สำเร็จ" in warn[0]["message"]
+    assert "ระบบยังไม่ปิดไม้" in warn[0]["message"]
+    assert warn[0]["quick_reply"]                     # กดอนุมัติได้จากข้อความเดิม
+
+
+def test_the_hold_and_the_warning_survive_repeated_cycles(_marks, monkeypatch):
+    """"ขยายให้ไม่ได้" = เลื่อนต่อไปเรื่อย ๆ (ไม่ปิดไม้) + เตือนครั้งเดียวต่อคำขอ
+
+    Both workers loop every minute, so the warning is throttled to one per
+    request (``AUTO_FAIL_NOTIFY_MIN`` = 6 h) — ไม่ใช่ทุกรอบ.
+    """
+    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    for _ in range(3):
+        out = asyncio.run(_guard(db, broker, notifier))
+        assert out["emergency_closed"] == 0 and out["emergency_held"] == 1
+
+    assert closed == []
+    assert notifier.of("trade_closed") == []
+    assert len(notifier.of("limit_expand")) == 1      # ไม่สแปมแชท
+    # กดอนุมัติซ้ำจากข้อความเตือนได้เสมอ แม้จะเลยช่วงยืนยันไปแล้ว
+    reply = limit_expand.decide(db, "/dd_ok", "line", settings=_GUARD_SETTINGS)
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
+    assert "ตอบหลังหมดช่วงยืนยัน" in reply
+
+
+def test_guard_holds_when_the_expansion_write_did_not_land(_marks, monkeypatch):
+    """"ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" — รอไปเรื่อย ๆ จนเขียนได้"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+    real_write = limit_expand._persist_settings
+    ups = {"fail": True}
+
+    def _write(db_, merged):
+        return not ups["fail"] and real_write(db_, merged)
+
+    monkeypatch.setattr(limit_expand, "_persist_settings", _write)
+
+    # รอบแรก: เขียนไม่ได้ → ไม่ปิดไม้ + เตือนว่ายังไม่ปิด
+    out = asyncio.run(_guard(db, broker, notifier))
+
+    assert out["emergency_closed"] == 0 and out["emergency_held"] == 1
+    assert closed == []
+    assert out["closed_assets"] == ""
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+    assert "trading_settings" not in db._client.store
+    warn = notifier.of("limit_expand")
+    assert len(warn) == 1 and "บันทึกค่าใหม่ไม่ลง" in warn[0]["message"]
+    assert "ระบบยังไม่ปิดไม้" in warn[0]["message"]
+
+    # ยังเขียนไม่ได้อีกรอบ → ยังเลื่อน + ไม่ปิดไม้ (ไม่มีการปิดหนีแทน)
+    out = asyncio.run(_guard(db, broker, notifier))
+    assert out["emergency_closed"] == 0 and out["emergency_held"] == 1
+    assert closed == []
+    assert len(notifier.of("limit_expand")) == 1      # เตือนซ้ำไม่เกินโควตา
+
+    # เขียนได้อีกครั้ง → รอบถัดไปขยายสำเร็จ + ลิมิตใหม่กว้างพอ → เลื่อนต่อไป (ฆ่าไม่หลุด)
+    ups["fail"] = False
+    out = asyncio.run(_guard(db, broker, notifier))
+
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
+    assert db.rows["kill_expand_requests"][0]["status"] == "approved"
+    assert out["emergency_closed"] == 0 and closed == []
+    assert out["emergency_held"] == 1
+    assert any("หมดเวลายืนยัน" in m["message"]
+               for m in notifier.of("limit_expand"))
+
+
+def test_a_lapsed_request_stays_answerable_in_the_popup(monkeypatch):
+    """ขยายอัตโนมัติไม่สำเร็จ → popup ยังขึ้น (ลิมิตไม่ถูกแตะ, ไม้ไม่ถูกปิด)"""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+
+    body = limit_expand.state(db, s)                   # ยังอยู่ในช่วงยืนยัน
+    assert body["pending"] is True and body["lapsed"] is False
+
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+    monkeypatch.setattr(limit_expand, "_persist_settings", lambda *_a: False)
+    settle, pushed = limit_expand.settle_lapsed_window(
+        db, s, RecordingNotifier())
+
+    assert settle.kind == "failed" and settle.holds and not settle.settled
+    assert pushed is True and settle.notice
+
+    body = limit_expand.state(db, s)                   # เลยเวลาแล้วแต่ยังตอบได้
+    assert body["pending"] is True and body["lapsed"] is True
+    assert body["request"]["id"] == db.rows["kill_expand_requests"][0]["id"]
+    assert body["last"] is None                        # ยังไม่ถูกตัดสิน
+    # เจ้าของกดอนุมัติเองได้ (ไม่ต้องรอระบบเขียว)
+    assert limit_expand.decide(db, "/dd_ok", "ui", settings=s).startswith("⚠️")
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+
+
+def test_guard_closes_when_the_widened_limit_is_still_breached(_marks):
+    """ขยายแล้วยังเกินลิมิตใหม่ → ยังต้องปิด (ขยายไม่ใช่การยกเว้นความเสี่ยง)"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    row = _ask_the_owner(
+        db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    row["detail"]["triggers"][0]["new_limit"] = 2.5   # +0.5pp ยังไม่พอ
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    out = asyncio.run(_guard(db, broker, notifier))
+
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 2.5
     assert out["emergency_closed"] == 1 and closed == ["T1"]
     assert out["emergency_held"] == 0
+    # การขยายต้องถูกรายงานเสมอ ไม่มีการขยายแบบเงียบ
+    assert len(notifier.of("limit_expand")) == 1
+    body = notifier.of("trade_closed")[0]["message"]
+    assert "ยังเกินลิมิตใหม่" in body and "ปิดไม้เพื่อความปลอดภัย" in body
+
+
+def test_guard_says_nothing_was_widened_when_the_request_needed_no_write(_marks):
+    """ขยายไม่ได้เพราะลิมิตปัจจุบันสูงกว่าที่ขอ → ข้อความต้องไม่โกหกว่าขยายแล้ว"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    row = _ask_the_owner(
+        db, mins_ago=limit_expand.ttl_minutes(_GUARD_SETTINGS) + 15.0)
+    row["detail"]["triggers"][0]["new_limit"] = 2.0   # = ลิมิตปัจจุบัน
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    out = asyncio.run(_guard(db, broker, notifier))
+
+    # ไม่มีการเขียนทับ (คำปิดเป็น "approved" + รายงานว่าไม่ต้องขยาย)
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "approved"
+    assert "trading_settings" not in db._client.store
+    sent = notifier.of("limit_expand")
+    assert len(sent) == 1 and "ไม่มีการเขียนทับ" in sent[0]["message"]
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    body = notifier.of("trade_closed")[0]["message"]
+    assert "คำขอไม่ต้องขยายอีกแล้ว" in body and "ยังเกินลิมิตอยู่" in body
+    assert "ขยายลิมิตให้อัตโนมัติแล้ว" not in body   # คำโกหกที่ต้องไม่มี
 
 
 def test_an_undateable_request_means_close_not_hold(_marks):
@@ -1072,6 +1323,25 @@ def test_api_popup_reports_a_lapsed_window_as_auto_applied():
         limit_expand.AUTO_DECIDED_BY
     assert body["state"]["pending"] is False
     assert [m for _u, m in line.pushes if body["reply"] in m]
+
+
+def test_api_popup_stays_open_when_the_expansion_write_fails(monkeypatch):
+    """เขียน DB ไม่สำเร็จ → popup ต้องไม่ปิด และต้องบอกว่าไม่สำเร็จ (ไม่ปิดไม้)"""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+    monkeypatch.setattr(limit_expand, "_persist_settings", lambda *_a: False)
+    _mount(db)
+
+    body = _popup_decide("approve").json()
+
+    assert body["ok"] is True
+    assert "บันทึกลิมิตใหม่ไม่สำเร็จ" in body["reply"]
+    assert "trading_settings" not in db._client.store   # ไม่มีการเขียนใด ๆ
+    # คำขอยังเปิดอยู่ → popup ยังขึ้น และกดอนุมัติซ้ำได้เมื่อ DB กลับมาเขียนได้
+    assert body["state"]["pending"] is True
+    assert body["state"]["lapsed"] is True
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
 
 
 def test_api_popup_approve_survives_a_line_push_failure():

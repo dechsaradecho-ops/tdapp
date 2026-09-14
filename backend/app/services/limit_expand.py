@@ -21,17 +21,25 @@ Flow implemented here:
   4. NO ANSWER before the window (Settings → ``kill_expand_ttl_min``, default
      180 min) → the request is applied as if approved (owner decision: "ถ้า
      confirm หมดอายุให้ดำเนินการขยาย limit เลย") and the result is pushed to
-     the SAME channels, so the widening is never silent. Only the monitor may
-     perform this write — see ``auto_apply_expired`` vs ``pending_request``.
+     the SAME channels, so the widening is never silent. Whichever mutating
+     caller reaches the lapsed row first performs this write (the monitor, or
+     the position guard) — see ``settle_lapsed_window`` vs ``pending_request``.
+     A window that could NOT be applied (policy off, or the settings write keeps
+     failing) stays OPEN so the owner can still press: the failure is reported
+     once per ``AUTO_FAIL_NOTIFY_MIN`` (6 h), the popup keeps offering it, and
+     the emergency exit keeps deferring (point 5).
   5. while such a request is open, the position guard DEFERS its emergency
      exit (``emergency_hold``): the prompt promises "ลิมิตยังไม่ถูกแตะต้อง", so
      the book must not be force-closed out from under the owner's finger (prod
      2026-09-14: AUDNZD was closed ~6 s after the prompt). Owner decision:
      "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch ทำงาน" — the guard stands down for the
-     WHOLE confirmation window (+ a short grace for the settle cycle), and
-     SL/TP management keeps running the entire time. Once the window is over
-     the exit runs regardless: a request that can never be settled must not
-     disable the safety net forever.
+     WHOLE confirmation window (no grace), and SL/TP management keeps running
+     the entire time. When the window lapses the timeout policy decides first
+     (point 4); the guard closes only if the account is STILL over the widened
+     limits. A window that could not be settled is NOT a reason to close — the
+     owner is still owed a decision ("ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้", "ไม่ปิดไม้
+     รอเจ้าของกดอย่างเดียว"), so it keeps deferring and the close message names
+     the outcome whenever a close does happen.
 
 Only the limits named in the request are touched, and only by
 ``EXPAND_STEP_PCT`` per confirmation; a limit is never written DOWN. The breach
@@ -41,6 +49,8 @@ never quote numbers that disagree with the switch that fired.
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -79,23 +89,22 @@ REASK_COOLDOWN_MIN = 30.0
 REASK_AFTER_REJECT_MIN = 120.0
 
 # Extra minutes the position guard keeps deferring its emergency exit AFTER the
-# confirmation window has run out. Prod 2026-09-14: the guard closed AUDNZD ~6
-# SECONDS after the prompt appeared, so the owner never had a chance to press
-# Approve — the prompt promises "ลิมิตยังไม่ถูกแตะต้อง", and closing the book
-# while the owner is deciding breaks that promise.
+# confirmation window has run out: NONE. The wait IS the window
+# (Settings → ``kill_expand_ttl_min``, default 180 min) — the guard stands down
+# exactly as long as the offer in the owner's hand is alive, and when the window
+# lapses the timeout policy decides (see ``settle_lapsed_window``), not the
+# guard. Owner decision 2026-09-14: "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch ทำงาน"
+# then "ถ้ารอตาม kill_expand_ttl_min แล้วไม่ได้รับการตอบกลับให้ขยายอัตโนมัติ".
 #
-# Owner decision: "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch ทำงาน" → the wait is NOT
-# an arbitrary cap any more, it lasts for the WHOLE confirmation window
-# (Settings → ``kill_expand_ttl_min``, default 180 min). The wait ends when the
-# request is settled, i.e. the moment the owner answers — or the moment the
-# timeout path applies the expansion (which normally clears the breach).
-#
-# This constant is only the GRACE on top of that: the monitor's cycle is what
-# settles a lapsed window, so the guard must not race it. Past window+grace the
-# guard protects the account without an answer — a row that can never be settled
-# (``AUTO_APPLY_ON_EXPIRY`` off, or a write that keeps failing) must not switch
-# the safety net off forever.
-EMERGENCY_HOLD_GRACE_MIN = 15.0
+# There is no separate cap on purpose: a fixed one (the first fix used 30 min)
+# closed the book while the prompt was still valid, and a LARGER one (window +
+# grace) closed it after a window whose policy is to expand. The deferral also
+# survives the case where the request can NEVER be settled (the auto-apply policy
+# is off, or the settings write keeps failing): the owner is still owed a
+# decision there, so the emergency exit keeps deferring and re-warns — owner
+# decisions 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" / "ไม่ปิดไม้ รอเจ้าของ
+# กดอย่างเดียว (SL/TP ยังทำงาน)". Only a window that IS settled (or a row nobody
+# can date, or an unreadable table) lets the guard protect the account as usual.
 
 # Owner decision (2026-09-14): "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย".
 # An unanswered request is therefore APPLIED once its window lapses instead of
@@ -111,6 +120,112 @@ TIMEOUT_TITLE = "⏳ หมดเวลายืนยัน — ขยายล
 # request is retired instead of widening a risk limit the account no longer
 # needs (the flow is ask-first, never "widen because time ran out").
 AUTO_NO_BREACH_BY = "auto:expired-no-breach"
+
+# A window the timeout policy could NOT settle (the settings write keeps failing,
+# or the policy is switched off) leaves the account paused with nothing but an
+# OLD prompt in the owner's hand. Every other outcome reports itself, so this one
+# must too — otherwise a limit silently never widens and trading stays stopped
+# until the owner happens to look at /monitor. Throttled per request id: BOTH
+# workers retry every minute and the row stays pending until something succeeds.
+AUTO_FAIL_NOTIFY_MIN = 360.0
+_FAIL_NOTICES: dict[str, float] = {}
+
+# Settle kinds where the emergency exit must keep DEFERRING (a decision is still
+# owed to the owner): the settings write did not land (``failed`` — the owner's
+# approval is still being honoured and it is retried every cycle) or the
+# auto-apply policy is switched off (``off`` — only the owner can settle it).
+# Owner decisions 2026-09-14: "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" and "ไม่ปิดไม้
+# รอเจ้าของกดอย่างเดียว (SL/TP ยังทำงาน)". Every other kind is a CLOSED window:
+# applied/skipped/no-breach/retired all settle it. A kind outside this tuple and
+# outside ``SettleResult.settled`` falls through to the guard's usual fail-safe
+# close — a bug must not switch the safety net off.
+HOLD_KINDS = ("failed", "off")
+
+
+def _fail_notice_due(request_id: str) -> bool:
+    """True when this request may be warned about (first time, then every 6 h)."""
+    now = time.monotonic()
+    cooldown = AUTO_FAIL_NOTIFY_MIN * 60.0
+    last = _FAIL_NOTICES.get(str(request_id or ""))
+    if last is not None and (now - last) < cooldown:
+        return False
+    for key in [k for k, at in _FAIL_NOTICES.items() if (now - at) >= cooldown]:
+        _FAIL_NOTICES.pop(key, None)     # never let the dict grow forever
+    return True
+
+
+def _note_fail_notice(request_id: str) -> None:
+    """Record a warning that was actually DELIVERED (a failed push may retry)."""
+    _FAIL_NOTICES[str(request_id or "")] = time.monotonic()
+
+
+def _fail_notice(kind: str, ttl: float) -> str:
+    """The one-time warning for a window that ran out and could not be applied.
+
+    Words matter here: NOTHING was widened, so the text never claims it was —
+    it says the limits still stand and how to get moving again (the same two
+    buttons as the original prompt). Same headline for both causes, so the
+    owner learns the one thing that matters ("ขยายอัตโนมัติไม่สำเร็จ") first.
+    """
+    why = ("ระบบบันทึกค่าใหม่ไม่ลง (จะลองใหม่ทุกรอบ)" if kind == "failed"
+           else "นโยบายขยายอัตโนมัติถูกปิดอยู่")
+    # The owner must know the emergency exit is NOT closing the book while we
+    # wait, otherwise "ไม่สำเร็จ" reads as "ไม้ถูกปิดเพราะระบบพัง".
+    tail = ("• ระบบยังไม่ปิดไม้ (SL/TP ทำงานปกติ) และจะลองบันทึกให้ใหม่ทุกรอบ"
+            if kind == "failed" else
+            "• ระบบยังไม่ปิดไม้ (SL/TP ทำงานปกติ) — รอคุณกดอนุมัติ/ไม่อนุมัติ")
+    return ("⚠️ ขยายลิมิตอัตโนมัติไม่สำเร็จ\n"
+            f"• รอครบ {ttl:.0f} นาที ไม่มีคำตอบ และ{why}\n"
+            "• ลิมิตเดิมยังมีผล และเทรดยังหยุดอยู่\n"
+            f"{tail}\n"
+            "กดอนุมัติในข้อความเดิมเพื่อทำต่อ หรือแก้ลิมิตที่หน้า Settings")
+
+
+def _retired_notice(ttl: float) -> str:
+    """A request that quotes no limit at all can never widen anything."""
+    return ("⚠️ คำขอขยายลิมิตหมดอายุและถูกยกเลิก\n"
+            f"• รอครบ {ttl:.0f} นาที ไม่มีคำตอบ และคำขอไม่มีลิมิตระบุไว้\n"
+            "• ลิมิตเดิมยังมีผล — ถ้ายังเกินลิมิต ระบบจะส่งคำขอใหม่ให้เอง")
+
+
+@dataclass(frozen=True)
+class SettleResult:
+    """Outcome of ONE attempt to settle a confirmation window that ran out.
+
+    ``kind`` is the whole story, and callers branch on ``settled`` (NOT on
+    "is there a message"): a FAILED attempt now carries ``notice`` — the owner
+    must hear about it — while the request is still unsettled and retried.
+
+      applied    limits written, pause re-evaluated, ``report`` pushed
+      skipped    a limit already ≥ the proposal → nothing written, ``report``
+      no-breach  no limit is over any more → retired WITHOUT widening
+      retired    the row quotes no limit → cannot ever widen, row closed
+      failed     the settings write did not land → row KEPT, retry next cycle
+      off        ``AUTO_APPLY_ON_EXPIRY`` is False → nothing was attempted
+      none       no lapsed window to settle (the common case)
+    """
+    kind: str
+    report: str = ""        # LINE report for a SETTLED window ("" otherwise)
+    notice: str = ""        # what to tell the owner when it was NOT settled
+    notified: bool = False
+    request_id: str = ""
+    age_min: float = 0.0
+    ttl_min: float = PENDING_TTL_MIN
+
+    @property
+    def settled(self) -> bool:
+        """The window is closed: nothing left to retry, nothing left to hold."""
+        return self.kind in ("applied", "skipped", "no-breach", "retired")
+
+    @property
+    def holds(self) -> bool:
+        """The emergency exit must keep deferring — the owner is still owed one.
+
+        True for ``failed`` (the expansion write keeps failing, retried every
+        cycle) and ``off`` (the auto-apply policy is switched off, so only the
+        owner's own press can settle the request). See ``HOLD_KINDS``.
+        """
+        return self.kind in HOLD_KINDS
 
 # trigger key, trading_settings column, LINE label, index into kill_metrics()
 # Order matters: drawdown is the trigger that caused the 2026-09-14 incident and
@@ -275,9 +390,9 @@ def pending_request(db, allow_stale: bool = False,
     metrics are stale, so an old chat message / popup can never widen a limit.
 
     This function is READ-ONLY on purpose (popup poll, GET /limit-expand,
-    state()). The window that lapsed is not a dead end any more — the monitor
-    APPLIES the request (``auto_apply_expired``, policy ``AUTO_APPLY_ON_EXPIRY``)
-    on its own cycle; a passive poll must never widen a limit as a side effect.
+    state()). The window that lapsed is not a dead end any more — the mutating
+    callers settle it (``settle_lapsed_window``, policy ``AUTO_APPLY_ON_EXPIRY``)
+    on their own cycle; a passive poll must never widen a limit as a side effect.
     """
     rows = _select(db, filters={"status": "pending"}, limit=1)
     if not rows:
@@ -299,7 +414,7 @@ def stale_pending(db, settings: Optional[AppSettings] = None
     """The newest PENDING request that has outlived the configured window.
 
     Read-only too: it answers "is there something the timeout path owes the
-    owner?" without writing. See ``auto_apply_expired`` for the write.
+    owner?" without writing. See ``settle_expired`` for the write.
 
     Only the NEWEST pending row is considered: if a failed write ever leaves an
     old row behind, the next request (fresh numbers, same policy) is the one
@@ -327,58 +442,39 @@ def pending_age_min(row: dict) -> float:
                     or (row or {}).get("created_at")) or 0.0
 
 
-def open_request(db, settings: Optional[AppSettings] = None
-                 ) -> Optional[dict]:
-    """The newest request the owner has NOT answered yet (pending, any age).
-
-    Read-only. Unlike ``pending_request`` a lapsed-but-unsettled row still
-    counts: the monitor has simply not reached it yet, and the prompt the owner
-    is holding is still the live offer.
-    """
-    row = pending_request(db, settings=settings)
-    return row if row is not None else stale_pending(db, settings=settings)
-
-
-def hold_limit_min(db, settings: Optional[AppSettings] = None) -> float:
-    """How long the guard may keep the emergency exit on hold (minutes).
-
-    The whole confirmation window plus ``EMERGENCY_HOLD_GRACE_MIN`` (default
-    180 + 15 = 195). Owners asked for "รอคอมเฟิร์มก่อน" and the prompt in their
-    hand quotes the same window, so the two must agree: the guard stands down
-    exactly as long as the offer is alive.
-    """
-    return _resolve_ttl(db, settings) + EMERGENCY_HOLD_GRACE_MIN
-
-
 def emergency_hold(db, settings: Optional[AppSettings] = None
                    ) -> Optional[dict]:
-    """The open request that MUST put the guard's emergency exit on hold.
+    """The request that put the guard's emergency exit on hold.
 
     The guard calls this only when the kill switch is already engaged. Returns
-    the row to report the deferral with, or None when the guard must close as
-    usual: no request at all (e.g. the owner rejected it, which settles the row
-    and is a plain "no"), or the owner has been silent past
-    ``hold_limit_min`` (window + grace).
+    the request the owner is STILL being asked about — a pending row inside its
+    confirmation window (``kill_expand_ttl_min``, default 180 min). Such a hold
+    is unconditional: the prompt in the owner's hand promises "ลิมิตยังไม่ถูกแตะต้อง".
 
-    Never raises: a DB hiccup must not disable a safety path, so an
-    unreadable table means "close" (fail-safe), not "hold". The same goes for a
-    row we cannot date — an age we cannot measure must not be treated as "brand
-    new", or a corrupt timestamp would hold the exit forever.
+    None means this call cannot vouch for a hold, for one of three reasons:
+    nobody is being asked (no row — e.g. the owner rejected it, which settles
+    the row and is a plain "no"), the window has RUN OUT (the timeout policy
+    owns it then — see ``settle_lapsed_window``), or we cannot read/date the
+    row. None is NOT an instruction to close: the guard then settles the lapsed
+    window and closes only if the account is still over the WIDENED limits — a
+    window that cannot be settled (write failure, policy off) keeps deferring,
+    because the owner has not answered either way (owner decisions 2026-09-14).
+
+    Never raises: a DB hiccup must not disable a safety path, so an unreadable
+    table means "no hold from this call" (the guard's fail-safe is the close),
+    not an exception. Same for a row whose timestamp cannot be parsed — an age
+    we cannot measure must not read as "brand new".
     """
     try:
-        row = open_request(db, settings=settings)
+        row = pending_request(db, settings=settings)
     except Exception as exc:  # pragma: no cover - defensive
         log.debug("emergency hold check failed: %s", exc)
         return None
     if row is None:
         return None
-    age = _age_min(row.get("requested_at") or row.get("created_at"))
-    if age is None:
+    if _age_min(row.get("requested_at") or row.get("created_at")) is None:
         log.warning("request %s has no readable timestamp — closing instead "
                     "of holding the emergency exit", row.get("id"))
-        return None
-    limit_min = hold_limit_min(db, settings)
-    if age > limit_min:
         return None
     return row
 
@@ -516,29 +612,35 @@ def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
         note=note or "; ".join(kill.triggers)[:200], title=title), "applied"
 
 
-def auto_apply_expired(db, settings: Optional[AppSettings] = None
-                       ) -> Optional[str]:
+def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
     """NO ANSWER BEFORE THE WINDOW LAPSED → apply the expansion anyway.
 
     Owner decision: "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย". The request
     the owner was shown is executed as if approved and the same report is pushed
-    to the same channels, so a limit never widens silently.
+    to the same channels, so a limit never widens silently. See ``SettleResult``
+    for the kinds; only ``applied`` / ``skipped`` mean a limit was looked at.
 
-    Returns the LINE report for a SETTLED window (limits written, or nothing to
-    write), else None (nothing was pending, the policy is off, the request is
-    unusable, or the settings write failed — the row is then kept so the next
-    cycle retries instead of pushing the same failure every minute).
-
-    Only mutating callers may call this (``portfolio_monitor`` via
-    ``request_and_notify``, and ``decide`` when the owner answers late). Read
-    paths (``state``, GET /api/trading/limit-expand, the popup poll) must not:
-    a poll would otherwise widen a limit as a side effect.
+    Only mutating callers may call this (``portfolio_monitor`` and
+    ``position_guard`` via ``settle_lapsed_window``, and ``decide`` when the
+    owner answers late). Read paths (``state``, GET /api/trading/limit-expand,
+    the popup poll) must not: a poll would otherwise widen a limit as a side
+    effect.
     """
-    if not AUTO_APPLY_ON_EXPIRY:
-        return None
     row = stale_pending(db, settings)
     if row is None:
-        return None
+        return SettleResult("none")
+    ttl = _resolve_ttl(db, settings)
+    age = pending_age_min(row)
+    rid = str(row.get("id") or "")
+
+    def _res(kind: str, report: str = "", notice: str = "") -> SettleResult:
+        return SettleResult(kind, report=report, notice=notice, request_id=rid,
+                            age_min=age, ttl_min=ttl)
+
+    if not AUTO_APPLY_ON_EXPIRY:
+        # Nothing is attempted (owner's switch), but the ROW is identified so a
+        # caller can tell the owner once instead of leaving them waiting.
+        return _res("off", notice=_fail_notice("off", ttl))
 
     s = settings or execution.get_app_settings(db)
     triggers = list((row.get("detail") or {}).get("triggers") or [])
@@ -548,7 +650,7 @@ def auto_apply_expired(db, settings: Optional[AppSettings] = None
         _mark(db, row, "expired", AUTO_DECIDED_BY)
         log.error("kill expand timeout: request %s lists no triggers — retired",
                   row.get("id"))
-        return None
+        return _res("retired", report=_retired_notice(ttl))
 
     if not breached_triggers(db, s):
         # The metrics came back inside the limits while the owner was thinking.
@@ -557,45 +659,71 @@ def auto_apply_expired(db, settings: Optional[AppSettings] = None
         _mark(db, row, "expired", AUTO_NO_BREACH_BY)
         log.info("kill expand timeout: no limit is breached any more — retired "
                  "without widening (request %s)", row.get("id"))
-        return ("ℹ️ คำขอขยายลิมิตหมดอายุโดยไม่ต้องขยาย\n"
-                "ไม่มีลิมิตที่เกินอยู่แล้ว (ค่ากลับมาอยู่ในกรอบ) — ลิมิตเดิมยังมีผล\n"
-                "ถ้าเทรดยังหยุดอยู่ ให้พิมพ์ /resume")
+        return _res("no-breach", report=(
+            "ℹ️ คำขอขยายลิมิตหมดอายุโดยไม่ต้องขยาย\n"
+            "ไม่มีลิมิตที่เกินอยู่แล้ว (ค่ากลับมาอยู่ในกรอบ) — ลิมิตเดิมยังมีผล\n"
+            "ถ้าเทรดยังหยุดอยู่ ให้พิมพ์ /resume"))
 
-    ttl = ttl_minutes(s)
-    age = pending_age_min(row)
     note = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที — ระบบขยายลิมิตให้อัตโนมัติ\n"
             "ปรับเวลาในการรอได้ที่หน้า Settings (รูทีนนี้ทำงานทุก ~1 นาที)")
     reply, outcome = _approve(db, row, AUTO_DECIDED_BY, note=note,
                               title=TIMEOUT_TITLE, settings=s)
     if outcome == "failed":
-        # Report NOTHING: it would repeat every minute. The row was not closed,
-        # so the next cycle retries once trading_settings is writable again.
+        # The row stays OPEN so the next cycle retries; the owner is warned at
+        # most once per window (the retry would otherwise repeat every minute).
         log.error("kill expand auto-apply wrote nothing (request %s)",
                   row.get("id"))
-        return None
+        return _res("failed", notice=_fail_notice("failed", ttl))
     if outcome == "skipped":
         log.info("kill expand timeout settled without writing (request %s)",
                  row.get("id"))
-        return reply
+        return _res("skipped", report=reply)
     log.warning("kill expand AUTO-APPLIED after %.0f min of silence (ttl %.0f)",
                 age, ttl)
-    return reply
+    return _res("applied", report=reply)
+
+
+def auto_apply_expired(db, settings: Optional[AppSettings] = None
+                       ) -> Optional[str]:
+    """str-only view of ``settle_expired`` — the LINE report, else None.
+
+    Kept for callers that only ask "was something widened, and what do I tell
+    the owner?" (a late press, the older tests). Nothing is reported for an
+    attempt that could not be settled — callers that must TELL the owner use
+    ``settle_lapsed_window`` / ``settle_expired(...).notice`` instead.
+    """
+    return settle_expired(db, settings).report or None
 
 
 def settle_lapsed_window(db, settings, notifier,
-                         user_id: str = "") -> tuple[Optional[str], bool]:
+                         user_id: str = "") -> tuple[SettleResult, bool]:
     """Apply a lapsed confirmation window AND report it — one step, no skips.
 
-    The monitor-side entry point (``request_and_notify`` also uses it): every
-    caller that may widen on timeout must push the same report, so a widening
-    can never happen without the owner being told. Returns
-    ``(report, notified)``; ``(None, False)`` when nothing needed settling.
+    The entry point for BOTH workers that may reach the lapsed row
+    (``portfolio_monitor`` and ``position_guard``), so a widening can never
+    happen without the owner being told. Returns ``(result, notified)``:
+
+    * settled (``applied``/``skipped``/``no-breach``/``retired``) → the report
+      is pushed, and the owner knows exactly what happened (including "nothing
+      needed writing", which must NOT be worded as a widening);
+    * NOT settled (``failed``/``off``, see ``HOLD_KINDS``) → a warning is pushed
+      at most once per ``AUTO_FAIL_NOTIFY_MIN`` (both workers retry every
+      minute, and the request stays open until it can be settled); callers must
+      keep the emergency exit DEFERRED rather than closing the book.
     """
-    report = auto_apply_expired(db, settings)
-    if not report:
-        return None, False
-    return report, _dispatch(notifier, user_id or DEFAULT_USER,
-                             "limit_expand", report)
+    res = settle_expired(db, settings)
+    if res.settled:
+        if not res.report:
+            return res, False
+        return res, _dispatch(notifier, user_id or DEFAULT_USER,
+                              "limit_expand", res.report)
+    if res.notice and _fail_notice_due(res.request_id):
+        sent = _dispatch(notifier, user_id or DEFAULT_USER, "limit_expand",
+                         res.notice, quick_reply_items())
+        if sent:
+            _note_fail_notice(res.request_id)
+        return res, sent
+    return res, False
 
 
 def decide(db, decision: str, decided_by: str = "line",
@@ -616,16 +744,24 @@ def decide(db, decision: str, decided_by: str = "line",
 
     # An unanswered request that is past its window is APPLIED (policy above),
     # even when the owner answers late — that press must not silently do nothing.
-    # This runs BEFORE the read below: pending_request() only reports requests
-    # that are still inside their window.
-    applied = auto_apply_expired(db, settings)
-    if applied:
-        return applied
+    # settle_expired() is the one implementation; a window it could NOT settle
+    # (policy off, write failing) stays open for the press below.
+    settled = settle_expired(db, settings)
+    if settled.settled:
+        return settled.report or "ℹ️ คำขอนี้ถูกดำเนินการไปแล้ว"
 
+    # The row is past its window and still open: the owner's press is now the
+    # best chance to get it through, so it is applied to THAT row ("late").
+    # Without this a late ❌ did nothing at all — and the row stayed pending,
+    # ready to be widened by the timeout path the owner had just refused.
     req = pending_request(db, settings=settings)
+    late = False
     if not req:
-        last = latest_request(db)
-        if str((last or {}).get("decided_by") or "") == AUTO_DECIDED_BY:
+        req = stale_pending(db, settings=settings)
+        late = req is not None
+    if not req:
+        last = latest_request(db) or {}
+        if str(last.get("decided_by") or "") == AUTO_DECIDED_BY:
             return ("⏳ คำขอนี้หมดเวลายืนยันและระบบขยายลิมิตไปอัตโนมัติแล้ว\n"
                     f"• ลิมิตล่าสุดที่เขียนไป: {last.get('limit_before')}% → "
                     f"{last.get('limit_after')}%\n"
@@ -636,17 +772,23 @@ def decide(db, decision: str, decided_by: str = "line",
                 f"(คำขอเดิมมีอายุ {ttl:.0f} นาที)")
 
     triggers = list((req.get("detail") or {}).get("triggers") or [])
+    late_note = ("" if not late else
+                 f"⏳ ตอบหลังหมดช่วงยืนยัน {pending_age_min(req):.0f} นาที — "
+                 "คำตอบนี้ยังมีผล")
     if not approve:
         _mark(db, req, "rejected", decided_by)
         _audit(db, "limit_expand_rejected", req, triggers, approved=False)
         execution.set_pause(db, True, "risk limits kept — owner rejected expansion")
         log.info("kill expand REJECTED by %s (%s)", decided_by,
                  req.get("trigger_type"))
+        note = "ลิมิตเดิมยังมีผล — เทรดยังหยุดอยู่ (ใช้ /resume ไม่ได้จนกว่าจะขยาย)"
+        if late_note:
+            note = f"{late_note}: ลิมิตไม่ถูกขยาย\n{note}"
         return build_limit_expand_result(
             approved=False, applied=[], remaining=triggers, kill_engaged=True,
-            note="ลิมิตเดิมยังมีผล — เทรดยังหยุดอยู่ (ใช้ /resume ไม่ได้จนกว่าจะขยาย)")
+            note=note)
 
-    reply, _ = _approve(db, req, decided_by, settings=settings)
+    reply, _ = _approve(db, req, decided_by, note=late_note, settings=settings)
     return reply
 
 
@@ -698,6 +840,16 @@ def state(db, s: AppSettings, paused: bool = False,
     """
     ttl = ttl_minutes(s)
     req = pending_request(db, settings=s)   # read-only; a lapsed row is applied
+    # A row whose window LAPSED is normally settled by the timeout policy within
+    # a minute, but when it cannot be (the settings write fails, or the policy is
+    # off) it stays open — and the emergency exit is deferred the whole time. The
+    # owner must still be able to answer from the desk, so keep showing it and
+    # flag it as lapsed (the LINE buttons on the original prompt are the other
+    # way in). ``decide`` accepts such a press and says so in its reply.
+    lapsed = False
+    if req is None:
+        req = stale_pending(db, s)
+        lapsed = req is not None
     live = breached_triggers(db, s)         # by the monitor, never by this poll
     last = latest_request(db)
     triggers = list((req.get("detail") or {}).get("triggers") or []) if req else list(live)
@@ -706,6 +858,7 @@ def state(db, s: AppSettings, paused: bool = False,
         last_public = None              # the pending row is reported separately
     return {
         "pending": bool(req),
+        "lapsed": lapsed,
         "breach": bool(live or triggers),
         "triggers": triggers,
         "request": _public(req, ttl),
@@ -729,18 +882,21 @@ def request_and_notify(db, s: AppSettings, notifier, user_id: str = "",
                        source: str = "monitor") -> dict:
     """Settle any lapsed window, then create/push the ONE actionable prompt.
 
-    This is the monitor's entry point on every breach, i.e. the ONE place a
-    lapsed confirmation window is allowed to become a limit write (see
-    ``auto_apply_expired``). The result of that write is pushed first, then the
-    cycle continues: with the limits now higher the breach may already be gone,
-    in which case ``request_expand`` simply reports ``no_breach``.
+    This is the monitor's entry point on every breach. A lapsed confirmation
+    window is settled here (see ``settle_lapsed_window``: the same call the
+    position guard makes, so either worker may be the one that writes). That
+    report is pushed first, then the cycle continues: with the limits now higher
+    the breach may already be gone, in which case ``request_expand`` simply
+    reports ``no_breach``. A window that could NOT be settled is reported once
+    (throttled) and the ``failed`` row is retried on the next cycle.
     """
     target = user_id or DEFAULT_USER
-    applied, notified = settle_lapsed_window(db, s, notifier, target)
-    if applied:
+    settle, notified = settle_lapsed_window(db, s, notifier, target)
+    if settle.settled:
         return {"requested": False, "reason": "auto_applied",
                 "auto_applied": True, "triggers": [],
-                "request": latest_request(db), "notified": notified}
+                "request": latest_request(db), "notified": notified,
+                "auto_kind": settle.kind}
 
     res = request_expand(db, s, source=source)
     reason = res.get("reason")

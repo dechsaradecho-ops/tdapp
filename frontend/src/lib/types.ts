@@ -530,6 +530,12 @@ export interface LimitExpandRequestInfo {
 export interface LimitExpandState {
   /** true = มีคำขอรอยืนยันอยู่ → popup ต้องขึ้น */
   pending: boolean;
+  /**
+   * true = คำขอนี้เลยช่วงยืนยัน (ttl_min) ไปแล้ว แต่ระบบยัง “ตัดสินให้ไม่ได้”
+   * (เขียนค่าลิมิตไม่สำเร็จ หรือปิดนโยบายขยายอัตโนมัติ) → คำขอยังเปิดอยู่
+   * คำตอบยังมีผล และระบบไม่ปิดไม้ระหว่างรอ (เดิมจะพ้นเวลาแล้วปิดไม้ทันที)
+   */
+  lapsed: boolean;
   breach: boolean;
   triggers: LimitExpandTrigger[];
   request: LimitExpandRequestInfo | null;

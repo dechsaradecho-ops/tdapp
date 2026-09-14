@@ -20,6 +20,10 @@ import { LimitExpandDecisionResult, LimitExpandState } from "@/lib/types";
  * ระบบจะ “ขยายลิมิตให้อัตโนมัติ” ตามนโยบายที่เจ้าของบัญชีเลือกไว้ แล้วส่งผลลัพธ์
  * ไปที่ LINE — กล่องนี้จะปิดเองเมื่อพ้นเวลา (การขยายไม่เคยเกิดขึ้นเงียบ ๆ)
  *
+ * แต่ถ้าขยายอัตโนมัติ “ทำไม่ได้” (เขียนค่าลิมิตไม่สำเร็จ หรือปิดนโยบาย) ระบบจะไม่
+ * ปิดไม้และไม่ตัดสินแทนเจ้าของ: คำขอยังเปิดอยู่ → กล่องนี้ยังขึ้นและยังกดตอบได้
+ * โดยมีแถบ amber บอกว่าเลยช่วงยืนยันแล้ว (ดู state.lapsed)
+ *
  * กรณี setup_required = ยังไม่ได้รัน database/036_kill_expand_confirm.sql →
  * ขึ้นคำแนะนำเดิมกับที่ LINE แจ้ง (ลิมิตไม่ถูกแตะต้อง)
  */
@@ -154,18 +158,31 @@ export default function LimitExpandPopup() {
 
             <TriggerList state={state} />
 
+            {state.lapsed && (
+              <div className="rounded-lg border border-amber-400/25 bg-amber-400/10 p-2.5 text-xs text-amber-300 flex items-start gap-1.5">
+                <Icon n="clock" size={14} className="mt-[1px] shrink-0" />
+                <span>
+                  เลยช่วงยืนยัน ({ttl} นาที) แล้ว แต่ระบบยังขยายอัตโนมัติไม่ได้ —
+                  ลิมิตยังไม่ถูกแตะต้อง และ<b>ระบบยังไม่ปิดไม้</b>ระหว่างรอ ·
+                  คำตอบของคุณยังมีผลอยู่
+                </span>
+              </div>
+            )}
+
             <p className="text-xs text-slate-400">
               สถานะ: <span className={state.paused ? "text-loss font-semibold" : "text-profit font-semibold"}>
                 {state.paused ? "หยุดเปิดออเดอร์ใหม่ (pause)" : "เทรดอยู่"}
               </span>{" "}
               — ลิมิตยังไม่ถูกแตะต้อง
             </p>
-            <p className="text-xs text-amber-300 flex items-start gap-1.5">
-              <Icon n="warning" size={14} className="mt-[1px] shrink-0" />
-              <span>
-                ถ้าไม่ยืนยันภายใน {ttl} นาที ระบบจะขยายลิมิตให้อัตโนมัติ (+{fmtNum(state.step_pct, 0)}%) แล้วเปิดเทรดต่อ
-              </span>
-            </p>
+            {!state.lapsed && (
+              <p className="text-xs text-amber-300 flex items-start gap-1.5">
+                <Icon n="warning" size={14} className="mt-[1px] shrink-0" />
+                <span>
+                  ถ้าไม่ยืนยันภายใน {ttl} นาที ระบบจะขยายลิมิตให้อัตโนมัติ (+{fmtNum(state.step_pct, 0)}%) แล้วเปิดเทรดต่อ
+                </span>
+              </p>
+            )}
 
             <p className="text-xs text-slate-500 flex items-start gap-1.5">
               <Icon n="clock" size={14} className="mt-[1px] shrink-0" />
@@ -198,7 +215,9 @@ export default function LimitExpandPopup() {
 
             <button onClick={() => req && setHiddenReq(req.id)} disabled={!!busy}
               className="w-full text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50">
-              ปิดไปก่อน (คำขอยังรออยู่ใน LINE — พ้นเวลาแล้วระบบขยายให้อัตโนมัติ)
+              {state.lapsed
+                ? "ปิดไปก่อน (คำขอยังค้างอยู่ — ระบบยังไม่ปิดไม้และยังไม่แตะลิมิตระหว่างรอคำตอบ)"
+                : "ปิดไปก่อน (คำขอยังรออยู่ใน LINE — พ้นเวลาแล้วระบบขยายให้อัตโนมัติ)"}
             </button>
           </>
         )}

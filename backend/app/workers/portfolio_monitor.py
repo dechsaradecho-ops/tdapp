@@ -141,13 +141,13 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     # for a limit it is about to widen and un-pause again in the same tick.
     # Only the monitor and the owner's own answer perform this write.
     try:
-        report, _notified = limit_expand.settle_lapsed_window(db, s, notifier,
-                                                             user_id)
-        if report:
+        settle, _notified = limit_expand.settle_lapsed_window(db, s, notifier,
+                                                              user_id)
+        if settle.settled and settle.report:
             s = execution.get_app_settings(db)   # widened limits for this cycle
             capital = s.capital
-            log.warning("portfolio monitor: applied a lapsed limit-expand "
-                        "request and reported it")
+            log.warning("portfolio monitor: settled a lapsed limit-expand "
+                        "request (%s) and reported it", settle.kind)
     except Exception as exc:
         log.error("kill expand auto-apply failed: %s", exc)
 

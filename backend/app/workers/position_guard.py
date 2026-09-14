@@ -14,8 +14,10 @@ Priority 0 is the EMERGENCY EXIT: when the kill switch is engaged every open
 position is closed at once. It is DEFERRED while an unanswered limit-expansion
 request is on the table (the prompt says "ลิมิตยังไม่ถูกแตะต้อง") — until the owner
 answers, and for the WHOLE confirmation window (``kill_expand_ttl_min``, default
-180 min) if they stay silent, plus ``limit_expand.EMERGENCY_HOLD_GRACE_MIN``.
-After that it runs regardless.
+180 min) if they stay silent. When the window runs out the TIMEOUT POLICY decides,
+not the guard: the +5% expansion is applied automatically (and pushed), the
+account is re-judged against the widened limits, and the guard closes only if it
+is STILL over them — or if the expansion could not be written at all.
 
 Real broker adapters (MT5/OANDA) enforce SL/TP server-side; their close events
 still flow through close_trade_rows so the journal stays authoritative.
@@ -555,10 +557,15 @@ async def guard_once(db, broker, notifier: NotificationService,
     # hand says "ลิมิตยังไม่ถูกแตะต้อง". While an unanswered request is on the
     # table the exit is DEFERRED (not disabled): positions keep their SL/TP
     # management from the normal pass below, and the pause stays engaged so no
-    # new order can be opened. Owner: "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch
-    # ทำงาน" → the wait lasts for the whole confirmation window
-    # (``limit_expand.hold_limit_min``); it ends the moment the owner answers
-    # or the timeout path applies the expansion, whichever comes first.
+    # new order can be opened.
+    #
+    # Owner: "ต้องรอคอมเฟิร์มก่อนถึงจะ kill switch ทำงาน" + "ถ้ารอตาม
+    # kill_expand_ttl_min แล้วไม่ได้รับการตอบกลับให้ขยายอัตโนมัติ" → the wait IS
+    # the confirmation window (no fixed cap, no grace), and when it runs out the
+    # TIMEOUT POLICY decides — not the guard. No answer means the +5% expansion
+    # is applied (owner decision), which normally clears the breach; a window
+    # that CANNOT be applied (write failure / policy off) has not been answered
+    # either, so the hold simply continues (see ``settle.holds`` below).
     hold_row = None
     hold_note = ""
     if kill_engaged:
@@ -572,27 +579,97 @@ async def guard_once(db, broker, notifier: NotificationService,
                 "(%.0f min of %.0f)",
                 emergency_held, "; ".join(kill_triggers)[:120] or "engaged",
                 hold_row.get("id"), limit_expand.pending_age_min(hold_row),
-                limit_expand.hold_limit_min(db, s))
+                limit_expand.ttl_minutes(s))
         else:
-            # The deferral ran out (or the switch fired with no request at
-            # all). Say WHICH one in the close message: the owner may still be
-            # looking at a prompt that promised nothing would be touched.
+            # No request is waiting for an answer any more. If one ran out of
+            # time, apply the expansion the owner asked for and re-judge the
+            # account against the WIDENED limits before closing anything: the
+            # monitor normally settles the lapsed window first, and doing it
+            # here too stops the guard from closing a book that the owner's own
+            # policy was about to rescue. A window that cannot be settled keeps
+            # the hold — see ``settle.holds``.
             try:
-                late = limit_expand.open_request(db, s)
+                stale = limit_expand.stale_pending(db, s)
             except Exception:
-                late = None
-            if late is not None:
-                hold_note = (
-                    "⏳ คำขอยืนยันยังไม่ถูกตอบมา "
-                    f"{limit_expand.pending_age_min(late):.0f} นาที\n"
-                    f"(เลยกำหนดรอ {limit_expand.hold_limit_min(db, s):.0f} "
-                    f"นาที = ช่วงยืนยัน {limit_expand.ttl_minutes(s):.0f} "
-                    f"+ เผื่อ {limit_expand.EMERGENCY_HOLD_GRACE_MIN:.0f})\n"
-                    "จึงปิดไม้เพื่อความปลอดภัย — ยังกดอนุมัติได้ "
-                    "แต่จะไม่หยุดการปิดไม้อีก")
-                log.warning("emergency exit resumed: request %s unanswered for "
-                            "%.0f min", late.get("id"),
-                            limit_expand.pending_age_min(late))
+                stale = None
+            settle = None
+            if stale is not None:
+                try:
+                    settle, _pushed = limit_expand.settle_lapsed_window(
+                        db, s, notifier)
+                except Exception as exc:
+                    log.error("auto-expand of the lapsed window failed: %s", exc)
+                if settle is not None and settle.settled:
+                    try:
+                        s = execution.get_app_settings(db)
+                    except Exception as exc:
+                        log.debug("settings reload after auto-expand: %s", exc)
+                    try:
+                        ks = execution.evaluate_kill(db, s)
+                        kill_engaged = bool(getattr(ks, "engaged", False))
+                        kill_triggers = list(getattr(ks, "triggers", []) or [])
+                    except Exception as exc:
+                        log.debug("kill re-check after auto-expand failed: %s",
+                                  exc)
+                    if not kill_engaged:
+                        emergency_held = len(positions)
+                        log.warning(
+                            "emergency exit NOT needed: the lapsed window was "
+                            "auto-applied (%d position(s) stay open)",
+                            emergency_held)
+                if settle is not None and settle.holds:
+                    # The window could NOT be settled: either the settings write
+                    # did not land (the owner's approval is still being honoured
+                    # and retried every cycle) or the auto-apply policy is off so
+                    # only the owner can settle it. Owner decisions 2026-09-14:
+                    # "ถ้าเขียน DB ไม่สำเร็จห้ามปิดไม้" / "ไม่ปิดไม้ รอเจ้าของกด
+                    # อย่างเดียว (SL/TP ยังทำงาน)" → keep DEFERRING instead of
+                    # closing: the row stays open, so the LINE buttons and the
+                    # popup still work, SL/TP keeps protecting the positions, and
+                    # settle_lapsed_window has already warned the owner (once per
+                    # 6 h, the first time immediately). A close here would be an
+                    # irreversible answer to a question the owner never lost.
+                    kill_engaged = False
+                    emergency_held = len(positions)
+                    log.warning(
+                        "emergency exit HELD: request %s lapsed %.0f min ago "
+                        "but could not be settled (%s) — retrying next cycle "
+                        "instead of closing %d position(s)",
+                        stale.get("id"), limit_expand.pending_age_min(stale),
+                        settle.kind, emergency_held)
+                if kill_engaged:
+                    # Still over the WIDENED limit (or the row could not even be
+                    # dated, so there was nothing to settle). Say WHICH outcome
+                    # it was in the close message: the owner may still be
+                    # looking at a prompt that promised nothing would be
+                    # touched, and "ขยายให้แล้ว" would be a lie for a window that
+                    # was skipped or never applied.
+                    age = limit_expand.pending_age_min(stale)
+                    ttl = limit_expand.ttl_minutes(s)
+                    kind = getattr(settle, "kind", "none") if settle else "none"
+                    if kind == "applied":
+                        head = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที → "
+                                "ขยายลิมิตให้อัตโนมัติแล้ว แต่ยังเกินลิมิตใหม่")
+                    elif kind == "skipped":
+                        head = (f"⏳ ครบช่วงยืนยัน {ttl:.0f} นาที — "
+                                "คำขอไม่ต้องขยายอีกแล้ว (ลิมิตปัจจุบันสูงกว่าที่"
+                                "คำขอเสนอ) แต่ยังเกินลิมิตอยู่")
+                    elif kind == "no-breach":
+                        head = (f"⏳ ครบช่วงยืนยัน {ttl:.0f} นาที — "
+                                "ไม่มีลิมิตที่เกินอยู่แล้ว จึงไม่ขยายลิมิต "
+                                "แต่ kill switch ยังเข้าเงื่อนไขอยู่")
+                    elif kind == "retired":
+                        head = (f"⏳ ครบช่วงยืนยัน {ttl:.0f} นาที — คำขอไม่มี"
+                                "ลิมิตให้ขยาย (ยกเลิกคำขอแล้ว) แต่ยังเกินลิมิตอยู่")
+                    else:
+                        head = (f"⏳ คำขอยืนยันยังไม่ถูกตอบมา {age:.0f} นาที "
+                                f"(เลยช่วงยืนยัน {ttl:.0f} นาที) "
+                                "และขยายอัตโนมัติไม่สำเร็จ")
+                    hold_note = (head + "\nจึงปิดไม้เพื่อความปลอดภัย — "
+                                 "ยังกดอนุมัติได้ แต่จะไม่หยุดการปิดไม้อีก")
+                    log.warning(
+                        "emergency exit resumed: request %s unanswered for "
+                        "%.0f min (settle=%s)", stale.get("id"), age, kind)
 
     # ---- Feed phase: live marks + snapshots + news IN PARALLEL -----------
     # These are independent fetches — running them one after another cost
