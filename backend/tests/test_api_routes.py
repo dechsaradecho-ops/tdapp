@@ -2194,3 +2194,98 @@ class TestAITestEndpoint:
         assert body["ok"] is False
         assert body["provider"] == "dead"
         assert "401" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# /api/system/rehydrate-book
+# ---------------------------------------------------------------------------
+class BookBroker(FakeBroker):
+    """Broker with the in-memory book PaperBroker actually exposes."""
+
+    def __init__(self) -> None:
+        self._positions: dict[str, object] = {}
+        self._seq = 0
+
+    async def all_positions(self) -> list:
+        return list(self._positions.values())
+
+
+class TestRehydrateBook:
+    """/api/system/rehydrate-book โ€” adopt DB open rows into the book NOW.
+
+    Prod case (2026-09-14): a NZDUSD position was closed on a daily-rate
+    fallback price the market never traded. The row was corrected back to
+    `open` by hand, but the paper book is in RAM and is only rebuilt at
+    STARTUP, so guard-now reported book=5 vs db_open=6 โ€” the corrected
+    position sat in the journal with no stop/trail enforcement until the
+    next deploy. This endpoint closes that gap without a redeploy.
+    """
+
+    ROW = {
+        "id": "row-5", "ticket": "PAPER-000005", "user_id": "demo",
+        "asset": "NZDUSD", "direction": "BUY", "volume": 0.03,
+        "entry_price": 0.5763, "stop_loss": 0.57313, "take_profit": 0.58081,
+        "status": "open", "created_at": "2026-09-14T12:54:37+00:00",
+    }
+
+    def _state(self) -> BookBroker:
+        set_state(FakeDatabase(rows={"paper_trades": [dict(self.ROW)]}))
+        broker = BookBroker()
+        app.state.broker = broker
+        return broker
+
+    @pytest.mark.asyncio
+    async def test_open_row_is_adopted_with_its_sl_and_tp(self):
+        broker = self._state()
+        assert broker._positions == {}
+
+        body = (await call("POST", "/api/system/rehydrate-book")).json()
+
+        assert body["verdict"] == "ok"
+        assert body["restored"] == 1
+        pos = broker._positions["PAPER-000005"]
+        # the CORRECTED levels travel into the book, not stale ones
+        assert pos.stop_loss == 0.57313 and pos.take_profit == 0.58081
+        assert pos.entry_price == 0.5763
+        assert pos.row_id == "row-5"
+        # the order sequence must skip the adopted ticket, or the next
+        # place_order() would re-issue PAPER-000005 and collide with it
+        assert broker._seq >= 5
+        ticket = [t for t in body["book_tickets"] if t["ticket"] == "PAPER-000005"]
+        assert ticket and ticket[0]["sl"] == 0.57313
+
+    @pytest.mark.asyncio
+    async def test_second_call_is_idempotent(self):
+        broker = self._state()
+        await call("POST", "/api/system/rehydrate-book")
+
+        body = (await call("POST", "/api/system/rehydrate-book")).json()
+
+        assert body["restored"] == 0
+        assert len(broker._positions) == 1
+
+    @pytest.mark.asyncio
+    async def test_closed_rows_are_not_adopted(self):
+        set_state(FakeDatabase(rows={"paper_trades": [
+            dict(self.ROW, status="closed", exit_price=0.5812)]}))
+        broker = BookBroker()
+        app.state.broker = broker
+
+        body = (await call("POST", "/api/system/rehydrate-book")).json()
+
+        assert body["restored"] == 0 and broker._positions == {}
+        assert body["db_open"] == []
+
+    @pytest.mark.asyncio
+    async def test_offline_db_reports_fail(self):
+        class Offline(FakeDatabase):
+            @property
+            def available(self) -> bool:
+                return False
+
+            init_error = "SUPABASE_URL missing"
+
+        set_state(Offline())
+        body = (await call("POST", "/api/system/rehydrate-book")).json()
+        assert body["verdict"] == "fail"
+        assert "SUPABASE_URL" in body["error"]

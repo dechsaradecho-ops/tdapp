@@ -206,6 +206,56 @@ async def scan_now(request: Request) -> dict:
     return out
 
 
+@router.post("/rehydrate-book")
+async def rehydrate_book_now(request: Request) -> dict:
+    """Adopt DB open rows into the in-memory broker book, right now.
+
+    WHY: the paper broker's book lives in RAM, so it only learns which rows
+    are open at STARTUP (``position_guard.rehydrate_book`` runs from the
+    lifespan hook). A row that becomes ``open`` while the process runs — e.g.
+    after a bad fill is corrected back to open by hand — therefore sits in the
+    journal with NO stop/trail enforcement, and guard-now shows it in
+    ``db_open`` but not in ``book_tickets`` (observed on prod 2026-09-14:
+    book=5 vs db_open=6, one NZDUSD position unprotected). Until this endpoint
+    existed the only way to adopt such a row was a redeploy.
+
+    Idempotent: tickets already in the book are skipped, so a second call
+    reports ``restored: 0``. Never raises.
+    """
+    app = request.app
+    db: Database = app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    from app.workers import position_guard
+
+    try:
+        out["restored"] = await position_guard.rehydrate_book(
+            db, app.state.broker)
+    except Exception as exc:  # surface anything the worker swallowed
+        out["verdict"] = "fail"
+        out["error"] = f"{exc.__class__.__name__}: {exc}"
+        return out
+    try:
+        book = await app.state.broker.all_positions()
+        out["book_tickets"] = [
+            {"ticket": p.ticket, "asset": p.asset,
+             "sl": p.stop_loss, "tp": p.take_profit}
+            for p in book
+        ]
+    except Exception as exc:
+        out["book_error"] = f"{exc.__class__.__name__}: {exc}"
+    out["db_open"] = [
+        {"ticket": r.get("ticket"), "asset": r.get("asset")}
+        for r in db.select("paper_trades", filters={"status": "open"}, limit=50)
+    ]
+    out["verdict"] = "ok"
+    return out
+
+
 @router.post("/guard-now")
 async def guard_now(request: Request) -> dict:
     """Run ONE position-guard cycle inline and report the outcome.
@@ -215,6 +265,11 @@ async def guard_now(request: Request) -> dict:
     tickets vs DB open rows (empty book = guard blind), per-position
     R vs breakeven trigger, and whether any SL moved. Never raises —
     failures are reported, matching the scheduler's silent-failure path.
+
+    NOTE: the book is only rebuilt from the DB at STARTUP. If ``db_open``
+    lists a row that ``book_tickets`` does not, the guard is blind to it —
+    call POST /api/system/rehydrate-book first (see that endpoint for the
+    prod case that motivated it: a corrected-back-to-open row was unchecked).
     """
     app = request.app
     db: Database = app.state.db
