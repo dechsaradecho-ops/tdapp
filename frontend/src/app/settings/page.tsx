@@ -58,6 +58,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   kill_weekly_loss_pct: 5,
   kill_monthly_loss_pct: 8,
   drawdown_throttle_pct: 5,
+  kill_expand_ttl_min: 180,
   news_block_minutes: 30,
   news_caution_minutes: 120,
   correlation_cap: 80,
@@ -1154,6 +1155,9 @@ export default function SettingsPage() {
               <NumField label="DD เริ่มลดความถี่ (%)" value={cfg.drawdown_throttle_pct}
                 onChange={(v) => set("drawdown_throttle_pct", v)} step={0.5}
                 hint="เตือนก่อน kill — ถึงระดับนี้ระบบลดความถี่เปิดไม้ลง (soft brake)" />
+              <NumField label="รอยืนยันขยายลิมิต (นาที)" value={cfg.kill_expand_ttl_min}
+                onChange={(v) => set("kill_expand_ttl_min", v)} step={30}
+                hint="เกินลิมิต ระบบส่งคำขอยืนยัน (LINE + popup) แล้วรอได้นานเท่านี้ — เกินเวลาคำขอหมดอายุ ต้องรอระบบสร้างคำขอใหม่พร้อมตัวเลขล่าสุด (ต่ำสุด 5 นาที / สูงสุด 7 วัน)" />
             </div>
 
             {/* --- News / correlation / order / backtest --- */}

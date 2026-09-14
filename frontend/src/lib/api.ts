@@ -16,6 +16,8 @@ import {
   GoalAssessment,
   JournalAnalysis,
   KillSwitch,
+  LimitExpandDecisionResult,
+  LimitExpandState,
   MarketCandlesResponse,
   MarketSummary,
   MonitorSnapshot,
@@ -233,6 +235,18 @@ export const api = {
   getTradingPause: () => get<PauseStatus>("/api/trading/pause"),
   setTradingPause: (paused: boolean, reason = "") =>
     post<PauseStatus>("/api/trading/pause", { paused, reason }),
+
+  // ---------- Owner-confirmed risk limit expansion ----------
+  // GET /api/trading/limit-expand — เงื่อนไขเดียวกับ LINE: popup ขึ้นเฉพาะ
+  // เมื่อมีคำขอขยายลิมิตค้างรอเจ้าของบัญชียืนยัน (pending)
+  getLimitExpand: () => get<LimitExpandState>("/api/trading/limit-expand"),
+
+  // POST /api/trading/limit-expand/decide — อนุมัติ/ไม่อนุมัติจาก popup
+  // เดินเส้นทางตัดสินใจเดียวกันกับ LINE (เขียนลิมิต → เปิดเทรด → ประเมิน
+  // kill switch ใหม่ → push รายงานผลกลับ LINE)
+  decideLimitExpand: (decision: "approve" | "reject") =>
+    post<LimitExpandDecisionResult>("/api/trading/limit-expand/decide",
+      { decision }),
 
   // ---------- Monitor dashboard ----------
   monitor: () => get<MonitorSnapshot>("/api/trading/monitor"),

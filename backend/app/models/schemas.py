@@ -1996,6 +1996,16 @@ class AppSettings(BaseModel):
     kill_weekly_loss_pct: float = 5.0
     kill_monthly_loss_pct: float = 8.0
     drawdown_throttle_pct: float = 5.0
+    # ---- Owner-confirmed limit expansion (migrations 036 / 037) -----------
+    # "เวลาในการรอ" — how long an Approve/Reject request stays valid, in
+    # minutes. A request quotes LIVE metrics, so after this window the row is
+    # retired as expired (app/services/limit_expand.py) and the monitor issues
+    # a fresh request with fresh numbers — an old LINE message or a stale
+    # popup can never widen a limit later. 180 = the default the owner picked;
+    # the LINE prompt and the web popup both render this same value.
+    # int to match the trading_settings integer column (float JSON like 180.0
+    # fails Postgres int cast).
+    kill_expand_ttl_min: int = 180
 
     # int to match trading_settings integer columns (float JSON like 30.0 fails Postgres int cast)
     news_block_minutes: int = 30

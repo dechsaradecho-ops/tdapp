@@ -15,7 +15,11 @@ from app.services.database import Database, queue_notification
 log = logging.getLogger(__name__)
 
 CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news",
-                  "trade_opened", "trade_closed"}
+                  "trade_opened", "trade_closed",
+                  # Owner-confirmed risk-limit expansion: the Approve/Reject
+                  # prompt must NOT be throttled by the risk_warning cooldown,
+                  # or the owner could never answer it (prod 2026-09-14).
+                  "limit_expand"}
 
 # Cooldown for risk_warning: the portfolio monitor re-evaluates every minute,
 # so a standing breach would push an identical LINE alert once a minute.
@@ -63,7 +67,14 @@ class NotificationService:
         self.line = line
 
     async def notify(self, user_id: str, ntype: str, message: str,
-                     critical: bool | None = None) -> None:
+                     critical: bool | None = None,
+                     quick_reply: Optional[list[dict]] = None) -> None:
+        """Dispatch one notification.
+
+        ``quick_reply`` attaches LINE postback buttons (used by the
+        owner-confirmed limit-expansion prompt: Approve / Reject). It only
+        affects the immediate push — the queue row stores the plain text.
+        """
         is_critical = critical if critical is not None else ntype in CRITICAL_TYPES
         # Per-category switch: a disabled category produces no queue row and
         # no immediate push (user turned it off from the Settings page).
@@ -84,7 +95,7 @@ class NotificationService:
         # A failed immediate push stays 'pending' — the worker retries it.
         # Non-critical types queue as 'pending' — the worker is the sender.
         if is_critical:
-            ok = await self.push_line(user_id, message)
+            ok = await self.push_line(user_id, message, quick_reply=quick_reply)
             queue_notification(self.db, user_id, ntype, message,
                                status="sent" if ok else "pending")
         else:
@@ -111,7 +122,8 @@ class NotificationService:
         age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
         return age_min < RISK_WARNING_COOLDOWN_MIN
 
-    async def push_line(self, user_id: str, message: str) -> bool:
+    async def push_line(self, user_id: str, message: str,
+                        quick_reply: Optional[list[dict]] = None) -> bool:
         """Push to every enabled LINE target of the user: personal chats
         (line_users) AND registered groups/rooms (line_targets).
 
@@ -121,10 +133,19 @@ class NotificationService:
         personal chats never received anything. The app is single-user:
         every enabled chat gets every alert."""
         ok = False
+
+        async def _push(target: str) -> bool:
+            # Only pass quick_reply when set so line clients/fakes with the
+            # original 2-arg push() signature keep working unchanged.
+            if quick_reply:
+                return await self.line.push(target, message,
+                                            quick_reply=quick_reply)
+            return await self.line.push(target, message)
+
         for lu in self.db.select("line_users",
                                  filters={"notification_enabled": True}):
-            ok = await self.line.push(lu["line_user_id"], message) or ok
+            ok = await _push(lu["line_user_id"]) or ok
         for t in self.db.select("line_targets",
                                 filters={"notification_enabled": True}):
-            ok = await self.line.push(t["target_id"], message) or ok
+            ok = await _push(t["target_id"]) or ok
         return ok

@@ -7,6 +7,10 @@ journal. On limit breach:
   2. sends the risk alert through NotificationService (risk_warning is a
      CRITICAL type → pushed to LINE instantly)
   3. logs a risk_events row for the audit trail
+  4. asks the OWNER on LINE before any limit may grow (limit_expand): a
+     pending request + Approve/Reject buttons — the platform NEVER widens a
+     risk limit on its own. Approving updates the limit, lifts the pause and
+     re-runs the kill switch (prod 2026-09-14 incident).
 
 Also writes one equity_snapshots row per cycle (deduped per UTC day) — the
 equity curve that powers the REAL drawdown in the kill switch and the
@@ -22,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
 from app.integrations.line_client import build_risk_alert
-from app.services import execution
+from app.services import execution, limit_expand
 from app.services.database import Database
 from app.services.notification_service import NotificationService
 
@@ -205,6 +209,15 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
                         "risk alert notify failed: %s", t.exception()))
         except Exception as exc:
             log.error("risk alert notify failed: %s", exc)
+        # 3) NEVER widen a risk limit silently. A breach only creates a PENDING
+        # request and pushes ONE actionable prompt (Approve/Reject quick-reply
+        # or /dd_ok, /dd_no); the pause stays engaged until the owner answers.
+        # Deduped inside limit_expand (one prompt per window) so this 1-min
+        # loop cannot spam the chat with the same question.
+        try:
+            limit_expand.request_and_notify(db, s, notifier, user_id)
+        except Exception as exc:
+            log.error("limit expand request failed: %s", exc)
         log.warning("portfolio monitor: limit breach → trading PAUSED (%s)",
                     status.message[:200])
         return {"checked": 1, "breach": True, "paused": pause.paused,

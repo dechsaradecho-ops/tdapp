@@ -4,9 +4,10 @@ and the 11-section extended analysis output.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.close_position import ClosePositionResult
 from app.models.stats_reset import StatsResetResult
@@ -44,8 +45,12 @@ from app.models.schemas import (
     walk_forward,
 )
 from app.services import execution
+from app.services import limit_expand
 from app.services import signal_log
+from app.services.notification_service import NotificationService
 router = APIRouter()
+
+log = logging.getLogger("trading")
 
 JOURNAL_TABLE = "trading_journal"
 
@@ -539,6 +544,77 @@ class PauseRequest(BaseModel):
 async def set_pause(payload: PauseRequest, request: Request) -> PauseStatus:
     """Engage/clear the manual kill switch — blocks BOTH auto and approved orders."""
     return execution.set_pause(request.app.state.db, payload.paused, payload.reason)
+
+
+# ------------------------------------------------- risk-limit expansion (owner)
+@router.get("/limit-expand")
+async def get_limit_expand(request: Request) -> dict:
+    """Owner-confirmation state for the in-app popup.
+
+    SAME condition as the LINE prompt: the popup only appears while a PENDING
+    ``kill_expand_requests`` row exists — the one the monitor created for the
+    current breach. Approve/Reject from either channel hits the same service
+    (``app/services/limit_expand``), so a decision taken in the web UI is
+    honoured on LINE too and vice versa.
+    """
+    db = request.app.state.db
+    s = _settings(request)
+    pause = execution.get_pause(db)
+    body = limit_expand.state(db, s, pause.paused, pause.reason)
+    kill = execution.evaluate_kill(db, s)
+    body["kill_engaged"] = bool(kill.engaged)
+    body["kill_triggers"] = list(kill.triggers)
+    return body
+
+
+class LimitExpandDecisionRequest(BaseModel):
+    decision: str = Field(..., description="approve | reject")
+
+
+@router.post("/limit-expand/decide")
+async def decide_limit_expand(payload: LimitExpandDecisionRequest,
+                              request: Request) -> dict:
+    """Apply the owner's Approve/Reject from the web popup.
+
+    Writes the new limits + resumes only when a pending request exists (a bare
+    approve can never widen anything by itself), then reports the SAME text
+    that was pushed to LINE back into LINE, so the two channels stay in sync.
+    """
+    db = request.app.state.db
+    # PRE-decision settings: the pending check + the confirmation window must
+    # use the values that produced the prompt (the decision itself may rewrite
+    # a limit, and the state below is re-read afterwards).
+    pre = _settings(request)
+    decision = (payload.decision or "").strip().lower()
+    if decision not in ("approve", "reject"):
+        raise HTTPException(status_code=422,
+                            detail="decision must be approve or reject")
+
+    had_pending = limit_expand.pending_request(db, settings=pre) is not None
+    reply = limit_expand.decide(db, decision, decided_by="ui", settings=pre)
+    if had_pending:
+        # Mirror the outcome to LINE (the prompt lives there) — a push failure
+        # must never turn an applied decision into an HTTP error.
+        try:
+            notifier = NotificationService(db, request.app.state.line)
+            await notifier.notify(execution.DEFAULT_USER, "limit_expand", reply)
+        except Exception as exc:
+            log.warning("limit expand decision push failed: %s", exc)
+
+    # RE-READ: the decision may have written new limits — reporting the state
+    # with the pre-decision values would show a kill switch that no longer fires.
+    s = _settings(request)
+    pause = execution.get_pause(db)
+    body = limit_expand.state(db, s, pause.paused, pause.reason)
+    kill = execution.evaluate_kill(db, s)
+    body["kill_engaged"] = bool(kill.engaged)
+    body["kill_triggers"] = list(kill.triggers)
+    return {
+        "ok": True,
+        "applied_decision": decision if had_pending else "",
+        "reply": reply,
+        "state": body,
+    }
 
 
 # ----------------------------------------------------------------- monitor

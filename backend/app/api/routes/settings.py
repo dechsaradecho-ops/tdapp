@@ -78,6 +78,74 @@ def get_app_settings(db) -> AppSettings:
     return _load_settings(db)
 
 
+def _missing_column(raw: str) -> Optional[str]:
+    """Column name out of a PostgREST PGRST204 schema-cache error."""
+    import re
+    m = (re.search(r"Could not find the '([^']+)' column", raw)
+         or re.search(r"'([^']+)'\s+of schema", raw))
+    return m.group(1) if m else None
+
+
+def _upsert_settings_row(db, row: dict[str, Any]):
+    """Upsert the settings row, dropping columns a migration has not added yet.
+
+    A missing column (PGRST204) must never block a write the platform NEEDS —
+    e.g. an owner-approved limit expansion (limit_expand.decide) would refuse
+    the whole update because of one new optional column. The unknown column is
+    dropped and the rest lands; non-PGRST204 errors propagate as before.
+    """
+    while True:
+        try:
+            return db._client.table(SETTINGS_TABLE).upsert(row).execute()
+        except Exception as exc:
+            raw = str(exc)
+            if "PGRST204" not in raw:
+                raise
+            missing = _missing_column(raw)
+            if not missing or missing not in row:
+                raise
+            row.pop(missing, None)
+            log.warning("settings upsert: dropped unknown column %s "
+                        "(migration not applied) — the rest of the row is "
+                        "written", missing)
+
+
+def persist_settings(db, merged: AppSettings) -> bool:
+    """Upsert a fully-merged AppSettings row (id=1). Never raises.
+
+    Used by the owner-confirmed kill-switch limit expansion flow
+    (app/services/limit_expand.py). The limit columns have existed since
+    migration 006; NEW optional columns (e.g. kill_expand_ttl_min, migration
+    037) are dropped with a warning when their migration has not been applied
+    yet, so an un-run migration can never block an approved expansion.
+    """
+    if not db or not db.available:
+        return False
+    try:
+        row = merged.model_dump(mode="json")
+        row["id"] = 1
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        resp = _upsert_settings_row(db, row)
+        if resp is not None and resp.data:
+            return True
+        # No representation returned (client/config dependent): confirm by
+        # READING THE ROW BACK instead of assuming the write landed.
+        back = _load_settings(db)
+        ok = all(
+            abs(float(getattr(back, k, 0) or 0) - float(v)) < 1e-6
+            for k, v in row.items()
+            if k in _FIELDS and isinstance(v, (int, float))
+            and not isinstance(v, bool)
+        )
+        if not ok:
+            log.warning("persist_settings: upsert returned no data and the "
+                        "read-back does not match")
+        return ok
+    except Exception as exc:
+        log.error("persist_settings failed: %s", exc)
+        return False
+
+
 @router.get("", response_model=AppSettings)
 def get_settings(request: Request) -> AppSettings:
     """GET /api/settings — effective configuration (DB → defaults fallback)."""
@@ -155,10 +223,7 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
         raw = str(exc)
         skipped: list[str] = []
         while "PGRST204" in raw:
-            import re
-            m = (re.search(r"'([^']+)'\s+of schema", raw)
-                 or re.search(r"Could not find the '([^']+)' column", raw))
-            missing = m.group(1) if m else None
+            missing = _missing_column(raw)
             if not missing or missing not in row:
                 break
             row.pop(missing, None)

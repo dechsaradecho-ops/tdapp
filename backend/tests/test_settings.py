@@ -117,6 +117,8 @@ def test_app_settings_defaults_match_engine_defaults():
     assert s.kill_monthly_loss_pct == 8.0
     assert s.max_drawdown_pct == 10.0
     assert s.drawdown_throttle_pct == 5.0
+    # owner-confirmation window for a risk-limit expansion (migration 037)
+    assert s.kill_expand_ttl_min == 180
     assert s.news_block_minutes == 30
     assert s.correlation_cap == 80.0
     assert s.risk_profile == RiskProfile.moderate
@@ -650,7 +652,12 @@ def test_risk_presets_moderate_matches_defaults():
                 "paper_exit_spread_mult", "paper_commission_per_lot",
                 # AI chat model/base URL (migration 034) — an infrastructure
                 # choice the user owns; a risk preset must never overwrite it
-                "ai_model", "ai_base_url"}
+                "ai_model", "ai_base_url",
+                # Owner-confirmation window in minutes (migration 037): how long
+                # the Approve/Reject request stays valid. A waiting-time knob,
+                # not a risk-appetite field — a preset switch must not silently
+                # shorten the time the owner has to answer
+                "kill_expand_ttl_min"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

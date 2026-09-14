@@ -19,6 +19,19 @@ log = logging.getLogger(__name__)
 API = "https://api.line.me/v2/bot/message"
 
 
+def _text_message(text: str, quick_reply: Optional[list[dict]] = None) -> dict:
+    """One text message, optionally carrying quick-reply buttons.
+
+    LINE accepts ``quickReply`` on any message, and the postback actions in
+    limit_expand.quick_reply_items() let the owner answer a risk decision with
+    one tap instead of typing /dd_ok (see app/services/limit_expand.py).
+    """
+    msg: dict = {"type": "text", "text": text}
+    if quick_reply:
+        msg["quickReply"] = {"items": list(quick_reply)}
+    return msg
+
+
 class LineClient:
     def __init__(self, access_token: Optional[str] = None) -> None:
         s = get_settings()
@@ -26,11 +39,13 @@ class LineClient:
         self.enabled = bool(self.token)
 
     # ------------------------------------------------------------------
-    async def push(self, line_user_id: str, text: str) -> bool:
-        ok, _ = await self.push_ex(line_user_id, text)
+    async def push(self, line_user_id: str, text: str,
+                   quick_reply: Optional[list[dict]] = None) -> bool:
+        ok, _ = await self.push_ex(line_user_id, text, quick_reply=quick_reply)
         return ok
 
-    async def push_ex(self, line_user_id: str, text: str) -> tuple[bool, str]:
+    async def push_ex(self, line_user_id: str, text: str,
+                      quick_reply: Optional[list[dict]] = None) -> tuple[bool, str]:
         """Push returning (ok, raw_error) — the Settings test button surfaces
         the LINE API error so a wrong token / bot-not-in-group is visible in
         the UI instead of a silent False."""
@@ -44,7 +59,7 @@ class LineClient:
                     headers={"Authorization": f"Bearer {self.token}",
                              "Content-Type": "application/json"},
                     json={"to": line_user_id,
-                          "messages": [{"type": "text", "text": text}]},
+                          "messages": [_text_message(text, quick_reply)]},
                 )
                 if resp.status_code == 200:
                     return True, ""
@@ -54,7 +69,8 @@ class LineClient:
         except Exception as exc:
             return False, f"{exc.__class__.__name__}: {exc}"
 
-    async def reply(self, reply_token: str, text: str) -> bool:
+    async def reply(self, reply_token: str, text: str,
+                    quick_reply: Optional[list[dict]] = None) -> bool:
         if not self.enabled:
             return False
         async with httpx.AsyncClient(timeout=15) as client:
@@ -63,7 +79,7 @@ class LineClient:
                 headers={"Authorization": f"Bearer {self.token}",
                          "Content-Type": "application/json"},
                 json={"replyToken": reply_token,
-                      "messages": [{"type": "text", "text": text}]},
+                      "messages": [_text_message(text, quick_reply)]},
             )
             return resp.status_code == 200
 
@@ -129,3 +145,93 @@ def build_daily_market_summary(regime: str, sentiment: str, top_opportunity: str
         f"Top Assets: {top_assets}\n"
         f"Risk Status: {risk_status}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Risk-limit expansion — owner confirmation (app/services/limit_expand.py)
+# ---------------------------------------------------------------------------
+def build_limit_expand_prompt(triggers: list[dict], paused: bool = True,
+                              setup_required: bool = False,
+                              ttl_min: float = 180.0) -> str:
+    """ONE actionable prompt: every breached limit + the proposed +5pp value.
+
+    The owner must confirm before ANY limit grows — the platform never widens
+    a risk limit on its own (prod 2026-09-14 incident). Buttons: Approve /
+    Reject (postback dd_ok / dd_no) with the typed commands as fallback.
+
+    ``ttl_min`` = the configured confirmation window (Settings →
+    ``kill_expand_ttl_min``, default 180). After it the request is retired as
+    expired and the monitor issues a fresh one — the message must say the same
+    number the web popup shows.
+    """
+    lines = ["🛑 เกินลิมิตความเสี่ยง — ต้องยืนยันจากเจ้าของบัญชีก่อนขยายลิมิต", ""]
+    for t in triggers or []:
+        lines.append(
+            f"• {t.get('label', t.get('trigger', '?'))}: "
+            f"{float(t.get('value', 0)):.2f}% เกิน {float(t.get('limit', 0)):.2f}% "
+            f"→ เสนอ {float(t.get('new_limit', 0)):.2f}% (+5%)"
+        )
+    lines.append("")
+    if setup_required:
+        lines.append("⚠️ ยังบันทึกคำขอไม่ได้ — รัน database/036_kill_expand_confirm.sql "
+                     "ใน Supabase SQL Editor ก่อน")
+        lines.append("ลิมิตยังไม่ถูกแตะต้อง (ระบบไม่ขยายลิมิตเองโดยอัตโนมัติ)")
+        return "\n".join(lines)
+    lines.append(f"สถานะ: {'🛑 หยุดเปิดออเดอร์ใหม่ (pause)' if paused else '🟢 เทรดอยู่'}"
+                 " — ลิมิตยังไม่ถูกแตะต้อง")
+    lines.append("ระบบจะไม่ขยายลิมิตเองโดยอัตโนมัติ")
+    lines.append("")
+    lines.append("ยืนยันได้ 2 วิธี")
+    lines.append("1) กดปุ่ม Approve / Reject ด้านล่าง")
+    lines.append("2) พิมพ์ /dd_ok (อนุมัติ) หรือ /dd_no (ไม่อนุมัติ)")
+    lines.append("")
+    lines.append(f"⏱ คำขอมีอายุ {float(ttl_min):.0f} นาที · อนุมัติแล้วระบบจะขยายลิมิต "
+                 "+ เปิดเทรดต่อ + ประเมิน kill switch ให้ใหม่ทันที")
+    return "\n".join(lines)
+
+
+def build_limit_expand_result(approved: bool, applied: list[dict],
+                              remaining: list[dict], kill_engaged: bool,
+                              note: str = "") -> str:
+    """Post-decision report pushed back to LINE (step 3 of the flow)."""
+    def _fmt(items: list[dict]) -> list[str]:
+        return [f"• {t.get('label', t.get('trigger', '?'))}: "
+                f"{float(t.get('limit', 0)):.2f}% → {float(t.get('new_limit', 0)):.2f}%"
+                for t in (items or [])]
+
+    def _fmt_cur(items: list[dict]) -> list[str]:
+        return [f"• {t.get('label', t.get('trigger', '?'))}: ลิมิต "
+                f"{float(t.get('limit', 0)):.2f}% (ปัจจุบัน {float(t.get('value', 0)):.2f}%)"
+                for t in (items or [])]
+
+    if not approved:
+        lines = ["❌ ยกเลิกการขยายลิมิต — ลิมิตเดิมไม่ถูกแตะต้อง"]
+        lines += _fmt_cur(remaining)
+        lines.append("")
+        lines.append("สถานะ: 🛑 เทรดยังหยุดอยู่ (pause)")
+        if note:
+            lines.append(note)
+        return "\n".join(lines)
+
+    lines = ["✅ ยืนยันแล้ว — ขยายลิมิตเรียบร้อย"]
+    lines += _fmt(applied)
+    lines.append("")
+    if kill_engaged:
+        lines.append("สถานะ: 🛑 ยังไม่เปิดเทรด — kill switch ยังทำงานอยู่")
+        if remaining:
+            # remaining = breached_triggers() on the MERGED settings, so
+            # `limit` is already the new limit and `new_limit` is a further
+            # +5pp proposal that must not be quoted here.
+            lines.append("ลิมิตที่ยังเกิน: " + ", ".join(
+                f"{t.get('label', t.get('trigger'))} "
+                f"{float(t.get('value', 0)):.2f}% > {float(t.get('limit', 0)):.2f}%"
+                for t in remaining))
+        else:
+            lines.append("ลิมิตที่ยังเกิน: ตรวจไม่พบ — เกิดจาก infra fail-safe")
+        lines.append("✅ อัปเดต + resume แล้ว แต่ระบบ pause กลับเพราะยังประเมินไม่ผ่าน")
+    else:
+        lines.append("สถานะ: ▶️ เปิดเทรดต่อทันที (pause ยกเลิกแล้ว)")
+        lines.append("ประเมินใหม่ (kill switch): 🟢 ปลอดภัย — ไม่มี trigger ค้าง")
+    if note:
+        lines.append(f"หมายเหตุ: {note}")
+    return "\n".join(lines)

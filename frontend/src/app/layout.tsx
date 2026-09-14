@@ -5,6 +5,7 @@ import CapitalSync from "@/components/CapitalSync";
 import ChatWidget from "@/components/ChatWidget";
 import DesktopNav from "@/components/DesktopNav";
 import AppHero from "@/components/AppHero";
+import LimitExpandPopup from "@/components/LimitExpandPopup";
 import MobileNav from "@/components/MobileNav";
 import PwaRegister from "@/components/PwaRegister";
 import "./globals.css";
@@ -85,7 +86,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             Tailwind utilities layer จึงเป็นตัวที่ชนะ แล้วการ์ดจะชิดขอบบน
             (px-3 กันการ์ดชนขอบจอ, pb-24 กัน dock ทับ — ห้ามแตะ) */}
         <main className="px-3 py-4 sm:px-6 sm:py-5 max-w-7xl mx-auto pb-24 md:pb-5">
-          <AuthGate>{children}</AuthGate>
+          {/* LimitExpandPopup อยู่ใน AuthGate เดียวกัน (ไม่สร้าง AuthGate ซ้ำ —
+              จะยิง probe สถานะ PIN ซ้อนกัน) — โชว์ผ่าน portal ไป body จึงไม่กด
+              เลย์เอาต์ของการ์ดใน <main> และจะขึ้นเฉพาะเมื่อมีคำขอ pending เหมือน LINE */}
+          <AuthGate>
+            {children}
+            <LimitExpandPopup />
+          </AuthGate>
         </main>
         <MobileNav />
         <CapitalSync />

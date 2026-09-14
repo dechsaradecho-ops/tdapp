@@ -24,13 +24,14 @@ from pydantic import BaseModel
 from app.api.routes.settings import get_app_settings
 from app.core.config import get_settings
 from app.integrations.line_client import LineClient
-from app.services import execution
+from app.services import execution, limit_expand
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
 COMMAND_HELP = (
-    "Commands: /portfolio /market /positions /risk /summary /pause /resume\n"
+    "Commands: /portfolio /market /positions /risk /summary /pause /resume "
+    "/dd_ok /dd_no\n"
     "หรือพิมพ์คำถามอิสระ เช่น “วันนี้ควรเทรดทองไหม” — AI จะตอบพร้อมบริบทตลาดจริง"
 )
 
@@ -129,6 +130,23 @@ async def line_webhook(
         if target_id and source_type in ("group", "room"):
             _register_target(db, target_id, source_type)
 
+        # Quick-reply buttons (Approve/Reject on the risk-limit prompt) arrive
+        # as POSTBACK events — answer them on the same pipeline as the typed
+        # /dd_ok, /dd_no commands.
+        if event.get("type") == "postback":
+            data = str((event.get("postback") or {}).get("data") or "").strip()
+            reply_token = event.get("replyToken", "")
+            reply = limit_expand.handle_postback(
+                db, data, decided_by=f"line:{source_type or 'user'}")
+            if reply and reply_token:
+                ok = await line.reply(reply_token, reply)
+                _log_event("postback_replied", data=data[:24],
+                           target_id=target_id, reply_ok=ok)
+            else:
+                _log_event("postback_ignored", data=data[:24],
+                           target_id=target_id)
+            continue
+
         if event.get("type") != "message":
             _log_event("skipped_non_message", event_type=event.get("type", "?"),
                        source_type=source_type)
@@ -141,7 +159,11 @@ async def line_webhook(
             continue
         # Group chats: only answer when mentioned or replying to the bot —
         # otherwise the bot would spam every conversation in the group.
-        if source_type == "group":
+        # EXCEPTION: the risk decision commands (/dd_ok, /dd_no) are explicit
+        # account-safety commands and stay usable without an @mention, because
+        # a paused account waits on that answer.
+        cmd = text.lower().split()[0] if text else ""
+        if source_type == "group" and cmd not in ("/dd_ok", "/dd_no"):
             mentionees = [
                 m for m in (event.get("message") or {}).get("mention", {})
                 .get("mentionees", []) if isinstance(m, dict)
@@ -217,6 +239,17 @@ async def handle_command(text: str, db) -> str | None:
     """Slash commands → instant canned reply. Returns None when the text is
     not a command, signalling the caller to route it to the AI instead."""
     cmd = text.lower().split()[0] if text else ""
+    if cmd in ("/dd_ok", "/dd_no") or text in ("[Approve]", "[Reject]"):
+        # Owner confirmation for risk-limit expansion (app/services/limit_expand).
+        # Decided here, but the limits are only written when a PENDING request
+        # exists — a bare /dd_ok can never widen anything by itself. The
+        # [Approve]/[Reject] labels are LINE approval cards, not slash commands,
+        # so this branch must come BEFORE the slash-command guard.
+        approve = cmd == "/dd_ok" or text == "[Approve]"
+        if cmd in ("/dd_ok", "/dd_no") or limit_expand.pending_request(db):
+            return limit_expand.decide(db, "approve" if approve else "reject",
+                                       decided_by="line")
+        return f"Received {text}. Processing SEMI-AUTO decision..."
     if not cmd.startswith("/"):
         return None
     if cmd == "/portfolio":
@@ -245,8 +278,6 @@ async def handle_command(text: str, db) -> str | None:
     if cmd == "/resume":
         execution.set_pause(db, False, "")
         return "▶️ Auto trading RESUMED (risk checks active)."
-    if text in ("[Approve]", "[Reject]"):
-        return f"Received {text}. Processing SEMI-AUTO decision..."
     return COMMAND_HELP
 
 

@@ -589,6 +589,18 @@ def peak_equity(db, capital: float, equity: float) -> float:
 # ---------------------------------------------------------------------------
 # Kill-switch — SINGLE shared evaluation (gate / guard / monitor share this)
 # ---------------------------------------------------------------------------
+def kill_metrics(db, capital: float) -> tuple[float, float, float, float]:
+    """(daily, weekly, monthly, drawdown) loss % — ONE definition.
+
+    Used by evaluate_kill AND by the owner-confirmed limit expansion flow
+    (app/services/limit_expand.py). A LINE prompt that quotes a drawdown the
+    kill switch disagrees with would be worse than no prompt at all, so both
+    read the numbers from here.
+    """
+    daily, weekly, monthly = _loss_pcts(db, capital)
+    return daily, weekly, monthly, equity_drawdown_pct(db, capital)
+
+
 def evaluate_kill(db, s: AppSettings,
                   broker_connected: bool = True,
                   market_data_ok: bool = True,
@@ -607,8 +619,7 @@ def evaluate_kill(db, s: AppSettings,
     """
     try:
         capital = float(getattr(s, "capital", 0) or 0)
-        daily, weekly, monthly = _loss_pcts(db, capital)
-        dd = equity_drawdown_pct(db, capital)
+        daily, weekly, monthly, dd = kill_metrics(db, capital)
         return KillSwitchEngine(
             daily_loss_limit=float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0),
             weekly_loss_limit=float(getattr(s, "kill_weekly_loss_pct", 5.0) or 5.0),

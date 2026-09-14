@@ -490,6 +490,70 @@ export interface KillSwitch {
   message: string;
 }
 
+/** ลิมิตความเสี่ยง 1 ตัวที่ "เกินอยู่" — ตัวเลขที่คำขอยืนยันอ้างอิง */
+export interface LimitExpandTrigger {
+  trigger: "drawdown" | "daily" | "weekly" | "monthly" | string;
+  /** คอลัมน์ใน trading_settings ที่จะถูกเขียนเมื่ออนุมัติ */
+  field: string;
+  label: string;
+  /** ค่าที่วัดได้จริงตอนนี้ (%) */
+  value: number;
+  /** ลิมิตที่ใช้อยู่ตอนนี้ (%) */
+  limit: number;
+  /** ลิมิตที่เสนอหลังอนุมัติ (limit + step) (%) */
+  new_limit: number;
+}
+
+export interface LimitExpandRequestInfo {
+  id: string;
+  status: "pending" | "approved" | "rejected" | "expired" | string;
+  trigger_type: string;
+  metric_value: number | null;
+  limit_before: number | null;
+  limit_after: number | null;
+  requested_at: string | null;
+  /** requested_at + kill_expand_ttl_min (ค่า default 180 นาที, ตั้งได้ในหน้า
+   *  Settings) — เลยเวลาแล้วคำขอหมดอายุ ไม่ขยายให้ */
+  expires_at: string | null;
+  age_min: number | null;
+  decided_at: string | null;
+  decided_by: string;
+}
+
+/**
+ * GET /api/trading/limit-expand — สถานะสำหรับ popup ยืนยันขยายลิมิต
+ * ใช้ "เงื่อนไขเดียวกับ LINE": popup ขึ้นเมื่อมีคำขอสถานะ pending รอเจ้าของบัญชี
+ * เท่านั้น (แถวเดียวกับที่สร้างข้อความ LINE) — ตัวเลขที่โชว์คือตัวเลขของคำขอนั้น
+ */
+export interface LimitExpandState {
+  /** true = มีคำขอรอยืนยันอยู่ → popup ต้องขึ้น */
+  pending: boolean;
+  breach: boolean;
+  triggers: LimitExpandTrigger[];
+  request: LimitExpandRequestInfo | null;
+  /** คำขอล่าสุดที่ตัดสินใจไปแล้ว (ไม่นับอันที่ยัง pending) */
+  last: LimitExpandRequestInfo | null;
+  paused: boolean;
+  pause_reason: string;
+  /** ยังไม่ได้รัน migration 036 → เก็บคำขอไม่ได้ (LINE แจ้งเหมือนกัน) */
+  setup_required: boolean;
+  step_pct: number;
+  ttl_min: number;
+  approve_command: string;
+  reject_command: string;
+  kill_engaged: boolean;
+  kill_triggers: string[];
+}
+
+export interface LimitExpandDecisionResult {
+  ok: boolean;
+  /** "" เมื่อไม่มีคำขอค้าง — การกดอนุมัติลอย ๆ ต้องไม่ขยายลิมิตใด ๆ */
+  applied_decision: "approve" | "reject" | "";
+  /** ข้อความรายงานผลชุดเดียวกับที่ push เข้า LINE */
+  reply: string;
+  state: LimitExpandState;
+}
+
 export interface JournalEntry {
   id?: string | null;
   asset: string;
@@ -669,6 +733,10 @@ export interface AppSettings {
   kill_weekly_loss_pct: number;
   kill_monthly_loss_pct: number;
   drawdown_throttle_pct: number;
+  /** นาทีที่รอการยืนยันขยายลิมิตความเสี่ยง (LINE + popup) ก่อนคำขอหมดอายุ —
+   *  default 180; เกินเวลาแล้วแถวเดิมถูกปิดเป็น expired และระบบสร้างคำขอใหม่
+   *  พร้อมตัวเลขล่าสุด (migration 037) */
+  kill_expand_ttl_min: number;
   news_block_minutes: number;
   news_caution_minutes: number;
   correlation_cap: number;
