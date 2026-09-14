@@ -160,7 +160,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             # Explainability (read-time): same sizing math execute_signal
             # uses — lots from risk_to_lot_for + min_lot floor, spread cost,
             # RR — so the card's "วิธีคำนวณ" matches the real order.
+            # _lots_card feeds suggested_lots (the lots the order will open).
             calc_notes: list[str] = []
+            _lots_card: float | None = None
             try:
                 asset_u = str(r.get("asset") or "").upper()
                 if entry > 0 and sl_distance > 0:
@@ -194,6 +196,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     lots_used = max(lots, floor)
                     contract = contract_value_for(asset_u)
                     risk_usd = sl_distance * lots_used * contract
+                    # Card lots = what the order will actually open (same
+                    # math, effective distance already applied above).
+                    _lots_card = round(lots_used, 2)
                     calc_notes.append(
                         f"ขนาดไม้: ทุน ${float(s.capital or 0):g} × "
                         f"{float(s.risk_per_trade_pct or 0):g}% = "
@@ -278,6 +283,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 live_price=live_prices.get(str(r["asset"]).upper()),
                 feed_status=feed,
                 calc_notes=calc_notes,
+                suggested_lots=_lots_card,
             ))
             # Countdown for pending cards: how long until this signal ages out
             # of the queue (30-min TTL) and the scanner re-evaluates the setup.

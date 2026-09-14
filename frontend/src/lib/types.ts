@@ -388,6 +388,9 @@ export interface SignalProposal {
   // Explainability: ขั้นตอนคำนวณทีละขั้น (SL จาก ATR, TP จาก RR, ขนาดไม้,
   // สเปรด) — การ์ดแสดงในบล็อก "วิธีคำนวณ" แบบพับได้
   calc_notes?: string[] | null;
+  // ขนาดไม้ (lots) ที่ระบบจะเปิดจริง — คำนวณ read-time ด้วยสูตรเดียวกับ
+  // execute_signal (risk_to_lot + min_lot floor บน effective SL)
+  suggested_lots?: number | null;
 }
 
 // ---------- Extended Trading System ----------

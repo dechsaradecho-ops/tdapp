@@ -232,6 +232,11 @@ class SignalProposal(BaseModel):
     # "สเปรด 0.00015 → ต้นทุน $0.15", "RR 1:2 จาก SL/TP". The card renders
     # these in a collapsible "วิธีคำนวณ" block — no bare numbers.
     calc_notes: list[str] = Field(default_factory=list)
+    # Read-time sized volume (lots) for this card — same math execute_signal
+    # uses (risk_to_lot_for + min_lot floor on the EFFECTIVE SL distance),
+    # so the card shows the lots the order will actually open (e.g. 0.02).
+    # None when entry/SL missing or for non-DB proposals that never sized.
+    suggested_lots: Optional[float] = None
 
 
 class TradeRecord(BaseModel):
