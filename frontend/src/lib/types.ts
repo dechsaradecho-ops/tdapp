@@ -513,10 +513,12 @@ export interface LimitExpandRequestInfo {
   limit_after: number | null;
   requested_at: string | null;
   /** requested_at + kill_expand_ttl_min (ค่า default 180 นาที, ตั้งได้ในหน้า
-   *  Settings) — เลยเวลาแล้วคำขอหมดอายุ ไม่ขยายให้ */
+   *  Settings) — เลยเวลาแล้วระบบ “ขยายลิมิตให้อัตโนมัติ” ตามนโยบายที่ตั้งไว้
+   *  (คำขอที่ไม่มีลิมิตค้างอยู่จะถูกปิดเป็น expired โดยไม่ขยาย) */
   expires_at: string | null;
   age_min: number | null;
   decided_at: string | null;
+  /** "ui" / "line:..." = เจ้าของกดเอง · "auto:expired" = ระบบขยายให้เมื่อพ้นเวลา */
   decided_by: string;
 }
 
@@ -547,8 +549,12 @@ export interface LimitExpandState {
 
 export interface LimitExpandDecisionResult {
   ok: boolean;
-  /** "" เมื่อไม่มีคำขอค้าง — การกดอนุมัติลอย ๆ ต้องไม่ขยายลิมิตใด ๆ */
-  applied_decision: "approve" | "reject" | "";
+  /**
+   * "" เมื่อไม่มีคำขอค้าง — การกดอนุมัติลอย ๆ ต้องไม่ขยายลิมิตใด ๆ
+   * "auto" เมื่อคำขอหมดเวลายืนยันไปแล้ว — ระบบขยายลิมิตให้เองตามนโยบาย
+   * (reply คือผลที่เกิดขึ้นจริง ไม่ใช่ผลจากการกดปุ่มครั้งนี้)
+   */
+  applied_decision: "approve" | "reject" | "auto" | "";
   /** ข้อความรายงานผลชุดเดียวกับที่ push เข้า LINE */
   reply: string;
   state: LimitExpandState;

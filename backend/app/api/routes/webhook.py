@@ -246,7 +246,11 @@ async def handle_command(text: str, db) -> str | None:
         # [Approve]/[Reject] labels are LINE approval cards, not slash commands,
         # so this branch must come BEFORE the slash-command guard.
         approve = cmd == "/dd_ok" or text == "[Approve]"
-        if cmd in ("/dd_ok", "/dd_no") or limit_expand.pending_request(db):
+        if cmd in ("/dd_ok", "/dd_no") or limit_expand.pending_request(db) \
+                or limit_expand.stale_pending(db):
+            # stale_pending: a window that lapsed is settled by decide() itself
+            # (policy: expiry = apply) — the card must reach that, not the
+            # unrelated semi-auto flow.
             return limit_expand.decide(db, "approve" if approve else "reject",
                                        decided_by="line")
         return f"Received {text}. Processing SEMI-AUTO decision..."

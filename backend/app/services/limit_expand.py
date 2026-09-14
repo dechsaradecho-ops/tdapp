@@ -1,10 +1,11 @@
-"""Risk-limit expansion — OWNER-confirmed on LINE, never automatic.
+"""Risk-limit expansion — the owner is ASKED first, the window decides last.
 
 Prod 2026-09-14: drawdown 10.06% > 10.00% fired the kill switch, the position
 guard closed all 5 open positions (2 of them winners) and Gate 1 blocked every
 new order. The behaviour was correct — but the owner had no sanctioned way to
 continue trading, and auto-widening a risk limit is exactly the mistake a kill
-switch exists to prevent.
+switch exists to prevent. So a breach ASKS first (nothing widens behind the
+owner's back, and never silently).
 
 Flow implemented here:
 
@@ -17,11 +18,16 @@ Flow implemented here:
   3. approve → the named limit columns are written, the pause is lifted, the
      kill switch is RE-EVALUATED and the result is pushed back to LINE
      reject  → limits stay exactly as they were and trading stays paused
+  4. NO ANSWER before the window (Settings → ``kill_expand_ttl_min``, default
+     180 min) → the request is applied as if approved (owner decision: "ถ้า
+     confirm หมดอายุให้ดำเนินการขยาย limit เลย") and the result is pushed to
+     the SAME channels, so the widening is never silent. Only the monitor may
+     perform this write — see ``auto_apply_expired`` vs ``pending_request``.
 
-Only the limits named in the confirmed request are touched, and only by
-``EXPAND_STEP_PCT`` per confirmation. The breach math is shared with the kill
-switch (``execution.kill_metrics``) so a prompt can never quote numbers that
-disagree with the switch that fired.
+Only the limits named in the request are touched, and only by
+``EXPAND_STEP_PCT`` per confirmation; a limit is never written DOWN. The breach
+math is shared with the kill switch (``execution.kill_metrics``) so a prompt can
+never quote numbers that disagree with the switch that fired.
 """
 from __future__ import annotations
 
@@ -62,6 +68,21 @@ MAX_TTL_MIN = 10080.0            # 7 days
 # another +5pp once the new limits are also exceeded).
 REASK_COOLDOWN_MIN = 30.0
 REASK_AFTER_REJECT_MIN = 120.0
+
+# Owner decision (2026-09-14): "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย".
+# An unanswered request is therefore APPLIED once its window lapses instead of
+# being dropped, which would leave the account paused until someone presses a
+# button that may never come. Flip to False to go back to "expiry = do nothing".
+AUTO_APPLY_ON_EXPIRY = True
+
+# ``decided_by`` written by the timeout path (vs "line:user" / "ui"), and the
+# headline of the report that path pushes. Both are greppable in prod.
+AUTO_DECIDED_BY = "auto:expired"
+TIMEOUT_TITLE = "⏳ หมดเวลายืนยัน — ขยายลิมิตให้อัตโนมัติ"
+# Same, for a window that lapsed while NO limit is breached any more: the
+# request is retired instead of widening a risk limit the account no longer
+# needs (the flow is ask-first, never "widen because time ran out").
+AUTO_NO_BREACH_BY = "auto:expired-no-breach"
 
 # trigger key, trading_settings column, LINE label, index into kill_metrics()
 # Order matters: drawdown is the trigger that caused the 2026-09-14 incident and
@@ -219,12 +240,42 @@ def latest_request(db) -> Optional[dict]:
 
 def pending_request(db, allow_stale: bool = False,
                     settings: Optional[AppSettings] = None) -> Optional[dict]:
-    """The newest PENDING request, or None.
+    """The newest PENDING request that is still inside its window, or None.
 
     A request older than the configured window (Settings →
-    ``kill_expand_ttl_min``, default 180 min) is retired as ``expired`` — its
-    quoted metrics are stale, so an old chat message / popup can never widen a
-    limit today; the monitor issues a fresh request with fresh numbers.
+    ``kill_expand_ttl_min``, default 180 min) is NOT returned: its quoted
+    metrics are stale, so an old chat message / popup can never widen a limit.
+
+    This function is READ-ONLY on purpose (popup poll, GET /limit-expand,
+    state()). The window that lapsed is not a dead end any more — the monitor
+    APPLIES the request (``auto_apply_expired``, policy ``AUTO_APPLY_ON_EXPIRY``)
+    on its own cycle; a passive poll must never widen a limit as a side effect.
+    """
+    rows = _select(db, filters={"status": "pending"}, limit=1)
+    if not rows:
+        return None
+    row = rows[0]
+    if allow_stale:
+        return row
+    ttl = _resolve_ttl(db, settings)
+    age = _age_min(row.get("requested_at") or row.get("created_at"))
+    if age is not None and age > ttl:
+        log.info("kill expand request is past its window (%.0f min > %.0f) — "
+                 "the monitor will apply it", age, ttl)
+        return None
+    return row
+
+
+def stale_pending(db, settings: Optional[AppSettings] = None
+                  ) -> Optional[dict]:
+    """The newest PENDING request that has outlived the configured window.
+
+    Read-only too: it answers "is there something the timeout path owes the
+    owner?" without writing. See ``auto_apply_expired`` for the write.
+
+    Only the NEWEST pending row is considered: if a failed write ever leaves an
+    old row behind, the next request (fresh numbers, same policy) is the one
+    that acts — a queue of stale rows must never stack up +5pp at a time.
     """
     rows = _select(db, filters={"status": "pending"}, limit=1)
     if not rows:
@@ -232,10 +283,7 @@ def pending_request(db, allow_stale: bool = False,
     row = rows[0]
     ttl = _resolve_ttl(db, settings)
     age = _age_min(row.get("requested_at") or row.get("created_at"))
-    if age is not None and age > ttl and not allow_stale:
-        _mark(db, row, "expired")
-        log.info("kill expand request expired after %.0f min (ttl %.0f)",
-                 age, ttl)
+    if age is None or age <= ttl:
         return None
     return row
 
@@ -290,6 +338,171 @@ def request_expand(db, s: AppSettings, source: str = "monitor") -> dict:
             "triggers": (fresh.get("detail") or {}).get("triggers") or triggers}
 
 
+def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
+             settings: Optional[AppSettings] = None) -> tuple[str, str]:
+    """Write what the request asked for, lift the pause, re-run the switch.
+
+    Shared by the owner's answer (``decide``) and by the timeout auto-apply, so
+    the two paths can never take a different shortcut. Returns ``(reply,
+    outcome)`` with outcome ∈ {"applied", "skipped", "failed"}:
+
+    * ``applied`` — the limits were written and the pause was re-evaluated
+    * ``skipped`` — nothing to write (a limit already at/above the proposal) and
+      the request was closed; safe to report, nothing to retry
+    * ``failed``  — the settings write did not land: the request was NOT closed
+      so a caller may retry, and nothing must be reported as a widening
+
+    Limits only ever move UP: a request is a snapshot, so when the owner raised
+    a limit by hand in the meantime the stale proposal is IGNORED instead of
+    silently lowering the newer setting. The report therefore quotes only the
+    limits that were actually written, and names the ones it skipped.
+    """
+    triggers = list((req.get("detail") or {}).get("triggers") or [])
+    if not triggers:
+        return ("⚠️ คำขอไม่สมบูรณ์ (ไม่ระบุลิมิตที่ต้องขยาย) — ยกเลิกคำขอนี้แล้ว",
+                "skipped")
+
+    s = settings or execution.get_app_settings(db)
+    patch: dict[str, float] = {}
+    for t in triggers:
+        field = t.get("field")
+        if not field or t.get("new_limit") is None:
+            continue
+        try:
+            proposed = float(t["new_limit"])
+            current = float(getattr(s, field, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if proposed > current:
+            patch[field] = proposed
+
+    if not patch:
+        _mark(db, req, "approved", decided_by)
+        _audit(db, "limit_expanded", req, triggers, approved=True)
+        log.info("kill expand approved by %s — limits already at/above the "
+                 "proposal, nothing written", decided_by)
+        return ("ℹ️ ลิมิตปัจจุบันสูงกว่าที่คำขอเสนออยู่แล้ว — ไม่มีการเขียนทับ\n"
+                "ลิมิตเดิมยังมีผล (ตัวเลขในคำขอคือค่าตอนสร้างคำขอ)", "skipped")
+
+    merged = AppSettings.model_validate({**s.model_dump(), **patch})
+    if not _persist_settings(db, merged):
+        return ("⚠️ บันทึกลิมิตใหม่ไม่สำเร็จ — ลิมิตเดิมยังมีผลและเทรดยังหยุดอยู่\n"
+                "ตรวจว่า trading_settings เขียนได้ แล้วกดอนุมัติอีกครั้ง", "failed")
+
+    # Only quote what was ACTUALLY written: a request can carry several
+    # triggers, and one of them may have been raised by hand in the meantime.
+    written = [t for t in triggers if str(t.get("field") or "") in patch]
+    skipped = [t for t in triggers if str(t.get("field") or "") not in patch]
+    if skipped:
+        note = ((note + "\n") if note else "") + (
+            "ℹ️ ไม่เขียนทับ: " + ", ".join(
+                str(t.get("label") or t.get("trigger") or "?") for t in skipped)
+            + " (ลิมิตปัจจุบันสูงกว่าที่คำขอเสนออยู่แล้ว)")
+
+    _mark(db, req, "approved", decided_by)
+    _audit(db, "limit_expanded", req, written, approved=True)
+
+    # Spec: "อัปเดต max_drawdown + resume ทันที" — resume happens BEFORE the
+    # re-evaluation, then the fresh kill state decides whether it stays lifted.
+    execution.set_pause(db, False, "")
+    kill = execution.evaluate_kill(db, merged)
+    remaining = breached_triggers(db, merged)
+    if kill.engaged or remaining:
+        # Still over a limit (or infra fail-safe) → the gate would block anyway;
+        # keep the pause so the UI never claims trading is live.
+        execution.set_pause(
+            db, True, f"kill switch after expand: {'; '.join(kill.triggers)[:150]}")
+    log.warning("kill expand APPROVED by %s: %s → kill engaged=%s remaining=%s",
+                decided_by, patch, kill.engaged,
+                [t["trigger"] for t in remaining])
+    return build_limit_expand_result(
+        approved=True, applied=written, remaining=remaining,
+        kill_engaged=kill.engaged or bool(remaining),
+        note=note or "; ".join(kill.triggers)[:200], title=title), "applied"
+
+
+def auto_apply_expired(db, settings: Optional[AppSettings] = None
+                       ) -> Optional[str]:
+    """NO ANSWER BEFORE THE WINDOW LAPSED → apply the expansion anyway.
+
+    Owner decision: "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย". The request
+    the owner was shown is executed as if approved and the same report is pushed
+    to the same channels, so a limit never widens silently.
+
+    Returns the LINE report for a SETTLED window (limits written, or nothing to
+    write), else None (nothing was pending, the policy is off, the request is
+    unusable, or the settings write failed — the row is then kept so the next
+    cycle retries instead of pushing the same failure every minute).
+
+    Only mutating callers may call this (``portfolio_monitor`` via
+    ``request_and_notify``, and ``decide`` when the owner answers late). Read
+    paths (``state``, GET /api/trading/limit-expand, the popup poll) must not:
+    a poll would otherwise widen a limit as a side effect.
+    """
+    if not AUTO_APPLY_ON_EXPIRY:
+        return None
+    row = stale_pending(db, settings)
+    if row is None:
+        return None
+
+    s = settings or execution.get_app_settings(db)
+    triggers = list((row.get("detail") or {}).get("triggers") or [])
+    if not triggers:
+        # A request with no quotable limit can never widen anything: retire it
+        # (with a decided_by) so it stops being a candidate every cycle.
+        _mark(db, row, "expired", AUTO_DECIDED_BY)
+        log.error("kill expand timeout: request %s lists no triggers — retired",
+                  row.get("id"))
+        return None
+
+    if not breached_triggers(db, s):
+        # The metrics came back inside the limits while the owner was thinking.
+        # Widening now would raise a risk limit the account does not need, so
+        # the request is retired and reported instead.
+        _mark(db, row, "expired", AUTO_NO_BREACH_BY)
+        log.info("kill expand timeout: no limit is breached any more — retired "
+                 "without widening (request %s)", row.get("id"))
+        return ("ℹ️ คำขอขยายลิมิตหมดอายุโดยไม่ต้องขยาย\n"
+                "ไม่มีลิมิตที่เกินอยู่แล้ว (ค่ากลับมาอยู่ในกรอบ) — ลิมิตเดิมยังมีผล\n"
+                "ถ้าเทรดยังหยุดอยู่ ให้พิมพ์ /resume")
+
+    ttl = ttl_minutes(s)
+    age = _age_min(row.get("requested_at") or row.get("created_at")) or 0.0
+    note = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที — ระบบขยายลิมิตให้อัตโนมัติ\n"
+            "ปรับเวลาในการรอได้ที่หน้า Settings (รูทีนนี้ทำงานทุก ~1 นาที)")
+    reply, outcome = _approve(db, row, AUTO_DECIDED_BY, note=note,
+                              title=TIMEOUT_TITLE, settings=s)
+    if outcome == "failed":
+        # Report NOTHING: it would repeat every minute. The row was not closed,
+        # so the next cycle retries once trading_settings is writable again.
+        log.error("kill expand auto-apply wrote nothing (request %s)",
+                  row.get("id"))
+        return None
+    if outcome == "skipped":
+        log.info("kill expand timeout settled without writing (request %s)",
+                 row.get("id"))
+        return reply
+    log.warning("kill expand AUTO-APPLIED after %.0f min of silence (ttl %.0f)",
+                age, ttl)
+    return reply
+
+
+def settle_lapsed_window(db, settings, notifier,
+                         user_id: str = "") -> tuple[Optional[str], bool]:
+    """Apply a lapsed confirmation window AND report it — one step, no skips.
+
+    The monitor-side entry point (``request_and_notify`` also uses it): every
+    caller that may widen on timeout must push the same report, so a widening
+    can never happen without the owner being told. Returns
+    ``(report, notified)``; ``(None, False)`` when nothing needed settling.
+    """
+    report = auto_apply_expired(db, settings)
+    if not report:
+        return None, False
+    return report, _dispatch(notifier, user_id or DEFAULT_USER,
+                             "limit_expand", report)
+
+
 def decide(db, decision: str, decided_by: str = "line",
            settings: Optional[AppSettings] = None) -> str:
     """Apply an owner decision to the pending request; returns the LINE reply.
@@ -306,8 +519,22 @@ def decide(db, decision: str, decided_by: str = "line",
     if not approve and word not in REJECT_WORDS:
         return ("ไม่เข้าใจคำสั่ง — ใช้ /dd_ok (อนุมัติ) หรือ /dd_no (ไม่อนุมัติ)")
 
+    # An unanswered request that is past its window is APPLIED (policy above),
+    # even when the owner answers late — that press must not silently do nothing.
+    # This runs BEFORE the read below: pending_request() only reports requests
+    # that are still inside their window.
+    applied = auto_apply_expired(db, settings)
+    if applied:
+        return applied
+
     req = pending_request(db, settings=settings)
     if not req:
+        last = latest_request(db)
+        if str((last or {}).get("decided_by") or "") == AUTO_DECIDED_BY:
+            return ("⏳ คำขอนี้หมดเวลายืนยันและระบบขยายลิมิตไปอัตโนมัติแล้ว\n"
+                    f"• ลิมิตล่าสุดที่เขียนไป: {last.get('limit_before')}% → "
+                    f"{last.get('limit_after')}%\n"
+                    "ถ้าไม่ต้องการ ให้แก้ลิมิตกลับได้ที่หน้า Settings")
         ttl = _resolve_ttl(db, settings)
         return ("ℹ️ ไม่มีคำขอขยายลิมิตที่รอการยืนยันอยู่\n"
                 "ถ้ายังเกินลิมิต ระบบจะส่งคำขอใหม่ให้อัตโนมัติ "
@@ -324,37 +551,8 @@ def decide(db, decision: str, decided_by: str = "line",
             approved=False, applied=[], remaining=triggers, kill_engaged=True,
             note="ลิมิตเดิมยังมีผล — เทรดยังหยุดอยู่ (ใช้ /resume ไม่ได้จนกว่าจะขยาย)")
 
-    patch = {t["field"]: float(t["new_limit"]) for t in triggers
-             if t.get("field") and t.get("new_limit") is not None}
-    if not patch:
-        return "⚠️ คำขอไม่สมบูรณ์ (ไม่ระบุลิมิตที่ต้องขยาย) — ยกเลิกคำขอนี้แล้ว"
-
-    s = execution.get_app_settings(db)
-    merged = AppSettings.model_validate({**s.model_dump(), **patch})
-    if not _persist_settings(db, merged):
-        return ("⚠️ บันทึกลิมิตใหม่ไม่สำเร็จ — ลิมิตเดิมยังมีผลและเทรดยังหยุดอยู่\n"
-                "ตรวจว่า trading_settings เขียนได้ แล้วกดอนุมัติอีกครั้ง")
-
-    _mark(db, req, "approved", decided_by)
-    _audit(db, "limit_expanded", req, triggers, approved=True)
-
-    # Spec: "อัปเดต max_drawdown + resume ทันที" — resume happens BEFORE the
-    # re-evaluation, then the fresh kill state decides whether it stays lifted.
-    execution.set_pause(db, False, "")
-    kill = execution.evaluate_kill(db, merged)
-    remaining = breached_triggers(db, merged)
-    if kill.engaged or remaining:
-        # Still over a limit (or infra fail-safe) → the gate would block anyway;
-        # keep the pause so the UI never claims trading is live.
-        execution.set_pause(
-            db, True, f"kill switch after expand: {'; '.join(kill.triggers)[:150]}")
-    log.warning("kill expand APPROVED by %s: %s → kill engaged=%s remaining=%s",
-                decided_by, patch, kill.engaged,
-                [t["trigger"] for t in remaining])
-    return build_limit_expand_result(
-        approved=True, applied=triggers, remaining=remaining,
-        kill_engaged=kill.engaged or bool(remaining),
-        note="; ".join(kill.triggers)[:200])
+    reply, _ = _approve(db, req, decided_by, settings=settings)
+    return reply
 
 
 def handle_postback(db, data: str, decided_by: str = "line",
@@ -404,8 +602,8 @@ def state(db, s: AppSettings, paused: bool = False,
     the Settings value too, so both channels expire at the same moment.
     """
     ttl = ttl_minutes(s)
-    req = pending_request(db, settings=s)   # may retire a stale row
-    live = breached_triggers(db, s)
+    req = pending_request(db, settings=s)   # read-only; a lapsed row is applied
+    live = breached_triggers(db, s)         # by the monitor, never by this poll
     last = latest_request(db)
     triggers = list((req.get("detail") or {}).get("triggers") or []) if req else list(live)
     last_public = _public(last, ttl)
@@ -434,10 +632,23 @@ def state(db, s: AppSettings, paused: bool = False,
 # ---------------------------------------------------------------------------
 def request_and_notify(db, s: AppSettings, notifier, user_id: str = "",
                        source: str = "monitor") -> dict:
-    """Create the request if warranted and push the ONE actionable prompt."""
+    """Settle any lapsed window, then create/push the ONE actionable prompt.
+
+    This is the monitor's entry point on every breach, i.e. the ONE place a
+    lapsed confirmation window is allowed to become a limit write (see
+    ``auto_apply_expired``). The result of that write is pushed first, then the
+    cycle continues: with the limits now higher the breach may already be gone,
+    in which case ``request_expand`` simply reports ``no_breach``.
+    """
+    target = user_id or DEFAULT_USER
+    applied, notified = settle_lapsed_window(db, s, notifier, target)
+    if applied:
+        return {"requested": False, "reason": "auto_applied",
+                "auto_applied": True, "triggers": [],
+                "request": latest_request(db), "notified": notified}
+
     res = request_expand(db, s, source=source)
     reason = res.get("reason")
-    target = user_id or DEFAULT_USER
 
     if res.get("requested"):
         text = build_limit_expand_prompt(res["triggers"],

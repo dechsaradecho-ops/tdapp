@@ -56,6 +56,26 @@ def _dd_db(equity: float = 8000.0, peak: float = 10000.0) -> FakeDatabase:
     })
 
 
+def _daily_loss_db(pnl: float = -300.0, capital: float = 10000.0) -> FakeDatabase:
+    """Db whose only breach is a DAILY-LOSS breach (3% vs a 2% limit).
+
+    The risk engine and the kill switch both read ``kill_daily_loss_pct``, so a
+    +5pp expansion (2 → 7) clears the breach for BOTH in the same cycle —
+    unlike a drawdown the monitor computes from the live broker book.
+    """
+    db = db_with_client({
+        "equity_snapshots": [
+            {"id": "eq-2", "snapshot_date": "2026-09-14", "equity": capital},
+            {"id": "eq-1", "snapshot_date": "2026-09-01", "equity": capital},
+        ],
+    })
+    db.rows["paper_trades"] = [{
+        "id": "t1", "status": "closed", "pnl": pnl,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    }]
+    return db
+
+
 # ---------------------------------------------------------------------------
 # breach detection
 # ---------------------------------------------------------------------------
@@ -113,14 +133,35 @@ def test_rejected_request_is_in_cooldown():
     assert limit_expand.request_expand(db, s)["reason"] == "cooldown"
 
 
-def test_stale_pending_request_is_retired():
+def test_a_lapsed_request_is_no_longer_answerable_but_waits_for_the_timeout():
+    """Reads stay side-effect free: the timeout path (not a poll) settles it."""
     db = _dd_db()
     db.insert("kill_expand_requests", {
         "status": "pending", "trigger_type": "drawdown",
         "requested_at": _minutes_ago(limit_expand.PENDING_TTL_MIN + 30),
     })
-    assert limit_expand.pending_request(db) is None
-    assert db.rows["kill_expand_requests"][0]["status"] == "expired"
+    assert limit_expand.pending_request(db) is None       # ตอบไม่ได้แล้ว
+    assert limit_expand.stale_pending(db) is not None     # แต่ยังค้างอยู่
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "pending"
+    assert not row.get("decided_by")
+    # …และสองการอ่านข้างบนไม่เขียนอะไรเลย
+    assert "trading_settings" not in db._client.store
+
+
+def test_the_timeout_settles_a_lapsed_request_even_with_no_breach_left():
+    db = _dd_db(equity=8900.0)
+    limit_expand.request_and_notify(db, AppSettings(), RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+    db.rows["equity_snapshots"][0]["equity"] = 10000.0   # กลับเข้ากรอบ
+
+    report = limit_expand.auto_apply_expired(db, AppSettings())
+
+    assert report and "ไม่มีลิมิตที่เกินอยู่แล้ว" in report
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "expired"
+    assert row["decided_by"] == limit_expand.AUTO_NO_BREACH_BY
+    assert "trading_settings" not in db._client.store     # ไม่ขยายอะไรเลย
 
 
 # ---------------------------------------------------------------------------
@@ -140,22 +181,23 @@ def test_confirmation_window_defaults_to_180_minutes_everywhere():
         ttl_min=limit_expand.ttl_minutes(AppSettings()))
 
 
-def test_confirmation_window_setting_drives_expiry():
-    """A shorter window (Settings) retires an older request; the default kept it."""
+def test_confirmation_window_setting_decides_which_requests_are_late():
+    """A shorter window (Settings) makes an older request LATE — not closed."""
     db = _dd_db()
     db.insert("kill_expand_requests", {
         "status": "pending", "trigger_type": "drawdown",
         "requested_at": _minutes_ago(45.0),
     })
     short = AppSettings(kill_expand_ttl_min=30)
-    # 45 min old: fine under the 180 default, stale under a 30-minute window
+    # 45 min old: fine under the 180 default, late under a 30-minute window
     assert limit_expand.pending_request(db, settings=AppSettings()) is not None
     assert limit_expand.pending_request(db, settings=short) is None
-    assert db.rows["kill_expand_requests"][0]["status"] == "expired"
+    assert limit_expand.stale_pending(db, short) is not None
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
 
 
-def test_confirmation_window_is_used_by_state_and_the_decision_message():
-    """Popup ttl_min + expires_at + the "no request" reply follow the setting."""
+def test_confirmation_window_is_used_by_state_and_the_timeout_report():
+    """Popup ttl_min + expires_at + the timeout report follow the setting."""
     db, s = _dd_db(equity=8900.0), AppSettings(kill_expand_ttl_min=30)
     limit_expand.request_and_notify(db, s, RecordingNotifier())
 
@@ -166,12 +208,21 @@ def test_confirmation_window_is_used_by_state_and_the_decision_message():
     # just under the window the request is still answerable…
     db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(29.0)
     assert limit_expand.pending_request(db, settings=s) is not None
-    # …and past it the owner is told the configured window, not a hardcoded 60
+    assert limit_expand.stale_pending(db, s) is None
+    # …and past it the timeout applies it and quotes the CONFIGURED window
     db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(31.0)
-    reply = limit_expand.decide(db, "/dd_ok", decided_by="line", settings=s)
+    report = limit_expand.auto_apply_expired(db, s)
+    assert report and "ไม่มีการยืนยันภายใน 30 นาที" in report
+    assert "180 นาที" not in report
+
+
+def test_the_no_request_message_quotes_the_configured_window():
+    db = _dd_db(equity=8900.0)
+    reply = limit_expand.decide(db, "/dd_ok", decided_by="line",
+                                settings=AppSettings(kill_expand_ttl_min=30))
     assert "ไม่มีคำขอขยายลิมิต" in reply
     assert "30 นาที" in reply
-    assert db.rows["kill_expand_requests"][0]["status"] == "expired"
+    assert "trading_settings" not in db._client.store
 
 
 def test_confirmation_window_from_the_db_when_caller_has_no_settings():
@@ -247,6 +298,164 @@ def test_second_breach_cycle_does_not_reask():
     res = limit_expand.request_and_notify(db, s, notifier)
     assert res["requested"] is False
     assert notifier.sent == []
+
+
+# ---------------------------------------------------------------------------
+# timeout → APPLY the expansion ("ถ้า confirm หมดอายุให้ดำเนินการขยาย limit เลย")
+# the owner is ASKED first, the WINDOW decides last — but never silently
+# ---------------------------------------------------------------------------
+def test_a_lapsed_window_is_applied_and_reported():
+    """No answer inside the window → the requested limits ARE written."""
+    db, s = _dd_db(equity=8900.0), AppSettings()   # 11% dd → clears at 15%
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    report = limit_expand.auto_apply_expired(db, s)
+
+    assert report and "หมดเวลายืนยัน" in report
+    assert "• Drawdown: 10.00% → 15.00%" in report
+    assert "เปิดเทรดต่อทันที" in report
+    assert "ไม่มีการยืนยันภายใน 180 นาที" in report
+    stored = db._client.store["trading_settings"][1]
+    assert stored["max_drawdown_pct"] == 15.0
+    assert db._client.store["trading_pause"][1]["paused"] is False
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "approved"
+    assert row["decided_by"] == limit_expand.AUTO_DECIDED_BY
+    assert "limit_expanded" in [
+        e["event_type"] for e in db.rows.get("risk_events", [])]
+
+
+def test_a_lapsed_window_is_applied_once_not_every_cycle():
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    assert limit_expand.auto_apply_expired(db, s)
+    assert limit_expand.auto_apply_expired(db, s) is None   # ปิดคำขอแล้ว
+    assert len(db.rows["kill_expand_requests"]) == 1
+
+
+def test_the_monitor_cycle_applies_then_does_not_ask_again():
+    """The 1-minute loop reports the widening instead of re-asking."""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(200.0)
+
+    notifier = RecordingNotifier()
+    res = limit_expand.request_and_notify(db, s, notifier)
+
+    assert res["requested"] is False and res["reason"] == "auto_applied"
+    assert res["auto_applied"] is True and res["notified"] is True
+    sent = notifier.of("limit_expand")
+    assert len(sent) == 1                   # the REPORT, not a new question
+    assert "หมดเวลายืนยัน" in sent[0]["message"]
+    assert sent[0]["quick_reply"] is None    # ไม่มีปุ่ม Approve/Reject ให้กดซ้ำ
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+    assert len(db.rows["kill_expand_requests"]) == 1
+
+
+def test_a_late_button_press_still_settles_the_lapsed_window():
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    reply = limit_expand.decide(db, "/dd_ok", decided_by="line:user")
+
+    assert "หมดเวลายืนยัน" in reply
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+    # the widening is credited to the timeout, NOT to the late press
+    assert db.rows["kill_expand_requests"][0]["decided_by"] == \
+        limit_expand.AUTO_DECIDED_BY
+    # pressing again explains what the system already did
+    again = limit_expand.decide(db, "/dd_no", decided_by="line:user")
+    assert "ไปอัตโนมัติแล้ว" in again
+    assert "10.0% → 15.0%" in again
+
+
+def test_a_lapsed_window_never_lowers_a_limit_the_owner_raised():
+    """The request is a snapshot — a hand-raised limit wins over a stale +5pp.
+
+    Two triggers (drawdown + daily) and the owner raised the DAILY limit to 8%
+    while the request proposed 7%: that field must not be written back down,
+    and the report must not claim it was.
+    """
+    from app.api.routes.settings import persist_settings
+
+    db, s = _dd_db(equity=8900.0), AppSettings()   # 11% dd; pnl adds 3% daily
+    db.rows["paper_trades"] = [{
+        "id": "t1", "status": "closed", "pnl": -300.0,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    }]
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    row = db.rows["kill_expand_requests"][0]
+    assert {t["trigger"] for t in row["detail"]["triggers"]} == {
+        "drawdown", "daily"}
+    row["requested_at"] = _minutes_ago(181.0)
+    # the owner raised the daily limit by hand (> the 7% the request proposed)
+    assert persist_settings(db, AppSettings(kill_daily_loss_pct=8.0))
+    live = execution.get_app_settings(db)
+
+    report = limit_expand.auto_apply_expired(db, live)
+
+    stored = db._client.store["trading_settings"][1]
+    assert stored["max_drawdown_pct"] == 15.0        # ที่เกินอยู่ → ขยาย
+    assert stored["kill_daily_loss_pct"] == 8.0       # ไม่เขียนลดลง
+    assert report and "ไม่เขียนทับ: Daily loss" in report
+    assert "Daily loss: 2.00% → 7.00%" not in report  # ไม่รายงานสิ่งที่ไม่ได้เขียน
+    assert "• Drawdown: 10.00% → 15.00%" in report
+    assert db.rows["kill_expand_requests"][0]["status"] == "approved"
+
+
+def test_a_failed_timeout_write_is_retried_and_never_reported():
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    class _Boom:
+        def table(self, _name):
+            raise RuntimeError("PostgREST down")
+
+    real = db._client
+    db._client = _Boom()
+    assert limit_expand.auto_apply_expired(db, s) is None   # ไม่มีรายงานหลอก
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+
+    db._client = real                        # เขียนได้อีกครั้ง → รอบถัดไปสำเร็จ
+    report = limit_expand.auto_apply_expired(db, s)
+    assert report and "หมดเวลายืนยัน" in report
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+    assert db.rows["kill_expand_requests"][0]["status"] == "approved"
+
+
+def test_timeout_apply_can_be_switched_off(monkeypatch):
+    """AUTO_APPLY_ON_EXPIRY=False keeps the old "wait for the owner" behaviour."""
+    monkeypatch.setattr(limit_expand, "AUTO_APPLY_ON_EXPIRY", False)
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    assert limit_expand.auto_apply_expired(db, s) is None
+    assert "trading_settings" not in db._client.store
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+
+
+def test_only_the_newest_pending_request_can_be_applied():
+    """A row left behind by a failed write must not stack another +5pp."""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    # oldest first: the fake returns the newest-inserted row first, exactly like
+    # ORDER BY requested_at DESC does on the real table
+    db.insert("kill_expand_requests", {
+        "status": "pending", "trigger_type": "drawdown",
+        "requested_at": _minutes_ago(600.0)})
+    db.insert("kill_expand_requests", {
+        "status": "pending", "trigger_type": "drawdown",
+        "requested_at": _minutes_ago(5.0)})
+
+    assert limit_expand.stale_pending(db, s) is None     # ตัวใหม่ยังไม่หมดเวลา
+    assert limit_expand.auto_apply_expired(db, s) is None
+    assert {r["status"] for r in db.rows["kill_expand_requests"]} == {"pending"}
+    assert "trading_settings" not in db._client.store
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +575,31 @@ def test_webhook_approve_label_still_handles_semi_auto():
     assert "ขยายลิมิตเรียบร้อย" in asyncio.run(handle_command("[Approve]", db))
 
 
+def test_webhook_answer_after_the_window_applies_the_request():
+    """A late /dd_ok or Approve card settles the window instead of no-op'ing."""
+    from app.api.routes.webhook import handle_command
+
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    reply = asyncio.run(handle_command("/dd_ok", db))
+    assert "หมดเวลายืนยัน" in reply
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+
+
+def test_webhook_approve_card_late_does_not_fall_into_semi_auto():
+    from app.api.routes.webhook import handle_command
+
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+
+    reply = asyncio.run(handle_command("[Approve]", db))
+    assert "SEMI-AUTO" not in reply
+    assert "หมดเวลายืนยัน" in reply
+
+
 # ---------------------------------------------------------------------------
 # monitor integration (the path that actually fires)
 # ---------------------------------------------------------------------------
@@ -392,6 +626,45 @@ def test_monitor_breach_asks_the_owner():
     quiet = RecordingNotifier()
     portfolio_monitor.monitor_once(db, None, quiet)
     assert quiet.of("limit_expand") == []
+
+
+def test_monitor_applies_a_lapsed_window_before_judging_the_account():
+    """Settled at the TOP of the cycle → the risk check sees the new limits."""
+    db = _daily_loss_db()                     # 3% daily vs a 2% limit
+    first = RecordingNotifier()
+    asked = portfolio_monitor.monitor_once(db, None, first)
+    assert asked["breach"] is True
+    row = db.rows["kill_expand_requests"][0]
+    assert row["status"] == "pending" and row["limit_after"] == 7.0
+    row["requested_at"] = _minutes_ago(181.0)   # ไม่มีใครกดยืนยัน
+
+    notifier = RecordingNotifier()
+    out = portfolio_monitor.monitor_once(db, None, notifier)
+
+    assert db._client.store["trading_settings"][1]["kill_daily_loss_pct"] == 7.0
+    # widened FIRST → THIS cycle already evaluates against 7%: no breach, so
+    # no pause churn and no second prompt
+    assert out["breach"] is False
+    assert db._client.store["trading_pause"][1]["paused"] is False
+    assert notifier.of("risk_warning") == []
+    sent = notifier.of("limit_expand")
+    assert len(sent) == 1 and "หมดเวลายืนยัน" in sent[0]["message"]
+    assert len(db.rows["kill_expand_requests"]) == 1   # ไม่สร้างคำขอใหม่
+
+
+def test_monitor_still_asks_when_the_window_is_open():
+    """A fresh request must NOT be applied early — the owner still decides."""
+    db = _daily_loss_db()
+    s = AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+
+    notifier = RecordingNotifier()
+    out = portfolio_monitor.monitor_once(db, None, notifier)
+
+    assert out["breach"] is True
+    assert "trading_settings" not in db._client.store
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+    assert notifier.of("limit_expand") == []            # ไม่ถามซ้ำในหน้าต่างเดิม
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +842,27 @@ def test_api_popup_approve_without_a_request_never_widens_anything():
     assert db._client.store["trading_pause"][1]["paused"] is True
     assert db._client.store["trading_pause"][1]["reason"] == "manual"
     assert line.pushes == []                   # nothing mirrored
+
+
+def test_api_popup_reports_a_lapsed_window_as_auto_applied():
+    """กดปุ่มหลังหมดเวลา → ระบบขยายให้เอง และยัง mirror รายงานเข้า LINE."""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_and_notify(db, s, RecordingNotifier())
+    db.rows["kill_expand_requests"][0]["requested_at"] = _minutes_ago(181.0)
+    db.rows["line_users"] = [{"id": "lu-1", "line_user_id": "U-owner",
+                              "notification_enabled": True}]
+    line = _mount(db)
+    line.pushes.clear()
+
+    body = _popup_decide("approve").json()
+
+    assert body["applied_decision"] == "auto"     # ไม่ใช่ผลจากการกดปุ่ม
+    assert "หมดเวลายืนยัน" in body["reply"]
+    assert db._client.store["trading_settings"][1]["max_drawdown_pct"] == 15.0
+    assert db.rows["kill_expand_requests"][0]["decided_by"] == \
+        limit_expand.AUTO_DECIDED_BY
+    assert body["state"]["pending"] is False
+    assert [m for _u, m in line.pushes if body["reply"] in m]
 
 
 def test_api_popup_approve_survives_a_line_push_failure():

@@ -155,14 +155,15 @@ def build_limit_expand_prompt(triggers: list[dict], paused: bool = True,
                               ttl_min: float = 180.0) -> str:
     """ONE actionable prompt: every breached limit + the proposed +5pp value.
 
-    The owner must confirm before ANY limit grows — the platform never widens
-    a risk limit on its own (prod 2026-09-14 incident). Buttons: Approve /
+    The owner is asked FIRST — nothing widens behind their back, and a widening
+    is never silent: if no answer arrives inside the window the request is
+    applied automatically and the result is pushed to the same channel
+    (``app.services.limit_expand.auto_apply_expired``). Buttons: Approve /
     Reject (postback dd_ok / dd_no) with the typed commands as fallback.
 
     ``ttl_min`` = the configured confirmation window (Settings →
-    ``kill_expand_ttl_min``, default 180). After it the request is retired as
-    expired and the monitor issues a fresh one — the message must say the same
-    number the web popup shows.
+    ``kill_expand_ttl_min``, default 180), which is also the auto-apply deadline
+    — the message must say the same number the web popup shows.
     """
     lines = ["🛑 เกินลิมิตความเสี่ยง — ต้องยืนยันจากเจ้าของบัญชีก่อนขยายลิมิต", ""]
     for t in triggers or []:
@@ -175,11 +176,12 @@ def build_limit_expand_prompt(triggers: list[dict], paused: bool = True,
     if setup_required:
         lines.append("⚠️ ยังบันทึกคำขอไม่ได้ — รัน database/036_kill_expand_confirm.sql "
                      "ใน Supabase SQL Editor ก่อน")
-        lines.append("ลิมิตยังไม่ถูกแตะต้อง (ระบบไม่ขยายลิมิตเองโดยอัตโนมัติ)")
+        lines.append("ลิมิตยังไม่ถูกแตะต้อง (ยังขยายอัตโนมัติไม่ได้เพราะไม่มีคำขอ)")
         return "\n".join(lines)
     lines.append(f"สถานะ: {'🛑 หยุดเปิดออเดอร์ใหม่ (pause)' if paused else '🟢 เทรดอยู่'}"
                  " — ลิมิตยังไม่ถูกแตะต้อง")
-    lines.append("ระบบจะไม่ขยายลิมิตเองโดยอัตโนมัติ")
+    lines.append(f"⏳ ถ้าไม่ยืนยันภายใน {float(ttl_min):.0f} นาที ระบบจะขยายลิมิตให้"
+                 "อัตโนมัติ (+5%) แล้วเปิดเทรดต่อ")
     lines.append("")
     lines.append("ยืนยันได้ 2 วิธี")
     lines.append("1) กดปุ่ม Approve / Reject ด้านล่าง")
@@ -192,8 +194,12 @@ def build_limit_expand_prompt(triggers: list[dict], paused: bool = True,
 
 def build_limit_expand_result(approved: bool, applied: list[dict],
                               remaining: list[dict], kill_engaged: bool,
-                              note: str = "") -> str:
-    """Post-decision report pushed back to LINE (step 3 of the flow)."""
+                              note: str = "", title: str = "") -> str:
+    """Post-decision report pushed back to LINE (step 3 of the flow).
+
+    ``title`` overrides the headline so the timeout auto-apply can report
+    itself as such instead of claiming the owner pressed Approve.
+    """
     def _fmt(items: list[dict]) -> list[str]:
         return [f"• {t.get('label', t.get('trigger', '?'))}: "
                 f"{float(t.get('limit', 0)):.2f}% → {float(t.get('new_limit', 0)):.2f}%"
@@ -205,7 +211,7 @@ def build_limit_expand_result(approved: bool, applied: list[dict],
                 for t in (items or [])]
 
     if not approved:
-        lines = ["❌ ยกเลิกการขยายลิมิต — ลิมิตเดิมไม่ถูกแตะต้อง"]
+        lines = [title or "❌ ยกเลิกการขยายลิมิต — ลิมิตเดิมไม่ถูกแตะต้อง"]
         lines += _fmt_cur(remaining)
         lines.append("")
         lines.append("สถานะ: 🛑 เทรดยังหยุดอยู่ (pause)")
@@ -213,7 +219,7 @@ def build_limit_expand_result(approved: bool, applied: list[dict],
             lines.append(note)
         return "\n".join(lines)
 
-    lines = ["✅ ยืนยันแล้ว — ขยายลิมิตเรียบร้อย"]
+    lines = [title or "✅ ยืนยันแล้ว — ขยายลิมิตเรียบร้อย"]
     lines += _fmt(applied)
     lines.append("")
     if kill_engaged:

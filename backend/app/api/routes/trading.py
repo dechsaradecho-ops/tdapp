@@ -579,6 +579,8 @@ async def decide_limit_expand(payload: LimitExpandDecisionRequest,
     Writes the new limits + resumes only when a pending request exists (a bare
     approve can never widen anything by itself), then reports the SAME text
     that was pushed to LINE back into LINE, so the two channels stay in sync.
+    A request whose window already lapsed is settled by ``decide`` itself, and
+    that outcome is reported as ``applied_decision="auto"``.
     """
     db = request.app.state.db
     # PRE-decision settings: the pending check + the confirmation window must
@@ -590,7 +592,12 @@ async def decide_limit_expand(payload: LimitExpandDecisionRequest,
         raise HTTPException(status_code=422,
                             detail="decision must be approve or reject")
 
-    had_pending = limit_expand.pending_request(db, settings=pre) is not None
+    # A window that already lapsed is settled by ``decide`` (policy: expiry =
+    # apply), which is not the owner's press — report it as "auto" so the popup
+    # neither claims the button did nothing nor claims the owner approved.
+    auto_settled = limit_expand.stale_pending(db, settings=pre) is not None
+    had_pending = (limit_expand.pending_request(db, settings=pre) is not None
+                   or auto_settled)
     reply = limit_expand.decide(db, decision, decided_by="ui", settings=pre)
     if had_pending:
         # Mirror the outcome to LINE (the prompt lives there) — a push failure
@@ -611,7 +618,8 @@ async def decide_limit_expand(payload: LimitExpandDecisionRequest,
     body["kill_triggers"] = list(kill.triggers)
     return {
         "ok": True,
-        "applied_decision": decision if had_pending else "",
+        "applied_decision": ("auto" if auto_settled
+                             else (decision if had_pending else "")),
         "reply": reply,
         "state": body,
     }

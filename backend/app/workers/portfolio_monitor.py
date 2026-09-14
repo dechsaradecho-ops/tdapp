@@ -135,6 +135,22 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     capital = s.capital
     user_id = execution.DEFAULT_USER
 
+    # A confirmation window that lapsed is settled BEFORE this cycle judges the
+    # account ("ถ้า confirm หมดอายุให้ดำเนินการขยาย limit เลย"): the expansion has
+    # to be visible to the risk check below, otherwise the monitor would pause
+    # for a limit it is about to widen and un-pause again in the same tick.
+    # Only the monitor and the owner's own answer perform this write.
+    try:
+        report, _notified = limit_expand.settle_lapsed_window(db, s, notifier,
+                                                             user_id)
+        if report:
+            s = execution.get_app_settings(db)   # widened limits for this cycle
+            capital = s.capital
+            log.warning("portfolio monitor: applied a lapsed limit-expand "
+                        "request and reported it")
+    except Exception as exc:
+        log.error("kill expand auto-apply failed: %s", exc)
+
     equity = _equity(db, capital, broker)
     _write_equity_snapshot(db, user_id, equity)
 
@@ -213,7 +229,9 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         # request and pushes ONE actionable prompt (Approve/Reject quick-reply
         # or /dd_ok, /dd_no); the pause stays engaged until the owner answers.
         # Deduped inside limit_expand (one prompt per window) so this 1-min
-        # loop cannot spam the chat with the same question.
+        # loop cannot spam the chat with the same question. A lapsed window is
+        # settled at the TOP of this cycle (settle_lapsed_window), i.e. before
+        # this call, so a lapsed row can never stack up a second one.
         try:
             limit_expand.request_and_notify(db, s, notifier, user_id)
         except Exception as exc:

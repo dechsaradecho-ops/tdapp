@@ -16,6 +16,10 @@ import { LimitExpandDecisionResult, LimitExpandState } from "@/lib/types";
  * อนุมัติ/ไม่อนุมัติเรียก endpoint เดียวกับที่ LINE ใช้ตัดสินใจ
  * (อนุมัติ → เขียนลิมิตใหม่ + เปิดเทรด + ประเมิน kill switch ใหม่ทันที)
  *
+ * ถ้าไม่ตอบภายในเวลาที่ตั้งไว้ (Settings → kill_expand_ttl_min, default 180 นาที)
+ * ระบบจะ “ขยายลิมิตให้อัตโนมัติ” ตามนโยบายที่เจ้าของบัญชีเลือกไว้ แล้วส่งผลลัพธ์
+ * ไปที่ LINE — กล่องนี้จะปิดเองเมื่อพ้นเวลา (การขยายไม่เคยเกิดขึ้นเงียบ ๆ)
+ *
  * กรณี setup_required = ยังไม่ได้รัน database/036_kill_expand_confirm.sql →
  * ขึ้นคำแนะนำเดิมกับที่ LINE แจ้ง (ลิมิตไม่ถูกแตะต้อง)
  */
@@ -57,6 +61,9 @@ export default function LimitExpandPopup() {
       if (!res.applied_decision) {
         // ไม่มีคำขอค้าง — กดอนุมัติลอย ๆ ไม่ขยายลิมิตใด ๆ
         setError("ไม่มีคำขอที่รอการยืนยันอยู่ — ไม่มีการเปลี่ยนแปลงลิมิต");
+      } else if (res.applied_decision === "auto") {
+        // คำขอหมดเวลาไปแล้ว: reply อธิบายผลที่ระบบทำเอง (ไม่ใช่ผลจากการกดปุ่ม)
+        setError("");
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -88,8 +95,8 @@ export default function LimitExpandPopup() {
           <>
             <div className="flex items-center justify-between">
               <h3 className="panel-title flex items-center gap-1.5">
-                <Icon n={result.applied_decision === "approve" ? "checkCircle" : "xCircle"}
-                  size={16} className={result.applied_decision === "approve" ? "text-profit" : "text-loss"} />
+                <Icon n={result.applied_decision === "reject" ? "xCircle" : "checkCircle"}
+                  size={16} className={result.applied_decision === "reject" ? "text-loss" : "text-profit"} />
                 ผลการตัดสินใจ
               </h3>
               <button onClick={() => setResult(null)} className="text-slate-400 hover:text-accent text-lg leading-none" aria-label="ปิดหน้าต่าง">✕</button>
@@ -132,7 +139,7 @@ export default function LimitExpandPopup() {
               </p>
             </div>
 
-            <p className="text-xs text-slate-500">ลิมิตยังไม่ถูกแตะต้อง — ระบบไม่ขยายลิมิตเองโดยอัตโนมัติ</p>
+            <p className="text-xs text-slate-500">ลิมิตยังไม่ถูกแตะต้อง — ยังขยายอัตโนมัติไม่ได้เพราะบันทึกคำขอไม่สำเร็จ</p>
 
             <button onClick={() => setSetupHidden(true)} className="btn-secondary w-full">ปิดไปก่อน</button>
           </>
@@ -153,7 +160,12 @@ export default function LimitExpandPopup() {
               </span>{" "}
               — ลิมิตยังไม่ถูกแตะต้อง
             </p>
-            <p className="text-xs text-slate-500">ระบบจะไม่ขยายลิมิตเองโดยอัตโนมัติ</p>
+            <p className="text-xs text-amber-300 flex items-start gap-1.5">
+              <Icon n="warning" size={14} className="mt-[1px] shrink-0" />
+              <span>
+                ถ้าไม่ยืนยันภายใน {ttl} นาที ระบบจะขยายลิมิตให้อัตโนมัติ (+{fmtNum(state.step_pct, 0)}%) แล้วเปิดเทรดต่อ
+              </span>
+            </p>
 
             <p className="text-xs text-slate-500 flex items-start gap-1.5">
               <Icon n="clock" size={14} className="mt-[1px] shrink-0" />
@@ -186,7 +198,7 @@ export default function LimitExpandPopup() {
 
             <button onClick={() => req && setHiddenReq(req.id)} disabled={!!busy}
               className="w-full text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50">
-              ปิดไปก่อน (คำขอยังรออยู่ใน LINE)
+              ปิดไปก่อน (คำขอยังรออยู่ใน LINE — พ้นเวลาแล้วระบบขยายให้อัตโนมัติ)
             </button>
           </>
         )}
