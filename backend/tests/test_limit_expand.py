@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from app.models.schemas import AppSettings
 from app.services import execution, limit_expand
-from app.workers import portfolio_monitor
+from app.workers import portfolio_monitor, position_guard
 from tests.test_auto_trader import db_with_client
 from tests.test_workers import FakeDatabase
 
@@ -665,6 +666,168 @@ def test_monitor_still_asks_when_the_window_is_open():
     assert "trading_settings" not in db._client.store
     assert db.rows["kill_expand_requests"][0]["status"] == "pending"
     assert notifier.of("limit_expand") == []            # ไม่ถามซ้ำในหน้าต่างเดิม
+
+
+# ---------------------------------------------------------------------------
+# position guard — the emergency exit WAITS while the owner is deciding
+#
+# Prod 2026-09-14: the monitor pushed the "+5% expansion?" prompt at 17:33 and
+# the guard emergency-closed AUDNZD (PAPER-000001, pnl -0.56) at 17:34 — about
+# SIX SECONDS later. The owner never got to press Approve, even though the
+# prompt in their hand promises "ลิมิตยังไม่ถูกแตะต้อง".
+# ---------------------------------------------------------------------------
+_GUARD_SETTINGS = AppSettings(smart_exit_enabled=False)  # no snapshot/news feeds
+
+
+def _ask_the_owner(db, mins_ago: float = 0.2,
+                   status: str = "pending") -> dict:
+    """Seed the confirmation request the owner is looking at."""
+    db.insert("kill_expand_requests", {
+        "id": "req-1", "status": status, "decided_by": "", "decided_at": "",
+        "requested_at": _minutes_ago(mins_ago),
+        "detail": {"triggers": [
+            {"trigger": "daily", "field": "kill_daily_loss_pct",
+             "label": "Daily loss", "value": 3.0, "limit": 2.0,
+             "new_limit": 7.0}]}})
+    return db.rows["kill_expand_requests"][0]
+
+
+def _open_trade_row(entry: float = 1.2352) -> dict:
+    """The open position the guard manages (no created_at → no time stop)."""
+    return {"id": "p1", "ticket": "T1", "asset": "AUDNZD", "status": "open",
+            "direction": "buy", "volume": 0.01, "entry_price": entry,
+            "user_id": "u1"}
+
+
+def _book(entry: float = 1.2352, sl=None, tp=None):
+    """Broker stand-in + the list its close_position() records tickets into."""
+    from app.integrations.brokers import Position
+    from tests.test_workers import _AsyncClosedWith, _AsyncFloat, _AsyncList
+
+    closed: list[str] = []
+    broker = SimpleNamespace()
+    broker._positions = {"T1": Position(
+        ticket="T1", user_id="u1", asset="AUDNZD", direction="BUY",
+        volume=0.01, entry_price=entry, stop_loss=sl, take_profit=tp,
+        current_price=entry)}
+    broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+    broker.mark_price = lambda ticket: _AsyncFloat(entry)
+    broker.quote = lambda asset: _AsyncFloat(0.0)
+    broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+    return broker, closed
+
+
+@pytest.fixture
+def _marks(monkeypatch):
+    """Pin the live mark (no network); the fixture returns a setter."""
+    def _set(price: float):
+        async def fake_spot(assets, **_kw):
+            return {a: price for a in assets}, {}
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+    _set(1.2352)
+    return _set
+
+
+def test_guard_holds_the_emergency_exit_while_the_owner_is_asked(_marks):
+    """kill switch engaged + request still open → ปิดไม้ยังไม่เกิด"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db)
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, notifier, settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 0
+    assert out["emergency_held"] == 1
+    assert closed == []                       # ไม้ยังอยู่ ไม่ถูกปิดทิ้ง
+    assert notifier.sent == []                # ไม่มีข้อความ "ปิดไม้" หลอกผู้ใช้
+    # และคำขอยังรอคำตอบอยู่ (การเลื่อนไม่ใช่การอนุมัติ)
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
+
+
+def test_the_hold_expires_so_silence_cannot_disable_the_safety_net(_marks):
+    """เงียบเกิน EMERGENCY_HOLD_MIN → กลับมาปิดไม้ตามปกติ + บอกเหตุผล"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, mins_ago=limit_expand.EMERGENCY_HOLD_MIN + 15.0)
+    broker, closed = _book()
+    notifier = RecordingNotifier()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, notifier, settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    assert out["emergency_held"] == 0
+    assert out["closed_assets"] == "AUDNZD:kill"
+    body = notifier.of("trade_closed")[0]["message"]
+    assert "Emergency Exit" in body
+    # ผู้ใช้อาจยังจ้องข้อความที่บอกว่า "ลิมิตยังไม่ถูกแตะต้อง" → ต้องอธิบาย
+    assert "เลยกำหนดรอ" in body and "ปิดไม้เพื่อความปลอดภัย" in body
+
+
+def test_guard_closes_when_the_request_was_already_settled(_marks):
+    """owner กดไม่อนุมัติแล้ว → ไม่มีอะไรให้รอ ปิดไม้ทันทีเหมือนเดิม"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, status="rejected")
+    broker, closed = _book()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, RecordingNotifier(), settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    assert out["emergency_held"] == 0
+
+
+def test_a_held_position_keeps_its_sl_tp_management(_marks):
+    """การเลื่อนฉุกเฉิน ≠ ปล่อยไม้ลอย: TP ยังทำงานในรอบเดียวกัน"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row(entry=1.1000))
+    _ask_the_owner(db)
+    _marks(1.2500)                             # ชน TP
+    broker, closed = _book(entry=1.1000, tp=1.2000)
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, RecordingNotifier(), settings=_GUARD_SETTINGS))
+
+    # ฉุกเฉินถูกเลื่อน (นับ 1) แต่ TP ยังปิดไม้ให้ตามปกติในรอบเดียวกัน
+    assert out["emergency_closed"] == 0 and out["emergency_held"] == 1
+    assert closed == ["T1"]                        # ปิดด้วย TP ไม่ใช่ฉุกเฉิน
+    assert out["closed_assets"] == "AUDNZD:tp@1.25"
+
+
+class _UnreadableRequests:
+    """Database shim whose SELECT on kill_expand_requests blows up."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def select(self, table, **kw):
+        if table == "kill_expand_requests":
+            raise RuntimeError('relation "kill_expand_requests" does not exist')
+        return self._db.select(table, **kw)
+
+
+def test_an_unreadable_request_table_means_close_not_hold(_marks):
+    """อ่านตารางคำขอไม่ได้ = ไม่รู้ว่ามีคนรออยู่ → fail-safe คือปิดไม้"""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db)
+    broker, closed = _book()
+
+    out = asyncio.run(position_guard.guard_once(
+        _UnreadableRequests(db), broker, RecordingNotifier(),
+        settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    assert out["emergency_held"] == 0
+    # ยังไม่ถูกตัดสิน: ถ้าตารางกลับมาอ่านได้ ผู้ใช้ยังกดยืนยันได้ตามเดิม
+    assert db.rows["kill_expand_requests"][0]["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------

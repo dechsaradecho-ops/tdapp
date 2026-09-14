@@ -10,6 +10,11 @@ SL/TP enforcement + position management loop for the PaperBroker:
      journals the close into paper_trades (so the kill switch / frequency
      engines see realized PnL) and notifies the user.
 
+Priority 0 is the EMERGENCY EXIT: when the kill switch is engaged every open
+position is closed at once. It is DEFERRED while an unanswered limit-expansion
+request is on the table (the prompt says "ลิมิตยังไม่ถูกแตะต้อง"), for at most
+``limit_expand.EMERGENCY_HOLD_MIN`` minutes — then it runs regardless.
+
 Real broker adapters (MT5/OANDA) enforce SL/TP server-side; their close events
 still flow through close_trade_rows so the journal stays authoritative.
 """
@@ -23,6 +28,7 @@ from app.engine import smart_exit
 from app.integrations import quotes
 from app.integrations.brokers import Position
 from app.services import execution
+from app.services import limit_expand
 from app.services import signal_log
 from app.services.notification_service import NotificationService
 
@@ -488,6 +494,7 @@ async def guard_once(db, broker, notifier: NotificationService,
     smart_closed = 0
     smart_partials = 0
     emergency_closed = 0
+    emergency_held = 0
     smart_skipped = 0
     # symbol-level audit for this round (capped when rendered)
     sl_assets: list[str] = []
@@ -500,6 +507,7 @@ async def guard_once(db, broker, notifier: NotificationService,
         return {"checked": 0, "closed": 0, "moved_sl": 0, "partial_closed": 0,
                 "smart_closed": 0, "smart_partials": 0,
                 "smart_skipped": 0, "emergency_closed": 0,
+                "emergency_held": 0,
                 "sl_assets": "", "closed_assets": "", "skip_assets": ""}
 
     # Settings once per cycle (breakeven/trailing/partial knobs). Falls back
@@ -537,6 +545,46 @@ async def guard_once(db, broker, notifier: NotificationService,
         except Exception as exc:
             log.debug("emergency kill check failed: %s", exc)
             kill_engaged = False
+
+    # ---- Emergency exit HOLD: the owner is still being asked ---------------
+    # Prod 2026-09-14: the monitor pushed the "confirm the +5% expansion"
+    # prompt at 17:33 and THIS worker emergency-closed AUDNZD ~6 s later — the
+    # owner never got to press Approve, even though the very message in their
+    # hand says "ลิมิตยังไม่ถูกแตะต้อง". While an unanswered request is on the
+    # table the exit is DEFERRED (not disabled): positions keep their SL/TP
+    # management from the normal pass below, and the pause stays engaged so no
+    # new order can be opened. ``limit_expand.EMERGENCY_HOLD_MIN`` bounds the
+    # wait — after that the guard protects the account without an answer.
+    hold_row = None
+    hold_note = ""
+    if kill_engaged:
+        hold_row = limit_expand.emergency_hold(db, s)
+        if hold_row is not None:
+            kill_engaged = False
+            emergency_held = len(positions)
+            log.warning(
+                "emergency exit HELD for %d position(s): kill switch is "
+                "engaged (%s) but request %s is still awaiting the owner",
+                emergency_held, "; ".join(kill_triggers)[:120] or "engaged",
+                hold_row.get("id"))
+        else:
+            # The deferral ran out (or the switch fired with no request at
+            # all). Say WHICH one in the close message: the owner may still be
+            # looking at a prompt that promised nothing would be touched.
+            try:
+                late = limit_expand.open_request(db, s)
+            except Exception:
+                late = None
+            if late is not None:
+                hold_note = (
+                    "⏳ คำขอยืนยันยังไม่ถูกตอบมา "
+                    f"{limit_expand.pending_age_min(late):.0f} นาที "
+                    f"(เลยกำหนดรอ {limit_expand.EMERGENCY_HOLD_MIN:.0f} นาที)\n"
+                    "จึงปิดไม้เพื่อความปลอดภัย — ยังกดอนุมัติได้ "
+                    "แต่จะไม่หยุดการปิดไม้อีก")
+                log.warning("emergency exit resumed: request %s unanswered for "
+                            "%.0f min", late.get("id"),
+                            limit_expand.pending_age_min(late))
 
     # ---- Feed phase: live marks + snapshots + news IN PARALLEL -----------
     # These are independent fetches — running them one after another cost
@@ -593,6 +641,9 @@ async def guard_once(db, broker, notifier: NotificationService,
         # ---- Priority 1: Emergency Exit (kill switch engaged) ------------
         # Closes EVERYTHING immediately — skips management/SL/TP/smart/time.
         # Notify is aggregated AFTER the loop (one LINE message per cycle).
+        # ``kill_engaged`` is already False when the exit is on HOLD (an
+        # unanswered confirmation request) — then the position falls through
+        # to the normal management pass, so SL/TP keep protecting it.
         if kill_engaged:
             try:
                 result = await broker.close_position(pos.ticket)
@@ -822,9 +873,11 @@ async def guard_once(db, broker, notifier: NotificationService,
                 body += f"\n…และอีก {len(emergency_lines) - 10} ไม้"
             await notifier.notify(
                 emergency_user, "trade_closed",
-                f"🚨 Emergency Exit (KILL SWITCH) — ปิด {emergency_closed} ไม้\n"
+                "🚨 Emergency Exit (KILL SWITCH) — ปิด "
+                + f"{emergency_closed} ไม้\n"
                 + body + "\n"
-                f"รวม PnL {emergency_pnl:+,.2f}\n"
+                + (hold_note + "\n" if hold_note else "")
+                + f"รวม PnL {emergency_pnl:+,.2f}\n"
                 + ("; ".join(kill_triggers)[:200] or "kill switch engaged"),
             )
         except Exception as exc:
@@ -835,6 +888,9 @@ async def guard_once(db, broker, notifier: NotificationService,
             "smart_closed": smart_closed, "smart_partials": smart_partials,
             "smart_skipped": smart_skipped,
             "emergency_closed": emergency_closed,
+            # >0 = the kill switch was engaged but an unanswered confirmation
+            # request deferred the emergency exit (see limit_expand).
+            "emergency_held": emergency_held,
             # symbol-level audit — see docstring. Format of one item:
             #   sl_assets     "EURCHF@0.93624>0.94337"  (asset@old SL>new SL;
             #                 "@0.94337" alone = old SL unknown / legacy row)

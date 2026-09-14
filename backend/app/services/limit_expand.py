@@ -23,6 +23,12 @@ Flow implemented here:
      confirm หมดอายุให้ดำเนินการขยาย limit เลย") and the result is pushed to
      the SAME channels, so the widening is never silent. Only the monitor may
      perform this write — see ``auto_apply_expired`` vs ``pending_request``.
+  5. while such a request is open, the position guard DEFERS its emergency
+     exit (``emergency_hold`` / ``EMERGENCY_HOLD_MIN``): the prompt promises
+     "ลิมิตยังไม่ถูกแตะต้อง", so the book must not be force-closed out from
+     under the owner's finger (prod 2026-09-14: AUDNZD was closed ~6 s after
+     the prompt). The deferral is bounded — silence must not disable a safety
+     net for the whole window — and SL/TP management keeps running.
 
 Only the limits named in the request are touched, and only by
 ``EXPAND_STEP_PCT`` per confirmation; a limit is never written DOWN. The breach
@@ -68,6 +74,17 @@ MAX_TTL_MIN = 10080.0            # 7 days
 # another +5pp once the new limits are also exceeded).
 REASK_COOLDOWN_MIN = 30.0
 REASK_AFTER_REJECT_MIN = 120.0
+
+# How long the position guard DEFERS its emergency exit while a confirmation
+# request is still open (prod 2026-09-14: the guard closed AUDNZD ~6 SECONDS
+# after the prompt appeared, so the owner never had a chance to press Approve —
+# the prompt promises "ลิมิตยังไม่ถูกแตะต้อง", and closing the book while the
+# owner is deciding breaks that promise).
+#
+# It is a DEFERRAL, not a disable: after this long the guard protects the
+# account as usual even without an answer (silence must never switch the
+# safety net off for the whole 180-min window), and the close message says so.
+EMERGENCY_HOLD_MIN = 30.0
 
 # Owner decision (2026-09-14): "ถ้า confirm หมดอายุ ให้ดำเนินการขยาย limit เลย".
 # An unanswered request is therefore APPLIED once its window lapses instead of
@@ -288,6 +305,54 @@ def stale_pending(db, settings: Optional[AppSettings] = None
     return row
 
 
+def pending_age_min(row: dict) -> float:
+    """How long the owner has had this request in hand (minutes).
+
+    0.0 when the timestamp is missing/unparseable — callers use it for messages
+    only, never for a decision (``pending_request``/``stale_pending`` treat an
+    unreadable age as "cannot tell", not as "brand new").
+    """
+    return _age_min((row or {}).get("requested_at")
+                    or (row or {}).get("created_at")) or 0.0
+
+
+def open_request(db, settings: Optional[AppSettings] = None
+                 ) -> Optional[dict]:
+    """The newest request the owner has NOT answered yet (pending, any age).
+
+    Read-only. Unlike ``pending_request`` a lapsed-but-unsettled row still
+    counts: the monitor has simply not reached it yet, and the prompt the owner
+    is holding is still the live offer.
+    """
+    row = pending_request(db, settings=settings)
+    return row if row is not None else stale_pending(db, settings=settings)
+
+
+def emergency_hold(db, settings: Optional[AppSettings] = None
+                   ) -> Optional[dict]:
+    """The open request that MUST put the guard's emergency exit on hold.
+
+    The guard calls this only when the kill switch is already engaged. Returns
+    the row to report the deferral with, or None when the guard must close as
+    usual (no request at all — e.g. the owner rejected it — or the owner has
+    been silent past ``EMERGENCY_HOLD_MIN``).
+
+    Never raises: a DB hiccup must not disable a safety path, so an
+    unreadable table means "close" (fail-safe), not "hold".
+    """
+    try:
+        row = open_request(db, settings=settings)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("emergency hold check failed: %s", exc)
+        return None
+    if row is None:
+        return None
+    age = _age_min(row.get("requested_at") or row.get("created_at")) or 0.0
+    if age > EMERGENCY_HOLD_MIN:
+        return None
+    return row
+
+
 def request_expand(db, s: AppSettings, source: str = "monitor") -> dict:
     """Create the pending confirmation request. Nothing is widened here.
 
@@ -467,7 +532,7 @@ def auto_apply_expired(db, settings: Optional[AppSettings] = None
                 "ถ้าเทรดยังหยุดอยู่ ให้พิมพ์ /resume")
 
     ttl = ttl_minutes(s)
-    age = _age_min(row.get("requested_at") or row.get("created_at")) or 0.0
+    age = pending_age_min(row)
     note = (f"⏳ ไม่มีการยืนยันภายใน {ttl:.0f} นาที — ระบบขยายลิมิตให้อัตโนมัติ\n"
             "ปรับเวลาในการรอได้ที่หน้า Settings (รูทีนนี้ทำงานทุก ~1 นาที)")
     reply, outcome = _approve(db, row, AUTO_DECIDED_BY, note=note,

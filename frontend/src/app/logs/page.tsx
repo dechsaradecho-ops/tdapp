@@ -73,6 +73,7 @@ const GUARD_FIELDS: { label: string; key: string; hint: string }[] = [
   { label: "smart แบ่งปิด", key: "smart_partials", hint: "Smart Exit สั่ง PARTIAL_25/50 แล้วแบ่งปิดสำเร็จ" },
   { label: "smart ข้าม", key: "smart_skipped", hint: "engine สั่งปิดแต่ทำไม่ได้ (ไม่มีราคา / broker ปฏิเสธ / TP1 ทำแล้ว) — ไม่ใช่การไม่ทำอะไรเงียบ ๆ" },
   { label: "ฉุกเฉิน", key: "emergency_closed", hint: "kill switch เข้าเงื่อนไข → ปิดไม้ทันที" },
+  { label: "เลื่อนฉุกเฉิน", key: "emergency_held", hint: "kill switch เข้าเงื่อนไข แต่มีคำขอขยายลิมิตที่รอการยืนยันอยู่ → เลื่อนการปิดไม้ออกไป (SL/TP ยังทำงานปกติ) จนครบเวลารอ" },
   { label: "ข้ามทั้งรอบ", key: "skipped_prev_running", hint: "รอบก่อนยังไม่จบ → รอบนี้ถูกข้าม ไม่ได้ตรวจอะไรเลย (รอบไม่หายไปแล้ว)" },
 ];
 
@@ -379,6 +380,7 @@ function GuardDetailCell({ detail, status, createdAt, durationMs }: {
   if (num("smart_partials") > 0) extras.push(`smart แบ่งปิด ${num("smart_partials")}`);
   if (num("smart_skipped") > 0) extras.push(`smart ข้าม ${num("smart_skipped")}`);
   if (num("emergency_closed") > 0) extras.push(`⚠ ฉุกเฉิน ${num("emergency_closed")}`);
+  if (num("emergency_held") > 0) extras.push(`⏸ เลื่อนฉุกเฉิน ${num("emergency_held")}`);
 
   // โทนสีของแถวสรุป: ข้าม (เหลือง) · ล้มเหลว (แดง) · ไม่มีข้อมูล (เทา) · ปกติ (ขาว)
   const tone = skipped
