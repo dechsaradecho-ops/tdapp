@@ -236,6 +236,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("broker book rehydrate failed (continuing)")
 
+    # Ticket numbers must not be recycled: the sequence is in-memory, so after
+    # a restart it re-issued PAPER-000001 for a NEW trade while the journal /
+    # signal-logs still described the old trade under that ticket (the monitor
+    # popup then showed another symbol's close). Walk the sequence past every
+    # ticket the DB still holds — see position_guard.seed_order_sequence.
+    try:
+        position_guard.seed_order_sequence(app.state.db, app.state.broker)
+    except Exception:
+        log.exception("order-sequence seed failed (continuing)")
+
     # Background workers run inside this single web service when
     # ENABLE_WORKERS=1 (set on tdapp-api only — never on more than one
     # instance, or jobs will run duplicated).

@@ -112,6 +112,24 @@ python -m app.workers.run_all
 On Render the workers also run inside the `tdapp-api` web service via
 `ENABLE_WORKERS=1` (see `render.yaml`) — do not enable both places at once.
 
+### Ticket numbers are never recycled
+
+`PaperBroker` keeps its order sequence (`_seq`) in memory, so every restart started it at 0 and
+re-issued tickets that permanent tables still remembered. Prod 2026-09-14 hit exactly that: the
+open **AUDCHF** position was `PAPER-000001`, the ticket the **AUDNZD** trade had been closed with
+an hour earlier (after `POST /api/trading/stats/reset` deleted the closed rows) — so the monitor's
+“ประวัติ SL/TP” popup, which groups `signal_logs` by ticket, showed the old AUDNZD close under the
+new symbol. Fixes:
+
+1. at boot `position_guard.seed_order_sequence` walks `_seq` past the highest ticket the DB still
+   holds in **both** `paper_trades` (journal) and `signal_logs` (the timeline source, 7-day TTL) —
+   a number is reused only once nothing remembers it, i.e. when there is no history left to mix up;
+2. `execution.close_trade_rows(..., asset=, direction=)` refuses to close a row whose symbol/ฝั่ง
+   does not match the book (logs a warning instead) — a recycled ticket can never close another
+   trade's journal row;
+3. the monitor only accepts a log into a position's timeline when the asset matches **and** the log
+   is not older than the row itself, so recycled history stays out of the popup.
+
 ## Trading Modes
 
 - **AUTO** — AI analyzes, opens/closes orders, sizes positions (respecting the Risk Engine).
@@ -199,13 +217,24 @@ Latest: `039_kill_expand_auto_apply.sql` — `trading_settings.kill_expand_auto_
 every time; **false** = the system may widen on its own **once per 24 hours** — after
 that a lapsing request is closed as `expired` with `decided_by = 'auto:capped'`, no
 new prompt is created, and the kill switch closes the book for safety (the guard
-stays the fail-safe: it only closes while the limit is still breached). Until the
-migration is applied the app still works — the settings PUT skips the unknown column
-on PostgREST `PGRST204` and the legacy “widen every time” behaviour stays in place.
+stays the fail-safe: it only closes while the limit is still breached).
+**Applied on prod 2026-09-14** (`kill_expand_auto_apply = true` confirmed by a raw
+PostgREST select of the column). Until the migration is applied the app still works —
+the settings PUT skips the unknown column on PostgREST `PGRST204` and the legacy
+“widen every time” behaviour stays in place.
 Before it: `038_risk_events_user_text.sql` — `risk_events.user_id` `uuid` → `text`
-(**must be applied or the audit trail stays empty**: the app writes the pseudo-user
-`demo` and the uuid FK rejects it with `22P02`; both write paths now report that error
-instead of swallowing it, and `GET /api/system/risk-logs` returns `audit_hint`).
+(**applied on prod 2026-09-14**; without it the audit trail stays empty because the app
+writes the pseudo-user `demo` and the uuid FK rejects it with `22P02`). Both write paths
+now report that error instead of swallowing it, `GET /api/system/db-check` gained a
+`risk_audit` step that inserts + deletes a probe row in `risk_events` (rerunnable proof that
+the audit path writes), and `GET /api/system/risk-logs` returns `audit_state`
+(`ok` / `empty` / `write_failed`) plus the raw error **only** when a write actually failed in
+this process. An empty table by itself no longer points at the migration (that wording sent the
+owner hunting for a problem that did not exist); when decisions exist without an audit row the
+API now states the fact instead of guessing — those rows were written before 038 was applied.
+Migrations 038 + 039 were verified live: `kill_expand_auto_apply` reads back
+from `trading_settings`, a `risk_events` insert carrying `user_id = 'demo'` returns `201`,
+and `GET /api/trading/limit-expand` serves `auto_apply` / `auto_apply_once` / `lapsed_closes`.
 Before it: `034_ai_chat_settings.sql` — `ai_model` + `ai_base_url` on `trading_settings`
 (AI chat model/base URL editable from the Settings page). Until it is applied, saving still
 works — the settings PUT skips unknown columns on PostgREST `PGRST204` and says so in the reply.

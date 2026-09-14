@@ -1209,6 +1209,74 @@ def _audit(db, event_type: str, req: dict, triggers: list[dict],
     })
 
 
+# เขียน audit ล้มเหลวเมื่อไร จำไว้ (in-process) — ให้ /api/system/risk-logs
+# รู้ "ข้อเท็จจริง" แทนที่จะเดาว่า migration ยังไม่รันจากการที่ตารางว่าง
+_AUDIT_FAIL: dict[str, Any] = {}
+AUDIT_FAIL_TTL = 24 * 3600.0        # เกินนี้ถือว่าเก่าเกินกว่าจะเอามาเตือน
+AUDIT_PROBE_EVENT = "audit_probe"   # แถวทดสอบของ db-check (insert แล้วลบทิ้ง)
+
+
+def _record_audit_fail(event_type: str, err: Any) -> None:
+    _AUDIT_FAIL.update({"event_type": str(event_type),
+                        "error": str(err)[:400], "at": time.time()})
+
+
+def audit_write_status() -> Optional[dict]:
+    """ผลการเขียน audit ที่ **ล้มเหลวจริง** ครั้งล่าสุด (ภายใน 24 ชม.) หรือ None.
+
+    WHY in-process: ไม่มีคอลัมน์ไหนเก็บ "error ของ log" ได้เอง การจำไว้ตั้งแต่
+    process เริ่มทำงานจึงเป็นหลักฐานที่ตรงที่สุด และไม่โกหก — ถ้าไม่เคยล้มเหลว
+    เลยตั้งแต่ start เราก็ต้องไม่บอกผู้ใช้ว่า "การเขียนไม่ลง".
+    """
+    if not _AUDIT_FAIL:
+        return None
+    age = time.time() - float(_AUDIT_FAIL.get("at") or 0)
+    if age > AUDIT_FAIL_TTL:
+        return None
+    out = dict(_AUDIT_FAIL)
+    out.pop("at", None)
+    out["age_min"] = round(age / 60.0, 1)
+    return out
+
+
+def probe_audit(db, user_id: Optional[str] = None) -> dict:
+    """insert → delete แถวทดสอบใน risk_events เพื่อพิสูจน์ทางเขียน audit.
+
+    ใช้เส้นทางเดียวกับ write_audit เป๊ะ ๆ (insert_raw + pseudo-user 'demo')
+    จึงจับได้ว่า migration 038 รันแล้วหรือยัง: ถ้า user_id ยังเป็น uuid FK
+    PostgREST จะตอบ 22P02 "invalid input syntax for type uuid: \"demo\"".
+    แถวทดสอบถูกลบทันที (event_type = audit_probe) จึงไม่ค้างในตารางถาวร
+    """
+    out: dict[str, Any] = {"table": "risk_events"}
+    row = {"user_id": user_id or DEFAULT_USER, "event_type": AUDIT_PROBE_EVENT,
+           "detail": {"probe": True}}
+    raw: Any = getattr(db, "insert_raw", None)
+    ins: Any = None
+    err: Any = None
+    if callable(raw):
+        res = raw("risk_events", row)
+        if isinstance(res, (tuple, list)) and len(res) > 1:
+            ins, err = res[0], res[1]
+        else:                                   # pragma: no cover
+            ins = res
+    else:                                       # very old fakes
+        ins = db.insert("risk_events", row)
+    out["insert"] = "ok" if ins else "FAIL"
+    if not ins:
+        out["error"] = err or "(no raw error surfaced)"
+        out["hint"] = (
+            "เขียน risk_events ไม่ลง. ถ้า error เป็น 'invalid input syntax for "
+            "type uuid' ให้รัน database/038_risk_events_user_text.sql "
+            "(user_id ต้องเป็น text)"
+        )
+        return out
+    pid = ins.get("id") if isinstance(ins, dict) else None
+    out["id"] = pid
+    if pid:
+        out["delete"] = "ok" if db.delete("risk_events", {"id": pid}) else "FAIL"
+    return out
+
+
 def write_audit(db, event_type: str, detail: dict, user_id: Optional[str] = None,
                 ) -> Optional[str]:
     """เขียนแถว audit ลง risk_events แล้ว **ไม่กลืน error** — คืน error ดิบ.
@@ -1219,6 +1287,8 @@ def write_audit(db, event_type: str, detail: dict, user_id: Optional[str] = None
     "invalid input syntax for type uuid" ทุกครั้ง) หน้า Logs จึงว่างเปล่า
     โดยไม่มีใครรู้ · แก้ที่ database/038_risk_events_user_text.sql
 
+    ล้มเหลวจะถูกจำไว้ที่ ``_AUDIT_FAIL`` (ดู ``audit_write_status``) เพื่อให้
+    /api/system/risk-logs เตือนจาก "ข้อเท็จจริง" ไม่ใช่จากการเดาว่าตารางว่าง
     ใช้ risk_events เป็น "ประวัติถาวร": ไม่มี TTL และ worker ที่ purge log
     (log_maintenance) ไม่ลบตารางนี้
     """
@@ -1233,12 +1303,14 @@ def write_audit(db, event_type: str, detail: dict, user_id: Optional[str] = None
             db.insert("risk_events", row)
         except Exception as exc:    # pragma: no cover
             log.error("risk_events insert failed (%s): %s", event_type, exc)
+            _record_audit_fail(event_type, exc)
             return str(exc)
         return None
 
     res = raw("risk_events", row)
     err = res[1] if isinstance(res, (tuple, list)) and len(res) > 1 else None
     if err:
+        _record_audit_fail(event_type, err)
         log.error(
             "risk_events insert FAILED (%s) — เหตุการณ์นี้จะไม่ปรากฏใน audit "
             "trail: %s · ถ้าเป็น 'invalid input syntax for type uuid' ให้รัน "

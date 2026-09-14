@@ -311,11 +311,26 @@ function describeMoveReason(reason: string): { label: string; why: string } {
   return { label: reason, why: "" };
 }
 
-/** ไอคอนนาฬิกาไทม์ไลน์ SL/TP ในคอลัมน์ราคาปัจจุบัน — กดเปิด popup
+/** ฟิลด์ที่ป้ายไทม์ไลน์ใช้จริง — รับได้ทั้งไม้เปิดค้าง (MonitorOpenPosition)
+ *  และแถว journal ที่ปิดแล้ว (MonitorTrade) เพื่อโชว์ในตารางประวัติยิง order */
+type MoveTimelinePos = {
+  asset: string;
+  direction: string;
+  stop_loss?: number | null;
+  take_profit?: number | null;
+  initial_stop_loss?: number | null;
+  initial_take_profit?: number | null;
+  sl_moved_at?: string | null;
+  sl_move_reason?: string | null;
+  tp_moved_at?: string | null;
+  tp_move_reason?: string | null;
+};
+
+/** ไอคอนนาฬิกาไทม์ไลน์ SL/TP — กดเปิด popup
  *  ประวัติการขยับ (ค่าเริ่ม→ปัจจุบัน, เวลา, เหตุผล+ทำไมถึงขยับ) + ไทม์ไลน์
  *  จาก signal-logs (portal to body สไตล์เดียวกับ SmartExitBadge). */
 function MoveTimelineBadge({ pos, timeline }: {
-  pos: MonitorSnapshot["open_positions"][number];
+  pos: MoveTimelinePos;
   timeline: SignalLog[];
 }) {
   const [pop, setPop] = useState(false);
@@ -364,8 +379,8 @@ function MoveTimelineBadge({ pos, timeline }: {
     (pos.initial_take_profit != null && pos.take_profit != null &&
       Math.abs(pos.take_profit - pos.initial_take_profit) > 1e-9);
   if (!slMoved && !tpMoved && timeline.length === 0) return null;
-  const slInfo = describeMoveReason(pos.sl_move_reason);
-  const tpInfo = describeMoveReason(pos.tp_move_reason);
+  const slInfo = describeMoveReason(pos.sl_move_reason ?? "");
+  const tpInfo = describeMoveReason(pos.tp_move_reason ?? "");
   const fmtWhen = (iso: string | null) =>
     iso ? new Date(iso).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-";
   const title = `ประวัติ SL/TP (${timeline.length}) — กดดูรายละเอียด`;
@@ -397,7 +412,7 @@ function MoveTimelineBadge({ pos, timeline }: {
               <span className="font-semibold text-loss">SL</span>{" "}
               {pos.initial_stop_loss != null ? fmtNum(pos.initial_stop_loss, 5) : "-"} →{" "}
               {pos.stop_loss != null ? fmtNum(pos.stop_loss, 5) : "-"}
-              <div className="text-slate-400">เมื่อ {fmtWhen(pos.sl_moved_at)} · {slInfo.label}</div>
+              <div className="text-slate-400">เมื่อ {fmtWhen(pos.sl_moved_at ?? null)} · {slInfo.label}</div>
               {slInfo.why && <div className="text-slate-300">เหตุผล: {slInfo.why}</div>}
             </div>
           )}
@@ -406,7 +421,7 @@ function MoveTimelineBadge({ pos, timeline }: {
               <span className="font-semibold text-profit">TP</span>{" "}
               {pos.initial_take_profit != null ? fmtNum(pos.initial_take_profit, 5) : "-"} →{" "}
               {pos.take_profit != null ? fmtNum(pos.take_profit, 5) : "-"}
-              <div className="text-slate-400">เมื่อ {fmtWhen(pos.tp_moved_at)} · {tpInfo.label}</div>
+              <div className="text-slate-400">เมื่อ {fmtWhen(pos.tp_moved_at ?? null)} · {tpInfo.label}</div>
               {tpInfo.why && <div className="text-slate-300">เหตุผล: {tpInfo.why}</div>}
             </div>
           )}
@@ -489,9 +504,33 @@ export default function MonitorPage() {
       // การขยับ SL) — ยังรับ order_opened เดิมไว้เพื่ออ่าน log เก่าย้อนหลัง
       try {
         const logs = await api.signalLogs(200);
+        // ticket → เจ้าของไม้ที่ snapshot นี้รู้จัก (asset/ฝั่ง/เวลาเปิด)
+        // WHY: PaperBroker._seq อยู่ในหน่วยความจำ รีสตาร์ทแล้วเริ่มนับ 1 ใหม่
+        // ขณะที่ signal_logs (TTL 7 วัน) ยังจำ ticket เก่า ⇒ ประวัติของไม้ที่
+        // ปิดไปแล้วโผล่ใต้ไม้ใหม่คนละ symbol (เจอจริงบน prod 2026-09-14:
+        // ปิด AUDNZD ในรอบของ AUDCHF) — จับคู่ได้เฉพาะ log ที่ไม่ก่อนเวลาเปิด
+        // ของไม้นั้น และ asset ตรงกัน
+        const known = new Map<string, { asset: string; since: number }>();
+        const remember = (tk: string | null, asset: string, createdAt: string | null) => {
+          if (!tk || known.has(tk)) return;
+          known.set(tk, {
+            asset: (asset || "").toUpperCase(),
+            since: createdAt ? Date.parse(createdAt) || 0 : 0,
+          });
+        };
+        for (const p of s.open_positions ?? []) remember(p.ticket, p.asset, p.created_at);
+        for (const r of s.recent ?? []) remember(r.ticket, r.asset, r.created_at);
         const byTicket: Record<string, SignalLog[]> = {};
+        // เผื่อ clock skew ระหว่าง row (DB) กับ log (backend) เล็กน้อย
+        const SKEW_MS = 60_000;
         for (const l of logs.logs ?? []) {
-          if (!l.ticket) continue;
+          const tk = l.ticket;
+          if (!tk) continue;
+          const owner = known.get(tk);
+          if (!owner) continue;               // ticket ที่ snapshot ไม่มีแถวให้แสดง
+          if (owner.asset && l.asset && l.asset.toUpperCase() !== owner.asset) continue;
+          const when = l.created_at ? Date.parse(l.created_at) || 0 : 0;
+          if (owner.since && when && when < owner.since - SKEW_MS) continue;
           const reason = l.reason || "";
           // เปิดไม้ครั้งแรก — ข้าม (ไม่ใช่การขยับ)
           if (/^เปิดออเดอร์/.test(reason)) continue;
@@ -500,7 +539,7 @@ export default function MonitorPage() {
             (l.event === "order_opened" &&
               /SL ย้าย|TP ย้าย|breakeven|trailing|ปรับด้วยมือ|manual/i.test(reason));
           if (!moveLike) continue;
-          (byTicket[l.ticket] ||= []).push(l);
+          (byTicket[tk] ||= []).push(l);
         }
         for (const k of Object.keys(byTicket)) {
           byTicket[k].sort((a, b) =>
@@ -983,6 +1022,12 @@ export default function MonitorPage() {
                     </td>
                     <td className="py-2 pr-4 text-xs">
                       <CloseReasonBadge trade={t} rules={snap.exit_rules} />
+                      {t.ticket && (
+                        <MoveTimelineBadge
+                          pos={t}
+                          timeline={moveLogs[t.ticket] ?? []}
+                        />
+                      )}
                     </td>
                     <td className="py-2 text-xs">{t.source === "auto" ? "Auto" : "Approve"}</td>
                   </tr>

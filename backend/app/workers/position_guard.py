@@ -313,7 +313,8 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
         return out
     out["closed"] = True
     pnl = execution.PaperBrokerPnl.compute(pos, s, asset=asset)
-    execution.close_trade_rows(db, ticket, price, pnl, reason_prefix)
+    execution.close_trade_rows(db, ticket, price, pnl, reason_prefix,
+                               asset=asset, direction=direction)
     signal_log.log_event(
         db=db, event="closed", asset=asset, direction=direction,
         entry=pos.entry_price, exit_price=price, pnl=pnl, ticket=ticket,
@@ -749,7 +750,9 @@ async def guard_once(db, broker, notifier: NotificationService,
                 continue
             pnl = execution.PaperBrokerPnl.compute(
                 pos, s, asset=str(pos.asset or ""))
-            execution.close_trade_rows(db, pos.ticket, price, pnl, "emergency")
+            execution.close_trade_rows(db, pos.ticket, price, pnl, "emergency",
+                                       asset=str(pos.asset or ""),
+                                       direction=str(pos.direction or ""))
             signal_log.log_event(
                 db=db, event="closed", asset=str(pos.asset or ""),
                 direction=str(pos.direction or ""),
@@ -883,7 +886,9 @@ async def guard_once(db, broker, notifier: NotificationService,
                         continue
                     pnl = execution.PaperBrokerPnl.compute(
                         pos, s, asset=str(pos.asset or ""))
-                    execution.close_trade_rows(db, pos.ticket, price, pnl, "time")
+                    execution.close_trade_rows(db, pos.ticket, price, pnl, "time",
+                                               asset=str(pos.asset or ""),
+                                               direction=str(pos.direction or ""))
                     signal_log.log_event(
                         db=db, event="closed", asset=str(pos.asset or ""),
                         direction=str(pos.direction or ""),
@@ -918,7 +923,9 @@ async def guard_once(db, broker, notifier: NotificationService,
             continue
 
         pnl = execution.PaperBrokerPnl.compute(pos, s, asset=str(pos.asset or ""))
-        execution.close_trade_rows(db, pos.ticket, price, pnl, reason)
+        execution.close_trade_rows(db, pos.ticket, price, pnl, reason,
+                                   asset=str(pos.asset or ""),
+                                   direction=str(pos.direction or ""))
         # Honest label: `reason` stays "sl"/"tp" for the journal + badge, but a
         # stop-out whose stop had been moved ABOVE entry is a win — calling it
         # "ตัดขาดทุน (SL)" made the log contradict the PnL on the same row.
@@ -1103,3 +1110,41 @@ async def rehydrate_book(db, broker) -> int:
         log.info("rehydrate: restored %d open position(s) into the broker book "
                  "(order sequence at %d)", restored, seq)
     return restored
+
+
+def seed_order_sequence(db, broker) -> int:
+    """Push the in-memory order sequence past every ticket the DB remembers.
+
+    WHY: `PaperBroker._seq` starts at 0 on every construction, so a restart
+    re-issues ticket numbers that PERMANENT tables still hold. rehydrate_book
+    only walks past tickets of rows that are still OPEN — after a stats reset
+    (which deletes closed rows) the sequence fell back to 1 and the next trade
+    took `PAPER-000001`, the ticket the AUDNZD trade had closed with an hour
+    earlier (prod 2026-09-14 11:10Z). The monitor groups its SL/TP timeline by
+    ticket, so the still-open AUDCHF row showed the old AUDNZD close as its own.
+
+    Sources, both already consulted by the UI:
+      * paper_trades — the journal (closed rows live until a stats reset),
+      * signal_logs — the audit log that feeds the timeline (7-day TTL).
+
+    Only when BOTH have forgotten a number is it reused — and then there is no
+    history left to show under the wrong symbol. Never raises; returns the
+    sequence in use.
+    """
+    if not hasattr(broker, "_seq"):
+        return 0
+    cur = int(getattr(broker, "_seq", 0) or 0)
+    best = cur
+    for table in ("paper_trades", "signal_logs"):
+        getter = getattr(db, "max_ticket", None)
+        if not callable(getter):        # old fakes / other brokers
+            continue
+        try:
+            best = max(best, int(getter(table) or 0))
+        except Exception as exc:        # pragma: no cover - defensive
+            log.warning("seed: max_ticket(%s) failed: %s", table, exc)
+    if best != cur:
+        log.info("seed: order sequence %d → %d (tickets already in the DB)",
+                 cur, best)
+    broker._seq = best
+    return best

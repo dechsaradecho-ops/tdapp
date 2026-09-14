@@ -8,6 +8,13 @@ Route: GET /api/system/db-check
   - deletes it
   - returns each step's status + raw error (if any)
 
+Also probes the two paths that fail SILENTLY in production:
+  - `worker_insert` → market_analysis (RLS policies, 004)
+  - `risk_audit`    → risk_events (audit trail, migration 038: user_id must be
+    text — the app writes the pseudo-user 'demo' which a uuid FK rejects with
+    22P02; Database.insert swallows that error, so the Logs audit tab stays
+    empty with no visible cause)
+
 The `db_probe` table is intentionally simple (no RLS, no FKs). Create it with
 database/003_db_probe.sql once. If the table is missing the endpoint reports
 that instead of failing.
@@ -24,7 +31,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Request
 
 from app.services.database import Database
-from app.services import execution
+from app.services import execution, limit_expand
 
 router = APIRouter()
 
@@ -98,7 +105,22 @@ async def db_check(request: Request) -> dict:
         # cleanup the probe row immediately
         db.delete("market_analysis", {"asset": "PROBE"})
 
-    result["verdict"] = "pass" if (ok_probe and data) else "partial"
+    # -- 5. RISK-AUDIT PROBE (risk_events) ------------------------------
+    # ทำไมต้องมี: audit trail (หน้า Logs → แท็บ Audit) เขียนลง risk_events
+    # ผ่าน limit_expand.write_audit ซึ่งDatabase.insert กลืน error ทุกอย่าง
+    # ทำให้ prod 2026-09-14 "ตารางว่างโดยไม่มีใครรู้สาเหตุ" (risk_events.user_id
+    # ยังเป็น uuid FK แต่แอปส่ง pseudo-user 'demo' → 22P02) · ขั้นตอนนี้ใช้
+    # เส้นทางเขียนตัวจริง ๆ แล้วลบแถวทดสอบทิ้ง ⇒ พิสูจน์ได้ทันทีว่า 038 รันแล้ว
+    audit = limit_expand.probe_audit(db)
+    result["risk_audit"] = audit
+    if audit.get("insert") != "ok":
+        result["risk_audit_hint"] = (
+            "audit trail เขียนไม่ลง — เหตุการณ์ความเสี่ยงจะไม่ปรากฏในหน้า Logs. "
+            "ถ้า error เป็น 'invalid input syntax for type uuid' ให้รัน "
+            "database/038_risk_events_user_text.sql"
+        )
+
+    result["verdict"] = "pass" if (ok_probe and data and audit.get("insert") == "ok") else "partial"
     return result
 
 
@@ -674,10 +696,14 @@ async def risk_logs(request: Request, limit: int = 100, offset: int = 0,
 
     `event` = all | limit_breach | limit_expanded | limit_expand_rejected
 
-    ⚠️ ถ้า `logs` ว่างทั้งที่ `requests` มีแถว = การเขียน audit ไม่ลง
-    (migration 038 ยังไม่รัน: risk_events.user_id ยังเป็น uuid FK แต่แอปส่ง
-    'demo' → error 22P02 ที่ Database.insert กลืนไว้) → คืน `audit_hint`
-    กลับไปให้หน้า Logs เตือนเอง ไม่ต้องเดา
+    ⚠️ ถ้า `logs` ว่าง: บอก **จากหลักฐาน** ไม่ใช่จากการเดา — `audit_state`
+    แยก 2 กรณีที่หน้า Logs ต้องแสดงต่างกัน:
+    * `write_failed` = `limit_expand.audit_write_status()` จำ error ดิบได้
+      (ภายใน 24 ชม. ของ process นี้) ⇒ การเขียนล้มเหลวจริง เช่น user_id ยัง
+      เป็น uuid FK → 22P02 ⇒ ให้รัน database/038_risk_events_user_text.sql
+    * `empty` = ตารางว่างโดยไม่มีการเขียนล้มเหลวเลย ⇒ ยังไม่มีเหตุการณ์ ·
+      รายการที่ตัดสินใจ "ก่อน" ทางเขียนถูกแก้จะไม่มีแถว audit (ปล่อยว่าง
+      ไม่ใช่ bug) — ส่ง `audit_missing` ให้หน้าเว็บอธิบายได้ตรง ๆ
     """
     db: Database = request.app.state.db
     out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
@@ -741,13 +767,52 @@ async def risk_logs(request: Request, limit: int = 100, offset: int = 0,
         for r in req_rows
     ]
 
-    if not scan and req_rows:
-        out["audit_hint"] = (
-            "มีคำขอยืนยันขยายลิมิต " + str(len(req_rows)) + " รายการ แต่ตาราง "
-            "risk_events ว่างเปล่า — การเขียน audit ไม่ลง รัน "
-            "database/038_risk_events_user_text.sql (เดิม user_id เป็น uuid FK "
-            "แต่แอปส่ง 'demo' → error 22P02 ที่ Database.insert กลืนไว้)"
-        )
+    # ---- สถานะการเขียน audit — บอกจาก "หลักฐาน" ไม่ใช่จากการเดา ----------
+    # หน้า Logs ต้องแยก 2 กรณีให้ออก ไม่งั้นมันจะกล่าวหาว่า migration ไม่ได้รัน
+    # ทั้งที่ตารางแค่ว่าง (ผู้ใช้ต้องเสียเวลาไล่ปัญหาที่ไม่มีอยู่ — เคยเกิดขึ้นจริง):
+    #   write_failed = write_audit เพิ่ง error จริงใน process นี้ → เตือนพร้อม error ดิบ
+    #   empty        = ไม่มีเหตุการณ์และไม่มีการเขียนที่ล้มเหลว → อธิบายกลาง ๆ
+    # `audit_missing` อธิบาย "ไม่อ้างเหตุการณ์ที่ไม่มีหลักฐาน" ได้ตรง ๆ: การตัดสินใจ
+    # ที่อนุมัติไปแล้วแต่ตารางไม่มีแถว audit = เขียนตอนที่ยังใช้ uuid FK (ก่อน 038)
+    # หรือตอนที่ process ยังจำ error ไม่ได้ (ความจำ error หายเมื่อ restart)
+    if scan:
+        out["audit_state"] = "ok"
+    else:
+        missing = [r for r in req_rows if r.get("decided_at")]
+        fail = limit_expand.audit_write_status()
+        if fail:
+            out["audit_state"] = "write_failed"
+            out["audit_error"] = fail.get("error")
+            out["audit_hint"] = (
+                "การเขียน audit ล้มเหลว " + str(fail.get("age_min")) + " นาที"
+                "ที่แล้ว (" + str(fail.get("event_type")) + "): "
+                + str(fail.get("error")) + " · ถ้าเป็น 'invalid input syntax for "
+                "type uuid' ให้รัน database/038_risk_events_user_text.sql "
+                "(risk_events.user_id ต้องเป็น text) แล้วเหตุการณ์ถัดไปจะลงปกติ"
+            )
+        elif missing:
+            out["audit_state"] = "empty"
+            latest = missing[0]
+            out["audit_missing"] = {
+                "count": len(missing),
+                "latest": {k: latest.get(k) for k in
+                           ("id", "status", "decided_at", "decided_by")},
+            }
+            out["audit_hint"] = (
+                "ตาราง risk_events ยังไม่มีแถว และตั้งแต่ backend เริ่มทำงานก็ไม่มี"
+                "การเขียนที่ล้มเหลว (ทางเขียนปกติ) · การตัดสินใจ " + str(len(missing))
+                + " รายการที่อนุมัติไปแล้วยังไม่มีแถว audit — เขียนไว้ตอนที่ยังใช้"
+                " risk_events.user_id เป็น uuid (ก่อน 038) หรือตอนที่ความจำ error ใน"
+                " process หายไปหลัง restart · เหตุการณ์ถัดไปจะลงปกติ"
+            )
+        else:
+            out["audit_state"] = "empty"
+            out["audit_hint"] = (
+                "ตาราง risk_events ยังว่าง — ยังไม่มีเหตุการณ์ความเสี่ยงที่ต้อง"
+                "บันทึก และไม่มีการเขียนที่ล้มเหลว (ทางเขียนปกติ) · อยากพิสูจน์"
+                "ตอนนี้เลย เปิด GET /api/system/db-check (มีขั้นตอน risk_audit ที่"
+                " insert แล้วลบแถวทดสอบให้ดู error ดิบ)"
+            )
 
     out["event_types"] = list(RISK_EVENT_TYPES)
     out["offset"] = page_offset

@@ -247,17 +247,51 @@ def persist_tp_move(db, ticket: str, new_tp: float, reason: str) -> None:
 
 
 def close_trade_rows(db, ticket: str, exit_price: float, pnl: float,
-                     reason: str) -> None:
-    """Mark the matching open paper_trades row closed after SL/TP/manual exit."""
+                     reason: str, asset: str = "", direction: str = "") -> None:
+    """Mark the matching open paper_trades row closed after SL/TP/manual exit.
+
+    `asset` / `direction` (optional, usually from the broker book) make the
+    match STRICTER: ticket numbers are reused across restarts (`PaperBroker._seq`
+    is in-memory), so a book holding a recycled ticket must never close the
+    journal row of a DIFFERENT symbol — that would leave the real position open
+    in the book while the monitor shows it closed (prod 2026-09-14: an open
+    AUDCHF carrying the ticket an AUDNZD trade had closed with an hour earlier).
+
+    A constraint only counts when BOTH sides carry a value (case-insensitive),
+    so a row written before migration-era casing can still match. When the
+    constraints are supplied and no open row satisfies them, this logs a
+    WARNING and does nothing — fail-safe over closing the wrong trade.
+    """
+    want_asset = str(asset or "").strip().upper()
+    want_dir = str(direction or "").strip().upper()
     try:
-        rows = db.select("paper_trades", filters={"ticket": ticket, "status": "open"},
-                         limit=1)
-        if rows:
-            db.update("paper_trades", rows[0]["id"], {
-                "status": "closed", "exit_price": exit_price,
-                "pnl": round(pnl, 2), "close_reason": reason,
-                "closed_at": datetime.now(timezone.utc).isoformat(),
-            })
+        # limit>1: a duplicate ticket (pre-038 history) must not hide the row
+        # that actually matches the book.
+        rows = db.select("paper_trades",
+                         filters={"ticket": ticket, "status": "open"}, limit=5)
+        row = None
+        for cand in rows:
+            if want_asset and str(cand.get("asset") or "").strip().upper() \
+                    not in ("", want_asset):
+                continue
+            if want_dir and str(cand.get("direction") or "").strip().upper() \
+                    not in ("", want_dir):
+                continue
+            row = cand
+            break
+        if row is None:
+            if rows and (want_asset or want_dir):
+                log.warning(
+                    "close_trade_rows %s: book %s %s does not match the open "
+                    "row(s) %s — refusing to close the wrong trade",
+                    ticket, want_asset or "?", want_dir or "?",
+                    [(r.get("asset"), r.get("direction")) for r in rows])
+            return
+        db.update("paper_trades", row["id"], {
+            "status": "closed", "exit_price": exit_price,
+            "pnl": round(pnl, 2), "close_reason": reason,
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+        })
     except Exception as exc:
         log.error("close_trade_rows failed: %s", exc)
 

@@ -896,6 +896,7 @@ export default function LogsPage() {
   const [auditReqs, setAuditReqs] = useState<RiskAuditRequest[]>([]);
   const [auditSummary, setAuditSummary] = useState<RiskLogsResponse["summary"] | null>(null);
   const [auditHint, setAuditHint] = useState("");
+  const [auditState, setAuditState] = useState<"" | "ok" | "empty" | "write_failed">("");
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditHasMore, setAuditHasMore] = useState(false);
   type RiskFilter = "all" | "limit_breach" | "limit_expanded" | "limit_expand_rejected";
@@ -980,6 +981,7 @@ export default function LogsPage() {
         setAuditReqs(ares.requests ?? []);
         setAuditSummary(ares.summary ?? null);
         setAuditHint(ares.audit_hint ?? "");
+        setAuditState(ares.audit_state ?? "");
         setAuditTotal(ares.summary?.total ?? (ares.logs ?? []).length);
         setAuditHasMore(ares.has_more ?? false);
       } else {
@@ -1965,11 +1967,15 @@ export default function LogsPage() {
         );
       })()}
 
-      {/* audit_hint = มีคำขอยืนยันแต่ risk_events ว่าง ⇒ เขียน audit ไม่ลง */}
+      {/* audit_hint = อธิบายจากหลักฐานว่าทำไมตาราง risk_events ว่าง
+          (write_failed = เขียนไม่ลงจริง · empty = แค่ยังไม่มีเหตุการณ์) */}
       {tab === "audit" && auditHint && (
-        <section className="panel border-amber-400/50">
-          <p className="text-sm font-bold text-amber-300 flex items-center gap-1.5">
-            <Icon n="warning" size={15} /> ตาราง risk_events ว่างเปล่า — เขียน audit ไม่ลง
+        <section className={`panel ${auditState === "write_failed" ? "border-amber-400/50" : "border-slate-700"}`}>
+          <p className={`text-sm font-bold flex items-center gap-1.5 ${auditState === "write_failed" ? "text-amber-300" : "text-slate-200"}`}>
+            <Icon n={auditState === "write_failed" ? "warning" : "inbox"} size={15} />{" "}
+            {auditState === "write_failed"
+              ? "เขียน audit ไม่ลง — เหตุการณ์ความเสี่ยงจะไม่ถูกบันทึก"
+              : "ยังไม่มีเหตุการณ์ความเสี่ยงในตาราง (ไม่ใช่ข้อผิดพลาด)"}
           </p>
           <p className="text-xs mt-1 text-slate-300">{auditHint}</p>
         </section>
@@ -1991,6 +1997,7 @@ export default function LogsPage() {
                   setAuditLogs(res.logs ?? []);
                   setAuditReqs(res.requests ?? []);
                   setAuditHint(res.audit_hint ?? "");
+                  setAuditState(res.audit_state ?? "");
                   setAuditTotal(res.summary?.total ?? (res.logs ?? []).length);
                   setAuditHasMore(res.has_more ?? false);
                 } finally { setLoading(false); }
@@ -2018,7 +2025,7 @@ export default function LogsPage() {
             {!loading && auditLogs.length === 0 && (
               <tr><td colSpan={4} className="py-6 text-center text-slate-500">
                 {auditReqs.length > 0
-                  ? "มีคำขอยืนยันขยายลิมิตแต่ยังไม่มีเหตุการณ์ที่บันทึกได้ — ดูคำเตือนด้านบน (migration 038)"
+                  ? "มีคำขอยืนยันขยายลิมิตแต่ยังไม่มีเหตุการณ์ที่บันทึกได้ — ดูคำอธิบายในกล่องด้านบน"
                   : "ยังไม่มีเหตุการณ์ความเสี่ยง — ระบบเขียนที่นี่ทุกครั้งที่ kill switch เข้าเงื่อนไข หรือเจ้าของอนุมัติ/ปฏิเสธขยายลิมิต"}
               </td></tr>
             )}

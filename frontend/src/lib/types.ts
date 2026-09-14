@@ -325,8 +325,22 @@ export interface RiskLogsResponse {
     /** จำนวนแถวที่สแกนมานับ by_event (เพดานฝั่ง backend) */
     scanned: number;
   };
-  /** ตั้งเมื่อ "มีคำขอยืนยันแต่ audit ว่าง" = การเขียน risk_events ไม่ลง (migration 038) */
+  /**
+   * สถานะการเขียน audit (จากหลักฐานฝั่ง backend ไม่ใช่การเดา):
+   * "ok" = มีแถวใน risk_events
+   * "empty" = ตารางว่างและ *ไม่* มีการเขียนที่ล้มเหลว → แค่ยังไม่มีเหตุการณ์
+   * "write_failed" = write_audit เพิ่ง error จริง (ดู audit_error)
+   */
+  audit_state?: "ok" | "empty" | "write_failed";
+  /** อธิบายว่าทำไมตารางว่าง/เขียนไม่ลง — แสดงในกล่องแจ้งเตือนของแท็บ Audit */
   audit_hint?: string;
+  /** error ดิบจาก write_audit ครั้งล่าสุด (มีเมื่อ audit_state = write_failed) */
+  audit_error?: string | null;
+  /** การตัดสินใจที่อนุมัติแล้วแต่ risk_events ไม่มีแถว (เขียนก่อน 038) */
+  audit_missing?: {
+    count: number;
+    latest: { id: string; status: string; decided_at: string | null; decided_by: string };
+  };
   event_types: string[];
   offset: number;
   limit: number;

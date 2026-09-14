@@ -50,6 +50,18 @@ def _request(status: str = "approved", **extra) -> dict:
     return row
 
 
+@pytest.fixture(autouse=True)
+def _clear_audit_fail_memory():
+    """`_AUDIT_FAIL` เป็นหน่วยความจำระดับ process — ต้องล้างก่อน/หลังทุกเทสต์.
+
+    ถ้าไม่ล้าง เทสต์ที่จำลองการเขียนล้มเหลวจะไปทำให้เทสต์ถัดไปเห็น audit_hint
+    ทั้งที่ในเทสต์นั้นไม่ได้มีอะไรพัง (และกลับกัน: เทสต์นี้จะจับได้เองถ้าลืมล้าง)
+    """
+    limit_expand._AUDIT_FAIL.clear()
+    yield
+    limit_expand._AUDIT_FAIL.clear()
+
+
 # ---------------------------------------------------------------------------
 # Write path — must NOT swallow the error any more
 # ---------------------------------------------------------------------------
@@ -132,6 +144,79 @@ class TestAuditPermanence:
 
 
 # ---------------------------------------------------------------------------
+# "เขียนไม่ลง" ต้องเป็นข้อเท็จจริงที่จำไว้ ไม่ใช่การเดาจากตารางว่าง
+# ---------------------------------------------------------------------------
+class TestAuditFailMemory:
+    def test_no_failure_recorded_is_none(self):
+        assert limit_expand.audit_write_status() is None
+
+    def test_failure_is_remembered_with_raw_error(self):
+        db = FakeDatabase(fail_tables={"risk_events"})
+        err = limit_expand.write_audit(db, "limit_breach", {"x": 1})
+        st = limit_expand.audit_write_status()
+        assert st is not None and err in st["error"]
+        assert st["event_type"] == "limit_breach"
+        assert st["age_min"] >= 0
+
+    def test_success_after_failure_does_not_erase_the_evidence(self, monkeypatch):
+        """ล้มเหลวแล้วสำเร็จทีหลัง: ยังต้องเห็นว่าก่อนหน้านี้มี error.
+
+        WHY: หลักฐานคือ "เคยเขียนไม่ลงเมื่อไร" — ถ้าล้างทิ้งเมื่อเขียนสำเร็จ
+        ผู้ใช้จะไม่เห็นสาเหตุของแถวที่หายไปก่อนหน้านี้เลย
+        """
+        limit_expand.write_audit(FakeDatabase(fail_tables={"risk_events"}),
+                                 "limit_breach", {})
+        limit_expand.write_audit(FakeDatabase(), "limit_breach", {})
+        assert limit_expand.audit_write_status() is not None
+
+    def test_stale_failure_is_forgotten(self, monkeypatch):
+        """เกิน 24 ชม. = เก่าเกินกว่าจะเอามาเตือนหน้าบ้าน (ปัญหาเดิมแก้ไปแล้ว)."""
+        db = FakeDatabase(fail_tables={"risk_events"})
+        limit_expand.write_audit(db, "limit_breach", {})
+        limit_expand._AUDIT_FAIL["at"] -= limit_expand.AUDIT_FAIL_TTL + 60
+        assert limit_expand.audit_write_status() is None
+
+
+class TestProbeAudit:
+    """probe_audit = พิสูจน์ทางเขียน audit ด้วยเส้นทางเดียวกับของจริง."""
+
+    def test_ok_writes_demo_user_and_deletes_the_row(self):
+        db = FakeDatabase()
+        res = limit_expand.probe_audit(db)
+        table, row = db.inserted[0]
+        assert table == "risk_events"
+        assert row["user_id"] == "demo"              # pseudo-user ตาม 038
+        assert row["event_type"] == limit_expand.AUDIT_PROBE_EVENT
+        assert res["insert"] == "ok" and res["delete"] == "ok"
+        # แถวทดสอบต้องไม่ค้างในตารางถาวร
+        assert db.rows.get("risk_events") == []
+
+    def test_missing_038_reports_uuid_hint(self):
+        db = FakeDatabase(fail_tables={"risk_events"})
+        res = limit_expand.probe_audit(db)
+        assert res["insert"] == "FAIL"
+        assert "row-level security" in res["error"]
+        assert "038" in res["hint"]
+
+    def test_old_fake_without_insert_raw(self):
+        class _Plain:
+            def __init__(self):
+                self.rows: list[tuple[str, dict]] = []
+
+            def insert(self, table, row):
+                self.rows.append((table, dict(row)))
+                return {**row, "id": "p1"}
+
+            def delete(self, table, filters):
+                return True
+
+        db = _Plain()
+        res = limit_expand.probe_audit(db)
+        assert res["insert"] == "ok"
+        assert db.rows[0][0] == "risk_events"
+
+
+# ---------------------------------------------------------------------------
 # Read path — GET /api/system/risk-logs (ที่หน้า Logs > Audit เรียก)
 # ---------------------------------------------------------------------------
 class TestRiskLogsEndpoint:
@@ -179,14 +264,46 @@ class TestRiskLogsEndpoint:
         assert page1["logs"][0]["id"] != page2["logs"][0]["id"]
 
     @pytest.mark.asyncio
-    async def test_audit_hint_when_requests_exist_but_table_is_empty(self):
-        """คำขอยืนยันมี แต่ไม่มี audit row → บอกหน้าบ้านตรง ๆ ว่ายังไม่รัน 038."""
+    async def test_empty_table_without_recorded_failure_does_not_blame_038(self):
+        """ตารางว่าง + ไม่มี error ที่บันทึกไว้ → **ห้าม**บอกให้รัน 038 ซ้ำ.
+
+        prod 2026-09-14: 038 รันไปแล้ว แต่ตารางยังว่างเพราะยังไม่มีเหตุการณ์ใหม่
+        ข้อความเดิม ("ให้รัน 038") ทำให้เจ้าของไปตามหาปัญหาที่ไม่มีอยู่
+        """
         db = FakeDatabase(rows={"kill_expand_requests": [_request("approved")]})
         set_state(db)
         body = (await call("GET", "/api/system/risk-logs")).json()
         assert body["logs"] == []
+        assert body["audit_state"] == "empty"
         assert "risk_events" in body["audit_hint"]
+        assert "รัน database/038" not in body["audit_hint"]
+        # ต้องอธิบาย "แถวที่หายไป" ด้วยข้อเท็จจริง: การตัดสินใจที่อนุมัติแล้ว
+        assert body["audit_missing"]["count"] == 1
+        assert body["audit_missing"]["latest"]["id"] == "req-1"
+        assert "audit_error" not in body
+
+    @pytest.mark.asyncio
+    async def test_empty_table_without_any_decision_points_at_db_check(self):
+        """ยังไม่มีคำขอเลย → บอกกลาง ๆ ว่าแค่ยังไม่มีเหตุการณ์ + ชี้ทางพิสูจน์."""
+        set_state(FakeDatabase())
+        body = (await call("GET", "/api/system/risk-logs")).json()
+        assert body["audit_state"] == "empty"
+        assert "db-check" in body["audit_hint"]
+        assert "audit_missing" not in body
+
+    @pytest.mark.asyncio
+    async def test_hint_reports_the_real_failure_when_write_actually_failed(self):
+        """มีการเขียนที่ล้มเหลวจริง → hint ต้องมี error ดิบ + คำแนะนำ 038."""
+        limit_expand.write_audit(FakeDatabase(fail_tables={"risk_events"}),
+                                 "limit_breach", {"risk_level": "high"})
+        db = FakeDatabase(rows={"kill_expand_requests": [_request("approved")]})
+        set_state(db)
+        body = (await call("GET", "/api/system/risk-logs")).json()
+        assert body["audit_state"] == "write_failed"
+        assert "row-level security" in body["audit_hint"]
         assert "038" in body["audit_hint"]
+        assert "limit_breach" in body["audit_hint"]
+        assert body["audit_error"]
 
     @pytest.mark.asyncio
     async def test_no_hint_once_audit_rows_exist(self):
@@ -195,7 +312,9 @@ class TestRiskLogsEndpoint:
             "kill_expand_requests": [_request("approved")],
         })
         set_state(db)
-        assert "audit_hint" not in (await call("GET", "/api/system/risk-logs")).json()
+        body = (await call("GET", "/api/system/risk-logs")).json()
+        assert "audit_hint" not in body
+        assert body["audit_state"] == "ok"
 
     @pytest.mark.asyncio
     async def test_empty_table_is_ok_not_fail(self):
@@ -220,3 +339,37 @@ class TestRiskLogsEndpoint:
         body = res.json()
         assert body["verdict"] == "fail"
         assert body["client"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/system/db-check — พิสูจน์ทางเขียน audit ได้ทันทีที่เรียก
+# ---------------------------------------------------------------------------
+class TestDbCheckRiskAudit:
+    @pytest.mark.asyncio
+    async def test_includes_risk_audit_probe_and_passes(self):
+        """db-check ต้องทดสอบ risk_events ด้วย (038) ไม่ใช่แค่ market_analysis.
+
+        ตาราง db_probe กับ market_analysis ไม่มี FK/ชนิดที่ทำให้ล้มแบบเดียวกับ
+        audit trail — ถ้าไม่มีขั้นนี้ "db-check ผ่าน" จะยังไม่ยืนยันว่าหน้า Logs
+        จะมีข้อมูล
+        """
+        db = FakeDatabase()
+        set_state(db)
+        body = (await call("GET", "/api/system/db-check")).json()
+        assert body["risk_audit"]["table"] == "risk_events"
+        assert body["risk_audit"]["insert"] == "ok"
+        assert body["risk_audit"]["delete"] == "ok"
+        assert body["verdict"] == "pass"
+        assert "risk_audit_hint" not in body
+        # แถวทดสอบต้องถูกเก็บกวาด (ไม่ค้างใน risk_events ถาวร)
+        assert db.rows.get("risk_events") == []
+
+    @pytest.mark.asyncio
+    async def test_failing_risk_events_downgrades_verdict_and_explains(self):
+        db = FakeDatabase(fail_tables={"risk_events"})
+        set_state(db)
+        body = (await call("GET", "/api/system/db-check")).json()
+        assert body["risk_audit"]["insert"] == "FAIL"
+        assert body["verdict"] == "partial"        # ไม่ใช่ fail — DB ยังใช้ได้
+        assert "038" in body["risk_audit_hint"]
+

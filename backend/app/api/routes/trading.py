@@ -738,7 +738,9 @@ async def close_position(payload: ClosePositionRequest,
             holding_min = None
 
     # ---- journal + notify -------------------------------------------------
-    execution.close_trade_rows(db, ticket, exit_price, pnl, payload.close_reason)
+    execution.close_trade_rows(db, ticket, exit_price, pnl, payload.close_reason,
+                               asset=str(row.get("asset") or ""),
+                               direction=str(row.get("direction") or ""))
     # Lifecycle log: manual close (user clicked ปิดไม้) — reason records why.
     signal_log.log_event(
         db=db, event="closed", asset=str(row.get("asset") or ""),
@@ -1084,7 +1086,9 @@ async def close_all_positions(payload: CloseAllRequest,
             volume=float(row.get("volume") or 0), asset=asset)
         pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
         execution.close_trade_rows(db, ticket, exit_price, pnl,
-                                   payload.close_reason)
+                                   payload.close_reason,
+                                   asset=asset,
+                                   direction=str(row.get("direction") or ""))
         signal_log.log_event(
             db=db, event="closed", asset=asset,
             direction=str(row.get("direction") or ""), entry=entry,
@@ -1227,7 +1231,9 @@ async def close_group_positions(payload: CloseGroupRequest,
             volume=float(row.get("volume") or 0), asset=asset)
         pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
         execution.close_trade_rows(db, ticket, exit_price, pnl,
-                                   payload.close_reason)
+                                   payload.close_reason,
+                                   asset=asset,
+                                   direction=str(row.get("direction") or ""))
         signal_log.log_event(
             db=db, event="closed", asset=asset,
             direction=str(row.get("direction") or ""), entry=entry,

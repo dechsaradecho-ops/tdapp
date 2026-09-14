@@ -99,11 +99,16 @@ class FakeDatabase:
         return False
 
     def insert_raw(self, table: str, row: dict) -> tuple[dict | None, str | None]:
-        """Same contract as Database.insert_raw (raw error, no swallow)."""
+        """Same contract as Database.insert_raw (raw error, no swallow).
+
+        Returns the row **as PostgREST does** (with the generated `id`), not the
+        dict we passed in — probe helpers (limit_expand.probe_audit) delete the
+        probe row by that id, so returning the input would hide a real bug.
+        """
         if table in self.fail_tables:
             return None, "fake: new row violates row-level security policy"
         self.insert(table, row)
-        return row, None
+        return dict(self.rows[table][0]), None
 
     def delete(self, table: str, filters: dict) -> bool:
         rows = self.rows.get(table, [])

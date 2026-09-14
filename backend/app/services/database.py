@@ -6,6 +6,7 @@ a project), calls degrade gracefully instead of crashing workers/API.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -203,6 +204,47 @@ class Database:
         except Exception as exc:
             log.error("delete_before %s/%s failed: %s", table, column, exc)
             return 0
+
+    def max_ticket(self, table: str, prefix: str = "PAPER-",
+                   scan: int = 200) -> int:
+        """Highest numeric suffix among `<prefix>NNNNNN` tickets in `table`.
+
+        WHY: `PaperBroker._seq` lives in memory and restarts at 0 with every
+        process, so a redeploy re-issues ticket numbers a PERMANENT table
+        still remembers. Prod 2026-09-14: the AUDCHF row opened 11:10 got
+        `PAPER-000001` — the same ticket the AUDNZD trade had closed with at
+        10:34 — so the monitor's SL/TP timeline (grouped by ticket) showed
+        the old trade's close under the new position.
+
+        Seeding the order sequence from the highest ticket the journal and
+        the log still hold makes a number reusable only once NOTHING
+        remembers it (at which point there is no history left to mix up).
+
+        Never raises: 0 when the table is empty/unavailable or the `like`
+        filter is unsupported.
+        """
+        if not self._client:
+            return 0
+        try:
+            resp = (self._client.table(table)
+                    .select("ticket")
+                    .like("ticket", f"{prefix}*")
+                    .order("ticket", desc=True)
+                    .limit(max(1, int(scan)))
+                    .execute())
+        except Exception as exc:
+            log.warning("max_ticket %s failed: %s", table, exc)
+            return 0
+        pat = re.compile(rf"^{re.escape(prefix)}(\d+)")
+        best = 0
+        for row in resp.data or []:
+            m = pat.match(str((row or {}).get("ticket") or ""))
+            if m:
+                try:
+                    best = max(best, int(m.group(1)))
+                except ValueError:          # pragma: no cover
+                    continue
+        return best
 
 
 def queue_notification(db: Database, user_id: str, ntype: str, message: str,
