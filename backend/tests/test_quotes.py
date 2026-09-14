@@ -513,9 +513,13 @@ class TestSpotFeed:
     @pytest.fixture(autouse=True)
     def _reset_spot_state(self):
         quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
         quotes._exchange_key_idx = 0
         yield
         quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
         quotes._exchange_key_idx = 0
 
     def test_pair_mapping_covers_fx_only(self):
@@ -613,6 +617,7 @@ class TestSpotFeed:
         prices, failures = await quotes.fetch_spot_prices(["EURUSD", "XAUUSD"])
         assert prices == {"EURUSD": 1.15, "XAUUSD": 4540.2}
         assert failures == {}
+        assert quotes.spot_source("EURUSD") == "spot"
         assert any(f"{quotes.YAHOO_CHART_URL}/EURUSD=X" in c for c in calls)
         assert any(f"{quotes.YAHOO_CHART_URL}/GC=F" in c for c in calls)
         assert not any("exchangerate" in c for c in calls)  # fallback not needed
@@ -632,6 +637,7 @@ class TestSpotFeed:
         prices, failures = await quotes.fetch_spot_prices(["GBPUSD"])
         assert prices == {"GBPUSD": 1.3485}
         assert failures == {}
+        assert quotes.spot_source("GBPUSD") == "daily"  # cold start: no live ref
         assert len([c for c in calls if "yahoo" in c]) == 1
         assert len([c for c in calls if "exchangerate" in c]) == 1
 
@@ -647,6 +653,86 @@ class TestSpotFeed:
         prices2, _ = await quotes.fetch_spot_prices(["GBPUSD"])
         assert prices1 == prices2 == {"GBPUSD": 1.3485}
         assert len(calls) == 1  # second call served from the 30s cache
+
+    # ---- daily-rate trust gate (prod 2026-09-14 phantom NZDUSD TP) --------
+    @pytest.mark.asyncio
+    async def test_stale_daily_rate_never_overrides_last_intraday_print(
+            self, monkeypatch):
+        """Yahoo down → reuse the last tick we SAW, not the daily rate.
+
+        Live 0.57667, daily fallback 0.5812 (= TP 0.58081 crossed). The old
+        chain returned 0.5812 and the guard booked a TP the market never hit.
+        """
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _yahoo_payload(0.57667),   # cycle 1: intraday print
+            _resp({}, status=429),     # cycle 2: Yahoo timed out/dead
+            _ex_resp("USD", 0.5812),   # ... daily fallback would say 0.5812
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        first, _ = await quotes.fetch_spot_prices(["NZDUSD"])
+        assert first == {"NZDUSD": 0.57667}
+        quotes._spot_cache.clear()          # force a refetch (TTL not reached)
+        prices, failures = await quotes.fetch_spot_prices(["NZDUSD"])
+        assert prices == {"NZDUSD": 0.57667}   # last REAL tick wins
+        assert quotes.spot_source("NZDUSD") == "spot"
+        assert "live feed down" in failures["NZDUSD"]  # ...but never silent
+        assert not any("exchangerate" in c for c in calls)  # fallback skipped
+
+    @pytest.mark.asyncio
+    async def test_daily_rate_rejected_when_it_disagrees_with_live(
+            self, monkeypatch):
+        """Beyond SPOT_LIVE_TTL the fallback is tried — but sanity-checked."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _yahoo_payload(0.57667),   # intraday print (reference)
+            _resp({}, status=429),     # > 15 min later: Yahoo still dead
+            _ex_resp("USD", 0.5812),   # daily rate 0.79% away → refuse
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        await quotes.fetch_spot_prices(["NZDUSD"])
+        # age the live print past SPOT_LIVE_TTL (but inside the 24h ref window)
+        ts, price = quotes._spot_live["NZDUSD"]
+        quotes._spot_live["NZDUSD"] = (ts - quotes.SPOT_LIVE_TTL - 1.0, price)
+        quotes._spot_cache.clear()
+        prices, failures = await quotes.fetch_spot_prices(["NZDUSD"])
+        assert prices == {}                     # nothing tradable this cycle
+        assert "ปฏิเสธ" in failures["NZDUSD"]
+        assert len([c for c in calls if "exchangerate" in c]) == 1
+
+    @pytest.mark.asyncio
+    async def test_daily_rate_accepted_when_it_agrees_with_live(
+            self, monkeypatch):
+        """A fallback within SPOT_DAILY_MAX_DEVIATION of the live tick is OK."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _yahoo_payload(1.34850),
+            _resp({}, status=429),
+            _ex_resp("USD", 1.34980),   # +0.096% → plausible
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        await quotes.fetch_spot_prices(["GBPUSD"])
+        ts, price = quotes._spot_live["GBPUSD"]
+        quotes._spot_live["GBPUSD"] = (ts - quotes.SPOT_LIVE_TTL - 1.0, price)
+        quotes._spot_cache.clear()
+        prices, failures = await quotes.fetch_spot_prices(["GBPUSD"])
+        assert prices == {"GBPUSD": 1.3498}
+        assert failures == {}
+        # provenance is tagged so the guard can refuse it for hard stops
+        assert quotes.spot_source("GBPUSD") == "daily"
+
+    def test_spot_source_defaults_to_empty(self):
+        assert quotes.spot_source("EURUSD") == ""
+        assert quotes.spot_source("eurusd") == ""
 
 
 # ---------------------------------------------------------------------------

@@ -1101,7 +1101,15 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             for asset, price in prices.items():
                 if price > 0:
                     marks["asset:" + asset] = price
-                    spot_assets.add(asset)
+                    # Provenance, not just a number: the exchangerate fallback
+                    # is a DAILY rate (one value per day). Badge it "daily" so
+                    # the monitor card never implies a live intraday tick —
+                    # prod 2026-09-14 NZDUSD was marked 0.5812 that way while
+                    # the real market sat at 0.5766.
+                    if quotes_mod.spot_source(asset) == "daily":
+                        daily_assets.add(asset)
+                    else:
+                        spot_assets.add(asset)
         except Exception as exc:  # whole-feed failure (shouldn't happen —
             # fetch_spot_prices isolates per-asset errors, but stay safe)
             prices, failures = {}, {a: str(exc) for a in assets}

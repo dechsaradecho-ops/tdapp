@@ -87,10 +87,33 @@ async def _live_marks(assets: list[str]) -> dict[str, float]:
     entry price forever, which made positions whose TP was already breached
     (e.g. GBPUSD TP 1.31286 vs live 1.3536) sit open indefinitely. Live marks
     come first; broker book values are only a fallback for unknown assets.
+
+    DAILY fallback rates are refused here. The spot chain falls through to
+    exchangerate.com when the intraday feed (Yahoo) is down, and that source
+    publishes ONE rate per business day — it can sit on the wrong side of a
+    stop by a whole percent. Prod 2026-09-14: Yahoo timed out for NZDUSD, the
+    daily rate 0.5812 (already 2h40m old, real market 0.5766) cleared TP
+    0.58081, so PAPER-000005 was booked \"closed TP 0.5812\" +14.70 and its
+    trailing SL moved to 0.58057 — all from a price that never traded. A
+    position with no intraday mark is left untouched for the cycle: a missed
+    trail is a normal outage, a fabricated fill is a corrupted journal.
     """
     try:
         prices, _failures = await quotes.fetch_spot_prices(assets)
-        return prices
+        out: dict[str, float] = {}
+        for asset, price in (prices or {}).items():
+            try:
+                p = float(price or 0)
+            except (TypeError, ValueError):
+                continue
+            if p <= 0:
+                continue
+            if quotes.spot_source(asset) == "daily":
+                log.warning("guard: %s mark %.6g is a DAILY fallback rate — "
+                            "not used for SL/TP this cycle", asset, p)
+                continue
+            out[asset] = p
+        return out
     except Exception as exc:
         log.warning("live marks unavailable (%s) — falling back to broker book", exc)
         return {}

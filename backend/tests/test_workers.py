@@ -1027,6 +1027,58 @@ class TestPositionGuard:
         assert pos.current_price == 1.1615  # seeded at entry; guard ticks it
         assert broker._seq == 7  # sequence walked past restored tickets
 
+    @pytest.mark.asyncio
+    async def test_daily_fallback_mark_never_triggers_a_stop(self, monkeypatch):
+        """Regression (prod 2026-09-14): NZDUSD was booked "closed TP 0.5812"
+        while the market never traded above 0.5767 — the mark came from the
+        exchangerate DAILY rate after Yahoo timed out. A daily rate may price
+        a position, but it must never fire an intraday SL/TP.
+        """
+        from app.workers import position_guard
+
+        closed: list[str] = []
+
+        async def daily_spot(assets, **_kw):
+            return ({a: 1.2500 for a in assets},
+                    {a: "…: fallback rate (rate รายวัน)" for a in assets})
+
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", daily_spot)
+        monkeypatch.setattr(position_guard.quotes, "spot_source",
+                            lambda _a: "daily", raising=False)
+
+        class Notifier:
+            async def notify(self, *a, **k):
+                return None
+
+        # live 1.2500 would clear TP 1.2000 — the daily rate must not be used
+        broker = self._broker_with(entry=1.1000, tp=1.2000)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "asset": "EURUSD", "status": "open",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.1000,
+             "take_profit": 1.2000}]})
+        summary = await position_guard.guard_once(db, broker, Notifier())
+        assert summary["checked"] == 1     # position still seen by the cycle
+        assert summary["closed"] == 0 and closed == []
+        # ...and the frozen book value (entry) is left as the mark
+        assert broker._positions["T1"].current_price == 1.1000
+
+    @pytest.mark.asyncio
+    async def test_live_marks_reports_only_intraday_prints(self, monkeypatch):
+        """Mixed batch: spot marks pass, daily-rate marks are dropped."""
+        from app.workers import position_guard
+
+        async def mixed_spot(assets, **_kw):
+            return ({"EURUSD": 1.2500, "NZDUSD": 0.5812},
+                    {"NZDUSD": "…: fallback rate (rate รายวัน)"})
+
+        src = {"EURUSD": "spot", "NZDUSD": "daily"}
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", mixed_spot)
+        monkeypatch.setattr(position_guard.quotes, "spot_source",
+                            lambda a: src.get(a, ""), raising=False)
+        marks = await position_guard._live_marks(["EURUSD", "NZDUSD"])
+        assert marks == {"EURUSD": 1.2500}
+
 
 # ---------------------------------------------------------------------------
 # Position guard — breakeven / trailing / partial close management

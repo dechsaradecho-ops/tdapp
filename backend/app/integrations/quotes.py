@@ -138,6 +138,26 @@ def _yahoo_symbol(asset: str) -> str | None:
 SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps feeds tiny
 _spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
 
+# asset → (monotonic_ts, price) of the last REAL intraday print (Yahoo chart
+# meta). Kept separately from _spot_cache (30s) because the question here is
+# "how stale is the last tick we actually saw", which needs a longer memory.
+_spot_live: dict[str, tuple[float, float]] = {}
+# asset → "spot" | "daily": WHERE the last successful price came from. The
+# exchangerate fallback publishes ONE rate per business day, so callers that
+# gate hard stops (position_guard) must be able to refuse it.
+_spot_source: dict[str, str] = {}
+
+SPOT_LIVE_TTL = 900.0        # 15 min — reuse the last intraday print this long
+SPOT_LIVE_REF_TTL = 86400.0  # 24 h  — window for the plausibility check below
+SPOT_DAILY_MAX_DEVIATION = 0.005  # 0.5 % — max gap daily-vs-live we will trust
+
+# Why the above exists (prod, 2026-09-14): Yahoo timed out for NZDUSD, the
+# chain fell through to exchangerate and handed back 0.5812 — a daily rate
+# already 2h40m old, while Yahoo printed 0.5766/0.5767 minutes either side.
+# The guard marked the position at 0.5812, so PAPER-000005 (BUY 0.5763,
+# TP 0.58081) "closed at TP 0.5812" for +14.70 and the trailing SL moved to
+# 0.58057 (= 0.5812 − 1.0 × ATR) — both from a price the market never traded.
+
 # ---- Timeout budgets (2026-09-11: scheduler-stall hardening) --------------
 # Per-request httpx timeouts (10s/15s) were never the problem — the stall
 # was the LACK of a total budget: fetch_all_snapshots created one
@@ -725,6 +745,7 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                     provider="yahoo", url=url, status="success",
                     http_status=resp.status_code, price=float(price),
                     duration_ms=dur)
+                _spot_live[asset] = (time.monotonic(), float(price))
                 return asset, float(price), ""
             except httpx.TimeoutException:
                 quote_log.log_call(
@@ -742,7 +763,7 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                 return asset, None, f"{asset}: spot feed error ({exc})"
 
         async def _one(asset: str, client: httpx.AsyncClient,
-                       ) -> tuple[str, float | None, str]:
+                       ) -> tuple[str, float | None, str, str]:
             # Per-asset cap: a hung feed resolves to a failure row, never
             # blocks the batch past _SPOT_PER_ASSET_TIMEOUT.
             try:
@@ -750,25 +771,46 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                     _one_inner(asset, client),
                     timeout=_SPOT_PER_ASSET_TIMEOUT)
             except asyncio.TimeoutError:
-                return asset, None, f"{asset}: spot batch timeout"
+                return asset, None, f"{asset}: spot batch timeout", ""
 
         async def _one_inner(asset: str, client: httpx.AsyncClient,
-                             ) -> tuple[str, float | None, str]:
+                             ) -> tuple[str, float | None, str, str]:
             # 1) Yahoo chart API first (real intraday spots; only XAUUSD source)
             asset_y, y_price, y_err = await _yahoo_one(asset, client)
             if y_price:
-                return asset, y_price, ""
-            # 2) exchangerate-api.com fallback (6 rotating keys — FX pairs only)
+                return asset, y_price, "", "spot"
+            # 2a) Primary intraday feed is down — prefer the last tick we
+            # really saw over a rate that is only published once a day. The
+            # note travels in `failures` so the feed banner stays honest.
+            seen = _spot_live.get(asset)
+            if seen is not None and time.monotonic() - seen[0] <= SPOT_LIVE_TTL:
+                age = time.monotonic() - seen[0]
+                return (asset, seen[1],
+                        f"{asset}: live feed down — ใช้ราคา intraday ล่าสุด "
+                        f"({age:.0f}s ที่แล้ว)", "spot")
+            # 2b) exchangerate-api.com fallback (6 rotating keys — FX pairs
+            # only), accepted only when it is plausible against the last
+            # intraday print we know. Cold start has nothing to compare with,
+            # so the historical "fallback saves the day" path is preserved.
             price, err = await _fetch_spot_exchangerate(asset, client)
             if price:
-                return asset, price, ""
-            return asset, None, f"{y_err}; {err}"
+                ref = _spot_live.get(asset)
+                if ref is not None and ref[1] > 0 \
+                        and time.monotonic() - ref[0] <= SPOT_LIVE_REF_TTL:
+                    dev = abs(price - ref[1]) / ref[1]
+                    if dev > SPOT_DAILY_MAX_DEVIATION:
+                        return (asset, None,
+                                f"{asset}: fallback rate {price:g} ห่างจากราคา "
+                                f"intraday {ref[1]:g} {dev * 100:.2f}% — "
+                                f"ปฏิเสธ (rate รายวัน)", "")
+                return asset, price, "", "daily"
+            return asset, None, f"{y_err}; {err}", ""
 
         # ONE shared client for the whole batch (was: one AsyncClient per
         # asset → 28× TLS handshakes per scanner cycle). Total budget caps
         # the batch so the guard's 1-min cycle can never stall on feeds;
         # completed partials are kept on expiry (not discarded).
-        results: list[tuple[str, float | None, str]] = []
+        results: list[tuple[str, float | None, str, str]] = []
         try:
             async with httpx.AsyncClient(follow_redirects=True) as client:
                 tasks = {asyncio.create_task(_one(a, client)): a
@@ -779,7 +821,7 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                     try:
                         results.append(t.result())
                     except Exception as exc:  # defensive — record, don't crash
-                        results.append((tasks[t], None, f"spot error ({exc})"))
+                        results.append((tasks[t], None, f"spot error ({exc})", ""))
                 if pending:
                     log.warning("spot batch timed out after %.0fs "
                                 "(%d/%d assets done) — returning cache hits + "
@@ -792,19 +834,38 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                     finished = {r[0] for r in results}
                     for t, a in tasks.items():
                         if a not in finished:
-                            results.append((a, None, f"{a}: spot batch timeout"))
+                            results.append((a, None, f"{a}: spot batch timeout", ""))
         except Exception as exc:
             log.warning("spot batch failed (%s) — returning cache hits", exc)
         now = time.monotonic()
-        for asset, price, err in results:
+        for asset, price, err, src in results:
             if price is not None:
                 _spot_cache[asset] = (now, price)
+                _spot_source[asset] = src or "spot"
                 out[asset] = price
+                if err:
+                    # Served WITH a caveat (live feed down → last intraday
+                    # print reused). Never silent: it lands in feed_status.
+                    failures[asset] = err
+                    log.warning("spot feed: %s", err)
             else:
                 failures[asset] = err
                 log.warning("spot feed: %s", err)
     quote_log.purge_old_logs(quote_log.get_db())
     return out, failures
+
+
+def spot_source(asset: str) -> str:
+    """Where the last successfully fetched spot price for `asset` came from.
+
+    "spot"  — intraday print from the primary feed (Yahoo chart meta), or the
+              last such print reused while that feed was briefly down.
+    "daily" — exchangerate.com daily-rate fallback: ONE value per business
+              day, so it may price/display a position but must never be the
+              trigger for an intraday stop (see position_guard._live_marks).
+    """
+    a = str(asset or "")
+    return _spot_source.get(a) or _spot_source.get(a.upper()) or ""
 
 
 _QUOTE_TTL = 60.0  # seconds — protects Twelve Data's 800 credits/day
