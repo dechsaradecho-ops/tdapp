@@ -62,8 +62,9 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
         <Field label="Risk / Trade" value={`${signal.risk_per_trade_pct}%`} />
         <Field label="Entry" value={<CopyNum value={signal.entry} />} />
         <Field label="RR" value={`1 : ${signal.expected_rr}`} />
-        <Field label="Stop Loss" value={<CopyNum value={signal.stop_loss} />} />
-        <Field label="Take Profit" value={<CopyNum value={signal.take_profit} />} />
+        {/* SL/TP หลักเป็น pill สี (แดง/เขียว) แบบเดียวกับ SltpLevels + SignalLogsPanel */}
+        <Field label="Stop Loss" value={<span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5"><CopyNum value={signal.stop_loss} /></span>} />
+        <Field label="Take Profit" value={<span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5"><CopyNum value={signal.take_profit} /></span>} />
       </div>
       {signal.live_price != null && signal.live_price > 0 && (
         // ราคาตลาดปัจจุบัน (spot feed) เทียบกับ entry บนการ์ด — ถ้า entry
