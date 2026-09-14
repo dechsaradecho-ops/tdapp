@@ -75,6 +75,21 @@ input[type="checkbox"] {
   background: transparent;
 }
 
+/* มือถือ/จอแคบ: thumb rgba(255,255,255,0.14) ลอยทับพื้น aurora สว่าง → มองเป็น
+   "แถบขาว" ติดขอบขวาตลอดเวลา (user feedback: ให้ทำให้เป็นสีใส)
+   ยังคงความกว้าง 8px ไว้ (layout ไม่ขยับ) แค่ไม่ทาสี — เลื่อนด้วยนิ้วได้เหมือนเดิม
+   desktop (hover ได้) ยังเห็น thumb จาง ๆ เพื่อบอกว่าอยู่ตำแหน่งไหนของหน้า */
+@media (hover: none), (max-width: 767px) {
+  ::-webkit-scrollbar-thumb {
+    background: transparent;
+  }
+  /* Firefox ไม่มี ::-webkit-scrollbar — คุมด้วย scrollbar-color แทน
+     (ใส่ที่ html เพราะ Firefox มองว่า viewport scrollbar มาจาก root) */
+  html {
+    scrollbar-color: transparent transparent;
+  }
+}
+
 /* ซ่อน scrollbar แต่ยังเลื่อนได้ — ใช้กับ dock เมนูล่าง (สไลด์ซ้ายขวา) */
 .no-scrollbar {
   -ms-overflow-style: none;

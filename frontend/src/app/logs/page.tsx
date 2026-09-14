@@ -1164,37 +1164,42 @@ export default function LogsPage() {
         </div>
       </section>
 
-      {/* ---------- Tabs: quotes / news / scheduler ---------- */}
-      <div className="flex gap-2 text-xs">
+      {/* ---------- Tabs: quotes / news / scheduler / guard / gate / audit ---------- */}
+      {/* 6 แท็บ + ป้ายยาว ("ราคา (Quote API)") เคยล้นออกนอกจอมือถือ แล้วถูก clip
+          เพราะ html/body เป็น overflow-x: clip → แท็บท้ายสุด (Audit) กดไม่ถึงเลย
+          แก้ 2 ชั้น: (1) ตัดวงเล็บอังกฤษออกเมื่อจอ < sm (ป้ายสั้นลง ~40%)
+          (2) flex-wrap + gap แคบลง เพื่อไม่ให้ล้นอีกแม้จอ 320px (ตกบรรทัดแทนการถูกตัด) */}
+      <div className="flex flex-wrap gap-1.5 sm:gap-2 text-xs">
         <button
           onClick={() => { setTab("quotes"); tabRef.current = "quotes"; setPage(1); if (!loadedRef.current.has("quotes")) loadOne("quotes"); }}
-          className={`px-3 py-1 rounded ${tab === "quotes" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
-          ราคา (Quote API)
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "quotes" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          ราคา<span className="hidden sm:inline"> (Quote API)</span>
         </button>
         <button
           onClick={() => { setTab("news"); tabRef.current = "news"; setPage(1); if (!loadedRef.current.has("news")) loadOne("news"); }}
-          className={`px-3 py-1 rounded ${tab === "news" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
-          ข่าว (News{newsSummary ? ` ${newsSummary.total}` : ""})
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "news" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          ข่าว{newsSummary ? ` ${newsSummary.total}` : ""}
+          <span className="hidden sm:inline"> (News)</span>
         </button>
         <button
           onClick={() => { setTab("scheduler"); tabRef.current = "scheduler"; setPage(1); if (!loadedRef.current.has("scheduler")) loadOne("scheduler"); }}
-          className={`px-3 py-1 rounded ${tab === "scheduler" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "scheduler" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Scheduler{schedSummary ? ` ${schedSummary.total}` : ""}
         </button>
         <button
           onClick={() => { setTab("guard"); tabRef.current = "guard"; setPage(1); if (!loadedRef.current.has("guard")) loadOne("guard"); }}
-          className={`px-3 py-1 rounded ${tab === "guard" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "guard" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Guard{schedSummary?.by_job?.position_guard ? ` ${schedSummary.by_job.position_guard.total}` : guardTotal ? ` ${guardTotal}` : ""}
         </button>
         <button
           onClick={() => { setTab("gate"); tabRef.current = "gate"; setPage(1); if (!loadedRef.current.has("gate")) loadOne("gate"); }}
-          className={`px-3 py-1 rounded ${tab === "gate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "gate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Gate{gateSummary ? ` ${gateSummary.blocked + gateSummary.opened}` : gateTotal ? ` ${gateTotal}` : ""}
         </button>
         <button
           onClick={() => { setTab("audit"); tabRef.current = "audit"; setPage(1); if (!loadedRef.current.has("audit")) loadOne("audit"); }}
           title="ประวัติเหตุการณ์ความเสี่ยง (kill switch / ขยายลิมิต) — เก็บถาวร"
-          className={`px-3 py-1 rounded ${tab === "audit" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "audit" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Audit{auditTotal > 0 ? ` ${auditTotal}` : ""}
         </button>
       </div>
