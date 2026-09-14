@@ -887,10 +887,16 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # starts from the CURRENT price — not the price on the card. Fail-safe:
     # any feed error keeps the signal prices (old behaviour) rather than
     # blocking the trade.
+    #
+    # fetch_trusted_spot (NOT fetch_spot_prices): this writes entry/SL/TP onto
+    # a REAL order, so a daily fallback rate must never be the anchor. Prod
+    # 2026-09-14: a stale NZDUSD daily rate re-anchored a whole position onto a
+    # price the market never printed — the trade then opened, trailed and
+    # "closed" on that number. A rejected asset keeps the signal's own prices.
     reanchor_note = ""
     if entry and entry > 0:
         try:
-            spot, _spot_fail = await quotes.fetch_spot_prices([asset])
+            spot, _spot_fail = await quotes.fetch_trusted_spot([asset])
             live_price = float(spot.get(asset) or 0)
         except Exception as exc:
             log.warning("live re-anchor failed for %s: %s", asset, exc)

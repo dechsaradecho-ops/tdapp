@@ -146,8 +146,12 @@ async def scan_once(db: Database) -> list[dict]:
     except Exception as exc:
         log.warning("scanner snapshot batch failed: %s — demo feed", exc)
         _PRELOADED_SNAPS = {}
+    # fetch_trusted_spot (NOT fetch_spot_prices): this batch feeds the emit
+    # re-anchor below, which WRITES entry/SL/TP into a signal card the user
+    # then approves — a daily fallback rate must never anchor a tradeable card.
+    # Display-only callers elsewhere still show the daily value with its badge.
     try:
-        _spot_all, _spot_fail = await quotes.fetch_spot_prices(sorted(tradable))
+        _spot_all, _spot_fail = await quotes.fetch_trusted_spot(sorted(tradable))
         _PRELOADED_SPOT = dict(_spot_all or {})
     except Exception as exc:
         log.warning("scanner spot batch failed: %s", exc)
@@ -295,7 +299,10 @@ async def scan_once(db: Database) -> list[dict]:
             live_price = _spot_for(asset)
             if not live_price:
                 try:
-                    spot, _spot_fail = await quotes.fetch_spot_prices([asset])
+                    # Trusted variant — this price is written onto the card
+                    # (entry/SL/TP), not just displayed. A daily rate would
+                    # shift every leg onto a price that never traded.
+                    spot, _spot_fail = await quotes.fetch_trusted_spot([asset])
                     live_price = float((spot or {}).get(asset) or 0)
                 except Exception as exc:
                     log.warning("spot re-anchor failed for %s: %s", asset, exc)

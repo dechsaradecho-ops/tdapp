@@ -868,6 +868,40 @@ def spot_source(asset: str) -> str:
     return _spot_source.get(a) or _spot_source.get(a.upper()) or ""
 
 
+async def fetch_trusted_spot(assets: list[str],
+                             ) -> tuple[dict[str, float], dict[str, str]]:
+    """fetch_spot_prices() with every DAILY fallback rate REMOVED.
+
+    Use this on any path that WRITES something out of the price — entry
+    re-anchor, signal cards, plan legs, order fills. A daily rate may be
+    DISPLAYED (badged "daily") but must never become a stored number: prod
+    2026-09-14, the NZDUSD daily rate 0.5812 opened/trailed/closes at prices
+    that never traded. Display-only callers keep fetch_spot_prices(), which
+    still returns the daily value so the page can show it with its badge.
+
+    Rejected assets are absent from the returned dict (callers already treat
+    a missing asset as "no fresh price — keep what I had") and the reason is
+    logged once per call, never silently dropped.
+    """
+    prices, failures = await fetch_spot_prices(assets)
+    trusted: dict[str, float] = {}
+    dropped: list[str] = []
+    for asset, price in (prices or {}).items():
+        if spot_source(asset) == "daily":
+            dropped.append(asset)
+            continue
+        trusted[asset] = price
+    if dropped:
+        log.warning(
+            "spot: ปฏิเสธราคา daily fallback สำหรับ %s — ผู้เรียกใช้ราคาเดิมแทน "
+            "(ห้ามเขียน/เปิดออเดอร์จาก rate รายวัน)", ", ".join(sorted(dropped)))
+        for asset in dropped:
+            failures.setdefault(
+                asset,
+                f"{asset}: ปฏิเสธราคา daily fallback — ไม่ใช้เขียนออเดอร์/การ์ด")
+    return trusted, failures
+
+
 _QUOTE_TTL = 60.0  # seconds — protects Twelve Data's 800 credits/day
 # from 10s dashboard polling (8,640 req/day → 1,440/day cached).
 # (2026-09-04: tried 30 min to cut Frankfurter calls — user prefers fresh

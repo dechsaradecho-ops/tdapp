@@ -1668,9 +1668,12 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
     if not _entry:
         # snapshot unavailable — anchor at the live spot price with an
         # ATR-derived stop so the plan still reflects the real market.
+        # fetch_trusted_spot: _entry/_sl/_tp below become the plan legs the
+        # user reviews and confirms, so a daily fallback rate must not anchor
+        # them (same reason as execution.execute_signal's re-anchor).
         try:
             from app.integrations import quotes as _quotes2
-            _prices, _fail = await _quotes2.fetch_spot_prices([asset])
+            _prices, _fail = await _quotes2.fetch_trusted_spot([asset])
             _spot = float((_prices or {}).get(asset) or 0)
         except Exception:
             _spot = 0.0

@@ -325,6 +325,37 @@ class TestGatePipeline:
         assert opened and "re-anchor" in opened[0]["reason"]
 
     @pytest.mark.asyncio
+    async def test_reanchor_refuses_a_daily_fallback_rate(
+            self, broker, notifier, monkeypatch):
+        """Prod 2026-09-14: a stale NZDUSD DAILY rate (0.5812 — a price the
+        market never printed) re-anchored a whole position's entry/SL/TP.
+        execute_signal must re-anchor only off an intraday tick."""
+        async def daily_spot(assets, **_kw):
+            return {"XAUUSD": 2420.0}, {}
+
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", daily_spot)
+        monkeypatch.setattr(execution.quotes, "spot_source", lambda a: "daily")
+        db = FakeDatabase()
+        s = clean_settings()
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=2400.0, stop_loss=2350.0, take_profit=2500.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-dl", source="auto",
+        )
+        assert report.allowed, report.rejects
+        order = broker.orders[0]
+        # NO shift: the signal's own prices survive (only the spread is added)
+        assert order.entry_price == pytest.approx(
+            execution.apply_spread(2400.0, "BUY",
+                                   execution.effective_spread(s, "XAUUSD")))
+        assert order.stop_loss == pytest.approx(2350.0)
+        assert order.take_profit == pytest.approx(2500.0)
+        opened = [row for table, row in db.inserted
+                  if table == "signal_logs" and row.get("event") == "order_opened"]
+        assert opened and "re-anchor" not in opened[0]["reason"]
+
+    @pytest.mark.asyncio
     async def test_heat_gate_blocks_new_order_when_portfolio_full(self, broker, notifier):
         """Gate 6 (portfolio heat): open risk $52 + new ~$10 exceeds the 60%
         daily budget → the new order is blocked with a Thai heat message

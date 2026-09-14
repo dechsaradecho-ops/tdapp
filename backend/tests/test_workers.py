@@ -645,6 +645,33 @@ class TestMarketScanner:
             assert row["stop_loss"] < row["entry"] < row["take_profit"]
 
     @pytest.mark.asyncio
+    async def test_signal_card_ignores_a_daily_fallback_rate(self, monkeypatch):
+        """A daily fallback rate may be DISPLAYED elsewhere but must never
+        become the entry/SL/TP of a tradeable card (prod 2026-09-14: the
+        NZDUSD daily rate 0.5812 was the price that "hit TP")."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)  # price=100.0
+
+        async def daily_spot(assets, **_kw):
+            return {a: 102.5 for a in assets}, {}
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices",
+                            daily_spot)
+        monkeypatch.setattr(market_scanner.quotes, "spot_source",
+                            lambda a: "daily")
+        await market_scanner.scan_once(db)
+        emitted = [row for table, row in db.inserted
+                   if table == "signals" and "created_at" not in row]
+        assert emitted, "strong setup must still emit"
+        for row in emitted:
+            assert row["entry"] == 100.0, (
+                "a daily rate must never anchor a tradeable card — the card "
+                "keeps the snapshot price instead")
+
+    @pytest.mark.asyncio
     async def test_signal_entry_keeps_snapshot_price_when_spot_fails(self, monkeypatch):
         """Spot feed failure must NOT zero/garbage the entry — fall back to the
         snapshot price (better than nothing) and still emit."""

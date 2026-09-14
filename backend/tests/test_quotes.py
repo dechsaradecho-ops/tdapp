@@ -736,6 +736,88 @@ class TestSpotFeed:
 
 
 # ---------------------------------------------------------------------------
+# fetch_trusted_spot — the WRITE-path half of the daily-rate gate
+# ---------------------------------------------------------------------------
+class TestTrustedSpot:
+    """fetch_spot_prices may RETURN a daily rate (display needs it);
+    fetch_trusted_spot must never hand one to a caller that STORES it
+    (scanner emit re-anchor, entry re-anchor, plan legs). Prod 2026-09-14:
+    the NZDUSD daily rate became the entry/SL/TP of a real paper trade.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_spot_state(self):
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        quotes._exchange_key_idx = 0
+        yield
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        quotes._exchange_key_idx = 0
+
+    @pytest.mark.asyncio
+    async def test_accepted_daily_rate_is_still_dropped_for_writers(
+            self, monkeypatch):
+        """The case that matters: the chain ACCEPTS the fallback (close
+        enough to display) — a writer must still refuse it."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _yahoo_payload(1.34850),   # intraday print (reference)
+            _resp({}, status=429),     # > 15 min later: Yahoo dead
+            _ex_resp("USD", 1.34980),  # +0.096% → chain accepts it
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        await quotes.fetch_spot_prices(["GBPUSD"])
+        ts, price = quotes._spot_live["GBPUSD"]
+        quotes._spot_live["GBPUSD"] = (ts - quotes.SPOT_LIVE_TTL - 1.0, price)
+        quotes._spot_cache.clear()
+        shown, _ = await quotes.fetch_spot_prices(["GBPUSD"])
+        assert shown == {"GBPUSD": 1.3498}            # display keeps it
+        assert quotes.spot_source("GBPUSD") == "daily"
+        trusted, failures = await quotes.fetch_trusted_spot(["GBPUSD"])
+        assert trusted == {}                          # writer must not
+        assert "ปฏิเสธราคา daily fallback" in failures["GBPUSD"]
+
+    @pytest.mark.asyncio
+    async def test_intraday_print_passes_through_untouched(self, monkeypatch):
+        calls: list[str] = []
+        responses = [_yahoo_payload(1.3485)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        trusted, failures = await quotes.fetch_trusted_spot(["GBPUSD"])
+        assert trusted == {"GBPUSD": 1.3485}
+        assert failures == {}
+        assert quotes.spot_source("GBPUSD") == "spot"
+
+    @pytest.mark.asyncio
+    async def test_chain_level_refusal_also_yields_nothing_to_writers(
+            self, monkeypatch):
+        """A refused daily rate never reaches the writer either way."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _yahoo_payload(0.57667),
+            _resp({}, status=429),
+            _ex_resp("USD", 0.5812),   # 0.79% away → refused by the chain
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        await quotes.fetch_spot_prices(["NZDUSD"])
+        ts, price = quotes._spot_live["NZDUSD"]
+        quotes._spot_live["NZDUSD"] = (ts - quotes.SPOT_LIVE_TTL - 1.0, price)
+        quotes._spot_cache.clear()
+        trusted, failures = await quotes.fetch_trusted_spot(["NZDUSD"])
+        assert trusted == {}
+        assert "NZDUSD" in failures
+
+
+# ---------------------------------------------------------------------------
 # fetch_all_snapshots — fallback semantics
 # ---------------------------------------------------------------------------
 class TestFetchAllSnapshots:
