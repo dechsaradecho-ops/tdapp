@@ -76,18 +76,37 @@ input[type="checkbox"] {
 }
 
 /* มือถือ/จอแคบ: thumb rgba(255,255,255,0.14) ลอยทับพื้น aurora สว่าง → มองเป็น
-   "แถบขาว" ติดขอบขวาตลอดเวลา (user feedback: ให้ทำให้เป็นสีใส)
-   ยังคงความกว้าง 8px ไว้ (layout ไม่ขยับ) แค่ไม่ทาสี — เลื่อนด้วยนิ้วได้เหมือนเดิม
-   desktop (hover ได้) ยังเห็น thumb จาง ๆ เพื่อบอกว่าอยู่ตำแหน่งไหนของหน้า */
+   "แถบขาว" (user feedback) → ทำเป็นสีใส แต่ยังกว้าง 8px เท่าเดิม
+   ใช้กับ scrollbar ของ "กล่องในหน้า" (แชท โมดัล ตาราง)
+   ⚠️ ห้ามเติม `scrollbar-color: transparent transparent` ที่ html เด็ดขาด
+   (วัดจริงใน Chromium 2026-09-14): พอเจอ scrollbar-color ที่ไม่ opaque มันจะ
+   ทิ้ง ::-webkit-scrollbar ทั้งชุด แล้ววาด scrollbar มาตรฐานของแพลตฟอร์มแทน
+   (สีเทาขาวทึบ ~15px) = ต้นเหตุ "แถบขาว" ที่โผล่บนมือถือทั้งที่ตั้ง thumb ใสแล้ว */
 @media (hover: none), (max-width: 767px) {
   ::-webkit-scrollbar-thumb {
     background: transparent;
   }
-  /* Firefox ไม่มี ::-webkit-scrollbar — คุมด้วย scrollbar-color แทน
-     (ใส่ที่ html เพราะ Firefox มองว่า viewport scrollbar มาจาก root) */
-  html {
-    scrollbar-color: transparent transparent;
-  }
+}
+
+/* ---------- แถบเลื่อนแนวตั้ง "ของหน้า" — ซ่อนทุกขนาดจอ ----------------------
+   user 2026-09-14: "เอา scroll bar ที่ลูกศรชี้ออก" (ของเดิมคือ scrollbar
+   มาตรฐานของแพลตฟอร์มที่โผล่เพราะ scrollbar-color — ดูกล่องบน)
+
+   scrollbar-width: none บน html = ซ่อนแถบของ viewport (Chromium 121+/Firefox)
+   ผลข้างเคียงที่ดี: viewport กว้างเต็มจอ ไม่ถูกกิน 8px อีก → ทุกหน้าใช้ความกว้าง
+   เท่ากันเป๊ะ ไม่กระตุกตอนสลับหน้า (จึงไม่ต้องพึ่ง scrollbar-gutter: stable)
+   วัดจริงที่ 1440px: viewportReserved 15 → 8 → 0 และแถบของกล่องในหน้ายังหนา
+   8px เท่าเดิม (ไม่ inherit ลงลูก)
+   ⚠️ ห้ามย้ายไปใส่ * หรือ body — จะไปซ่อนแถบของแชท/ตาราง (.scroll-x-thin) ด้วย
+
+   html::-webkit-scrollbar-thumb = เผื่อ engine ที่ยังไม่รู้จัก scrollbar-width
+   (Chromium <121, Safari) — วัดแล้วว่า rule นี้ scope เฉพาะ root จริง
+   (root thumb = rgba(0,0,0,0) แต่ .inner ยังได้ rgba(255,255,255,0.14)) */
+html {
+  scrollbar-width: none;
+}
+html::-webkit-scrollbar-thumb {
+  background: transparent;
 }
 
 /* ซ่อน scrollbar แต่ยังเลื่อนได้ — ใช้กับ dock เมนูล่าง (สไลด์ซ้ายขวา) */
