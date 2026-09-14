@@ -12,6 +12,9 @@ import {
   QuoteApiLog,
   QuoteLogSummary,
   QuoteTestResult,
+  RiskAuditRequest,
+  RiskEventLog,
+  RiskLogsResponse,
   SchedulerLog,
   SchedulerLogsResponse,
   SchedulerJobStat,
@@ -542,6 +545,267 @@ function GuardDetailCell({ detail, status, createdAt, durationMs }: {
   );
 }
 
+/** เวลาแบบไทย (ว่าง = "—") สำหรับตาราง audit */
+function auditTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("th-TH", { hour12: false });
+  } catch {
+    return "—";
+  }
+}
+
+/** ป้ายชื่อเหตุการณ์ความเสี่ยง (risk_events.event_type) เป็นภาษาไทย */
+function riskEventLabel(t: string): string {
+  if (t === "limit_breach") return "kill switch เข้าเงื่อนไข";
+  if (t === "limit_expanded") return "อนุมัติขยายลิมิต";
+  if (t === "limit_expand_rejected") return "ปฏิเสธคำขอขยายลิมิต";
+  return t || "—";
+}
+
+/** ชื่อสั้นสำหรับปุ่มกรอง */
+function riskEventShort(t: string): string {
+  if (t === "limit_breach") return "kill switch";
+  if (t === "limit_expanded") return "อนุมัติขยาย";
+  if (t === "limit_expand_rejected") return "ปฏิเสธขยาย";
+  return t;
+}
+
+function riskEventTone(t: string): string {
+  if (t === "limit_breach") return "bg-rose-500/15 text-rose-300";
+  if (t === "limit_expanded") return "bg-amber-500/15 text-amber-300";
+  if (t === "limit_expand_rejected") return "bg-sky-500/15 text-sky-300";
+  return "bg-slate-500/15 text-slate-300";
+}
+
+function riskStatusLabel(s: string): string {
+  if (s === "approved") return "อนุมัติแล้ว";
+  if (s === "rejected") return "ปฏิเสธแล้ว";
+  if (s === "pending") return "รอเจ้าของตอบ";
+  if (s === "expired") return "หมดเวลายืนยัน";
+  return s || "—";
+}
+
+function riskStatusTone(s: string): string {
+  if (s === "approved") return "bg-amber-500/15 text-amber-300";
+  if (s === "rejected") return "bg-sky-500/15 text-sky-300";
+  if (s === "pending") return "bg-emerald-500/15 text-emerald-300";
+  return "bg-slate-500/15 text-slate-300";
+}
+
+/** ใครเป็นคนตัดสินใจ (kill_expand_requests.decided_by) */
+function decidedByLabel(by: string): string {
+  const v = (by || "").trim();
+  if (!v) return "ยังไม่มีคนตัดสิน";
+  if (v.startsWith("line")) return "เจ้าของกดปุ่มใน LINE";
+  if (v === "ui") return "เจ้าของกดในหน้าเว็บ";
+  if (v.startsWith("auto")) return "ระบบขยายให้อัตโนมัติ (หมดเวลายืนยัน)";
+  return v;
+}
+
+/** "k=v · k=v" จาก object ใด ๆ (ค่าที่เป็น object → JSON) — ไม่ throw */
+function kvLine(o: Record<string, unknown>): string {
+  try {
+    return Object.entries(o)
+      .map(([k, v]) => `${k}=${v && typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+      .join(" · ");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * ช่อง "รายละเอียดการตัดสินใจ" ของแถว risk_events
+ *
+ * ย่อบรรทัดเดียวแล้วเปิด popup แบบ portal (เหมือน GuardDetailCell) — ต้อง
+ * createPortal(document.body) เพราะ `.panel` มี backdrop-filter ซึ่งกลายเป็น
+ * containing block ของ position: fixed → popup จะถูกตัดขอบถ้าไม่ portal
+ */
+function AuditDetailCell({ ev }: { ev: RiskEventLog }) {
+  const [pop, setPop] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const d = ev.detail ?? {};
+  const isExpand = ev.event_type === "limit_expanded" || ev.event_type === "limit_expand_rejected";
+  const triggers = Array.isArray(d.triggers) ? (d.triggers as unknown[]) : [];
+  const breaches = Array.isArray(d.breaches) ? (d.breaches as string[]) : [];
+  const message = typeof d.message === "string" ? d.message : "";
+  const level = typeof d.risk_level === "string" ? d.risk_level : "";
+  const numOrNull = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const before = numOrNull(d.limit_before);
+  const after = numOrNull(d.limit_after);
+
+  useEffect(() => {
+    if (!pop) return;
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) {
+      const w = Math.min(360, window.innerWidth - 16);
+      const left = Math.min(r.left, Math.max(8, window.innerWidth - w - 8));
+      const ph = popRef.current?.offsetHeight ?? 260;
+      let top = r.bottom + 6;
+      if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+      setPos({ top, left });
+    }
+    const close = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as Node | null;
+      if (t && (btnRef.current?.contains(t) || popRef.current?.contains(t))) return;
+      setPop(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close, { passive: true });
+    const onMove = () => setPop(false);
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+      window.removeEventListener("scroll", onMove, true);
+      window.removeEventListener("resize", onMove);
+    };
+  }, [pop]);
+
+  return (
+    <div className="text-xs">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setPop((v) => !v)}
+        aria-expanded={pop}
+        title="กดเพื่อดูรายละเอียดการตัดสินใจครั้งนี้แบบเต็ม"
+        className="inline-flex w-full min-w-0 items-center gap-1.5 rounded-lg border border-white/15 bg-white/[0.07] px-2 py-1 text-left touch-manipulation hover:bg-white/[0.11]"
+      >
+        <span className="min-w-0 flex-1 truncate">
+          {isExpand ? (
+            <>
+              ลิมิต{" "}
+              <b className="text-slate-50">
+                {before !== null && after !== null
+                  ? `${fmtNum(before, 1)}% → ${fmtNum(after, 1)}%`
+                  : "—"}
+              </b>
+              {d.approved === false && <span className="text-slate-400"> · ไม่ขยาย (คงลิมิตเดิม)</span>}
+              {d.approved === true && <span className="text-emerald-300"> · ขยายแล้ว ไม่ปิดไม้</span>}
+              {triggers.length > 0 && <span className="text-slate-400"> · เข้าเงื่อนไข {triggers.length} ข้อ</span>}
+            </>
+          ) : (
+            <>
+              {level && (
+                <>
+                  ระดับ <b className="text-rose-300">{level}</b>
+                  <span className="text-slate-500"> · </span>
+                </>
+              )}
+              {breaches.length > 0 ? breaches.slice(0, 2).join(" · ") : (message || "ลิมิตถูกแตะ")}
+              {breaches.length > 2 && <span className="text-slate-400"> +{breaches.length - 2}</span>}
+            </>
+          )}
+        </span>
+        <span className={`shrink-0 text-slate-400 transition-transform ${pop ? "rotate-90" : ""}`}>›</span>
+      </button>
+      {pop && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label="รายละเอียดเหตุการณ์ความเสี่ยง"
+          style={{ position: "fixed", top: pos.top, left: pos.left, width: "min(360px, calc(100vw - 16px))" }}
+          className="z-50 max-h-[80vh] overflow-y-auto rounded-xl border border-slate-600 bg-slate-900/95 backdrop-blur px-3.5 py-3 text-xs leading-relaxed text-slate-100 shadow-xl"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold text-slate-50">{riskEventLabel(ev.event_type)}</span>
+            <span className={`text-[11px] px-1.5 py-0.5 rounded ${riskEventTone(ev.event_type)}`}>
+              {ev.event_type}
+            </span>
+          </div>
+          <p className="mt-0.5 text-[11px] text-slate-300">{auditTime(ev.created_at)}</p>
+
+          {(before !== null || after !== null) && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-slate-50">
+                ขยายลิมิต <b>{before !== null ? `${fmtNum(before, 1)}%` : "—"}</b>
+                <span className="text-slate-500"> → </span>
+                <b>{after !== null ? `${fmtNum(after, 1)}%` : "—"}</b>
+                {d.approved === false && <span className="text-slate-400"> (ไม่ขยาย — คงลิมิตเดิม)</span>}
+              </p>
+              <p className="text-[11px] mt-1 text-slate-300">
+                ผลคือไม้เปิดทั้งหมดยังอยู่และทำงานต่อ (SL/TP ทำงานปกติ) — policy
+                ปัจจุบันคือ &quot;เขียน DB ไม่สำเร็จ/ไม่ได้รับอนุมัติ ⇒ ห้ามปิดไม้&quot;
+              </p>
+            </>
+          )}
+
+          {level && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-slate-50">
+                ระดับความเสี่ยง <b className="text-rose-300">{level}</b>
+                {typeof d.trading_paused === "boolean" && (
+                  <span className="text-slate-400"> · {d.trading_paused ? "หยุดเทรด" : "เทรดต่อ"}</span>
+                )}
+              </p>
+            </>
+          )}
+
+          {triggers.length > 0 && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
+                เงื่อนไขที่ทำให้ต้องขอขยาย ({triggers.length})
+              </p>
+              <ul className="space-y-1">
+                {triggers.map((t, i) => {
+                  const o = (t && typeof t === "object") ? (t as Record<string, unknown>) : { value: t };
+                  return (
+                    <li key={i} className="flex gap-1.5">
+                      <span className="text-slate-500 shrink-0">•</span>
+                      <span className="break-all">{kvLine(o) || String(t)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
+
+          {breaches.length > 0 && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
+                ลิมิตที่ถูกแตะ ({breaches.length})
+              </p>
+              <ul className="space-y-1">
+                {breaches.map((b, i) => (
+                  <li key={i} className="flex gap-1.5">
+                    <span className="text-slate-500 shrink-0">•</span>
+                    <span className="break-all">{b}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {message && (
+            <>
+              <div className="border-t border-slate-700 my-2" />
+              <p className="text-[11px] text-slate-300">{message}</p>
+            </>
+          )}
+
+          <div className="border-t border-slate-700 my-2" />
+          <p className="text-[10px] font-mono break-all text-slate-400" title="ค่าดิบจาก risk_events.detail">
+            {Object.keys(d).length > 0 ? JSON.stringify(d) : "ไม่มีรายละเอียด"}
+          </p>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 /**
  * ข้อความ empty-state ของตาราง scheduler_runs (scheduler / guard tab)
  *
@@ -579,7 +843,7 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
@@ -595,7 +859,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -620,6 +884,17 @@ export default function LogsPage() {
   const [gateHasMore, setGateHasMore] = useState(false);
   const [gateFilter, setGateFilter] = useState<"order_blocked" | "order_opened" | "all">("all");
   const gateFilterRef = useRef<"order_blocked" | "order_opened" | "all">("all");
+  // แท็บ Audit = risk_events (ประวัติการตัดสินใจความเสี่ยง — ไม่มี TTL)
+  // คู่กับ kill_expand_requests (คำขอยืนยันขยายลิมิตที่เจ้าของกด/ระบบขยายให้)
+  const [auditLogs, setAuditLogs] = useState<RiskEventLog[]>([]);
+  const [auditReqs, setAuditReqs] = useState<RiskAuditRequest[]>([]);
+  const [auditSummary, setAuditSummary] = useState<RiskLogsResponse["summary"] | null>(null);
+  const [auditHint, setAuditHint] = useState("");
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditHasMore, setAuditHasMore] = useState(false);
+  type RiskFilter = "all" | "limit_breach" | "limit_expanded" | "limit_expand_rejected";
+  const [auditFilter, setAuditFilter] = useState<RiskFilter>("all");
+  const auditFilterRef = useRef<RiskFilter>("all");
   const PAGE_SIZE = 50;
   const SERVER_PAGE = 500;
 
@@ -649,10 +924,15 @@ export default function LogsPage() {
     return api.signalLogs(SERVER_PAGE, offset, gateFilterRef.current);
   }, []);
 
+  const loadAudit = useCallback(async (pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.riskLogs(SERVER_PAGE, offset, auditFilterRef.current);
+  }, []);
+
   // โหลดเฉพาะแท็บที่เปิดอยู่ (lazy) — เข้าหน้าครั้งแรกยิงแค่ 1 request
   // แทน 5 requests พร้อมกัน (quotes+news+scheduler+guard+gate) ทำให้หน้าแรกไวขึ้น ~5 เท่า
   const loadedRef = useRef<Set<string>>(new Set());
-  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate", flt?: "all" | "forex" | "gold") => {
+  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit", flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       if (t === "quotes") {
@@ -688,6 +968,14 @@ export default function LogsPage() {
         setGateSummary(gates.summary ?? null);
         setGateTotal(gates.total ?? (gates.logs ?? []).length);
         setGateHasMore(gates.has_more ?? false);
+      } else if (t === "audit") {
+        const ares = await loadAudit(1);
+        setAuditLogs(ares.logs ?? []);
+        setAuditReqs(ares.requests ?? []);
+        setAuditSummary(ares.summary ?? null);
+        setAuditHint(ares.audit_hint ?? "");
+        setAuditTotal(ares.summary?.total ?? (ares.logs ?? []).length);
+        setAuditHasMore(ares.has_more ?? false);
       } else {
         const sres = await loadSched(1);
         setSchedLogs(sres.logs ?? []);
@@ -704,7 +992,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
+  }, [loadAudit, loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
 
   // เปลี่ยน server page (ทุก 10 หน้า UI = 500 แถว) — ดึง chunk ถัดไปจาก backend
   const gotoServerPage = useCallback(async (pg: number) => {
@@ -731,6 +1019,12 @@ export default function LogsPage() {
         setGateLogs(gates.logs ?? []);
         setGateTotal(gates.total ?? 0);
         setGateHasMore(gates.has_more ?? false);
+      } else if (tabRef.current === "audit") {
+        const ares = await loadAudit(pg);
+        setAuditLogs(ares.logs ?? []);
+        setAuditReqs(ares.requests ?? []);
+        setAuditTotal(ares.summary?.total ?? (ares.logs ?? []).length);
+        setAuditHasMore(ares.has_more ?? false);
       } else {
         const sres = await loadSched(pg);
         setSchedLogs(sres.logs ?? []);
@@ -745,7 +1039,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
+  }, [loadAudit, loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
 
   useEffect(() => {
     loadOne("quotes");
@@ -807,6 +1101,14 @@ export default function LogsPage() {
   const gatePageRows = gateLogs.slice((gateChunkPage - 1) * PAGE_SIZE, gateChunkPage * PAGE_SIZE);
   const gateServerPage = Math.floor((gateSafePage - 1) / uiPagesPerChunk) + 1;
   const gateServerPages = Math.max(1, Math.ceil(gateTotalPages / uiPagesPerChunk));
+  // แท็บ Audit ใช้ chunk ตัวเอง (server filter event_type แล้ว)
+  const auditChunkTotal = auditLogs.length;
+  const auditTotalPages = Math.max(1, Math.ceil((auditTotal || auditChunkTotal) / PAGE_SIZE));
+  const auditSafePage = Math.min(page, auditTotalPages);
+  const auditChunkPage = ((auditSafePage - 1) % uiPagesPerChunk) + 1;
+  const auditPageRows = auditLogs.slice((auditChunkPage - 1) * PAGE_SIZE, auditChunkPage * PAGE_SIZE);
+  const auditServerPage = Math.floor((auditSafePage - 1) / uiPagesPerChunk) + 1;
+  const auditServerPages = Math.max(1, Math.ceil(auditTotalPages / uiPagesPerChunk));
   const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
   const newsServerPage = Math.floor((newsSafePage - 1) / uiPagesPerChunk) + 1;
   const schedServerPage = Math.floor((schedSafePage - 1) / uiPagesPerChunk) + 1;
@@ -829,7 +1131,9 @@ export default function LogsPage() {
                   ? "การทำงานของ Guard ทุกรอบ (ทุก 1 นาที) — เช็ค SL/TP, ขยับ SL, ปิดไม้ (เก็บ 7 วัน)"
                   : tab === "gate"
                     ? "Gate อนุมัติ/ปัดตกออเดอร์ — เหตุผลทุกครั้งที่เปิดหรือบล็อก (เก็บ 7 วัน)"
-                    : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
+                    : tab === "audit"
+                      ? "ประวัติเหตุการณ์ความเสี่ยง — kill switch เข้าเงื่อนไข · เจ้าของอนุมัติ/ปฏิเสธขยายลิมิต (เก็บถาวร ไม่มีอายุ)"
+                      : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
@@ -878,6 +1182,12 @@ export default function LogsPage() {
           onClick={() => { setTab("gate"); tabRef.current = "gate"; setPage(1); if (!loadedRef.current.has("gate")) loadOne("gate"); }}
           className={`px-3 py-1 rounded ${tab === "gate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Gate{gateSummary ? ` ${gateSummary.blocked + gateSummary.opened}` : gateTotal ? ` ${gateTotal}` : ""}
+        </button>
+        <button
+          onClick={() => { setTab("audit"); tabRef.current = "audit"; setPage(1); if (!loadedRef.current.has("audit")) loadOne("audit"); }}
+          title="ประวัติเหตุการณ์ความเสี่ยง (kill switch / ขยายลิมิต) — เก็บถาวร"
+          className={`px-3 py-1 rounded ${tab === "audit" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          Audit{auditTotal > 0 ? ` ${auditTotal}` : ""}
         </button>
       </div>
 
@@ -1593,6 +1903,216 @@ export default function LogsPage() {
             )}
           </div>
         )}
+      </section>
+      )}
+
+      {/* ---------- Audit summary (risk_events — ประวัติถาวร ไม่ถูกลบ) ---------- */}
+      {tab === "audit" && (() => {
+        const by = auditSummary?.by_event ?? {};
+        const breached = by.limit_breach ?? 0;
+        const expanded = by.limit_expanded ?? 0;
+        const rejected = by.limit_expand_rejected ?? 0;
+        const grand = Object.values(by).reduce((a, n) => a + n, 0);
+        const latestReq = auditReqs[0];
+        return (
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="panel">
+            <p className="text-xs text-slate-500">เหตุการณ์ทั้งหมด</p>
+            <p className="text-2xl font-bold">{grand.toLocaleString()}</p>
+            <p className="text-xs text-slate-500 mt-1">เก็บถาวร — ไม่ถูกลบตามอายุเหมือน log อื่นในหน้านี้</p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">kill switch เข้าเงื่อนไข</p>
+            <p className={`text-2xl font-bold ${breached > 0 ? "text-rose-400" : ""}`}>{breached.toLocaleString()}</p>
+            <p className="text-xs text-slate-500 mt-1">limit_breach — เกินลิมิต → หยุดเทรด + เตือน LINE</p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">อนุมัติขยายลิมิต</p>
+            <p className={`text-2xl font-bold ${expanded > 0 ? "text-amber-400" : ""}`}>{expanded.toLocaleString()}</p>
+            <p className="text-xs text-slate-500 mt-1">limit_expanded — ขยายลิมิตแล้วไม่ปิดไม้</p>
+          </div>
+          <div className="panel">
+            <p className="text-xs text-slate-500">ปฏิเสธคำขอขยาย</p>
+            <p className={`text-2xl font-bold ${rejected > 0 ? "text-sky-400" : ""}`}>{rejected.toLocaleString()}</p>
+            <p className="text-xs text-slate-500 mt-1">limit_expand_rejected — ไม่ขยายตามที่ขอ</p>
+          </div>
+          {latestReq && (
+            <div className="panel col-span-2 md:col-span-4">
+              <p className="text-xs text-slate-500">คำขอยืนยันขยายลิมิตล่าสุด (kill_expand_requests)</p>
+              <p className="text-sm font-bold mt-1">
+                {riskStatusLabel(latestReq.status)}
+                {latestReq.limit_before != null && latestReq.limit_after != null && (
+                  <span className="font-normal text-slate-300">
+                    {" "}· ลิมิต {fmtNum(latestReq.limit_before, 1)}% → {fmtNum(latestReq.limit_after, 1)}%
+                  </span>
+                )}
+              </p>
+              <p className="text-xs mt-1 text-slate-400">
+                {latestReq.trigger_type || "—"}
+                {latestReq.metric_value != null && ` (ค่าที่วัดได้ ${fmtNum(latestReq.metric_value, 2)})`}
+                {latestReq.requested_at && ` · ขอเมื่อ ${auditTime(latestReq.requested_at)}`}
+                {` · ${decidedByLabel(latestReq.decided_by)}`}
+              </p>
+            </div>
+          )}
+        </section>
+        );
+      })()}
+
+      {/* audit_hint = มีคำขอยืนยันแต่ risk_events ว่าง ⇒ เขียน audit ไม่ลง */}
+      {tab === "audit" && auditHint && (
+        <section className="panel border-amber-400/50">
+          <p className="text-sm font-bold text-amber-300 flex items-center gap-1.5">
+            <Icon n="warning" size={15} /> ตาราง risk_events ว่างเปล่า — เขียน audit ไม่ลง
+          </p>
+          <p className="text-xs mt-1 text-slate-300">{auditHint}</p>
+        </section>
+      )}
+
+      {/* ---------- Audit table (risk_events = ร่องรอยการตัดสินใจ) ---------- */}
+      {tab === "audit" && (
+      <section className="panel">
+        <div className="overflow-x-auto">
+        <div className="flex flex-wrap gap-2 mb-3 text-xs">
+          {(["all", "limit_breach", "limit_expanded", "limit_expand_rejected"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={async () => {
+                setAuditFilter(f); auditFilterRef.current = f; setPage(1);
+                setLoading(true);
+                try {
+                  const res = await api.riskLogs(SERVER_PAGE, 0, f);
+                  setAuditLogs(res.logs ?? []);
+                  setAuditReqs(res.requests ?? []);
+                  setAuditHint(res.audit_hint ?? "");
+                  setAuditTotal(res.summary?.total ?? (res.logs ?? []).length);
+                  setAuditHasMore(res.has_more ?? false);
+                } finally { setLoading(false); }
+              }}
+              className={`px-3 py-1 rounded ${auditFilter === f ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+              {f === "all" ? "ทั้งหมด" : riskEventShort(f)}
+            </button>
+          ))}
+        </div>
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">เวลา</th>
+              <th className="py-2 pr-3">เหตุการณ์</th>
+              <th className="py-2 pr-3">รายละเอียดการตัดสินใจ</th>
+              <th className="py-2">Request</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && auditLogs.length === 0 && (
+              <tr><td colSpan={4} className="py-6">
+                <LoadingGraphic message="กำลังโหลดประวัติความเสี่ยง — Render cold start อาจใช้เวลาสักครู่" compact />
+              </td></tr>
+            )}
+            {!loading && auditLogs.length === 0 && (
+              <tr><td colSpan={4} className="py-6 text-center text-slate-500">
+                {auditReqs.length > 0
+                  ? "มีคำขอยืนยันขยายลิมิตแต่ยังไม่มีเหตุการณ์ที่บันทึกได้ — ดูคำเตือนด้านบน (migration 038)"
+                  : "ยังไม่มีเหตุการณ์ความเสี่ยง — ระบบเขียนที่นี่ทุกครั้งที่ kill switch เข้าเงื่อนไข หรือเจ้าของอนุมัติ/ปฏิเสธขยายลิมิต"}
+              </td></tr>
+            )}
+            {auditPageRows.map((ev) => (
+              <tr key={ev.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">{auditTime(ev.created_at)}</td>
+                <td className="py-2 pr-3">
+                  <span className={`px-2 py-0.5 rounded whitespace-nowrap ${riskEventTone(ev.event_type)}`}>
+                    {riskEventLabel(ev.event_type)}
+                  </span>
+                </td>
+                <td className="py-2 pr-3 min-w-[280px] max-w-[560px]">
+                  <AuditDetailCell ev={ev} />
+                </td>
+                <td className="py-2 font-mono text-[11px] text-slate-500">
+                  {ev.detail?.request_id ? String(ev.detail.request_id).slice(0, 8) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+        {(auditLogs.length > 0 || auditTotal > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {auditSafePage}/{auditTotalPages} · แสดง {auditPageRows.length} จาก {auditTotal.toLocaleString()} รายการ
+              {auditServerPages > 1 && ` · ชุดที่ ${auditServerPage}/${auditServerPages}`} · เก็บถาวร (ไม่มี TTL)
+            </p>
+            {auditTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => {
+                    if (auditChunkPage > 1 || auditSafePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(auditServerPage - 1).then(() => setPage((auditServerPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={auditSafePage <= 1 || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{auditSafePage} / {auditTotalPages}</span>
+                <button onClick={() => {
+                    if (auditChunkPage < uiPagesPerChunk && auditChunkPage * PAGE_SIZE < auditChunkTotal) { setPage((p) => Math.min(auditTotalPages, p + 1)); return; }
+                    if (!auditHasMore && auditServerPage >= auditServerPages) { setPage((p) => Math.min(auditTotalPages, p + 1)); return; }
+                    gotoServerPage(auditServerPage + 1).then(() => setPage(auditServerPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={auditSafePage >= auditTotalPages || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      )}
+
+      {/* ---------- คำขอยืนยันขยายลิมิต (kill_expand_requests) ---------- */}
+      {tab === "audit" && auditReqs.length > 0 && (
+      <section className="panel">
+        <p className="text-sm font-bold">คำขอยืนยันขยายลิมิต (ล่าสุด {auditReqs.length} รายการ)</p>
+        <p className="text-xs text-slate-500 mt-0.5 mb-3">
+          ต้นทางของการตัดสินใจ — ระบบขอให้เจ้าของยืนยันก่อนขยายลิมิต เพราะการขยาย =
+          ยอมรับความเสี่ยงที่มากขึ้น · คำขอที่อนุมัติแล้วคือลิมิตที่ระบบใช้อยู่จริง
+        </p>
+        <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">ขอเมื่อ</th>
+              <th className="py-2 pr-3">สถานะ</th>
+              <th className="py-2 pr-3">เข้าเงื่อนไข</th>
+              <th className="py-2 pr-3">ลิมิตก่อน → หลัง</th>
+              <th className="py-2 pr-3">ตัดสินเมื่อ</th>
+              <th className="py-2">ใครตัดสิน</th>
+            </tr>
+          </thead>
+          <tbody>
+            {auditReqs.map((r) => (
+              <tr key={r.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">{auditTime(r.requested_at)}</td>
+                <td className="py-2 pr-3">
+                  <span className={`px-2 py-0.5 rounded whitespace-nowrap ${riskStatusTone(r.status)}`}>
+                    {riskStatusLabel(r.status)}
+                  </span>
+                </td>
+                <td className="py-2 pr-3 text-slate-300">
+                  {r.trigger_type || "—"}
+                  {r.metric_value != null && <span className="text-slate-500"> (วัดได้ {fmtNum(r.metric_value, 2)})</span>}
+                </td>
+                <td className="py-2 pr-3 font-mono text-slate-300">
+                  {r.limit_before != null && r.limit_after != null
+                    ? `${fmtNum(r.limit_before, 1)}% → ${fmtNum(r.limit_after, 1)}%`
+                    : "—"}
+                </td>
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">{auditTime(r.decided_at)}</td>
+                <td className="py-2 text-slate-300">{decidedByLabel(r.decided_by)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
       </section>
       )}
     </div>

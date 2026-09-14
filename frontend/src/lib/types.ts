@@ -280,6 +280,54 @@ export interface SchedulerLogsResponse {
   has_more: boolean;
 }
 
+// ---------- Risk audit trail (risk_events — ไม่มี TTL ไม่ถูกลบ) ----------
+export interface RiskEventLog {
+  id: string;
+  created_at: string | null;
+  /** limit_breach | limit_expanded | limit_expand_rejected (หรือค่าอื่นในอนาคต) */
+  event_type: string;
+  resolved_at: string | null;
+  /** รายละเอียดตามชนิดเหตุการณ์ (limit_expanded = {request_id, limit_before,
+   *  limit_after, triggers[], approved} · limit_breach = RiskStatus dump) */
+  detail: Record<string, unknown>;
+}
+
+/** คำขอยืนยันขยายลิมิต (kill_expand_requests) = ต้นทางของการตัดสินใจ */
+export interface RiskAuditRequest {
+  id: string;
+  status: "pending" | "approved" | "rejected" | "expired" | string;
+  trigger_type: string;
+  metric_value: number | null;
+  limit_before: number | null;
+  limit_after: number | null;
+  requested_at: string | null;
+  decided_at: string | null;
+  /** "" = ยังไม่ตัดสิน · "ui"/"line:..." = เจ้าของกดเอง · "auto:expired" = ระบบขยายให้ */
+  decided_by: string;
+  detail: Record<string, unknown>;
+}
+
+export interface RiskLogsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  logs: RiskEventLog[];
+  requests: RiskAuditRequest[];
+  summary: {
+    total: number;
+    by_event: Record<string, number>;
+    /** จำนวนแถวที่สแกนมานับ by_event (เพดานฝั่ง backend) */
+    scanned: number;
+  };
+  /** ตั้งเมื่อ "มีคำขอยืนยันแต่ audit ว่าง" = การเขียน risk_events ไม่ลง (migration 038) */
+  audit_hint?: string;
+  event_types: string[];
+  offset: number;
+  limit: number;
+  total?: number;
+  has_more: boolean;
+}
+
 export interface MarketSummary {
   regime: string;
   confidence: number;

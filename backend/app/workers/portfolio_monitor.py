@@ -193,10 +193,10 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     status = risk_engine_for_settings(s).check(snap)
 
     if status.trading_paused:
-        db.insert("risk_events", {
-            "user_id": user_id, "event_type": "limit_breach",
-            "detail": status.model_dump(),
-        })
+        # audit row ผ่าน limit_expand.write_audit (ไม่กลืน error — เดิม
+        # db.insert ลด error เหลือ debug log ทำให้ audit หายเงียบ ๆ)
+        limit_expand.write_audit(db, "limit_breach", status.model_dump(),
+                                 user_id)
         # 1) engage the SAME pause switch the execution gate reads — without
         # this the breach was cosmetic and orders kept firing.
         pause = execution.set_pause(

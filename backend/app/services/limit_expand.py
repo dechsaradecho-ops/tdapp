@@ -981,18 +981,49 @@ def _audit(db, event_type: str, req: dict, triggers: list[dict],
     kill_expand_requests row itself (status/decided_at/decided_by/detail) —
     this row is for the existing risk-event views.
     """
-    try:
-        db.insert("risk_events", {
-            "user_id": DEFAULT_USER,
-            "event_type": event_type,
-            "detail": {
-                "request_id": req.get("id"),
-                "approved": approved,
-                "triggers": triggers,
-                "requested_at": req.get("requested_at"),
-                "limit_before": req.get("limit_before"),
-                "limit_after": req.get("limit_after"),
-            },
-        })
-    except Exception as exc:
-        log.debug("risk_events insert failed: %s", exc)
+    write_audit(db, event_type, {
+        "request_id": req.get("id"),
+        "approved": approved,
+        "triggers": triggers,
+        "requested_at": req.get("requested_at"),
+        "limit_before": req.get("limit_before"),
+        "limit_after": req.get("limit_after"),
+    })
+
+
+def write_audit(db, event_type: str, detail: dict, user_id: Optional[str] = None,
+                ) -> Optional[str]:
+    """เขียนแถว audit ลง risk_events แล้ว **ไม่กลืน error** — คืน error ดิบ.
+
+    WHY ไม่ใช้ db.insert เฉย ๆ: `Database.insert` ลด error ทุกอย่างเหลือ
+    log.debug บรรทัดเดียว ทำให้ prod 2026-09-14 ตรวจไม่เจอว่า audit ไม่ลงเลย
+    (risk_events.user_id เป็น uuid FK แต่แอปส่ง pseudo-user 'demo' → 22P02
+    "invalid input syntax for type uuid" ทุกครั้ง) หน้า Logs จึงว่างเปล่า
+    โดยไม่มีใครรู้ · แก้ที่ database/038_risk_events_user_text.sql
+
+    ใช้ risk_events เป็น "ประวัติถาวร": ไม่มี TTL และ worker ที่ purge log
+    (log_maintenance) ไม่ลบตารางนี้
+    """
+    row = {
+        "user_id": user_id or DEFAULT_USER,
+        "event_type": event_type,
+        "detail": detail,
+    }
+    raw: Any = getattr(db, "insert_raw", None)
+    if not callable(raw):           # very old fakes: no raw-error surface
+        try:
+            db.insert("risk_events", row)
+        except Exception as exc:    # pragma: no cover
+            log.error("risk_events insert failed (%s): %s", event_type, exc)
+            return str(exc)
+        return None
+
+    res = raw("risk_events", row)
+    err = res[1] if isinstance(res, (tuple, list)) and len(res) > 1 else None
+    if err:
+        log.error(
+            "risk_events insert FAILED (%s) — เหตุการณ์นี้จะไม่ปรากฏใน audit "
+            "trail: %s · ถ้าเป็น 'invalid input syntax for type uuid' ให้รัน "
+            "database/038_risk_events_user_text.sql (user_id ต้องเป็น text)",
+            event_type, err)
+    return err

@@ -28,7 +28,8 @@ tdapp/
 │       ├── app/              # Pages: dashboard (หน้าหลัก, รวม market + การ์ดสถานะ
 │       │                     #         auto-trade readiness), signals (แท็บ
 │       │                     #         signal-logs), monitor (แท็บ performance, รวม risk
-│       │                     #         เป็นการ์ดล่างสุด), logs, settings, chat +
+│       │                     #         เป็นการ์ดล่างสุด), logs (แท็บ quotes/news/
+│       │                     #         scheduler/guard/gate/audit), settings, chat +
 │       │                     #         redirect stubs (market/risk/signal-logs/performance)
 │       ├── components/       # ChatWidget, CapitalSync, GoalForm, PinManager, MobileNav, ...
 │       └── lib/              # api.ts (REST client), portfolio.ts (DB-backed store),
@@ -44,7 +45,7 @@ tdapp/
 │   │   └── workers/          # Market Scanner, News Analysis, Auto Trader, Notifier, ...
 │   ├── scripts/              # Ops probes: check_*.py, poll_*.py, smoke_stream.py, ...
 │   └── tests/                # Pytest suite (676 tests)
-├── database/                 # Supabase migrations 001–034 (run manually in SQL Editor)
+├── database/                 # Supabase migrations 001–038 (run manually in SQL Editor)
 ├── UI-DESIGN-SYSTEM.md       # iOS Liquid Glass Dark — hard rules for UI work
 ├── docker-compose.yml        # Local infra (redis)
 └── render.yaml               # Render.com blueprint (api + workers + static web)
@@ -191,8 +192,12 @@ Single-user dashboard — no Supabase Auth:
 - แยก worker service (tdapp-workers) ถูกตัดออกแล้ว — ถ้ารันคู่กับ ENABLE_WORKERS=1 จะยิง
   order/แจ้งเตือนซ้ำสองเท่า (ดู comment ใน render.yaml หากต้องการเปิดกลับ)
 
-Database migrations (`database/001–034`) are run manually in the Supabase SQL Editor.
-Latest: `034_ai_chat_settings.sql` — `ai_model` + `ai_base_url` on `trading_settings`
+Database migrations (`database/001–038`) are run manually in the Supabase SQL Editor.
+Latest: `038_risk_events_user_text.sql` — `risk_events.user_id` `uuid` → `text`
+(**must be applied or the audit trail stays empty**: the app writes the pseudo-user
+`demo` and the uuid FK rejects it with `22P02`; both write paths now report that error
+instead of swallowing it, and `GET /api/system/risk-logs` returns `audit_hint`).
+Before it: `034_ai_chat_settings.sql` — `ai_model` + `ai_base_url` on `trading_settings`
 (AI chat model/base URL editable from the Settings page). Until it is applied, saving still
 works — the settings PUT skips unknown columns on PostgREST `PGRST204` and says so in the reply.
 

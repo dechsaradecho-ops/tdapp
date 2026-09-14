@@ -645,3 +645,113 @@ async def scheduler_logs(request: Request, limit: int = 100, offset: int = 0,
     out["has_more"] = (page_offset + len(rows)) < (out["total"] or 0)
     out["verdict"] = "ok"
     return out
+
+
+# ---------------------------------------------------------------------------
+# Risk audit trail — risk_events + คำขอยืนยันขยายลิมิตที่ตัดสินใจแล้ว
+# ---------------------------------------------------------------------------
+# event_type ที่ระบบเขียนจริง: monitor เขียน limit_breach ตอนลิมิตเกิน,
+# limit_expand เขียน limit_expanded ตอนเจ้าของอนุมัติ (หรือระบบขยายให้เองเมื่อ
+# พ้นช่วงยืนยัน) และ limit_expand_rejected ตอนเจ้าของกดปฏิเสธ
+RISK_EVENT_TYPES = ("limit_breach", "limit_expanded", "limit_expand_rejected")
+
+# เพดานสแกนสำหรับนับแยกชนิด (risk_events โตช้า — 1 แถวต่อการตัดสินใจ 1 ครั้ง
+# ไม่ใช่ 1 แถวต่อรอบเหมือน log อื่น) ไม่กระทบแถวที่แสดง (มี server paging)
+_RISK_AUDIT_SCAN = 2000
+
+# กี่แถวของคำขอยืนยันที่จะโชว์คู่กับ audit (คำขอหลัก = เบรกเกอร์ลิมิตทำงาน)
+_RISK_REQUEST_ROWS = 20
+
+
+@router.get("/risk-logs")
+async def risk_logs(request: Request, limit: int = 100, offset: int = 0,
+                    event: str = "all") -> dict:
+    """Audit trail ของความเสี่ยง — risk_events (รายการตัดสินใจ) + คำขอยืนยัน.
+
+    ต่างจาก log อื่นในหน้านี้: **ไม่ถูก purge** (ไม่มี TTL) เพราะเป็นร่องรอย
+    "ใครตัดสินใจอะไร เมื่อไร ลิมิตเปลี่ยนจากเท่าไรเป็นเท่าไร" ซึ่งต้องอยู่ยาว
+    ใช้ server paging รูปแบบเดียวกับ /quote-logs เพื่อให้เดินดูของเก่าได้
+
+    `event` = all | limit_breach | limit_expanded | limit_expand_rejected
+
+    ⚠️ ถ้า `logs` ว่างทั้งที่ `requests` มีแถว = การเขียน audit ไม่ลง
+    (migration 038 ยังไม่รัน: risk_events.user_id ยังเป็น uuid FK แต่แอปส่ง
+    'demo' → error 22P02 ที่ Database.insert กลืนไว้) → คืน `audit_hint`
+    กลับไปให้หน้า Logs เตือนเอง ไม่ต้องเดา
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    page_size = max(1, min(limit, 500))
+    page_offset = max(0, offset)
+    filters: dict[str, Any] = {}
+    if event and event != "all":
+        filters["event_type"] = event
+    rows = db.select("risk_events", filters=filters, order="created_at",
+                     desc=True, limit=page_size, offset=page_offset)
+    out["logs"] = [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "event_type": r.get("event_type"),
+            "resolved_at": r.get("resolved_at"),
+            "detail": r.get("detail") or {},
+        }
+        for r in rows
+    ]
+
+    # แยกชนิดจากสแกนมีขอบเขต (count=exact ต่อชนิดจะยิงหลาย request โดยไม่จำเป็น)
+    scan = db.select("risk_events", order="created_at", desc=True,
+                     limit=_RISK_AUDIT_SCAN)
+    by_event: dict[str, int] = {}
+    for r in scan:
+        key = str(r.get("event_type") or "unknown")
+        by_event[key] = by_event.get(key, 0) + 1
+    total = None
+    try:
+        total = db.count("risk_events", filters=filters or None)
+    except Exception:
+        total = None
+    out["summary"] = {
+        "total": total if total is not None else len(scan),
+        "by_event": by_event,
+        "scanned": len(scan),
+    }
+
+    # ต้นทางของการตัดสินใจ: คำขอยืนยันขยายลิมิต (status/decided_by/ลิมิตก่อน-หลัง)
+    req_rows = db.select("kill_expand_requests", order="requested_at",
+                         desc=True, limit=_RISK_REQUEST_ROWS)
+    out["requests"] = [
+        {
+            "id": r.get("id"),
+            "status": r.get("status"),
+            "trigger_type": r.get("trigger_type"),
+            "metric_value": r.get("metric_value"),
+            "limit_before": r.get("limit_before"),
+            "limit_after": r.get("limit_after"),
+            "requested_at": r.get("requested_at"),
+            "decided_at": r.get("decided_at"),
+            "decided_by": r.get("decided_by"),
+            "detail": r.get("detail") or {},
+        }
+        for r in req_rows
+    ]
+
+    if not scan and req_rows:
+        out["audit_hint"] = (
+            "มีคำขอยืนยันขยายลิมิต " + str(len(req_rows)) + " รายการ แต่ตาราง "
+            "risk_events ว่างเปล่า — การเขียน audit ไม่ลง รัน "
+            "database/038_risk_events_user_text.sql (เดิม user_id เป็น uuid FK "
+            "แต่แอปส่ง 'demo' → error 22P02 ที่ Database.insert กลืนไว้)"
+        )
+
+    out["event_types"] = list(RISK_EVENT_TYPES)
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    out["has_more"] = (page_offset + len(rows)) < (out["summary"]["total"] or 0)
+    out["verdict"] = "ok"
+    return out

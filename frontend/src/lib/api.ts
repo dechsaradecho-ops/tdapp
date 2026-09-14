@@ -31,6 +31,7 @@ import {
   PortfolioRecommendation,
   QuoteLogsResponse,
   QuoteTestResult,
+  RiskLogsResponse,
   SchedulerLogsResponse,
   LineTargetsResponse,
   LineTargetMutation,
@@ -303,6 +304,13 @@ export const api = {
     get<SchedulerLogsResponse>(
       `/api/system/scheduler-logs?limit=${limit}&offset=${offset}` +
       `&job=${encodeURIComponent(job)}&status=${encodeURIComponent(status)}`
+    ),
+
+  // ---------- Risk audit trail (risk_events — ถาวร, ไม่มี TTL) ----------
+  riskLogs: (limit = 100, offset = 0, event = "all") =>
+    get<RiskLogsResponse>(
+      `/api/system/risk-logs?limit=${limit}&offset=${offset}` +
+      `&event=${encodeURIComponent(event)}`
     ),
 
   // ---------- LINE: notification targets + test button ----------
