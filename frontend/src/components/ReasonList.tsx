@@ -39,44 +39,44 @@ function classify(reason: string): Category {
 }
 
 export default function ReasonList({ reasons }: { reasons: string[] }) {
-  // เปิดหมวดที่มีเหตุผลไว้ตั้งแต่แรก (score มักมี 1 ข้อ) — ปิดหมวดว่าง
-  const [open, setOpen] = useState<Record<string, boolean>>(() => {
-    const init: Record<string, boolean> = {};
-    for (const c of CATEGORY_ORDER) init[c] = false;
-    return init;
-  });
+  // พับเดียวรวมทุกหมวด (เดิมแยกหัวละหมวด → การ์ดยาว) — กางทีเดียวเห็นครบ
+  const [open, setOpen] = useState(false);
 
   const groups = CATEGORY_ORDER
     .map((cat) => ({ cat, items: reasons.filter((r) => classify(r) === cat) }))
     .filter((g) => g.items.length > 0);
 
   if (!groups.length) return null;
-
-  const toggle = (cat: Category) => setOpen((prev) => ({ ...prev, [cat]: !prev[cat] }));
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
 
   return (
-    <div className="mt-2 space-y-1">
-      {groups.map(({ cat, items }) => (
-        <div key={cat} className="rounded-xl border border-white/10 bg-white/[0.04]">
-          <button
-            onClick={() => toggle(cat)}
-            className="flex w-full items-center justify-between px-2 py-1.5 text-xs hover:bg-white/10 rounded-xl"
-            aria-expanded={open[cat]}
-          >
-            <span className={`flex items-center gap-1.5 font-semibold ${CATEGORY_META[cat].color}`}>
-              <Icon n={CATEGORY_META[cat].icon} size={13} />
-              {CATEGORY_META[cat].label}
-              <span className="text-slate-500">({items.length})</span>
-            </span>
-            <span className="text-slate-500">{open[cat] ? "▾" : "▸"}</span>
-          </button>
-          {open[cat] && (
-            <ol className="list-decimal list-inside px-3 pb-2 space-y-1 text-slate-300 text-xs">
-              {items.map((r, i) => <li key={i}>{r}</li>)}
-            </ol>
-          )}
+    <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.04]">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-2 py-1.5 text-xs hover:bg-white/10 rounded-xl"
+        aria-expanded={open}
+      >
+        <span className="text-slate-400">
+          เหตุผล ({total}) — {groups.map((g) => CATEGORY_META[g.cat].label).join(" • ")}
+        </span>
+        <span className="text-slate-500 shrink-0 ml-2">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-2 space-y-2">
+          {groups.map(({ cat, items }) => (
+            <div key={cat}>
+              <p className={`flex items-center gap-1.5 text-xs font-semibold ${CATEGORY_META[cat].color}`}>
+                <Icon n={CATEGORY_META[cat].icon} size={13} />
+                {CATEGORY_META[cat].label}
+                <span className="text-slate-500">({items.length})</span>
+              </p>
+              <ol className="list-decimal list-inside mt-0.5 space-y-0.5 text-slate-300 text-xs">
+                {items.map((r, i) => <li key={i}>{r}</li>)}
+              </ol>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }

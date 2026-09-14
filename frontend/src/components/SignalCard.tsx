@@ -56,52 +56,54 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
           {signal.recommendation}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-2 text-sm mb-2">
-        <Field label="Confidence" value={`${signal.confidence}%`} />
-        <Field label="Risk / Trade" value={`${signal.risk_per_trade_pct}%`} />
-        <Field label="Entry" value={<CopyNum value={signal.entry} />} />
-        <Field label="RR" value={`1 : ${signal.expected_rr}`} />
-        {/* SL/TP หลักเป็น pill สี (แดง/เขียว) แบบเดียวกับ SltpLevels + SignalLogsPanel */}
-        <Field label="Stop Loss" value={<span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5"><CopyNum value={signal.stop_loss} /></span>} />
-        <Field label="Take Profit" value={<span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5"><CopyNum value={signal.take_profit} /></span>} />
-      </div>
-      {signal.live_price != null && signal.live_price > 0 && (
-        // ราคาตลาดปัจจุบัน (spot feed) เทียบกับ entry บนการ์ด — ถ้า entry
-        // ห่างจากราคาสดมาก ผู้ใช้เห็นทันทีว่า entry เป็นราคาเก่า (daily close)
-        // แทนที่จะดูเหมือนราคาปัจจุบัน
-        <div className="mb-2 flex items-center gap-2 rounded border border-accent/30 bg-accent/5 px-2 py-1 text-xs">
-          <span className="text-slate-400">ราคาตลาดตอนนี้</span>
-          <span className="font-semibold text-accent">{fmtNum(signal.live_price, 5)}</span>
-          {signal.entry > 0 && (
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold ${liveDeltaPct >= 0 ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
-              {liveDeltaPct >= 0 ? "▲" : "▼"} {Math.abs(liveDeltaPct).toFixed(2)}%
+      {/* เมตาแถวเดียว: มั่นใจ • RR • เสี่ยง • นับถอยหลัง — แทน grid 2 แถว + แถว TTL */}
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400">
+        <span>มั่นใจ <b className="text-slate-200">{signal.confidence}%</b></span>
+        <span className="text-slate-600">•</span>
+        <span>RR <b className="text-slate-200">1 : {signal.expected_rr}</b></span>
+        <span className="text-slate-600">•</span>
+        <span>เสี่ยง {signal.risk_per_trade_pct}%/ไม้</span>
+        {signal.approval !== "approved" && signal.expires_min_left != null && (
+          <>
+            <span className="text-slate-600">•</span>
+            <span className={signal.expires_min_left < 10 ? "text-amber-400 font-semibold" : ""}>
+              ⏳ อีก {Math.max(signal.expires_min_left, 0).toFixed(0)} นาที
             </span>
-          )}
-        </div>
-      )}
-      {/* ขนาดไม้ที่จะเข้าจริง (lots) — คำนวณ read-time สูตรเดียวกับ order */}
-      <div className="mb-2 flex items-center gap-2 rounded border border-accent/30 bg-accent/5 px-2 py-1 text-xs">
-        <span className="text-slate-400">ขนาดไม้</span>
-        {signal.suggested_lots != null ? (
-          <span className="inline-flex items-center rounded-full bg-accent/30 text-accent px-2 py-0.5 font-semibold">{signal.suggested_lots.toFixed(2)} lots</span>
-        ) : (
-          <span className="text-slate-500">—</span>
+          </>
         )}
       </div>
-      {signal.approval !== "approved" && signal.expires_min_left != null && (
-        // นับถอยหลัง: อีกกี่นาทีก่อนสัญญาณหมดอายุและระบบเริ่มประเมินใหม่
-        // (TTL 30 นาที) — เหลือ <10 นาทีเปลี่ยนเป็นสีเตือน
-        <div className={`mb-2 flex items-center gap-2 rounded border px-2 py-1 text-xs ${
-          signal.expires_min_left < 10
-            ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
-            : "border-white/10 bg-white/[0.04] text-slate-400"
-        }`}>
-          <span>⏳</span>
-          <span>
-            อีก {Math.max(signal.expires_min_left, 0).toFixed(0)} นาที ระบบจะหมดอายุและเริ่มประเมินใหม่
-          </span>
+      {/* Entry/SL/TP แถวเดียว 3 คอลัมน์ (เดิม 2 คอลัมน์ 3 แถว) — pill สีแดง/เขียว */}
+      <div className="grid grid-cols-3 gap-1.5 text-sm mb-2">
+        <Field compact label="Entry" value={<CopyNum value={signal.entry} />} />
+        <Field compact label="SL" value={<span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5"><CopyNum value={signal.stop_loss} /></span>} />
+        <Field compact label="TP" value={<span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5"><CopyNum value={signal.take_profit} /></span>} />
+      </div>
+      {/* ราคาสด + ขนาดไม้ แถวเดียว 2 คอลัมน์ (เดิมแถวเต็ม 2 แถว) */}
+      <div className="mb-2 grid grid-cols-2 gap-1.5 text-xs">
+        {signal.live_price != null && signal.live_price > 0 ? (
+          <div className="flex min-w-0 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/5 px-2 py-1.5">
+            <span className="shrink-0 text-slate-400">สด</span>
+            <span className="truncate font-semibold text-accent">{fmtNum(signal.live_price, 5)}</span>
+            {signal.entry > 0 && (
+              <span className={`inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 font-semibold ${liveDeltaPct >= 0 ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
+                {liveDeltaPct >= 0 ? "▲" : "▼"}{Math.abs(liveDeltaPct).toFixed(1)}%
+              </span>
+            )}
+          </div>
+        ) : (
+          <div className="flex min-w-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1.5 text-slate-500">
+            สด —
+          </div>
+        )}
+        <div className="flex min-w-0 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/5 px-2 py-1.5">
+          <span className="shrink-0 text-slate-400">ไม้</span>
+          {signal.suggested_lots != null ? (
+            <span className="inline-flex items-center rounded-full bg-accent/30 text-accent px-2 py-0.5 font-semibold">{signal.suggested_lots.toFixed(2)} lots</span>
+          ) : (
+            <span className="text-slate-500">—</span>
+          )}
         </div>
-      )}
+      </div>
       {/* SL/TP ด้านบนคือค่า effective (tier + SL cap = ที่ระบบจะยิงจริง) — 3 ระดับล่างรวมในพับเดียว */}
       <SignalLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
@@ -145,11 +147,11 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
   );
 }
 
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
+function Field({ label, value, compact = false }: { label: string; value: React.ReactNode; compact?: boolean }) {
   return (
-    <div className="bg-white/[0.05] rounded-xl p-2 border border-white/10">
-      <p className="text-xs text-slate-500">{label}</p>
-      <p className="font-bold">{value}</p>
+    <div className={`bg-white/[0.05] border border-white/10 ${compact ? "rounded-lg px-1.5 py-1 min-w-0" : "rounded-xl p-2"}`}>
+      <p className="text-[11px] text-slate-500 truncate">{label}</p>
+      <p className={`font-bold ${compact ? "text-[13px] truncate" : ""}`}>{value}</p>
     </div>
   );
 }
