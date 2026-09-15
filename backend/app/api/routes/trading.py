@@ -40,6 +40,8 @@ from app.models.schemas import (
     WalkForwardResult,
     analyze_journal,
     effective_min_confidence,
+    effective_spread,
+    is_market_closed,
     paper_trading_status,
     run_backtest,
     walk_forward,
@@ -449,6 +451,226 @@ async def get_correlation(request: Request, assets: str | None = None) -> dict:
         "symbol_risk": (
             CorrelationEngine.symbol_risk(wanted, positions, cap) if wanted else {}
         ),
+    }
+
+
+# ----------------------------------------------------------- gate preview
+@router.get("/gate-preview")
+async def get_gate_preview(request: Request) -> dict:
+    """Portfolio-level preview of the pre-open guards (Gate 2b / 3b / 4b).
+
+    These three gates were added to `execution._gate_blocked` after the
+    dashboard's readiness card was written, so the card said "เทรดได้" while
+    a guard could still refuse the order. This endpoint exposes the same
+    numbers the guards judge on so the card can be an honest mirror.
+
+    Every value comes from the SAME helper the execution gate calls —
+    `ExposureEngine.currency_risk`, `effective_spread`,
+    `execution.session_filter_block`, `execution._news_risk`,
+    `execution.reentry_cooldown_block` — so the preview can never drift from
+    what auto_trader actually enforces.
+
+    IMPORTANT — what "blocking" means here. Gate 3b's spread guard and Gate
+    4b both judge a *candidate* order (spread vs that order's SL; the book
+    plus that order's risk). This endpoint has no candidate, so:
+
+      * `spread` reports the same ratio over the OPEN book. That is a labelled
+        PROXY for market condition, never a verdict — `proxy` is true and it
+        never sets `blocking`.
+      * `currency` reports risk-at-stop over the OPEN book only. That is
+        strictly a LOWER bound vs the real gate (which adds the candidate), so
+        `over_cap = true` really does mean "the book is already past the cap" —
+        a genuine block for any same-currency addition. Reporting it as
+        informational when false is the honest reading: it is headroom, not a
+        guarantee that the next order clears.
+      * `session` is the one truly portfolio-wide guard (blocks every symbol
+        regardless), so its `blocking` is exact.
+      * `cooldown` is per-symbol, so `blocking` means at least one symbol is
+        still cooling down — not that the next order will be refused.
+
+    Fail-open: any broken read degrades to disabled/empty, never raises.
+    """
+    db = request.app.state.db
+    s = _settings(request)
+
+    def _f(v) -> float:
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    try:
+        open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+    except Exception:
+        open_rows = []
+
+    positions = []
+    for t in open_rows or []:
+        asset = str(t.get("asset") or "").upper()
+        if not asset:
+            continue
+        positions.append({
+            "asset": asset,
+            "direction": str(t.get("direction") or "").upper(),
+            "volume": _f(t.get("volume")),
+            "entry_price": _f(t.get("entry_price")),
+            "stop_loss": _f(t.get("stop_loss")),
+        })
+
+    # ---- Gate 3b (1): spread guard — open-book proxy ---------------------
+    spread_cap = _f(getattr(s, "spread_guard_max_pct", 0))
+    spread_positions = []
+    for p in positions:
+        dist = abs(p["entry_price"] - p["stop_loss"])
+        sp = effective_spread(s, p["asset"])
+        if dist <= 0 or sp <= 0:
+            continue
+        spread_positions.append({
+            "asset": p["asset"], "spread": sp, "sl_distance": dist,
+            "spread_pct": round(sp / dist * 100.0, 2),
+        })
+    spread_positions.sort(key=lambda r: -r["spread_pct"])
+    worst = spread_positions[0] if spread_positions else None
+    spread = {
+        "cap_pct": spread_cap,
+        "enabled": spread_cap > 0,
+        "proxy": True,
+        "worst_asset": worst["asset"] if worst else None,
+        "worst_pct": worst["spread_pct"] if worst else None,
+        "worst_spread": worst["spread"] if worst else None,
+        "worst_sl_distance": worst["sl_distance"] if worst else None,
+        "positions": spread_positions,
+    }
+
+    # ---- Gate 3b (2): pre-news flatten -----------------------------------
+    try:
+        pre_min = int(getattr(s, "pre_news_flatten_min", 0) or 0)
+    except (TypeError, ValueError):
+        pre_min = 0
+    nxt = None
+    mins: float | None = None
+    if pre_min > 0:
+        try:
+            news = execution._news_risk(db, s)
+            nxt = news.next_high_impact
+            mins = float(news.minutes_to_next) if news.minutes_to_next is not None else None
+        except Exception:
+            nxt, mins = None, None
+    ev_ccy = str(getattr(nxt, "currency", "") or "").upper()
+    affected: list[str] = []
+    if nxt is not None and mins is not None and mins <= pre_min and ev_ccy:
+        for p in positions:
+            base, quote = ExposureEngine._base_quote(p["asset"])
+            if ev_ccy in {base, quote}:
+                affected.append(p["asset"])
+    pre_news = {
+        "flatten_min": pre_min,
+        "enabled": pre_min > 0,
+        "minutes_to_next": (round(mins, 1) if mins is not None else None),
+        "event": (getattr(nxt, "event", None) if nxt is not None else None),
+        "currency": ev_ccy or None,
+        "affected_assets": sorted(set(affected)),
+        "in_window": bool(nxt is not None and mins is not None and mins <= pre_min),
+        "blocking": bool(set(affected)),
+    }
+
+    # ---- Gate 3b (3): session filter — the portfolio-wide guard ----------
+    session_enabled = bool(getattr(s, "session_filter_enabled", False))
+    market_closed = False
+    sess_overlap = True
+    sess_vol = "medium"
+    sess_names: list[str] = []
+    if session_enabled:
+        try:
+            market_closed = bool(is_market_closed())
+            sess = SessionEngine.active()
+            sess_overlap = bool(sess.overlapping)
+            sess_vol = str(sess.volatility_hint)
+            sess_names = list(sess.active_sessions or [])
+        except Exception:
+            pass
+    # Verdict text comes from the shared helper the gate itself calls.
+    try:
+        session_block = execution.session_filter_block(s)
+    except Exception:
+        session_block = ""
+    session = {
+        "enabled": session_enabled,
+        "market_closed": market_closed,
+        "overlapping": sess_overlap,
+        "volatility_hint": sess_vol,
+        "active_sessions": sess_names,
+        "blocking": bool(session_block),
+        "reason": session_block,
+    }
+
+    # ---- Gate 4b: currency exposure (risk at stop) -----------------------
+    cap_ccy = _f(getattr(s, "max_currency_exposure_pct", 0))
+    cap_usd = _f(getattr(s, "capital", 0))
+    try:
+        risk = ExposureEngine.currency_risk(positions, cap_usd, cap_ccy)
+    except Exception:
+        risk = {"currency": "", "direction": "", "risk_usd": 0.0, "pct": 0.0,
+                "cap_pct": cap_ccy, "over_cap": False, "buckets": []}
+    currency = {
+        "cap_pct": cap_ccy,
+        "enabled": cap_ccy > 0 and cap_usd > 0,
+        "currency": risk.get("currency") or None,
+        "direction": risk.get("direction") or None,
+        "risk_usd": risk.get("risk_usd", 0.0),
+        "pct": risk.get("pct", 0.0),
+        "over_cap": bool(risk.get("over_cap")),
+        "buckets": risk.get("buckets") or [],
+    }
+
+    # ---- Gate 2b: same-asset re-entry cooldown ---------------------------
+    try:
+        cool_min = int(getattr(s, "reentry_cooldown_min", 0) or 0)
+    except (TypeError, ValueError):
+        cool_min = 0
+    cooling: list[dict] = []
+    if cool_min > 0:
+        # Cheap pre-filter: only symbols with a close inside the window can
+        # possibly block. This is a SUPERSET of the helper's block condition,
+        # so asking the helper per asset can't miss a block.
+        try:
+            closed_rows = db.select("paper_trades", filters={"status": "closed"},
+                                    limit=200)
+        except Exception:
+            closed_rows = []
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=cool_min)
+        candidates: set[str] = set()
+        for r in closed_rows or []:
+            try:
+                asset = str(r.get("asset") or "").upper()
+                if not asset:
+                    continue
+                dt = execution._parse_dt(r.get("closed_at"))
+                if dt is None or dt < cutoff:
+                    continue
+                candidates.add(asset)
+            except Exception:
+                continue
+        for asset in sorted(candidates):
+            try:
+                block = execution.reentry_cooldown_block(db, s, asset)
+            except Exception:
+                block = ""
+            if block:
+                cooling.append({"asset": asset, "reason": block})
+    cooldown = {
+        "minutes": cool_min,
+        "enabled": cool_min > 0,
+        "active": cooling,
+    }
+
+    return {
+        "spread": spread,
+        "pre_news": pre_news,
+        "session": session,
+        "currency": currency,
+        "cooldown": cooldown,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

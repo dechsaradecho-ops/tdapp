@@ -13,6 +13,7 @@ import {
   ExtendedAnalysis,
   ExtendedOpenResult,
   FrequencyDecision,
+  GatePreview,
   GoalAssessment,
   JournalAnalysis,
   KillSwitch,
@@ -178,6 +179,10 @@ export const api = {
         ? `?assets=${encodeURIComponent(assets.join(","))}` : ""}`,
     ),
   tradingCalendar: () => get<NewsRisk>("/api/trading/calendar"),
+
+  // GET /api/trading/gate-preview — ตัวอย่าง gate ก่อนเปิดไม้ (Gate 2b/3b/4b)
+  // ระดับพอร์ต: spread (proxy) · ข่าวก่อนเปิด · session · ความเสี่ยงต่อสกุล · cooldown
+  gatePreview: () => get<GatePreview>("/api/trading/gate-preview"),
 
   tradingSession: () => get<SessionStatus>("/api/trading/session"),
 

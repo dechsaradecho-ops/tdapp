@@ -812,6 +812,30 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
             f"— ไม้เปิดทับสกุลเดียวกัน รอปิดไม้เดิมก่อน")
 
 
+def session_filter_block(s: AppSettings) -> str:
+    """Thai block reason from the session filter (Gate 3b #3), else "".
+
+    This is the only pre-open guard that is PORTFOLIO-wide — it blocks every
+    new order regardless of symbol, so it needs no `asset`/candidate. Split
+    out of `pre_open_block` so the dashboard's gate preview can ask the exact
+    same question without having to invent a symbol to pass in (no drift).
+    Fail-open ("") when the session clock is unreadable.
+    """
+    if not bool(getattr(s, "session_filter_enabled", False)):
+        return ""
+    try:
+        if is_market_closed():
+            return "ตลาดปิด (weekend) — งดเปิดไม้ใหม่ กัน gap วันจันทร์"
+        sess = SessionEngine.active()
+        if not sess.overlapping and sess.volatility_hint == "low":
+            names = ", ".join(sess.active_sessions) or "ไม่มี"
+            return (f"ช่วงสภาพคล่องต่ำ ({names}) — งดเปิดไม้ใหม่ "
+                    "รอ London/New York เปิด")
+    except Exception:
+        pass
+    return ""
+
+
 def pre_open_block(db, s: AppSettings, asset: str,
                    entry: Optional[float] = None,
                    stop_loss: Optional[float] = None) -> str:
@@ -869,17 +893,9 @@ def pre_open_block(db, s: AppSettings, asset: str,
         except Exception:
             pass
     # ---- 3. session filter ------------------------------------------------
-    if bool(getattr(s, "session_filter_enabled", False)):
-        try:
-            if is_market_closed():
-                return "ตลาดปิด (weekend) — งดเปิดไม้ใหม่ กัน gap วันจันทร์"
-            sess = SessionEngine.active()
-            if not sess.overlapping and sess.volatility_hint == "low":
-                names = ", ".join(sess.active_sessions) or "ไม่มี"
-                return (f"ช่วงสภาพคล่องต่ำ ({names}) — งดเปิดไม้ใหม่ "
-                        "รอ London/New York เปิด")
-        except Exception:
-            pass
+    session_block = session_filter_block(s)
+    if session_block:
+        return session_block
     return ""
 
 

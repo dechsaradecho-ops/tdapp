@@ -538,6 +538,75 @@ export interface NewsRisk {
   status: "SAFE" | "CAUTION" | "DANGER";
   reason: string;
   minutes_to_next: number | null;
+  /** ข่าว high-impact ตัวถัดไป (backend ส่งมาอยู่แล้ว — เดิม type ไม่ได้ประกาศ) */
+  next_high_impact?: {
+    event: string;
+    currency: string;
+    time_utc: string;
+    impact: string;
+  } | null;
+}
+
+/**
+ * ตัวอย่าง gate ก่อนเปิดไม้ ระดับพอร์ต — GET /api/trading/gate-preview
+ *
+ * รูปร่างตรงกับ backend (app/api/routes/trading.py :: get_gate_preview) ทุกฟิลด์
+ * ⚠️ อ่าน semantics ให้ดีก่อนเอาไปตัดสินว่าบล็อกหรือไม่:
+ * - spread  = วัดจาก "ไม้ที่เปิดอยู่" (proxy, ไม่มี blocking) — gate จริงวัดตอนเปิดไม้ใหม่
+ * - currency = ความเสี่ยง ณ จุด SL ของไม้ที่เปิดอยู่ "เท่านั้น" = ค่าต่ำสุด (lower bound)
+ * - session  = เป็นด่านระดับพอร์ตจริง → blocking เชื่อถือได้
+ * - cooldown = รายสัญลักษณ์ → active = "มีบางคู่ติด" ไม่ได้แปลว่าไม้ถัดไปจะโดน
+ */
+export interface GatePreview {
+  spread: {
+    cap_pct: number;
+    enabled: boolean;
+    /** true = ตัวเลขนี้มาจากไม้ที่เปิดอยู่ ไม่ใช่ไม้ที่กำลังจะเปิด */
+    proxy: boolean;
+    worst_asset: string | null;
+    worst_pct: number | null;
+    worst_spread: number | null;
+    worst_sl_distance: number | null;
+    positions: { asset: string; spread: number; sl_distance: number; spread_pct: number }[];
+  };
+  pre_news: {
+    flatten_min: number;
+    enabled: boolean;
+    minutes_to_next: number | null;
+    event: string | null;
+    currency: string | null;
+    /** สินทรัพย์ในพอร์ตที่ได้/เสียสกุลของข่าวลูกถัดไป */
+    affected_assets: string[];
+    /** อยู่ในหน้าต่างงดเปิดไม้ก่อนข่าวแล้ว */
+    in_window: boolean;
+    blocking: boolean;
+  };
+  session: {
+    enabled: boolean;
+    market_closed: boolean;
+    overlapping: boolean;
+    volatility_hint: string;
+    active_sessions: string[];
+    blocking: boolean;
+    /** ข้อความไทยจาก helper ตัวเดียวกับที่ gate ใช้ — ว่าง = ไม่บล็อก */
+    reason: string;
+  };
+  currency: {
+    cap_pct: number;
+    enabled: boolean;
+    currency: string | null;
+    direction: string | null;
+    risk_usd: number;
+    pct: number;
+    over_cap: boolean;
+    buckets: { currency: string; direction: string; risk_usd: number; pct: number }[];
+  };
+  cooldown: {
+    minutes: number;
+    enabled: boolean;
+    active: { asset: string; reason: string }[];
+  };
+  generated_at: string;
 }
 
 export interface SessionStatus {

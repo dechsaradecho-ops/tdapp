@@ -7,6 +7,7 @@ import LoadingGraphic from "@/components/LoadingGraphic";
 import type {
   AppSettings,
   CorrelationResponse,
+  GatePreview,
   MonitorSnapshot,
   NewsRisk,
 } from "@/lib/types";
@@ -17,8 +18,15 @@ import type {
  *
  * ปัจจัยทั้งหมด mirror gate pipeline จริงของ backend
  * (backend/app/services/execution.py :: _gate_blocked —
- * pause → kill switch → frequency → news → correlation → risk officer)
+ * pause → kill switch → frequency → cooldown (2b) → news →
+ * pre-open: spread / pre-news / session (3b) → correlation →
+ * currency exposure (4b) → risk officer)
  * จึงสอดคล้องกับสิ่งที่ auto_trader ใช้ตัดสินใจจริงทุก 1 นาที
+ *
+ * Gate 2b/3b/4b ไม่มี endpoint ไหนให้ข้อมูลได้ครบ จึงดึงจาก
+ * GET /api/trading/gate-preview โดยเฉพาะ — และการ์ดต้องพูดให้ตรงกับ
+ * semantics ของมัน: spread เป็น proxy จากไม้ที่เปิดอยู่ (ไม่เคยฟันธงว่าบล็อก),
+ * currency เป็นค่าต่ำสุด (ไม้เปิดเท่านั้น) ส่วน session เป็นด่านระดับพอร์ตจริง
  */
 
 type FactorState = "pass" | "fail" | "warn";
@@ -60,19 +68,22 @@ export default function AutoTradeReadinessCard() {
     setLoading(true);
     setErr("");
     try {
-      const [mon, settings, news, corr] = await Promise.all([
+      const [mon, settings, news, corr, gp] = await Promise.all([
         api.monitor(),
         api.getSettings(),
         api.tradingCalendar(),
         api.tradingCorrelation().catch(() => null), // correlation พัง = ข้าม ไม่บล็อกการ์ด
+        api.gatePreview().catch(() => null), // gate ใหม่พัง = ข้าม แต่การ์ดจะเตือนว่ายืนยันไม่ได้
       ]);
-      setFactors(buildFactors(mon, settings, news, corr));
+      setFactors(buildFactors(mon, settings, news, corr, gp));
       const goldMin =
         settings.min_confidence_gold ?? settings.min_confidence;
       setSignalNote(
         `เงื่อนไขฝั่งสัญญาณ: confidence ≥ ${settings.min_confidence} ` +
           `(XAUUSD ≥ ${goldMin}) · opportunity ≥ ${settings.min_opportunity} · ` +
-          `สินทรัพย์นั้นต้องไม่มีไม้เปิดค้าง · สัญญาณอายุ ≤ 30 นาที`,
+          `สินทรัพย์นั้นต้องไม่มีไม้เปิดค้าง · สัญญาณอายุ ≤ 30 นาที · ` +
+          `สเปรดต้องไม่กินระยะ SL · งดเปิดไม้ช่วงข่าวใหญ่/ตลาดปิด/สภาพคล่องต่ำ · ` +
+          `ความเสี่ยงต่อสกุลเงินไม่เกินเพดาน`,
       );
       setCheckedAt(
         new Date().toLocaleTimeString("th-TH", {
@@ -242,6 +253,7 @@ function buildFactors(
   s: AppSettings,
   news: NewsRisk,
   corr: CorrelationResponse | null,
+  gp: GatePreview | null,
 ): Factor[] {
   const f: Factor[] = [];
 
@@ -329,6 +341,160 @@ function buildFactors(
       detail: `พอร์ต ${corr.portfolio_correlation.toFixed(0)} > cap ${s.correlation_cap} — เสี่ยงซ้ำทิศเดียวกัน`,
       progress: { used: corr.portfolio_correlation, limit: s.correlation_cap },
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Gate ใหม่ (migration 041) — ข้อมูลทั้งหมดมาจาก /api/trading/gate-preview
+  // ---------------------------------------------------------------------
+  // โหลดไม่ได้ = ยืนยันไม่ได้ → warn (ไม่ใช่ pass) เพื่อไม่ให้การ์ดบอกว่า
+  // "พร้อมเทรด" ทั้งที่ยังไม่ได้ตรวจด่าน 3b/4b เลย
+  if (!gp) {
+    f.push({
+      state: "warn",
+      label: "Gate ก่อนเปิดไม้ (2b/3b/4b)",
+      detail: "โหลด gate-preview ไม่สำเร็จ — ยืนยันสเปรด/ข่าว/ช่วงเวลา/สกุลเงินไม่ได้",
+    });
+    return f;
+  }
+
+  // Gate 2b: cooldown เปิดซ้ำสัญลักษณ์เดิม — รายสัญลักษณ์ ไม่ได้หยุดทั้งพอร์ต
+  if (!gp.cooldown.enabled) {
+    f.push({
+      state: "warn",
+      label: "Cooldown เปิดซ้ำ",
+      detail: "ยังไม่ตั้ง cooldown — เปิดไม้สัญลักษณ์เดิมซ้ำได้ทันที",
+    });
+  } else if (gp.cooldown.active.length > 0) {
+    const names = gp.cooldown.active.map((c) => c.asset).join(", ");
+    f.push({
+      state: "warn",
+      label: "Cooldown เปิดซ้ำ",
+      detail: `${gp.cooldown.active.length} คู่เพิ่งปิดภายใน ${gp.cooldown.minutes} นาที: ${names} — เปิดซ้ำคู่นี้ตอนนี้จะถูกเลื่อน`,
+    });
+  } else {
+    f.push({
+      state: "pass",
+      label: "Cooldown เปิดซ้ำ",
+      detail: `ไม่มีคู่ไหนเพิ่งปิดภายใน ${gp.cooldown.minutes} นาที`,
+    });
+  }
+
+  // Gate 3b (1): spread guard — ⚠️ proxy จาก "ไม้ที่เปิดอยู่" (endpoint ตั้งใจ
+  // ไม่ส่ง blocking ให้หัวข้อนี้) เพราะ gate จริงวัดสเปรดตอนไม้ใหม่เปิด
+  if (!gp.spread.enabled) {
+    f.push({
+      state: "warn",
+      label: "สเปรดก่อนเปิดไม้",
+      detail: "ยังไม่ตั้งเพดานสเปรด — ปิดการตรวจสเปรดอยู่",
+    });
+  } else if (gp.spread.worst_asset === null || gp.spread.worst_pct === null) {
+    f.push({
+      state: "pass",
+      label: "สเปรดก่อนเปิดไม้",
+      detail: `ยังไม่มีไม้เปิดให้ประเมิน — เพดาน ${gp.spread.cap_pct}% ของระยะ SL`,
+    });
+  } else {
+    const spreadOver = gp.spread.worst_pct > gp.spread.cap_pct;
+    f.push({
+      state: spreadOver ? "warn" : "pass",
+      label: "สเปรดก่อนเปิดไม้",
+      detail: spreadOver
+        ? `แย่สุด ${gp.spread.worst_asset} ${gp.spread.worst_pct}%/เพดาน ${gp.spread.cap_pct}% ` +
+          "(วัดจากไม้เปิดอยู่) — ไม้ใหม่ที่ SL แคบกว่านี้จะถูกบล็อก"
+        : `แย่สุด ${gp.spread.worst_asset} ${gp.spread.worst_pct}%/เพดาน ${gp.spread.cap_pct}% ` +
+          "(วัดจากไม้เปิดอยู่) — สเปรดกินระยะ SL น้อย",
+      progress: { used: gp.spread.worst_pct, limit: gp.spread.cap_pct },
+    });
+  }
+
+  // Gate 3b (2): งดเปิดไม้ก่อนข่าว high-impact ที่กระทบสกุลในพอร์ต
+  if (!gp.pre_news.enabled) {
+    f.push({
+      state: "warn",
+      label: "ข่าวก่อนเปิดไม้",
+      detail: "ยังไม่ตั้งเวลางดเปิดไม้ก่อนข่าว — ปิดการตรวจนี้อยู่",
+    });
+  } else if (gp.pre_news.blocking) {
+    f.push({
+      state: "fail",
+      label: "ข่าวก่อนเปิดไม้",
+      detail:
+        `ข่าว ${gp.pre_news.event ?? "high-impact"} (${gp.pre_news.currency ?? "-"}) ` +
+        `อีก ${Math.round(gp.pre_news.minutes_to_next ?? 0)} นาที — งดเปิดไม้ใหม่ ` +
+        `· กระทบ ${gp.pre_news.affected_assets.join(", ")}`,
+    });
+  } else if (gp.pre_news.in_window) {
+    f.push({
+      state: "warn",
+      label: "ข่าวก่อนเปิดไม้",
+      detail:
+        `ข่าว ${gp.pre_news.event ?? "-"} (${gp.pre_news.currency ?? "-"}) ` +
+        `อีก ${Math.round(gp.pre_news.minutes_to_next ?? 0)} นาที — ไม่กระทบสกุลในพอร์ต (ยังเทรดได้)`,
+    });
+  } else {
+    f.push({
+      state: "pass",
+      label: "ข่าวก่อนเปิดไม้",
+      detail: gp.pre_news.minutes_to_next !== null
+        ? `ข่าวใหญ่ตัวถัดไปอีก ${Math.round(gp.pre_news.minutes_to_next)} นาที — ไกลจากหน้าต่างงดเปิดไม้ ${gp.pre_news.flatten_min} นาที`
+        : `ไม่มีข่าว high-impact ในปฏิทิน — หน้าต่างงดเปิดไม้ ${gp.pre_news.flatten_min} นาที`,
+    });
+  }
+
+  // Gate 3b (3): session / ตลาดปิด — ด่านระดับพอร์ตจริง blocking จึงฟันธงได้
+  if (!gp.session.enabled) {
+    f.push({
+      state: "warn",
+      label: "ช่วงเวลาเทรด",
+      detail: "ยังไม่เปิด session filter — ระบบเปิดไม้ได้ทุกช่วงเวลา",
+    });
+  } else if (gp.session.blocking) {
+    f.push({
+      state: "fail",
+      label: "ช่วงเวลาเทรด",
+      detail: gp.session.reason || "งดเปิดไม้ใหม่ในช่วงนี้",
+    });
+  } else {
+    f.push({
+      state: "pass",
+      label: "ช่วงเวลาเทรด",
+      detail:
+        `session: ${gp.session.active_sessions.join(", ") || "-"} · ` +
+        `สภาพคล่อง ${gp.session.volatility_hint}` +
+        (gp.session.overlapping ? " · ทับซ้อน (ดี)" : ""),
+    });
+  }
+
+  // Gate 4b: ความเสี่ยงต่อสกุลเงิน ณ จุด SL — ค่าต่ำสุด (คิดจากไม้เปิดเท่านั้น)
+  if (!gp.currency.enabled) {
+    f.push({
+      state: "warn",
+      label: "ความเสี่ยงต่อสกุลเงิน",
+      detail: "ยังไม่ตั้งเพดานความเสี่ยงต่อสกุลเงิน — ปิดการตรวจนี้อยู่",
+    });
+  } else {
+    const c = gp.currency;
+    const dir =
+      c.direction === "long" ? "ยาว" : c.direction === "short" ? "สั้น" : (c.direction ?? "-");
+    if (c.over_cap) {
+      f.push({
+        state: "fail",
+        label: "ความเสี่ยงต่อสกุลเงิน",
+        detail:
+          `สกุล ${c.currency ?? "-"} เอียง${dir} ${c.pct.toFixed(1)}% เกินเพดาน ${c.cap_pct}% ` +
+          `(เสี่ยง $${c.risk_usd.toFixed(2)}) — ไม้เปิดทับสกุลเดียวกัน รอปิดไม้เดิมก่อน`,
+        progress: { used: c.pct, limit: c.cap_pct },
+      });
+    } else {
+      f.push({
+        state: "pass",
+        label: "ความเสี่ยงต่อสกุลเงิน",
+        detail:
+          `แย่สุด ${c.currency ?? "-"} (${dir}) ${c.pct.toFixed(1)}% จากเพดาน ${c.cap_pct}% — ` +
+          "คิดจากไม้เปิดเท่านั้น ไม้ใหม่จะบวกความเสี่ยงเพิ่ม",
+        progress: { used: c.pct, limit: c.cap_pct },
+      });
+    }
   }
 
   return f;
