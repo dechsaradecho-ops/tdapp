@@ -28,6 +28,27 @@ const REFRESH_OPTIONS = [
   { label: "5 นาที", value: 300 },
 ];
 
+/** Timestamp 2 บรรทัด (วันที่ / เวลา) สำหรับตาราง "ประวัติการยิง order ล่าสุด".
+ *
+ * แยกเวลาเปิดกับเวลาปิดเป็นคนละช่อง เพราะช่อง "เวลา" เดิมโชว์อย่างใดอย่างหนึ่ง:
+ * ไม้ที่ปิดแล้วจะโชว์เวลาปิดทับ ทำให้ย้อนกลับไปหา "ไม้นี้เปิดเมื่อไร" ไม่ได้
+ * (ไทม์ไลน์ SL/TP ในคอลัมน์เหตุผลปิดอ้างเวลาปิดอยู่แล้ว จึงต้องมีเวลาเปิดคู่กัน)
+ *
+ * ยัดเป็น 2 บรรทัดแทน timestamp เต็ม ๆ แถวเดียว เพื่อไม่ให้ตารางที่กว้างอยู่แล้ว
+ * ต้องเลื่อนแนวนอนเพิ่มบนมือถือ; title มีวินาทีไว้ตรวจย้อนหลังแบบละเอียด */
+function StampCell({ iso }: { iso: string | null }) {
+  if (!iso) return <span className="text-slate-600">-</span>;
+  const d = new Date(iso);
+  return (
+    <span title={d.toLocaleString("th-TH")}>
+      <span className="block">{d.toLocaleDateString("th-TH", { dateStyle: "short" })}</span>
+      <span className="block text-slate-500">
+        {d.toLocaleTimeString("th-TH", { timeStyle: "short" })}
+      </span>
+    </span>
+  );
+}
+
 /** Badge "Smart Exit" — คะแนนคุณภาพการถือไม้ (0-100) + คำแนะนำ
  *  แตะ/คลิกเพื่อดู 9 ปัจจัย + เหตุผลภาษาไทย (portal to body). */
 function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_positions"][number]["exit_info"]> }) {
@@ -980,7 +1001,10 @@ export default function MonitorPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500 uppercase tracking-wide">
-                  <th className="py-2 pr-4">เวลา</th>
+                  {/* เวลาเปิด/ปิด คนละคอลัมน์ — แถวถูกเรียงตาม created_at มากสุดก่อน
+                      จึงวาง "เวลาเปิด" ก่อนให้ตรงกับลำดับที่อ่าน */}
+                  <th className="py-2 pr-4">เวลาเปิด</th>
+                  <th className="py-2 pr-4">เวลาปิด</th>
                   <th className="py-2 pr-4">Asset</th>
                   <th className="py-2 pr-4">ฝั่ง</th>
                   <th className="py-2 pr-4">Lots</th>
@@ -999,16 +1023,12 @@ export default function MonitorPage() {
               <tbody>
                 {snap.recent.map((t) => (
                   <tr key={t.id} className="border-t border-slate-800">
-                    <td className="py-2 pr-4 text-xs text-slate-400"
-                      title={t.status === "closed" && t.closed_at && t.created_at
-                        ? `เปิด ${new Date(t.created_at).toLocaleString("th-TH")} · ปิด ${new Date(t.closed_at).toLocaleString("th-TH")}`
-                        : undefined}>
-                      {/* แถวปิดแล้วโชว์เวลาปิด (ตรงกับไทม์ไลน์ SL/TP ข้างใน)
-                          เดิมโชว์เวลาเปิด — แถว AUDNZD ขึ้น 14/9 ทั้งที่ประวัติ
-                          ข้างในเป็น 15/9 เลยดูเหมือน badge ไปติดผิดไม้ */}
-                      {t.status === "closed" && t.closed_at
-                        ? new Date(t.closed_at).toLocaleString("th-TH")
-                        : t.created_at ? new Date(t.created_at).toLocaleString("th-TH") : "-"}
+                    <td className="py-2 pr-4 text-xs text-slate-400 whitespace-nowrap">
+                      <StampCell iso={t.created_at} />
+                    </td>
+                    {/* ไม้ที่ยังไม่ปิด/ถูกบล็อกไม่มีเวลาปิด — โชว์ "-" ไม่ใช่เวลาเปิด */}
+                    <td className="py-2 pr-4 text-xs text-slate-400 whitespace-nowrap">
+                      <StampCell iso={t.status === "closed" ? t.closed_at : null} />
                     </td>
                     <td className="py-2 pr-4 font-semibold">{t.asset}</td>
                     <td className="py-2 pr-4 font-bold">
