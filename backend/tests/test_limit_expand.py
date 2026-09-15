@@ -777,6 +777,136 @@ def test_monitor_still_asks_when_the_window_is_open():
 
 
 # ---------------------------------------------------------------------------
+# EARLY warning — "ถ้ากำลังจะเกิน Max Drawdown ให้ส่ง notification ไปที่ line"
+#
+# The breach path above only speaks AFTER the limit is gone (trading already
+# paused). The owner asked for a heads-up while the account can still act, so
+# portfolio_monitor pushes a drawdown_warning once the drawdown has eaten
+# DRAWDOWN_APPROACH_RATIO (0.8) of the kill-switch budget — and it must NOT
+# pause anything, must NOT create a kill_expand_requests row, and must not
+# repeat itself every minute.
+# ---------------------------------------------------------------------------
+def _dd_warning_db(dd_pct: float, limit: float = 10.0) -> FakeDatabase:
+    """Db whose drawdown is exactly ``dd_pct`` against a ``limit`` ceiling.
+
+    The monitor derives CURRENT equity from the paper_trades journal +
+    broker unrealized (``portfolio_monitor._equity``) — NOT from
+    equity_snapshots — while the PEAK comes from the snapshots. Seeding
+    snapshots alone leaves equity == capital (dd 0%). The matching
+    ``_warning_broker`` below supplies the unrealized leg so the monitor
+    actually sees the intended drawdown without tripping the daily/weekly/
+    monthly loss gates (realized stays 0).
+    """
+    peak = 10000.0
+    return _dd_db(equity=peak * (1.0 - dd_pct / 100.0), peak=peak)
+
+
+def _warning_broker(dd_pct: float, peak: float = 10000.0):
+    """Fake broker whose unrealized PnL puts equity exactly at the dd target.
+
+    loss = peak * dd% via one EURUSD BUY (contract 100k, vol 1.0) so
+    ``PaperBrokerPnl.compute`` returns -loss and ``_equity`` = capital - loss.
+    """
+    loss = peak * dd_pct / 100.0
+    leg = SimpleNamespace(direction="BUY", asset="EURUSD",
+                          entry_price=1.0,
+                          current_price=1.0 - loss / 100_000.0, volume=1.0)
+
+    class _Broker:
+        def all_positions(self):
+            return [leg]
+
+    return _Broker()
+
+
+def test_monitor_warns_before_the_drawdown_limit_is_breached():
+    db = _dd_warning_db(9.0)                    # 90% of the 10% ceiling
+    notifier = RecordingNotifier()
+
+    out = portfolio_monitor.monitor_once(db, _warning_broker(9.0), notifier)
+
+    assert out["breach"] is False and out["drawdown_warning"] is True
+    warned = notifier.of("drawdown_warning")
+    assert len(warned) == 1
+    msg = warned[0]["message"]
+    assert "9.00%" in msg and "10.00%" in msg   # current dd + the ceiling
+    assert "1.00%" in msg                       # room left before the kill
+    assert "ยังไม่ถูก pause" in msg             # trading is still running
+    # an early warning must never stop trading or open an expansion request
+    assert db.rows.get("kill_expand_requests") in (None, [])
+    assert db._client.store.get("trading_pause") is None
+    assert notifier.of("risk_warning") == []
+
+
+def test_monitor_stays_quiet_below_the_warning_ratio():
+    db = _dd_warning_db(7.0)                    # 70% of the ceiling
+    notifier = RecordingNotifier()
+
+    out = portfolio_monitor.monitor_once(db, _warning_broker(7.0), notifier)
+
+    assert out["breach"] is False and out["drawdown_warning"] is False
+    assert notifier.of("drawdown_warning") == []
+
+
+def test_drawdown_warning_is_throttled_across_monitor_cycles():
+    """The monitor runs every minute — the warning must not repeat each time."""
+    db = _dd_warning_db(9.0)
+    broker = _warning_broker(9.0)
+    first = RecordingNotifier()
+    assert portfolio_monitor.monitor_once(db, broker, first)["drawdown_warning"]
+    # RecordingNotifier bypasses NotificationService.queue_notification, so
+    # stamp the cooldown row the real pipeline would have written.
+    db.insert("notifications", {"type": "drawdown_warning",
+                                "created_at": _minutes_ago(0.0)})
+
+    quiet = RecordingNotifier()
+    out = portfolio_monitor.monitor_once(db, broker, quiet)
+    assert out["drawdown_warning"] is False
+    assert quiet.of("drawdown_warning") == []
+
+    # ...and it speaks again once the cooldown has lapsed
+    db.rows["notifications"][0]["created_at"] = _minutes_ago(
+        portfolio_monitor.DRAWDOWN_APPROACH_COOLDOWN_MIN + 1.0)
+    again = RecordingNotifier()
+    assert portfolio_monitor.monitor_once(db, broker, again)["drawdown_warning"]
+    assert len(again.of("drawdown_warning")) == 1
+
+
+def test_breach_still_pauses_and_does_not_double_warn():
+    """At/over the limit the OLD path owns the cycle — no early warning too."""
+    db = _dd_warning_db(12.0)                   # over the 10% ceiling
+    notifier = RecordingNotifier()
+
+    out = portfolio_monitor.monitor_once(db, _warning_broker(12.0), notifier)
+
+    assert out["breach"] is True and out["paused"] is True
+    assert notifier.of("risk_warning")            # the real breach alert
+    assert notifier.of("drawdown_warning") == []  # not both at once
+
+
+def test_drawdown_warning_shares_the_risk_category_switch():
+    """Turning off "ความเสี่ยง" in Settings must silence the early warning too."""
+    from app.services.notification_service import category_enabled
+
+    assert category_enabled(AppSettings(notify_risk_warning=True),
+                            "drawdown_warning") is True
+    assert category_enabled(AppSettings(notify_risk_warning=False),
+                            "drawdown_warning") is False
+
+
+def test_drawdown_warning_message_builder_is_self_consistent():
+    from app.integrations.line_client import build_drawdown_approach_alert
+
+    msg = build_drawdown_approach_alert(
+        9.0, 10.0, 1.0, equity=9100.0, peak_equity=10000.0,
+        open_positions=3, open_risk_pct=2.5)
+    assert "90% ของเพดาน" in msg
+    assert "9,100.00" in msg and "10,000.00" in msg
+    assert "3 ไม้" in msg and "2.50%" in msg
+    assert "เริ่มเตือนที่ 80%" in msg
+
+
+# ---------------------------------------------------------------------------
 # position guard — the emergency exit WAITS while the owner is deciding
 #
 # Prod 2026-09-14: the monitor pushed the "+5% expansion?" prompt at 17:33 and

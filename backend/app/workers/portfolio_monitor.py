@@ -25,12 +25,29 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
-from app.integrations.line_client import build_risk_alert
+from app.integrations.line_client import (DRAWDOWN_APPROACH_COOLDOWN_MIN,
+                                          build_drawdown_approach_alert,
+                                          build_risk_alert)
 from app.services import execution, limit_expand
 from app.services.database import Database
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
+
+# Drawdown at/above this fraction of the kill-switch limit triggers the EARLY
+# LINE warning ("ใกล้ถึงเพดาน") while trading is still running. 0.8 matches
+# goal_engine.DRAWDOWN_PRESSURE_RATIO, so the goal assessment and the alert
+# agree on when a drawdown counts as "eating the budget".
+DRAWDOWN_APPROACH_RATIO = 0.8
+
+# Notification type for the early warning. It is NOT "risk_warning": that type
+# is a CRITICAL push with a 30-min cooldown and its own wording ("TRADING
+# PAUSED"), and reusing it would (a) claim a pause that has not happened and
+# (b) let the early warning swallow the real breach alert's cooldown slot.
+# "drawdown_warning" is queued (non-critical) → worker #4 delivers it, and it
+# is gated by the SAME Settings category as risk_warning (see
+# notification_service.NOTIFY_CATEGORY_FIELDS).
+DRAWDOWN_WARNING_TYPE = "drawdown_warning"
 
 
 def _realized_pnl_since(closed_trades: list[dict], since: datetime) -> float:
@@ -100,6 +117,92 @@ def _peak_equity(db, capital: float, equity: float) -> float:
         return execution.peak_equity(db, capital, equity)
     except Exception:
         return max(capital, equity)
+
+
+def _drawdown_warning_due(db, cooldown_min: float) -> bool:
+    """True when the early drawdown warning may be pushed again.
+
+    Reads the newest ``drawdown_warning`` notifications row (created_at is
+    stamped by queue_notification). Fail-OPEN: when the lookup breaks we send —
+    a repeated warning beats a silently swallowed one, and the alert is
+    informational (nothing is paused by it).
+    """
+    try:
+        rows = db.select("notifications",
+                         filters={"type": DRAWDOWN_WARNING_TYPE},
+                         order="created_at", desc=True, limit=1)
+    except Exception:
+        return True
+    if not rows:
+        return True
+    raw = str(rows[0].get("created_at") or "")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+    return age_min >= cooldown_min
+
+
+def _notify_drawdown_approach(db, notifier, user_id: str, status,
+                              equity: float, peak: float,
+                              open_positions: int, open_risk_pct: float) -> bool:
+    """Push the "drawdown ใกล้ถึงเพดาน" early warning (throttled). Never raises.
+
+    Fires while the account is STILL TRADING (the breach path below owns the
+    "already paused" case), so the owner gets a chance to act before the kill
+    switch stops everything. Returns True when a push was attempted.
+    """
+    try:
+        max_dd = float(getattr(status, "max_drawdown_pct", 0) or 0)
+        dd = float(getattr(status, "current_drawdown_pct", 0) or 0)
+        if max_dd <= 0 or dd < max_dd * DRAWDOWN_APPROACH_RATIO:
+            return False
+        if not _drawdown_warning_due(db, DRAWDOWN_APPROACH_COOLDOWN_MIN):
+            log.info("drawdown approach warning skipped (cooldown %.0f min)",
+                     DRAWDOWN_APPROACH_COOLDOWN_MIN)
+            return False
+        alert = build_drawdown_approach_alert(
+            dd, max_dd, max(0.0, max_dd - dd), equity=equity,
+            peak_equity=peak, open_positions=open_positions,
+            open_risk_pct=open_risk_pct, warn_ratio=DRAWDOWN_APPROACH_RATIO)
+        _dispatch_notify(notifier, user_id, DRAWDOWN_WARNING_TYPE, alert)
+        log.warning("portfolio monitor: drawdown %.2f%% is %.0f%% of the %.2f%% "
+                    "limit → early warning pushed", dd, dd / max_dd * 100, max_dd)
+        return True
+    except Exception as exc:
+        log.error("drawdown approach warning failed: %s", exc)
+        return False
+
+
+def _dispatch_notify(notifier, user_id: str, ntype: str, message: str) -> None:
+    """Send through NotificationService from a sync OR async caller.
+
+    Same loop handling as the breach path: scheduler thread → asyncio.run,
+    running loop → fire-and-forget task. Never raises — a failed alert must
+    not take down the worker that is protecting the account.
+    """
+    if notifier is None:
+        return
+    try:
+        import asyncio
+        coro = notifier.notify(user_id, ntype, message)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is None:
+            asyncio.run(coro)  # sync scheduler thread (to_thread)
+        else:
+            # in-app scheduler: fire-and-forget on the running loop
+            task = running.create_task(coro)
+            task.add_done_callback(
+                lambda t: t.exception() and log.error(
+                    "%s notify failed: %s", ntype, t.exception()))
+    except Exception as exc:
+        log.error("%s notify failed: %s", ntype, exc)
 
 
 def _write_equity_snapshot(db, user_id: str, equity: float) -> bool:
@@ -208,23 +311,7 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
             status.current_drawdown_pct, status.max_drawdown_pct,
             "TRADING PAUSED — MANUAL REVIEW REQUIRED. ลดขนาดโพซิชัน/ปิดบางส่วน.",
         )
-        try:
-            import asyncio
-            coro = notifier.notify(user_id, "risk_warning", alert)
-            try:
-                running = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-            if running is None:
-                asyncio.run(coro)  # sync scheduler thread (to_thread)
-            else:
-                # in-app scheduler: fire-and-forget on the running loop
-                task = running.create_task(coro)
-                task.add_done_callback(
-                    lambda t: t.exception() and log.error(
-                        "risk alert notify failed: %s", t.exception()))
-        except Exception as exc:
-            log.error("risk alert notify failed: %s", exc)
+        _dispatch_notify(notifier, user_id, "risk_warning", alert)
         # 3) NEVER widen a risk limit silently. A breach only creates a PENDING
         # request and pushes ONE actionable prompt (Approve/Reject quick-reply
         # or /dd_ok, /dd_no); the pause stays engaged until the owner answers.
@@ -241,4 +328,16 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         return {"checked": 1, "breach": True, "paused": pause.paused,
                 "equity": round(equity, 2)}
 
-    return {"checked": 1, "breach": False, "equity": round(equity, 2)}
+    # No breach → the account is still trading. Warn EARLY when the drawdown
+    # has eaten most of the kill-switch budget ("ถ้ากำลังจะเกิน Max Drawdown
+    # ให้ส่ง notification ไปที่ line"): the owner can cut size or close a loser
+    # while the platform is still allowed to act, instead of learning about the
+    # limit only when trading has already stopped. Throttled per
+    # DRAWDOWN_APPROACH_COOLDOWN_MIN so the 1-minute loop cannot spam LINE.
+    warned = _notify_drawdown_approach(
+        db, notifier, user_id, status, equity=equity,
+        peak=snap.peak_equity, open_positions=len(open_rows),
+        open_risk_pct=status.open_risk_pct)
+
+    return {"checked": 1, "breach": False, "equity": round(equity, 2),
+            "drawdown_warning": warned}

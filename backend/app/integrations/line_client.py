@@ -18,6 +18,13 @@ log = logging.getLogger(__name__)
 
 API = "https://api.line.me/v2/bot/message"
 
+# How long the "drawdown ใกล้ถึงเพดาน" early warning stays quiet after one push.
+# The portfolio monitor re-evaluates every MINUTE, so without a cooldown a
+# standing 8.5%-of-10% drawdown would push an identical LINE alert 60 times an
+# hour. 6 h is deliberately longer than the risk_warning cooldown (30 min):
+# this is a "you still have room, but plan for it" notice, not an emergency.
+DRAWDOWN_APPROACH_COOLDOWN_MIN = 360.0
+
 
 def _text_message(text: str, quick_reply: Optional[list[dict]] = None) -> dict:
     """One text message, optionally carrying quick-reply buttons.
@@ -108,6 +115,52 @@ def build_risk_alert(drawdown_pct: float, max_dd: float, recommendation: str) ->
         f"Maximum Allowed Drawdown: {max_dd:.2f}%\n"
         f"Recommendation: {recommendation}"
     )
+
+
+def build_drawdown_approach_alert(drawdown_pct: float, max_dd: float,
+                                  remaining_pct: float,
+                                  equity: float = 0.0,
+                                  peak_equity: float = 0.0,
+                                  open_positions: int = 0,
+                                  open_risk_pct: float = 0.0,
+                                  warn_ratio: float = 0.8) -> str:
+    """EARLY warning: drawdown is approaching the kill-switch limit.
+
+    Distinct from ``build_risk_alert`` (which fires only AFTER the limit is
+    breached and trading is already paused). This one is the "ยังไม่เกิน แต่
+    ใกล้แล้ว" notice, so the owner can act while the account is still trading:
+    reduce size, close a loser, or raise the limit deliberately.
+
+    The numbers quoted are the SAME ones the kill switch uses
+    (``execution.kill_metrics`` → ``equity_drawdown_pct``), so the warning can
+    never disagree with the switch that will eventually fire.
+    """
+    pct_of_limit = (drawdown_pct / max_dd * 100.0) if max_dd > 0 else 0.0
+    lines = [
+        "⚠️ Drawdown ใกล้ถึงเพดาน (ยังไม่หยุดเทรด)",
+        f"• Drawdown ปัจจุบัน: {drawdown_pct:.2f}% "
+        f"({pct_of_limit:.0f}% ของเพดาน)",
+        f"• เพดาน Max Drawdown: {max_dd:.2f}% "
+        f"(เริ่มเตือนที่ {warn_ratio * 100:.0f}%)",
+        f"• เหลืออีก: {remaining_pct:.2f}% ก่อน kill switch หยุดเทรด",
+    ]
+    if equity > 0 and peak_equity > 0:
+        lines.append(f"• Equity: {equity:,.2f} (จุดสูงสุด {peak_equity:,.2f})")
+    if open_positions:
+        risk = f" · ความเสี่ยงไม้เปิดรวม {open_risk_pct:.2f}%" if open_risk_pct else ""
+        lines.append(f"• ไม้เปิดอยู่: {open_positions} ไม้{risk}")
+    lines += [
+        "",
+        "สถานะ: 🟢 ยังเทรดอยู่ — ยังไม่ถูก pause",
+        "ทำอะไรได้ตอนนี้",
+        "1) ลดขนาดไม้ / ปิดไม้ที่ขาดทุนก่อนถึงเพดาน",
+        "2) ตรวจว่าลิมิตที่ตั้งไว้ยังเหมาะกับแผน (หน้า Settings)",
+        "3) ถ้าตั้งใจรับความเสี่ยงสูงขึ้น → ปรับ Max Drawdown ที่หน้า Settings",
+        "",
+        f"⏱ เตือนซ้ำได้อีกครั้งหลัง {DRAWDOWN_APPROACH_COOLDOWN_MIN:.0f} นาที "
+        "ถ้ายังไม่เข้าใกล้เพดานขึ้นไปอีก",
+    ]
+    return "\n".join(lines)
 
 
 def build_trade_closed_alert(asset: str, result: str, pnl: float, growth_pct: float) -> str:

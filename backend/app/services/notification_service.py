@@ -43,7 +43,13 @@ NOTIFY_CATEGORY_FIELDS = {
     "notify_trade_opened": {"trade_opened"},
     "notify_trade_closed": {"trade_closed"},
     "notify_stop_loss": {"stop_loss"},
-    "notify_risk_warning": {"risk_warning"},
+    # drawdown_warning = the EARLY "ใกล้ถึงเพดาน Max Drawdown" notice pushed by
+    # portfolio_monitor while trading is still running. It shares the ความเสี่ยง
+    # switch with risk_warning on purpose: both are drawdown/portfolio-risk
+    # alerts, and a user who turned risk alerts off does not want this one
+    # either. It is NOT in CRITICAL_TYPES (queued → worker #4 delivers it) and
+    # has its own cooldown, so it can never consume the breach alert's slot.
+    "notify_risk_warning": {"risk_warning", "drawdown_warning"},
     "notify_daily_digest": {"daily_digest"},
     "notify_daily_summary": {"daily_portfolio_summary", "daily_market_summary",
                              "weekly_report", "monthly_report"},
