@@ -992,14 +992,23 @@ export default function MonitorPage() {
                       ของคอลัมน์จริง ๆ (width ที่ <th> เป็นแค่ preferred width) */}
                   <th className="py-2 pr-4 min-w-[5rem]">สถานะ</th>
                   <th className="py-2 pr-4">เหตุผลปิด</th>
+                  <th className="py-2 pr-4">Ticket</th>
                   <th className="py-2">ที่มา</th>
                 </tr>
               </thead>
               <tbody>
                 {snap.recent.map((t) => (
                   <tr key={t.id} className="border-t border-slate-800">
-                    <td className="py-2 pr-4 text-xs text-slate-400">
-                      {t.created_at ? new Date(t.created_at).toLocaleString("th-TH") : "-"}
+                    <td className="py-2 pr-4 text-xs text-slate-400"
+                      title={t.status === "closed" && t.closed_at && t.created_at
+                        ? `เปิด ${new Date(t.created_at).toLocaleString("th-TH")} · ปิด ${new Date(t.closed_at).toLocaleString("th-TH")}`
+                        : undefined}>
+                      {/* แถวปิดแล้วโชว์เวลาปิด (ตรงกับไทม์ไลน์ SL/TP ข้างใน)
+                          เดิมโชว์เวลาเปิด — แถว AUDNZD ขึ้น 14/9 ทั้งที่ประวัติ
+                          ข้างในเป็น 15/9 เลยดูเหมือน badge ไปติดผิดไม้ */}
+                      {t.status === "closed" && t.closed_at
+                        ? new Date(t.closed_at).toLocaleString("th-TH")
+                        : t.created_at ? new Date(t.created_at).toLocaleString("th-TH") : "-"}
                     </td>
                     <td className="py-2 pr-4 font-semibold">{t.asset}</td>
                     <td className="py-2 pr-4 font-bold">
@@ -1029,6 +1038,7 @@ export default function MonitorPage() {
                         />
                       )}
                     </td>
+                    <td className="py-2 pr-4 text-xs text-slate-500">{t.ticket || "-"}</td>
                     <td className="py-2 text-xs">{t.source === "auto" ? "Auto" : "Approve"}</td>
                   </tr>
                 ))}
