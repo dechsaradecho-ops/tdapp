@@ -352,8 +352,8 @@ TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
 # touched, so switching profile changed almost nothing. RISK_PRESETS is the
 # single source of truth: every field the profile owns, per level.
 #
-# Owns (38 fields): frequency ×5, signal gates ×8, position mgmt ×5,
-# Smart Exit ×12, kill/risk/news/correlation ×8.
+# Owns (42 fields): frequency ×5, signal gates ×8, position mgmt ×5,
+# Smart Exit ×12, kill/risk/news/correlation ×8, exposure/pre-open ×4.
 # Deliberately EXCLUDED (user identity, not risk appetite): capital,
 # min_confidence_gold / min_lot_gold overrides, min_lot floor, paper_spread /
 # spread_overrides, order_mode, default_equity / paper_virtual_capital,
@@ -387,6 +387,9 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "kill_weekly_loss_pct": 4.0, "kill_monthly_loss_pct": 6.0,
         "drawdown_throttle_pct": 3.0, "correlation_cap": 70.0,
         "news_block_minutes": 45, "news_caution_minutes": 180,
+        # exposure / pre-open guards — tight leash
+        "max_currency_exposure_pct": 40.0, "spread_guard_max_pct": 20.0,
+        "pre_news_flatten_min": 45, "session_filter_enabled": True,
     },
     RiskProfile.moderate: {
         "max_trades_daily": 6, "max_trades_weekly": 30,
@@ -409,6 +412,8 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "kill_weekly_loss_pct": 5.0, "kill_monthly_loss_pct": 8.0,
         "drawdown_throttle_pct": 5.0, "correlation_cap": 80.0,
         "news_block_minutes": 30, "news_caution_minutes": 120,
+        "max_currency_exposure_pct": 50.0, "spread_guard_max_pct": 25.0,
+        "pre_news_flatten_min": 30, "session_filter_enabled": True,
     },
     RiskProfile.aggressive: {
         # frequency — more, bigger bets
@@ -436,6 +441,8 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         "kill_weekly_loss_pct": 7.0, "kill_monthly_loss_pct": 12.0,
         "drawdown_throttle_pct": 7.0, "correlation_cap": 90.0,
         "news_block_minutes": 15, "news_caution_minutes": 60,
+        "max_currency_exposure_pct": 60.0, "spread_guard_max_pct": 35.0,
+        "pre_news_flatten_min": 15, "session_filter_enabled": False,
     },
 }
 
@@ -1049,6 +1056,41 @@ class ExposureEngine:
             return list(parts)
         return ["Other"]
 
+    # Explicit (base, quote) for the assets whose CURRENCY_MAP order is NOT
+    # [quote, base] (metals/crypto) — the map itself is inconsistent, so the
+    # side-aware view must be spelled out rather than inferred.
+    BASE_QUOTE_MAP = {
+        "XAUUSD": ("Gold", "USD"), "XAGUSD": ("Silver", "USD"),
+        "BTCUSD": ("Crypto", "USD"),
+    }
+
+    @classmethod
+    def _base_quote(cls, asset: str) -> tuple[str, str]:
+        """(base, quote) currencies for an asset — the SIDE-AWARE view.
+
+        `_currencies_for` returns the two currencies but its ORDER is not
+        consistent (the explicit CURRENCY_MAP is [quote, base] for FX while
+        the generic `fx_parts` derivation is (base, quote)), so it must never
+        be used to decide which leg is long/short. This helper normalises
+        every source to (base, quote) — the only ordering `currency_risk` may
+        use. Metals/crypto are spelled out in BASE_QUOTE_MAP because their
+        CURRENCY_MAP entries are [base, quote], not [quote, base].
+        """
+        a = str(asset or "").upper()
+        explicit = cls.BASE_QUOTE_MAP.get(a)
+        if explicit:
+            return explicit
+        parts = quotes.fx_parts(a)
+        if parts:
+            return parts[0], parts[1]
+        ccy = cls.CURRENCY_MAP.get(a)
+        if ccy and len(ccy) == 2:
+            # FX entries are stored [quote, base] (EURUSD → ["USD","EUR"]).
+            return ccy[1], ccy[0]
+        if ccy:
+            return ccy[0], "USD"
+        return "Other", "Other"
+
     @classmethod
     def analyze(cls, open_positions: list[dict]) -> list[ExposureBreakdown]:
         """positions: [{"asset", "direction": BUY/SELL, "volume"(lots), "price"}]."""
@@ -1067,6 +1109,82 @@ class ExposureEngine:
                 currency=ccy, exposure_pct=round(pct, 1),
                 direction_net=("net_long" if val > 0 else "net_short" if val < 0 else "flat")))
         return out
+
+    @classmethod
+    def currency_risk(cls, positions: list[dict], capital: float,
+                      cap_pct: float) -> dict:
+        """Currency-direction risk concentration vs a % of capital (Gate 4b).
+
+        WHY this exists next to `analyze`: `analyze` weights by NOTIONAL
+        (volume × price) and reports a share of the book — two AUD-long pairs
+        can look balanced there while the account is really one AUD bet. The
+        correlation cap (Gate 4) has the same blind spot: it averages pairwise
+        correlation, so AUDNZD + AUDCHF (0.55 prior) can sit under the cap
+        while both lose together on one AUD move.
+
+        This sums the RISK AT THE STOP (USD) per currency and per direction —
+        the money actually lost if every stop fills — and reports the largest
+        bucket as a % of capital. A pair contributes to BOTH its currencies
+        (AUDNZD BUY = long AUD, short NZD), so a long-AUD book and a short-NZD
+        book both show up.
+
+        positions: [{"asset", "direction", "volume"(lots), "entry_price",
+                     "stop_loss"}] — rows without a usable SL are skipped.
+        Returns {currency, direction, risk_usd, pct, cap_pct, over_cap,
+                 buckets: [{currency, direction, risk_usd, pct}]} — the largest
+        bucket drives the verdict. Never raises (empty result on bad input).
+        """
+        empty = {"currency": "", "direction": "", "risk_usd": 0.0, "pct": 0.0,
+                 "cap_pct": float(cap_pct or 0.0), "over_cap": False,
+                 "buckets": []}
+        try:
+            cap = float(cap_pct or 0.0)
+            cap_usd = float(capital or 0.0)
+            if cap <= 0 or cap_usd <= 0:
+                return empty
+            buckets: dict[tuple[str, str], float] = {}
+            for p in positions or []:
+                try:
+                    asset = str(p.get("asset") or "").upper()
+                    entry = float(p.get("entry_price") or 0)
+                    sl = float(p.get("stop_loss") or 0)
+                    vol = float(p.get("volume") or 0)
+                    if not asset or entry <= 0 or sl <= 0 or vol <= 0:
+                        continue
+                    risk = abs(entry - sl) * vol * contract_value_for(asset)
+                    if risk <= 0:
+                        continue
+                    long_side = str(p.get("direction") or "").upper() == "BUY"
+                    base, quote = cls._base_quote(asset)
+                    # BUY = long the base, short the quote (and vice versa).
+                    for c, is_base in ((base, True), (quote, False)):
+                        if c == "Other":
+                            continue
+                        if is_base:
+                            side = "long" if long_side else "short"
+                        else:
+                            side = "short" if long_side else "long"
+                        key = (c, side)
+                        buckets[key] = buckets.get(key, 0.0) + risk
+                except Exception:
+                    continue
+            if not buckets:
+                return empty
+            rows = [
+                {"currency": c, "direction": d, "risk_usd": round(v, 2),
+                 "pct": round(v / cap_usd * 100.0, 2)}
+                for (c, d), v in buckets.items()
+            ]
+            rows.sort(key=lambda r: -r["risk_usd"])
+            top = rows[0]
+            return {
+                "currency": top["currency"], "direction": top["direction"],
+                "risk_usd": top["risk_usd"], "pct": top["pct"],
+                "cap_pct": cap, "over_cap": top["pct"] > cap,
+                "buckets": rows,
+            }
+        except Exception:
+            return empty
 
 
 # ---------- Economic Calendar & News Risk ----------
@@ -2033,6 +2151,29 @@ class AppSettings(BaseModel):
     news_block_minutes: int = 30
     news_caution_minutes: int = 120
     correlation_cap: float = 80.0
+
+    # ---- Currency exposure cap (Gate 4b, migration 041) --------------------
+    # Correlation cap (Gate 4) measures the AVERAGE pairwise correlation of the
+    # book, so two AUD-long pairs (AUDNZD + AUDCHF) can each look "diversified"
+    # while the account is really one AUD bet. This gate sums the RISK (USD at
+    # the stop) per currency and per direction and blocks when one currency
+    # would exceed this share of capital. 0 disables the gate.
+    max_currency_exposure_pct: float = 50.0
+
+    # ---- Pre-open guards (Gate 3b, migration 041) --------------------------
+    # Spread guard: block when the symbol's spread eats more than this % of the
+    # SL distance (a 0.00035 spread on a 0.0007 SL = 50% — the edge is gone
+    # before the trade starts). 0 disables.
+    spread_guard_max_pct: float = 25.0
+    # Pre-news flatten: block a NEW order when a high-impact event for one of
+    # the pair's currencies lands within this many minutes (0 = use the news
+    # gate's own block window only). 0 disables the extra pre-open check.
+    pre_news_flatten_min: int = 30
+    # Session filter: block new orders while the market is closed (weekend gap)
+    # or only a low-liquidity session is open (Sydney-only hours). False
+    # disables (the scanner already stops emitting when closed).
+    session_filter_enabled: bool = True
+
     order_mode: str = "auto"
     # Which SL/TP distance tier opens the real order. Signal cards preview 3
     # tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR); the stored signal row

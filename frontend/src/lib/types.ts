@@ -840,6 +840,18 @@ export interface AppSettings {
   news_block_minutes: number;
   news_caution_minutes: number;
   correlation_cap: number;
+  /** เพดานความเสี่ยงต่อสกุล (%) — Gate 4b (migration 041): รวม risk-at-stop
+   *  ต่อสกุล+ทิศทาง (ไม้เปิด + ไม้นี้) ห้ามเกิน % ของทุน — 0 = ปิด (default 50) */
+  max_currency_exposure_pct: number;
+  /** เพดานสเปรดต่อระยะ SL (%) — Gate 3b (migration 041): สเปรดกินระยะ SL
+   *  เกิน % นี้ = edge หาย งดเปิดไม้ — 0 = ปิด (default 25) */
+  spread_guard_max_pct: number;
+  /** งดเปิดไม้ใหม่ก่อนข่าว high-impact กี่นาที — Gate 3b (migration 041):
+   *  เฉพาะข่าวของสกุลในคู่นั้น — 0 = ปิด (default 30) */
+  pre_news_flatten_min: number;
+  /** ตัวกรอง session — Gate 3b (migration 041): งดเปิดไม้ใหม่ตอนตลาดปิด
+   *  (weekend) หรือสภาพคล่องต่ำ (Sydney-only) — false = ปิด (default true) */
+  session_filter_enabled: boolean;
   order_mode: string;
   sl_distance_mode: "short" | "medium" | "long";
   /** SL distance clamp (% of price) — 0 disables a bound; min=max forces a fixed distance */

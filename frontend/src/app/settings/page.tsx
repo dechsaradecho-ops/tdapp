@@ -64,6 +64,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   news_block_minutes: 30,
   news_caution_minutes: 120,
   correlation_cap: 80,
+  max_currency_exposure_pct: 50,
+  spread_guard_max_pct: 25,
+  pre_news_flatten_min: 30,
+  session_filter_enabled: true,
   order_mode: "auto",
   sl_distance_mode: "medium",
   sl_distance_min_pct: 0,
@@ -1198,6 +1202,29 @@ export default function SettingsPage() {
               <NumField label="Correlation Cap (0-100)" value={cfg.correlation_cap}
                 onChange={(v) => set("correlation_cap", v)} step={1}
                 hint="คะแนนสหสัมพันธ์พอร์ตเกินนี้ = บล็อกไม้ใหม่ (กันเปิดหลายคู่ทางเดียวกันเกินไป)" />
+              <NumField label="เพดานเสี่ยงต่อสกุล (%)" value={cfg.max_currency_exposure_pct}
+                onChange={(v) => set("max_currency_exposure_pct", v)} step={5}
+                hint="Gate 4b: รวม risk-at-stop ต่อสกุล+ทิศทาง (ไม้เปิด + ไม้นี้) ห้ามเกิน % ของทุน — กันเปิดไม้ทับสกุลเดิม (AUDNZD+AUDCHF) — 0 = ปิด" />
+              <NumField label="เพดานสเปรดต่อระยะ SL (%)" value={cfg.spread_guard_max_pct}
+                onChange={(v) => set("spread_guard_max_pct", v)} step={5}
+                hint="Gate 3b: สเปรดกินระยะ SL เกิน % นี้ = edge หายก่อนเปิดไม้ — 0 = ปิด" />
+              <NumField label="งดเปิดไม้ก่อนข่าว (นาที)" value={cfg.pre_news_flatten_min}
+                onChange={(v) => set("pre_news_flatten_min", v)} step={5}
+                hint="Gate 3b: งดเปิดไม้ใหม่ก่อนข่าว high-impact ของสกุลในคู่นั้น — 0 = ปิด" />
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm">ตัวกรอง Session</p>
+                  <p className="text-[11px] text-slate-500">
+                    Gate 3b: งดเปิดไม้ใหม่ตอนตลาดปิด (weekend) หรือสภาพคล่องต่ำ (Sydney-only)
+                  </p>
+                </div>
+                <button type="button" onClick={() => set("session_filter_enabled", !cfg.session_filter_enabled)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 ${
+                    cfg.session_filter_enabled ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.session_filter_enabled ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
               <NumField label="Paper Capital เสมือน" value={cfg.paper_virtual_capital}
                 onChange={(v) => set("paper_virtual_capital", v)} step={10_000}
                 hint="เงินจำลองสำหรับ paper trading — ใช้คำนวณ lot โหมดกระดาษแยกจากทุนจริง" />

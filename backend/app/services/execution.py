@@ -34,12 +34,14 @@ from app.models.schemas import (
     PauseStatus,
     RiskOfficer,
     RiskProfile,
+    SessionEngine,
     TradeLimits,
     contract_value_for,
     effective_min_confidence,
     effective_min_lot,
     effective_sl_tp,
     effective_spread,
+    is_market_closed,
     risk_to_lot,
     risk_to_lot_for,
 )
@@ -735,10 +737,158 @@ def reentry_cooldown_block(db, s: AppSettings, asset: str,
 # ---------------------------------------------------------------------------
 # The gate pipeline
 # ---------------------------------------------------------------------------
+def currency_exposure_block(db, s: AppSettings, asset: str,
+                            entry: Optional[float] = None,
+                            stop_loss: Optional[float] = None,
+                            volume: Optional[float] = None,
+                            direction: str = "") -> str:
+    """Thai block reason when the new order over-concentrates one currency.
+
+    Gate 4b — the correlation cap (Gate 4) averages pairwise correlation, so
+    AUDNZD + AUDCHF (0.55 prior) can sit under the cap while the account is
+    really ONE AUD bet. This sums the risk-at-stop per currency/direction over
+    the OPEN book PLUS the candidate order and blocks when the largest bucket
+    exceeds `max_currency_exposure_pct` of capital.
+
+    The candidate's own risk is sized with the SAME helper the order will use
+    (size_position → min_lot floor), so the gate judges the trade that would
+    actually open. 0 / missing cap disables. Fail-open ("") when the book is
+    unreadable — the other gates still protect. The execution gate AND the
+    signal-card preview MUST both call this (no drift).
+    """
+    try:
+        cap = float(getattr(s, "max_currency_exposure_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if cap <= 0:
+        return ""
+    asset_u = str(asset or "").upper()
+    if not asset_u:
+        return ""
+    try:
+        rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+    except Exception:
+        return ""
+    positions: list[dict] = []
+    for r in rows or []:
+        try:
+            positions.append({
+                "asset": str(r.get("asset") or "").upper(),
+                "direction": str(r.get("direction") or "").upper(),
+                "volume": float(r.get("volume") or 0),
+                "entry_price": float(r.get("entry_price") or 0),
+                "stop_loss": float(r.get("stop_loss") or 0),
+            })
+        except Exception:
+            continue
+    # Add the candidate order (sized exactly like the real order would be).
+    if entry and stop_loss:
+        try:
+            lots = (round(float(volume), 2) if volume and float(volume) > 0
+                    else size_position(s, float(entry), float(stop_loss),
+                                       asset=asset_u))
+            if lots > 0:
+                positions.append({
+                    "asset": asset_u,
+                    "direction": str(direction or "").upper(),
+                    "volume": lots,
+                    "entry_price": float(entry),
+                    "stop_loss": float(stop_loss),
+                })
+        except Exception:
+            pass
+    try:
+        from app.models.schemas import ExposureEngine
+        res = ExposureEngine.currency_risk(
+            positions, float(getattr(s, "capital", 0) or 0), cap)
+    except Exception:
+        return ""
+    if not res.get("over_cap"):
+        return ""
+    ccy = res.get("currency") or "?"
+    side = "LONG" if res.get("direction") == "long" else "SHORT"
+    return (f"สกุล {ccy} เอียง {side} เกินเพดาน {cap:g}% ของทุน "
+            f"(เสี่ยงรวม {res.get('pct', 0):.1f}% = ${res.get('risk_usd', 0):,.2f}) "
+            f"— ไม้เปิดทับสกุลเดียวกัน รอปิดไม้เดิมก่อน")
+
+
+def pre_open_block(db, s: AppSettings, asset: str,
+                   entry: Optional[float] = None,
+                   stop_loss: Optional[float] = None) -> str:
+    """Thai block reason from the pre-open guards (Gate 3b), else "".
+
+    Three independent checks, each disabled by its own 0/False setting:
+      1. spread guard — the symbol's spread as a % of the SL distance; a wide
+         spread on a tight stop means the edge is gone before entry.
+      2. pre-news flatten — a high-impact event for one of the pair's
+         currencies inside `pre_news_flatten_min` minutes.
+      3. session filter — market closed (weekend gap) or only a low-liquidity
+         session open (Sydney-only hours).
+
+    Fail-open ("") on any read error — the news/session gates still protect.
+    Shared with the signal-card preview so the card explains the block first.
+    """
+    asset_u = str(asset or "").upper()
+    if not asset_u:
+        return ""
+    # ---- 1. spread guard --------------------------------------------------
+    try:
+        cap = float(getattr(s, "spread_guard_max_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if cap > 0 and entry and stop_loss:
+        try:
+            dist = abs(float(entry) - float(stop_loss))
+            spread = effective_spread(s, asset_u)
+            if dist > 0 and spread > 0:
+                pct = spread / dist * 100.0
+                if pct > cap:
+                    return (f"สเปรด {spread:g} กินระยะ SL {pct:.0f}% "
+                            f"(เกินเพดาน {cap:g}%) — edge หายก่อนเปิดไม้")
+        except Exception:
+            pass
+    # ---- 2. pre-news flatten ---------------------------------------------
+    try:
+        pre_min = int(getattr(s, "pre_news_flatten_min", 0) or 0)
+    except (TypeError, ValueError):
+        pre_min = 0
+    if pre_min > 0:
+        try:
+            news = _news_risk(db, s)
+            nxt = news.next_high_impact
+            mins = news.minutes_to_next
+            if nxt is not None and mins is not None and mins <= pre_min:
+                # Only block when the event's currency is in this pair.
+                from app.models.schemas import ExposureEngine
+                base, quote = ExposureEngine._base_quote(asset_u)
+                pair_ccy = {base, quote}
+                ev_ccy = str(getattr(nxt, "currency", "") or "").upper()
+                if ev_ccy and ev_ccy in pair_ccy:
+                    return (f"ข่าว {nxt.event} ({ev_ccy}) อีก {mins:.0f} นาที "
+                            f"— งดเปิดไม้ใหม่ก่อนข่าว (เพดาน {pre_min} นาที)")
+        except Exception:
+            pass
+    # ---- 3. session filter ------------------------------------------------
+    if bool(getattr(s, "session_filter_enabled", False)):
+        try:
+            if is_market_closed():
+                return "ตลาดปิด (weekend) — งดเปิดไม้ใหม่ กัน gap วันจันทร์"
+            sess = SessionEngine.active()
+            if not sess.overlapping and sess.volatility_hint == "low":
+                names = ", ".join(sess.active_sessions) or "ไม่มี"
+                return (f"ช่วงสภาพคล่องต่ำ ({names}) — งดเปิดไม้ใหม่ "
+                        "รอ London/New York เปิด")
+        except Exception:
+            pass
+    return ""
+
+
 def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                   confidence: float, opportunity: float,
                   entry: Optional[float] = None,
-                  stop_loss: Optional[float] = None) -> GateReport:
+                  stop_loss: Optional[float] = None,
+                  direction: str = "",
+                  volume: Optional[float] = None) -> GateReport:
     """Run every safety gate. Returns GateReport with allowed=False on any block.
 
     size_lots is computed here too, so callers never place an un-sized order.
@@ -822,6 +972,20 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
         rejects.append(f"News gate: {news.reason}")
     checks.append(f"news={news.status}")
 
+    # ---- Gate 3b: pre-open guards (spread / pre-news / session) -----------
+    # Runs AFTER the news gate so a DANGER block is reported first, and BEFORE
+    # correlation/exposure so the cheapest-to-explain reason wins. Shared
+    # helper with the signal-card preview (no drift).
+    try:
+        _pre = pre_open_block(db, s, asset, entry=entry, stop_loss=stop_loss)
+    except Exception as exc:
+        _pre = ""
+        checks.append(f"pre_open=error {exc}")
+    else:
+        checks.append(f"pre_open={'blocked' if _pre else 'clear'}")
+    if _pre:
+        rejects.append(_pre)
+
     # ---- Gate 4: correlation cap -----------------------------------------
     corr_score, corr_reject = 0.0, ""
     try:
@@ -837,6 +1001,22 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     if corr_reject:
         rejects.append(f"Correlation gate: {corr_reject}")
     checks.append(f"correlation={corr_score:.0f}/cap {s.correlation_cap:.0f}")
+
+    # ---- Gate 4b: currency exposure cap -----------------------------------
+    # Correlation averages pairwise priors, so two AUD-long pairs can pass
+    # Gate 4 while the book is one AUD bet. This sums risk-at-stop per
+    # currency/direction (open book + this order) vs the cap.
+    try:
+        _exp = currency_exposure_block(
+            db, s, asset, entry=entry, stop_loss=stop_loss, volume=volume,
+            direction=direction)
+    except Exception as exc:
+        _exp = ""
+        checks.append(f"exposure=error {exc}")
+    else:
+        checks.append(f"exposure={'over' if _exp else 'ok'}")
+    if _exp:
+        rejects.append(_exp)
 
     # ---- Gate 5: risk officer (final veto) --------------------------------
     officer = RiskOfficer().review_trade(
@@ -1015,7 +1195,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         except Exception as exc:
             log.warning("effective_sl_tp failed for %s: %s", asset, exc)
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
-                           entry=entry, stop_loss=stop_loss)
+                           entry=entry, stop_loss=stop_loss,
+                           direction=direction, volume=volume)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)
         # Lifecycle log: the gate said NO (pause/limits/news/correlation/...).

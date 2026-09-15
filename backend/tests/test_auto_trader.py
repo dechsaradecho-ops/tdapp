@@ -214,9 +214,14 @@ class TestGatePipeline:
         # kill budget raised: the 0.05 floor risks ~$250 on $100 capital —
         # Gate 6 (heat) would block it under the default 2% budget, which
         # would hide the floor behaviour this test isolates.
+        # Gate 3b/4b disabled too: the tiny $100 capital makes the SL cap
+        # tighten the stop to 0.02, so the gold spread (0.30) would look like
+        # 1500% of the SL and the spread guard would mask the floor.
         s = clean_settings(capital=100.0, risk_per_trade_pct=0.1,
                            min_lot=0.01, min_lot_gold=0.05,
-                           kill_daily_loss_pct=500.0)
+                           kill_daily_loss_pct=500.0,
+                           max_currency_exposure_pct=0.0,
+                           spread_guard_max_pct=0.0)
         report = await execution.execute_signal(
             db, broker, notifier, s,
             user_id="demo", asset="XAUUSD", direction="BUY",

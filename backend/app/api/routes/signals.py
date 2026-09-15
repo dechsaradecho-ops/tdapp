@@ -265,6 +265,26 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
                                    f"(สัปดาห์นี้ {week_count}/"
                                    f"{s.max_trades_weekly})")
+                # Pre-open guards (Gate 3b) + currency exposure (Gate 4b) —
+                # SAME shared helpers as the execution gate, so the card
+                # explains the block before it happens (no drift). Fail-open.
+                if not order_block:
+                    try:
+                        _pre = execution.pre_open_block(
+                            db, s, asset, entry=entry, stop_loss=stop_loss)
+                    except Exception:
+                        _pre = ""
+                    if _pre:
+                        order_block = f"ไม่ได้เปิดออเดอร์นี้เพราะ {_pre}"
+                if not order_block:
+                    try:
+                        _exp = execution.currency_exposure_block(
+                            db, s, asset, entry=entry, stop_loss=stop_loss,
+                            direction=str(r.get("direction") or ""))
+                    except Exception:
+                        _exp = ""
+                    if _exp:
+                        order_block = f"ไม่ได้เปิดออเดอร์นี้เพราะ {_exp}"
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
