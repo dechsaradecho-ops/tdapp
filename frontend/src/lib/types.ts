@@ -768,6 +768,8 @@ export interface AppSettings {
   max_trades_weekly: number;
   max_open_positions: number;
   risk_per_trade_pct: number;
+  /** Re-entry cooldown (นาที) หลังปิดไม้คู่ไหนก่อนเปิดคู่นั้นใหม่ — 0 = ปิดฟีเจอร์ */
+  reentry_cooldown_min: number;
   /** Minimum lot size for opened orders (floor of risk_to_lot sizing) */
   min_lot: number;
   /** Gold (XAUUSD) override — null/undefined = use min_lot */

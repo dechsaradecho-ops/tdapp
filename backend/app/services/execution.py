@@ -672,6 +672,67 @@ def evaluate_kill(db, s: AppSettings,
 
 
 # ---------------------------------------------------------------------------
+# Re-entry cooldown — SINGLE shared check (gate + signal card share this)
+# ---------------------------------------------------------------------------
+def reentry_cooldown_block(db, s: AppSettings, asset: str,
+                           now: Optional[datetime] = None) -> str:
+    """Thai block reason when SAME-asset re-entry is still cooling down, else "".
+
+    Measures from the latest paper_trades.closed_at for `asset`. Stops the
+    1-minute close→reopen loop: the guard closes on SL/TP/time-stop and the
+    auto-trader would otherwise re-fire the still-pending signal next cycle.
+    0 / missing cooldown disables. Fail-open ("" ) when history is unreadable
+    so one broken read can never halt all trading — the other gates still
+    protect. The execution gate AND the signal-card preview MUST both call
+    this so the card explains the block before it happens (no drift).
+    """
+    try:
+        cooldown = int(getattr(s, "reentry_cooldown_min", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if cooldown <= 0:
+        return ""
+    asset_u = str(asset or "").upper()
+    if not asset_u:
+        return ""
+    try:
+        rows = db.select("paper_trades", filters={"status": "closed"},
+                         limit=200)
+    except Exception:
+        return ""
+    latest: Optional[datetime] = None
+    try:
+        for r in rows or []:
+            try:
+                if str(r.get("asset") or "").upper() != asset_u:
+                    continue
+                dt = _parse_dt(r.get("closed_at"))
+                if dt is None:
+                    continue
+                if latest is None or dt > latest:
+                    latest = dt
+            except Exception:
+                continue
+    except Exception:
+        return ""
+    if latest is None:
+        return ""
+    try:
+        at = now or datetime.now(timezone.utc)
+        elapsed = (at - latest).total_seconds() / 60.0
+        if elapsed < 0:
+            elapsed = 0.0
+        if elapsed >= cooldown:
+            return ""
+        left = cooldown - elapsed
+        return (f"เพิ่งปิด {asset_u} ไป {elapsed:.1f} นาที — "
+                f"รอ cooldown {cooldown:g} นาที กันเปิดซ้ำทันที "
+                f"(เหลืออีก {left:.1f} นาที)")
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # The gate pipeline
 # ---------------------------------------------------------------------------
 def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
@@ -736,6 +797,20 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     if not freq_allowed:
         rejects.append(freq_reason)
     checks.append(f"frequency={'ok' if freq_allowed else freq_reason}")
+
+    # ---- Gate 2b: re-entry cooldown (SAME asset, closed_at recency) --------
+    # Stops the 1-minute close→reopen loop: guard closes on SL/TP/time-stop,
+    # auto-trader would otherwise re-fire the still-pending signal next cycle
+    # (30-min TTL). Shared helper with the signal-card preview (no drift).
+    try:
+        _cool = reentry_cooldown_block(db, s, asset)
+    except Exception as exc:
+        _cool = ""
+        checks.append(f"cooldown=error {exc}")
+    else:
+        checks.append(f"cooldown={'cooling' if _cool else 'clear'}")
+    if _cool:
+        rejects.append(_cool)
 
     # ---- Gate 3: news block ----------------------------------------------
     news: NewsRiskStatus

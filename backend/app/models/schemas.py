@@ -352,7 +352,7 @@ TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
 # touched, so switching profile changed almost nothing. RISK_PRESETS is the
 # single source of truth: every field the profile owns, per level.
 #
-# Owns (37 fields): frequency ×4, signal gates ×8, position mgmt ×5,
+# Owns (38 fields): frequency ×5, signal gates ×8, position mgmt ×5,
 # Smart Exit ×12, kill/risk/news/correlation ×8.
 # Deliberately EXCLUDED (user identity, not risk appetite): capital,
 # min_confidence_gold / min_lot_gold overrides, min_lot floor, paper_spread /
@@ -365,6 +365,7 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         # frequency — fewer, smaller bets
         "max_trades_daily": 3, "max_trades_weekly": 15,
         "max_open_positions": 2, "risk_per_trade_pct": 0.5,
+        "reentry_cooldown_min": 60,
         # signal gates — demand higher quality, gold breakout only
         "min_confidence": 75.0, "min_opportunity": 65.0,
         "gold_breakout_only": True, "sl_distance_mode": "medium",
@@ -390,6 +391,7 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
     RiskProfile.moderate: {
         "max_trades_daily": 6, "max_trades_weekly": 30,
         "max_open_positions": 4, "risk_per_trade_pct": 1.0,
+        "reentry_cooldown_min": 30,
         "min_confidence": 70.0, "min_opportunity": 60.0,
         "gold_breakout_only": True, "sl_distance_mode": "medium",
         "rr_target": 2.0, "sl_distance_min_pct": 0.0,
@@ -412,6 +414,7 @@ RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
         # frequency — more, bigger bets
         "max_trades_daily": 10, "max_trades_weekly": 50,
         "max_open_positions": 8, "risk_per_trade_pct": 2.0,
+        "reentry_cooldown_min": 15,
         # signal gates — accept lower quality, gold trades every setup
         "min_confidence": 65.0, "min_opportunity": 55.0,
         "gold_breakout_only": False, "sl_distance_mode": "long",
@@ -1880,6 +1883,14 @@ class AppSettings(BaseModel):
     max_trades_weekly: int = 30
     max_open_positions: int = 4
     risk_per_trade_pct: float = 1.0
+    # Re-entry cooldown: minutes after a position on the SAME asset closes
+    # before a new order on that asset may open. 0 disables. Default 30 —
+    # stops the 1-minute close→reopen loop (guard closes on SL/TP/time-stop,
+    # auto-trader re-fires the still-pending signal next cycle). The gate
+    # measures from paper_trades.closed_at per asset, so a TP exit and an
+    # SL exit cool down equally — a fresh setup must survive one scanner
+    # cycle before re-entering.
+    reentry_cooldown_min: int = 30
     # Minimum lot size for every opened order (PaperBroker floor). The
     # risk_to_lot result is raised to this value so tiny accounts still trade
     # a visible size — user-configurable (e.g. 0.02) from the Settings page.

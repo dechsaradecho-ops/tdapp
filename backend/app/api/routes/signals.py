@@ -239,7 +239,17 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 if asset in open_assets:
                     order_block = (f"ไม่ได้เปิดออเดอร์ใหม่เพราะ {asset} "
                                    f"มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน")
-                elif heat_cap > 0 and heat_open_pct + _new_pct > heat_limit:
+                else:
+                    # Re-entry cooldown preview — SAME shared helper as the
+                    # execution gate (Gate 2b), so the card explains the block
+                    # before it happens (no drift). Fail-open: "" = clear.
+                    try:
+                        _cool = execution.reentry_cooldown_block(db, s, asset)
+                    except Exception:
+                        _cool = ""
+                    if _cool:
+                        order_block = f"ไม่ได้เปิดออเดอร์นี้เพราะ {_cool}"
+                if not order_block and heat_cap > 0 and heat_open_pct + _new_pct > heat_limit:
                     order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะ heat เต็ม "
                                    f"(ไม้เปิด {heat_open_pct:.2f}% + ไม้นี้ ~{_new_pct:.2f}% "
                                    f"เกินงบ daily {heat_limit:g}%) — รอปิดไม้เดิมก่อน")

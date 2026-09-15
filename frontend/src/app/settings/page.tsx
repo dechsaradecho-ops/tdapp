@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   max_trades_weekly: 30,
   max_open_positions: 4,
   risk_per_trade_pct: 1.0,
+  reentry_cooldown_min: 30,
   min_lot: 0.01,
   min_lot_gold: null,
   breakeven_trigger_r: 1.0,
@@ -415,7 +416,7 @@ export default function SettingsPage() {
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
 
-  // --- risk preset (36 ช่องความเสี่ยงตามโปรไฟล์) — ดึงค่ามาใส่ฟอร์มเฉย ๆ
+  // --- risk preset (38 ช่องความเสี่ยงตามโปรไฟล์) — ดึงค่ามาใส่ฟอร์มเฉย ๆ
   // ยังไม่บันทึกลง DB จนกว่าจะกด “บันทึกการตั้งค่า” (กันเผลอกดแล้วค่าเปลี่ยนทันที) ---
   const [presetBusy, setPresetBusy] = useState(false);
   const [presetMsg, setPresetMsg] = useState("");
@@ -867,7 +868,7 @@ export default function SettingsPage() {
                       options={RISK_PROFILES} />
                   </div>
                   <button type="button" onClick={applyPreset} disabled={presetBusy}
-                    title="ใส่ค่า 36 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
+                    title="ใส่ค่า 38 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
                     className="shrink-0 bg-accent text-white text-xs font-semibold rounded px-3 min-h-[40px] disabled:opacity-50 active:brightness-90">
                     <span className="inline-flex items-center gap-1.5">
                       {presetBusy && <Icon n="spinner" size={13} className="animate-spin" />}
@@ -877,7 +878,7 @@ export default function SettingsPage() {
                 </div>
                 <span className="block text-xs text-slate-500 mt-1">
                   เปลี่ยน dropdown อย่างเดียว = เปลี่ยนชื่อโปรไฟล์เฉย ๆ — กด “ใช้ preset”
-                  เพื่อใส่ค่าความเสี่ยงทั้ง 36 ช่องลงฟอร์ม (ลิมิตเทรด, signal gate, จัดการไม้,
+                  เพื่อใส่ค่าความเสี่ยงทั้ง 38 ช่องลงฟอร์ม (ลิมิตเทรด, signal gate, จัดการไม้,
                   Smart Exit, kill switch, ข่าว, correlation) แล้วกด “บันทึกการตั้งค่า” เพื่อลง DB
                   {presetMsg && <span className="text-accent"> · {presetMsg}</span>}
                 </span>
@@ -949,6 +950,9 @@ export default function SettingsPage() {
               <NumField label="Risk ต่อไม้ (%)" value={cfg.risk_per_trade_pct}
                 onChange={(v) => set("risk_per_trade_pct", v)} step={0.1}
                 hint="ขาดทุนสูงสุดต่อไม้เป็น % ของทุน — ใช้คำนวณ lot ทุก order (หัวใจ money management)" />
+              <NumField label="Cooldown กันเปิดซ้ำ (นาที)" value={cfg.reentry_cooldown_min}
+                onChange={(v) => set("reentry_cooldown_min", v)} step={1}
+                hint="หลังปิดไม้คู่ไหน ต้องรอครบเท่านี้ก่อนเปิดคู่นั้นใหม่ — กันปิดแล้วเปิดซ้ำในนาทีเดียว (0 = ปิดฟีเจอร์)" />
               <NumField label="ขนาด Lot ขั้นต่ำ (min_lot)" value={cfg.min_lot}
                 onChange={(v) => set("min_lot", v)} step={0.01}
                 hint="พื้น lot ทุก order — คำนวณจาก %risk ได้เท่าไรก็ปัดขึ้นไม่ต่ำกว่านี้ (เช่น 0.02 กันไม้จิ๋ว)" />
