@@ -1,7 +1,7 @@
 # tdapp — สรุปฟีเจอร์ทั้งหมด (FEATURES)
 
-> อัปเดตล่าสุด: 2026-09-15 · commit `75a222e` (monitor: recent แถวปิดโชว์ `closed_at` + คอลัมน์ Ticket) · ก่อนหน้า `4084011` (re-entry cooldown Gate 2b)
-> เอกสารเทคนิคอื่น: `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `MENU-REORG-PLAN.md` (โครงเมนู 5 เมนู), `database/*.sql` (migration 001–040)
+> อัปเดตล่าสุด: 2026-09-18 · **Web Push (VAPID)** = ช่องแจ้งเตือนที่ 2 คู่กับ LINE + การ์ด "การแจ้งเตือนมือถือ" ในหน้า Settings (มีปุ่ม **ทดสอบการแจ้งเตือน**) · ก่อนหน้า 2026-09-15 commit `75a222e` (monitor: recent แถวปิดโชว์ `closed_at` + คอลัมน์ Ticket)
+> เอกสารเทคนิคอื่น: `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `MENU-REORG-PLAN.md` (โครงเมนู 5 เมนู), `PUSH-NOTIFICATION-PLAN.md` (แผน Web Push), `database/*.sql` (migration 001–042)
 
 ## 1. ภาพรวมระบบ
 
@@ -15,7 +15,7 @@
 | Auth | PIN 6 หลัก (hash ฝั่ง server), session ใน memory + Bearer token |
 | AI | DeepSeek / GLM — model + base URL ตั้งจากหน้า Settings ได้ (fallback `backend/ai.config.json`) |
 | Trading | Paper-trading engine; broker adapter (MT5/OANDA/IB) หลัง interface |
-| แจ้งเตือน | LINE Messaging API (6 หมวด เปิด/ปิดแยกกันได้) |
+| แจ้งเตือน | LINE Messaging API (6 หมวด เปิด/ปิดแยกกันได้) **+** Web Push/VAPID — เด้งเข้าถัง notification ของมือถือ/เดสก์ท็อปแม้ปิดแท็บ (2 ช่องทางทำงานคู่กัน ไม่แทนกัน) |
 | Deploy | Render — `tdapp-api` (web + workers ฝังในตัวผ่าน `ENABLE_WORKERS=1`) + `tdapp-web` (static) |
 
 **โหมดเทรด 3 แบบ** (`order_mode`): `auto` (AI เปิด/ปิดเอง), `semi_auto` (AI เสนอ → คนกดอนุมัติ), `manual` (AI วิเคราะห์อย่างเดียว ไม่ยิง order)
@@ -28,7 +28,7 @@
 | ⚡ สัญญาณ | `/signals` (แท็บ `สัญญาณ (สด) \| บันทึกสัญญาณ`) | การ์ด signal + ปุ่มอนุมัติ/ปฏิเสธ, เหตุผลบล็อก (`order_blocked`), preview SL/TP 3 tier (สั้น/กลาง/ยาว), SignalLevels/SltpLevels, SignalLogsPanel (tab `?tab=logs`) |
 | 📊 มอนิเตอร์ | `/monitor` (แท็บ `มอนิเตอร์ \| Performance`, `?tab=performance`) | สถิติเทรด, ตารางไม้เปิดค้าง (Paper), ประวัติยิง order ล่าสุด, Risk Engine Status (ย้ายมาล่างสุด), PerformancePanel (Equity/Journal/Backtest/Kill Switch) |
 | 📜 Logs | `/logs` (แท็บ quotes/news/scheduler/guard/gate/audit) | สุขภาพ quote feed, ประวัติ signal/news/scheduler/guard, risk logs |
-| ⚙️ ตั้งค่า | `/settings` | Portfolio, ระบบเทรด 38 ช่อง, preset ความเสี่ยง, ตกแต่ง (hero/bg), LINE (6 หมวด), AI model/URL, PIN, ทดสอบ DB |
+| ⚙️ ตั้งค่า | `/settings` | Portfolio, ระบบเทรด 38 ช่อง, preset ความเสี่ยง, ตกแต่ง (hero/bg), **การแจ้งเตือนมือถือ (Web Push + ปุ่มทดสอบ)**, LINE (6 หมวด), AI model/URL, PIN, ทดสอบ DB |
 | 💬 แชท | `/chat` + วิดเจ็ตลอยทุกหน้า | แชท AI แบบ stream, จำ 20 ข้อความใน localStorage |
 
 Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect stub (client redirect ชี้ `*.html` รองรับ static hosting + bookmark เก่า)
@@ -53,7 +53,7 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 | market_scanner | 5 นาที | วิเคราะห์ → score + signal pending |
 | news_analysis | 15 นาที | CPI/GDP/NFP/FOMC/geopolitics → sentiment |
 | portfolio_monitor | 1 นาที | drawdown/open-risk → auto-pause/close/notify |
-| notifications | 1 นาที | ส่งคิว LINE (critical = ทันที) |
+| notifications | 1 นาที | ส่งคิว LINE + Web Push (critical = ทันที) |
 | auto_trader | 1 นาที | เปิด order อัตโนมัติผ่าน gate |
 | position_guard | 1 นาที | breakeven/trailing/partial/time-stop/smart-exit |
 | calendar_sync | 6 ชม. | sync ปฏิทินข่าว → news block/caution |
@@ -100,6 +100,7 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 - **Settings (38 ช่อง + preset)**: Portfolio (capital/target/drawdown/mode/allowed assets/backtest), ระบบเทรด (confidence ทองแยก, opportunity, จำนวนไม้ daily/weekly/open, risk/trade, **cooldown**, min lot ทองแยก, breakeven/trailing/partial/hold/RR, smart-exit ทั้งชุด, gold breakout, spread/commission, kill limits + expand TTL/auto-apply, news block/caution, correlation, SL mode/clamp/cap, refresh intervals, AI model/URL), preset Conservative/Moderate/Aggressive, ตกแต่ง (hero zoom/height/dim + bg + event `tdapp:*-changed`), LINE 6 หมวด (trade opened/closed, stop-loss, risk, digest, summary — ปิดหมวดไหนไม่คิวไม่ push), PIN manager, ทดสอบ DB
 - **AI Chat**: หน้า + วิดเจ็ตลอย, stream `POST /api/chat/stream`, typing indicator + ตัวนับวินาที, history 20 ข้อความ; ลำดับ model/URL: Settings (DB) → `ai.config.json` → provider default; ปุ่มทดสอบ (ยิงค่าที่ยังไม่ save แล้วคืนค่าเดิม); key อยู่ env `AI_API_KEY` เท่านั้น
 - **LINE**: push เปิด/ปิดไม้, SL, risk alert, ขยายลิมิต (Approve/Reject หมดอายุตาม `kill_expand_ttl_min` 180 นาที + auto-apply ครั้งเดียว/24 ชม.), daily digest/summary, drawdown warning; คำสั่ง `/portfolio /market /positions /risk /summary /pause /resume`; webhook @mention ในกลุ่ม (`LINE_BOT_USER_ID`), targets/events/simulate/diag/test endpoints
+- **Web Push (VAPID)**: การ์ด "การแจ้งเตือนมือถือ" ในหน้า Settings — ปุ่ม `เปิดการแจ้งเตือนบนอุปกรณ์นี้` / `ปิดบนเครื่องนี้`, ปุ่ม `ทดสอบการแจ้งเตือน` (ยิงจริงผ่าน `/api/push/test` แล้วโชว์ผลรายอุปกรณ์), แถวสถานะ 4 บรรทัด (เบราว์เซอร์รองรับ / สิทธิ์ / อุปกรณ์นี้ผูกแล้ว / เซิร์ฟเวอร์มี VAPID key), รายชื่ออุปกรณ์ที่ลงทะเบียน + `last_error`, คู่มือเปิดใช้บน Android (ไม่ต้องติดตั้งแอป) และ iPhone/iPad (ต้อง Add to Home Screen ก่อน, iOS 16.4+); critical types เด้งทันที ที่เหลือรอคิว worker; endpoint/keys ไม่ถูกส่งกลับ API; migration 042 (`push_subscriptions`, RLS service_role เท่านั้น)
 
 ## 10. ราคา (Quotes) + ความทนทาน feed
 
@@ -111,17 +112,18 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 - PIN 6 หลัก hash ฝั่ง server (`008_pin_auth.sql`), token ใน `localStorage`, session ใน memory (deploy backend ใหม่ = login ใหม่, 401 พร้อมกันหลัง deploy = ปกติ)
 - Supabase = source of truth (capital/PnL/equity/paper_trades/signals/settings ส่วนใหญ่); localStorage มีแค่ wallpaper/hero/dim/session/chat-history (migration 019 ย้าย refresh interval ลง DB, 034 ย้าย AI model/URL ลง DB)
 
-## 12. Database (migration 001–040)
+## 12. Database (migration 001–042)
 
-001 schema ตั้งต้น · 002 worker tables · 004 RLS insert · 005 extended trading · 006/007 settings+autotrader · 008 PIN · 009/010 signal expired/approved · 011 quote logs · 012 min-conf ทอง · 013 signal_logs · 014 SL mode · 015/016 min lot (+ทอง) · 017 position mgmt · 018 line targets · 019 UI prefs ลง DB · 020 หมวดแจ้งเตือน · 021 allowed assets + SL/TP move tracking · 022 line notify fix · 023 max hold · 024 gold breakout · 025 SL clamp · 026 score reasons · 027 spread overrides · 028 RR target · 029 smart exit · 030 scheduler logs · 031 source ขยาย · 032 left-behind primary · 033 paper costs · 034 AI chat settings · 035 SL risk cap · 036/037/039 kill-expand confirm/TTL/auto-apply · 038 risk event user text · **040 reentry cooldown** (`reentry_cooldown_min` default 30)
+001 schema ตั้งต้น · 002 worker tables · 004 RLS insert · 005 extended trading · 006/007 settings+autotrader · 008 PIN · 009/010 signal expired/approved · 011 quote logs · 012 min-conf ทอง · 013 signal_logs · 014 SL mode · 015/016 min lot (+ทอง) · 017 position mgmt · 018 line targets · 019 UI prefs ลง DB · 020 หมวดแจ้งเตือน · 021 allowed assets + SL/TP move tracking · 022 line notify fix · 023 max hold · 024 gold breakout · 025 SL clamp · 026 score reasons · 027 spread overrides · 028 RR target · 029 smart exit · 030 scheduler logs · 031 source ขยาย · 032 left-behind primary · 033 paper costs · 034 AI chat settings · 035 SL risk cap · 036/037/039 kill-expand confirm/TTL/auto-apply · 038 risk event user text · 040 reentry cooldown (`reentry_cooldown_min` default 30) · 041 currency exposure cap + pre-open guards · **042 push subscriptions** (`push_subscriptions`: endpoint unique, p256dh/auth, user_agent, `user_id text`, enabled, fail_count, last_error, last_ok_at — RLS เปิด, policy `service_role` เท่านั้น) ⚠️ **ต้องรันมือใน Supabase SQL Editor**
 
 ## 13. API (FastAPI routers)
 
-- `auth`: status/login/set-pin/logout · `settings`: get/put/reset/presets/preset/{profile} · `signals`: latest/approve · `trading`: monitor/frequency/order-plan/extended-open/correlation/calendar/session/kill-switch/risk-officer/pause/limit-expand(+decide)/positions (close/levels/close-all/close-group)/stats/reset/equity-curve/signal-report/journal(+post)/backtest/walk-forward/paper-trading/extended-analysis · `risk`: check · `market`: summary/candles · `goal`: assess · `portfolio`: recommend · `chat`: +stream · `ai`: explain/test · `webhook`: LINE webhook/targets(+post/delete)/events/simulate/diag/test · `system`: db-check/counts/scan-now/rehydrate-book/guard-now/autotrader-dry-run/quote-logs/signal-logs/news-logs/quote-test/scheduler-logs/risk-logs
+- `auth`: status/login/set-pin/logout · `settings`: get/put/reset/presets/preset/{profile} · `signals`: latest/approve · `push`: key/subscribe/unsubscribe/subscriptions/test · `trading`: monitor/frequency/order-plan/extended-open/correlation/calendar/session/kill-switch/risk-officer/pause/limit-expand(+decide)/positions (close/levels/close-all/close-group)/stats/reset/equity-curve/signal-report/journal(+post)/backtest/walk-forward/paper-trading/extended-analysis · `risk`: check · `market`: summary/candles · `goal`: assess · `portfolio`: recommend · `chat`: +stream · `ai`: explain/test · `webhook`: LINE webhook/targets(+post/delete)/events/simulate/diag/test · `system`: db-check/counts/scan-now/rehydrate-book/guard-now/autotrader-dry-run/quote-logs/signal-logs/news-logs/quote-test/scheduler-logs/risk-logs
 
 ## 14. คุณภาพ + Deploy
 
-- Backend pytest (~800+ tests ใน `backend/tests/` — cooldown 7 เคส, ticket-recycling, ticket seed, realized stats, smart-exit, RR, costs ฯลฯ) · frontend `npx tsc --noEmit` + `next build` (13/13 routes)
-- `backend/scripts/` มี probe ตรวจ prod (check_*, e2e_probe_post_deploy, probe_line_*)
+- Backend pytest (**882 tests** ใน `backend/tests/` — cooldown 7 เคส, ticket-recycling, ticket seed, realized stats, smart-exit, RR, costs, web-push 26 เคส ฯลฯ) · frontend `npx tsc --noEmit` + `next build` (13/13 routes)
+- `backend/scripts/` มี probe ตรวจ prod (check_*, e2e_probe_post_deploy, probe_line_*) + `gen_vapid_keys.py` (สร้างคู่คีย์ Web Push)
+- Web Push ต้องตั้ง env `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (ไม่มี = ฟีเจอร์นิ่ง ไม่พัง: `/api/push/key` ตอบ `enabled: false`); `pywebpush` เพิ่มใน `requirements.txt` → api service ต้อง redeploy; หมุน private key = subscription เดิมทุกเครื่องใช้ไม่ได้ ต้องกดเปิดใหม่
 - Deploy: push `master` → Render build api (pip + uvicorn, health `/health` มี commit/workers/ai_config) + static web (`out/` ~5–10 นาที); ตรวจ deploy ด้วย ASCII marker ใน JS chunk (ไทยโดน \\u-escape, hash เปลี่ยนทุก build)
 - UI: iOS Liquid Glass Dark (`.panel` แก้วฝ้า blur 10px, aurora, accent `#0a84ff`/profit `#30d158`/loss `#ff453a`, SVG monotone 36 ไอคอน, มือถือ-first ≥44px, `scroll-x-thin`, ห้าม emoji ในปุ่ม)

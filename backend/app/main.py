@@ -12,8 +12,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import (ai, auth, chat, goal, market, portfolio, risk, settings as settings_routes, signals,
-                            system, trading, webhook)
+from app.api.routes import (ai, auth, chat, goal, market, portfolio, push, risk, settings as settings_routes,
+                            signals, system, trading, webhook)
 from app.core.ai_config import describe_ai_config, set_ai_overrides
 from app.core.config import get_settings
 from app.core.logging import setup_logging
@@ -386,6 +386,9 @@ app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+# Web Push (VAPID) — /api/push/key|subscribe|unsubscribe|subscriptions|test
+# Protected by the PIN gate automatically (not in _PIN_EXEMPT_PATHS).
+app.include_router(push.router, prefix="/api/push", tags=["push"])
 
 
 @app.get("/ping", tags=["system"])

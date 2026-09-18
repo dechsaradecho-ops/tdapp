@@ -12,6 +12,7 @@ export type IconName =
   | "bulb" | "flask" | "coins" | "clock" | "hourglass"
   | "octagon" | "pause" | "play" | "arrowsH"
   | "message" | "arrowDown" | "undo" | "shield" | "refresh" | "spinner"
+  | "bell"
   | "download" | "upload";
 
 const PATHS: Record<IconName, React.ReactNode> = {
@@ -226,6 +227,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
     </>
   ),
   shield: <path d="M12 21.5s7.5-3.2 7.5-9.5V5.2L12 2.5 4.5 5.2V12c0 6.3 7.5 9.5 7.5 9.5Z" />,
+  // ใช้กับการแจ้งเตือนWeb Push (กระดิ่ง = notification tray ของ OS)
+  bell: (
+    <>
+      <path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.5-2 6.5h16s-2-1.5-2-6.5Z" />
+      <path d="M13.7 19a2 2 0 0 1-3.4 0" />
+    </>
+  ),
   download: (
     <>
       <path d="M12 3.5v12" />

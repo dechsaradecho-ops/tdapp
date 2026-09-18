@@ -1310,10 +1310,65 @@ export interface LineEvent {
   kind: string;   // received | signature_rejected | skipped_* | replied | simulated
   [key: string]: unknown;
 }
-
 /** Response of GET /api/line/events (webhook debug log). */
 export interface LineEventsResponse {
   events: LineEvent[];
+}
+
+// ---------- Web Push (VAPID) — แจ้งเตือนบนมือถือ ----------
+// ดู database/042_push_subscriptions.sql + backend/app/api/routes/push.py
+// endpoint/p256dh/auth ไม่เคยถูกส่งกลับจากเซิร์ฟเวอร์ (เป็น credential ของอุปกรณ์)
+
+/** Response of GET /api/push/key. */
+export interface PushKeyInfo {
+  enabled: boolean;        // false = API ยังไม่มี VAPID key → ยังส่งไม่ได้
+  public_key: string;
+  subscriptions: number;   // อุปกรณ์ที่ยังเปิดอยู่
+  total: number;           // รวมทุกแถว (รวมที่ปิด/ตายแล้ว)
+  message: string;
+}
+
+/** Response of POST /api/push/subscribe และ /api/push/unsubscribe. */
+export interface PushSubscribeResult {
+  ok: boolean;
+  subscribed: boolean;
+  message: string;
+}
+
+/** One device row from GET /api/push/subscriptions (ไม่มี endpoint/keys). */
+export interface PushDeviceInfo {
+  id?: number | null;
+  device: string;          // "Android · Chrome"
+  enabled: boolean;
+  fail_count: number;
+  last_error: string;
+  last_ok_at?: string | null;
+  created_at?: string | null;
+}
+
+/** Response of GET /api/push/subscriptions. */
+export interface PushSubscriptionsResponse {
+  total: number;
+  enabled_count: number;
+  devices: PushDeviceInfo[];
+}
+
+/** Per-device result of POST /api/push/test. */
+export interface PushTestItem {
+  device: string;
+  ok: boolean;
+  error: string;
+}
+
+/** Response of POST /api/push/test (ปุ่ม ทดสอบ ในหน้า Settings). */
+export interface PushTestResult {
+  ok: boolean;
+  enabled: boolean;
+  sent: number;
+  failed: number;
+  total: number;
+  message: string;
+  results: PushTestItem[];
 }
 
 /** One pipeline step of POST /api/line/simulate. */

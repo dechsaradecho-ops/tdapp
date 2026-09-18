@@ -2265,3 +2265,69 @@ class SettingsSaveResult(BaseModel):
     ok: bool
     settings: AppSettings
     message: str = ""
+
+
+# ---------- Web Push (VAPID) — เบราว์เซอร์/มือถือ ----------
+# ดู database/042_push_subscriptions.sql + app/integrations/web_push.py
+# endpoint/p256dh/auth = ข้อมูลอ่อนไหว: ส่งเข้ามาครั้งเดียวตอน subscribe
+# และ **ไม่เคย** ถูกส่งกลับออกไปใน response ใด ๆ
+
+
+class PushKeys(BaseModel):
+    """กุญแจของเบราว์เซอร์ (ได้จาก PushSubscription.toJSON().keys)"""
+    p256dh: str = ""
+    auth: str = ""
+
+
+class PushSubscribeRequest(BaseModel):
+    endpoint: str = ""
+    keys: PushKeys = Field(default_factory=PushKeys)
+    user_agent: str = ""
+    user_id: str = "demo"
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str = ""
+
+
+class PushKeyInfo(BaseModel):
+    """GET /api/push/key — enabled=false = เซิร์ฟเวอร์ยังไม่มีกุญแจ VAPID"""
+    enabled: bool = False
+    public_key: str = ""
+    subscriptions: int = 0   # จำนวนอุปกรณ์ที่ยังเปิดอยู่
+    total: int = 0           # รวมทุกแถว (รวมที่ปิด/ตายแล้ว)
+    message: str = ""
+
+
+class PushSubscribeResult(BaseModel):
+    ok: bool = False
+    subscribed: bool = False
+    message: str = ""
+
+
+class PushDeviceInfo(BaseModel):
+    """ข้อมูลอุปกรณ์สำหรับแสดงผล — ตัด endpoint/keys ออกแล้ว"""
+    id: Optional[int] = None
+    device: str = ""
+    enabled: bool = True
+    fail_count: int = 0
+    last_error: str = ""
+    last_ok_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class PushSubscriptionsResponse(BaseModel):
+    total: int = 0
+    enabled_count: int = 0
+    devices: list[PushDeviceInfo] = []
+
+
+class PushTestResult(BaseModel):
+    """POST /api/push/test — ปุ่ม "ทดสอบ" ในหน้า Settings"""
+    ok: bool = False
+    enabled: bool = False
+    sent: int = 0
+    failed: int = 0
+    total: int = 0
+    message: str = ""
+    results: list[dict] = []

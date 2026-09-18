@@ -2,13 +2,23 @@
 
 Sends immediately for critical types; other types are persisted for the
 Notification Service worker to batch/deliver on schedule.
+
+TWO TRANSPORTS (parallel, independent):
+  1. LINE          — line_users + line_targets (the original channel)
+  2. Web Push      — push_subscriptions (手機/desktop notification tray)
+Both fire for every alert. Neither replaces the other: the LINE bot can be
+removed from a group, and a phone can have push permission revoked — one
+transport dying must not silence the other. Web Push is silently inert when
+the API has no VAPID keys, so nothing changes for LINE-only deployments.
 """
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from app.integrations import web_push
 from app.integrations.line_client import LineClient
 from app.services.database import Database, queue_notification
 
@@ -67,6 +77,54 @@ def category_enabled(settings, ntype: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Web Push (VAPID) presentation helpers
+# ---------------------------------------------------------------------------
+# The OS notification tray shows a short bold TITLE + a one-line body — a LINE
+# message (multi-line, with an emoji header) does not fit. The long text stays
+# in LINE and in the dashboard; the phone gets a scannable headline.
+PUSH_TITLES = {
+    "trade_opened": "เปิดไม้ใหม่",
+    "trade_closed": "ปิดไม้แล้ว",
+    "stop_loss": "ชน Stop Loss",
+    "risk_warning": "เตือนความเสี่ยง",
+    "drawdown_warning": "ใกล้ถึงเพดาน Drawdown",
+    "limit_expand": "ขอขยายลิมิตความเสี่ยง",
+    "economic_news": "ข่าวเศรษฐกิจ",
+    "daily_digest": "สรุปตลาดประจำวัน",
+    "daily_portfolio_summary": "สรุปพอร์ตประจำวัน",
+    "daily_market_summary": "สรุปตลาดประจำวัน",
+    "weekly_report": "รายงานรายสัปดาห์",
+    "monthly_report": "รายงานรายเดือน",
+}
+
+# Where tapping the notification lands. Static export paths end in .html
+# (`/monitor.html` — same targets the /risk and /performance stub pages use).
+PUSH_URLS = {
+    "economic_news": "/signals.html",
+}
+DEFAULT_PUSH_URL = "/monitor.html"
+
+# Leading emoji/symbols + whitespace. LINE messages open with "🔔 "/"⚠️ " —
+# the UI design system forbids emoji, and the tray already shows an app icon.
+_LEAD_SYMBOLS = re.compile(r"^[^0-9A-Za-z\u0E00-\u0E7F]+")
+
+
+def push_title(ntype: str) -> str:
+    return PUSH_TITLES.get(ntype) or "แจ้งเตือนจาก AI Trading"
+
+
+def push_url(ntype: str) -> str:
+    return PUSH_URLS.get(ntype, DEFAULT_PUSH_URL)
+
+
+def push_body(message: str, limit: int = 140) -> str:
+    """First line of the LINE message, emoji stripped, truncated to fit."""
+    first = (message or "").strip().splitlines()[0] if (message or "").strip() else ""
+    first = _LEAD_SYMBOLS.sub("", first).strip()
+    return first[:limit]
+
+
 class NotificationService:
     def __init__(self, db: Database, line: LineClient) -> None:
         self.db = db
@@ -102,8 +160,11 @@ class NotificationService:
         # Non-critical types queue as 'pending' — the worker is the sender.
         if is_critical:
             ok = await self.push_line(user_id, message, quick_reply=quick_reply)
+            # Web Push is fired as a SEPARATE transport, not as a fallback: the
+            # phone must be alerted even when the LINE group lost the bot.
+            pushed = await self.push_web(ntype, message)
             queue_notification(self.db, user_id, ntype, message,
-                               status="sent" if ok else "pending")
+                               status="sent" if (ok or pushed) else "pending")
         else:
             queue_notification(self.db, user_id, ntype, message)
 
@@ -155,3 +216,28 @@ class NotificationService:
                                 filters={"notification_enabled": True}):
             ok = await _push(t["target_id"]) or ok
         return ok
+
+    async def push_web(self, ntype: str, message: str,
+                       url: Optional[str] = None) -> bool:
+        """Send the same alert to every device registered for Web Push.
+
+        Not a queue of its own — the orchestrating path (notify for critical,
+        dispatch_pending for the rest) already owns persistence. Returns True
+        when at least one device accepted the push.
+
+        Never raises: push is a best-effort side channel, and with no VAPID
+        keys configured it returns False without touching the network.
+        """
+        try:
+            sent = await web_push.push_all(
+                self.db,
+                title=push_title(ntype),
+                body=push_body(message),
+                url=url or push_url(ntype),
+                tag=ntype or "tdapp",
+                ntype=ntype,
+            )
+        except Exception as exc:  # web_push is defensive; belt and braces
+            log.warning("web push failed (%s): %s", ntype, exc)
+            return False
+        return sent > 0

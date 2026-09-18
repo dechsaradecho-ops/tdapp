@@ -30,6 +30,10 @@ import {
   PinLoginResponse,
   PinStatus,
   PortfolioRecommendation,
+  PushKeyInfo,
+  PushSubscribeResult,
+  PushSubscriptionsResponse,
+  PushTestResult,
   QuoteLogsResponse,
   QuoteTestResult,
   RiskLogsResponse,
@@ -330,6 +334,17 @@ export const api = {
     bot_user_id?: string; push_reply_to?: string }) =>
     post<LineSimulateResult>("/api/line/simulate", input),
   lineTest: () => post<LineTestResult>("/api/line/test", {}),
+
+  // ---------- Web Push (VAPID) — มือถือ/เดสก์ท็อป ----------
+  // key = กุญแจสาธารณะ + สถานะว่าฝั่งเซิร์ฟเวอร์พร้อมหรือยัง
+  pushKey: () => get<PushKeyInfo>("/api/push/key"),
+  pushSubscribe: (input: { endpoint: string;
+    keys: { p256dh: string; auth: string }; user_agent: string }) =>
+    post<PushSubscribeResult>("/api/push/subscribe", input),
+  pushUnsubscribe: (endpoint: string) =>
+    post<PushSubscribeResult>("/api/push/unsubscribe", { endpoint }),
+  pushSubscriptions: () => get<PushSubscriptionsResponse>("/api/push/subscriptions"),
+  pushTest: () => post<PushTestResult>("/api/push/test", {}),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

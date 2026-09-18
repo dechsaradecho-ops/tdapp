@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     # group chats so the bot only answers when explicitly addressed.
     line_bot_user_id: str = ""
 
+    # Web Push (VAPID) — แจ้งเตือนเข้า notification tray ของมือถือ/เดสก์ท็อป
+    # ผ่านเบราว์เซอร์ (ทำงานคู่กับ LINE ไม่แทนที่กัน)
+    #
+    # สร้างกุญแจ: backend/scripts/gen_vapid_keys.py
+    # ⚠️ เก็บใน env เท่านั้น (Render → tdapp-api → Environment / backend/.env)
+    # ⚠️ ไม่ตั้งเลย = ฟีเจอร์นี้ "เงียบ" ทั้งระบบ (ไม่ crash, ไม่ส่งอะไร)
+    #    แล้วหน้า Settings จะขึ้นข้อความบอกวิธีตั้งค่าแทนปุ่ม
+    # ⚠️ เปลี่ยน private key = subscription เดิมทุกเครื่องใช้ไม่ได้ ต้องผูกใหม่
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = ""   # ต้องเป็น mailto:you@example.com (สเปกบังคับ)
+
     # Market data — Twelve Data free key for gold (XAU/USD) OHLC.
     # FX pairs use Frankfurter (ECB) — free, no key needed.
     twelvedata_api_key: str = ""

@@ -2,6 +2,9 @@
 
 Sends pending notifications (LINE alerts, daily/weekly/monthly reports).
 Critical alerts are also dispatched immediately by NotificationService.
+Each dispatch goes out over BOTH transports — LINE and Web Push (browser
+notification tray) — so a phone-only user still gets queued (non-critical)
+alerts, which the immediate path never touches.
 """
 from __future__ import annotations
 
@@ -38,7 +41,12 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
                 "sent_at": datetime.now(timezone.utc).isoformat(),
             })
             continue
-        ok = await notifier.push_line(n["user_id"], n["message"])
+        # TWO transports, independently: LINE AND Web Push. Marking 'sent' when
+        # EITHER delivered stops the other one from re-alerting the same event
+        # a minute later (duplicate phone notifications for one alert).
+        ok_line = await notifier.push_line(n["user_id"], n["message"])
+        ok_push = await notifier.push_web(n.get("type", ""), n["message"])
+        ok = ok_line or ok_push
         db.update("notifications", n["id"], {
             "status": "sent" if ok else "failed",
             "sent_at": datetime.now(timezone.utc).isoformat(),

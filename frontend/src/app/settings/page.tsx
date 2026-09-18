@@ -8,6 +8,7 @@ import Icon from "@/components/Icon";
 import LoadingGraphic from "@/components/LoadingGraphic";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import PinManager from "@/components/PinManager";
+import PushNotificationCard from "@/components/PushNotificationCard";
 import { api } from "@/lib/api";
 import { fmtPct } from "@/lib/format";
 import { usePortfolio } from "@/lib/portfolio";
@@ -1349,6 +1350,9 @@ export default function SettingsPage() {
           </div>
         )}
       </div>
+
+      {/* ---------------- Web Push (การแจ้งเตือนมือถือ) ---------------- */}
+      <PushNotificationCard />
 
       {/* ---------------- LINE Notifications ---------------- */}
       <div className="panel md:col-span-2">

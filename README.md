@@ -16,7 +16,7 @@ AI-driven market analysis, goal feasibility assessment, risk management, and LIN
 | Auth | 6-digit PIN (server-side hashed), in-memory sessions + Bearer token |
 | AI Provider | DeepSeek or GLM — model + base URL configurable from the Settings page (falls back to `ai.config.json`) |
 | Trading | Paper-trading engine; broker adapters (MT5 / OANDA / IB) behind an adapter interface |
-| Notifications | LINE Messaging API |
+| Notifications | LINE Messaging API **+** Web Push (VAPID) — both transports run side by side |
 | Deployment | Render.com — `tdapp-api` (web, workers embedded) + `tdapp-web` (static) |
 
 ## Project Structure
@@ -39,13 +39,14 @@ tdapp/
 │   │   ├── api/              # REST endpoints (FastAPI routers: auth, trading, settings, chat, ...)
 │   │   ├── core/             # Settings, logging, AI config
 │   │   ├── engine/           # GoalEngine, RiskEngine, StrategyEngine, PortfolioEngine
-│   │   ├── integrations/     # Broker adapters, AI providers, quotes (Twelve Data), LINE client
+│   │   ├── integrations/     # Broker adapters, AI providers, quotes (Twelve Data), LINE client,
+│   │   │                     #   web_push (VAPID sender)
 │   │   ├── models/           # Pydantic schemas
 │   │   ├── services/         # DB access, execution (paper trades), PIN auth, quote log
 │   │   └── workers/          # Market Scanner, News Analysis, Auto Trader, Notifier, ...
-│   ├── scripts/              # Ops probes: check_*.py, poll_*.py, smoke_stream.py, ...
-│   └── tests/                # Pytest suite (773 tests)
-├── database/                 # Supabase migrations 001–039 (run manually in SQL Editor)
+│   ├── scripts/              # Ops probes: check_*.py, poll_*.py, smoke_stream.py, gen_vapid_keys.py
+│   └── tests/                # Pytest suite (882 tests)
+├── database/                 # Supabase migrations 001–042 (run manually in SQL Editor)
 ├── UI-DESIGN-SYSTEM.md       # iOS Liquid Glass Dark — hard rules for UI work
 ├── docker-compose.yml        # Local infra (redis)
 └── render.yaml               # Render.com blueprint (api + workers + static web)
@@ -66,7 +67,7 @@ uvicorn app.main:app --reload --port 8000
 
 API docs: http://localhost:8000/docs
 
-Run the test suite (415 tests):
+Run the test suite (882 tests):
 
 ```bash
 cd backend
@@ -100,7 +101,7 @@ docker compose up -d redis
 | Market Scanner | 5 min | Analyze EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD → trend/volatility/opportunity score |
 | News Analysis | 15 min | CPI, GDP, NFP, FOMC, geopolitical events → sentiment score |
 | Portfolio Monitor | 1 min | Drawdown, open risk, exposure → auto-pause + close + notify on breach |
-| Notification Service | event/scheduled | LINE alerts, daily/weekly/monthly reports (critical = immediate) |
+| Notification Service | event/scheduled | LINE **+** Web Push alerts, daily/weekly/monthly reports (critical = immediate) |
 
 Run workers:
 
@@ -151,6 +152,34 @@ When any limit is hit → `TRADING PAUSED — MANUAL REVIEW REQUIRED` + LINE Ris
 ## LINE Commands
 
 `/portfolio`, `/market`, `/positions`, `/risk`, `/summary`, `/pause`, `/resume`
+
+## Push Notifications (Web Push / VAPID)
+
+A second delivery channel **next to LINE** (both fire — neither replaces the other) that reaches
+**the OS notification tray** on the phone/desktop even when the tab is closed.
+
+- Subscribe from **Settings → "การแจ้งเตือนมือถือ"** → `เปิดการแจ้งเตือนบนอุปกรณ์นี้`.
+  The **ทดสอบการแจ้งเตือน** button does a real round trip and prints per-device results.
+- Android / desktop: works from an ordinary browser tab, **no install required**
+  (Chrome, Firefox, Samsung Internet). iOS/iPadOS **16.4+**: add the site to the Home Screen
+  first (Safari only) — otherwise the card says so instead of pretending it worked.
+- Secrets stay server-side: `GET /api/push/key` returns the public key only, and
+  `GET /api/push/subscriptions` never returns `endpoint` / `p256dh` / `auth`.
+- One row per device in `push_subscriptions` (**migration 042**); health = `fail_count` +
+  `last_error`. `410 Gone` disables that row at once, other errors at `MAX_FAILS = 10`.
+  Re-subscribing the same endpoint re-enables it and resets the counter — the row is kept,
+  never deleted, so the history of a dead device stays visible.
+- Delivery: critical types (`risk_warning`, `stop_loss`, `economic_news`, `trade_opened`,
+  `trade_closed`, `limit_expand`) push immediately; everything else rides the notification
+  queue and pushes when the worker dispatches it (see `notification_worker`).
+- Service worker `frontend/public/sw.js` handles `push` / `notificationclick` /
+  `pushsubscriptionchange`; the page re-registers a rotated subscription on load
+  (`lib/push.ts` → `installPushSync`) because a service worker cannot read the PIN token.
+- **Env (required to enable):** `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`
+  (`mailto:` or the site URL) — generate with `python backend/scripts/gen_vapid_keys.py`.
+  Without them nothing crashes: `/api/push/key` answers `enabled: false` and the card explains it.
+- ⚠️ Rotating `VAPID_PRIVATE_KEY` invalidates **every** existing subscription — all devices must
+  subscribe again.
 
 ## PIN Authentication
 
@@ -210,8 +239,18 @@ Single-user dashboard — no Supabase Auth:
 - แยก worker service (tdapp-workers) ถูกตัดออกแล้ว — ถ้ารันคู่กับ ENABLE_WORKERS=1 จะยิง
   order/แจ้งเตือนซ้ำสองเท่า (ดู comment ใน render.yaml หากต้องการเปิดกลับ)
 
-Database migrations (`database/001–039`) are run manually in the Supabase SQL Editor.
-Latest: `039_kill_expand_auto_apply.sql` — `trading_settings.kill_expand_auto_apply`
+Database migrations (`database/001–042`) are run manually in the Supabase SQL Editor.
+Latest: `042_push_subscriptions.sql` — the `push_subscriptions` table for Web Push
+(`endpoint` unique, `p256dh` / `auth` keys, `user_agent`, `user_id text`, `enabled`,
+`fail_count`, `last_error`, `last_ok_at`). RLS is on with a **service_role-only** policy —
+the frontend never reads the table directly, it goes through `/api/push/*`. Nothing
+subscribing/pushing works until it is applied, but the API stays up and the Settings card
+explains what is missing.
+Before it: `041_currency_exposure_preopen.sql` (currency-exposure cap — sums risk per currency
+and per direction instead of averaging pairwise correlation — plus the pre-open guards
+spread-max %, pre-news flatten window and session filter) and `040_reentry_cooldown.sql`
+(re-entry cooldown after a close, so a 1-minute close→reopen loop cannot happen).
+Before those: `039_kill_expand_auto_apply.sql` — `trading_settings.kill_expand_auto_apply`
 (`boolean not null default true`), the toggle for the risk-limit timeout policy.
 **true** (default) = a confirmation window that lapses widens the breached limits
 every time; **false** = the system may widen on its own **once per 24 hours** — after
