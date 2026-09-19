@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.schemas import AppSettings, ExposureEngine
+from app.models import schemas
 from app.services import execution
 from tests.test_workers import FakeDatabase
 
@@ -445,6 +446,107 @@ def test_discretionary_block_is_separate_from_manual_block(monkeypatch):
     manual = execution.market_closed_close_block()
     disc = execution.market_closed_discretionary_close_block()
     assert manual and disc and manual != disc
+
+
+# ---------------------------------------------------------------------------
+# Trading days — age rules must NOT count the weekend closure (2026-09-19)
+#
+# Every age rule (time stop, NO-POSITION-LEFT-BEHIND) asks "has this trade had
+# enough time to work?" — time the MARKET was open. While the market is shut
+# the price is frozen, so the position is parked, not aging. Counting the
+# weekend added ~2 days per weekend, so a position at 4.9 days on Friday
+# 20:59 UTC was cut by the time stop in the first cycle after the Sunday
+# 21:00 UTC reopen.
+# ---------------------------------------------------------------------------
+def _U(y, m, d, h, mi=0):
+    return datetime(y, m, d, h, mi, tzinfo=timezone.utc)
+
+
+def test_market_closed_days_counts_only_the_weekend():
+    """Fri 21:00 → Sun 21:00 UTC is exactly 2.0 closed days."""
+    assert schemas.market_closed_days_between(
+        _U(2026, 9, 18, 21), _U(2026, 9, 20, 21)) == 2.0
+
+
+def test_market_closed_days_partial_window():
+    """Fri 20:00 → Fri 22:00 straddles the close: only 1h is dead time."""
+    assert schemas.market_closed_days_between(
+        _U(2026, 9, 18, 20), _U(2026, 9, 18, 22)) == pytest.approx(1 / 24, abs=1e-6)
+
+
+def test_market_closed_days_zero_midweek():
+    """Mon → Wed has no closure at all."""
+    assert schemas.market_closed_days_between(
+        _U(2026, 9, 21, 0), _U(2026, 9, 23, 0)) == 0.0
+
+
+def test_market_closed_days_two_weekends():
+    """Fri → Mon+7 spans two closures = 4.0 days."""
+    assert schemas.market_closed_days_between(
+        _U(2026, 9, 18, 20), _U(2026, 9, 28, 22)) == 4.0
+
+
+def test_market_closed_days_never_raises():
+    """Inverted / naive / None inputs degrade to 0.0, never raise."""
+    assert schemas.market_closed_days_between(
+        _U(2026, 9, 20, 22), _U(2026, 9, 18, 20)) == 0.0
+    assert schemas.market_closed_days_between(None, None) == 0.0
+    # naive start is coerced to UTC rather than blowing up
+    assert schemas.market_closed_days_between(
+        datetime(2026, 9, 18, 20), _U(2026, 9, 20, 22)) == 2.0
+
+
+def test_market_open_days_subtracts_the_weekend():
+    """The headline case: Fri 20:00 → Sun 22:00 is 50h wall-clock but only
+    2h of TRADING time."""
+    assert schemas.market_open_days_between(
+        _U(2026, 9, 18, 20), _U(2026, 9, 20, 22)) == pytest.approx(2 / 24, abs=1e-6)
+
+
+def test_market_open_days_equals_span_midweek():
+    """No closure → trading days == wall-clock days."""
+    assert schemas.market_open_days_between(
+        _U(2026, 9, 21, 0), _U(2026, 9, 23, 0)) == 2.0
+
+
+def test_position_age_excludes_weekend(monkeypatch):
+    """A position opened Fri 20:00 UTC, checked Sun 22:00 UTC, is 2h old —
+    NOT 50h. This is the bug that cut positions on the reopen."""
+    from app.workers import position_guard as pg
+    db = FakeDatabase(rows={"paper_trades": [
+        {"ticket": "T1", "created_at": "2026-09-18T20:00:00+00:00"}]})
+    pos = SimpleNamespace(ticket="T1", opened_at=None)
+    monkeypatch.setattr(pg, "_utcnow", lambda: _U(2026, 9, 20, 22))
+    assert pg._position_age_days(pos, db) == pytest.approx(2 / 24, abs=1e-6)
+
+
+def test_position_age_matches_wall_clock_midweek(monkeypatch):
+    """No weekend in the span → age is the plain wall-clock age."""
+    from app.workers import position_guard as pg
+    db = FakeDatabase(rows={"paper_trades": [
+        {"ticket": "T1", "created_at": "2026-09-21T00:00:00+00:00"}]})
+    pos = SimpleNamespace(ticket="T1", opened_at=None)
+    monkeypatch.setattr(pg, "_utcnow", lambda: _U(2026, 9, 23, 0))
+    assert pg._position_age_days(pos, db) == pytest.approx(2.0, abs=1e-6)
+
+
+def test_avg_hold_days_excludes_weekend():
+    """A trade held Fri 20:00 → Sun 22:00 contributes 2h, not 50h, to the
+    average — otherwise the left_behind threshold drifts up every weekend."""
+    rows = [{"pnl": 5.0, "created_at": "2026-09-18T20:00:00+00:00",
+             "closed_at": "2026-09-20T22:00:00+00:00"}]
+    # A single row is below the min sample, so the fallback is returned —
+    # assert the SPAN itself via the shared helper instead.
+    assert schemas.market_open_days_between(
+        execution._parse_dt(rows[0]["created_at"]),
+        execution._parse_dt(rows[0]["closed_at"])) == pytest.approx(2 / 24, abs=1e-6)
+
+
+def test_holding_days_badge_matches_guard():
+    """The monitor badge must show the SAME age the guard measured."""
+    c = execution._parse_dt("2026-09-18T20:00:00+00:00")
+    x = execution._parse_dt("2026-09-20T22:00:00+00:00")
+    assert round(schemas.market_open_days_between(c, x), 2) == 0.08
 
 
 def test_session_filter_blocks_low_liquidity(monkeypatch):

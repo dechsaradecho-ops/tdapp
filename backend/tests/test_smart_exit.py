@@ -195,9 +195,41 @@ class _FakeDb:
 
 
 def _closed(created_days_ago: float, held_days: float, pnl: float | None):
+    """A closed row whose span is pure TRADING time.
+
+    avg_hold_days now measures trading days (schemas.market_open_days_between),
+    so a now()-relative fixture would silently change value depending on the
+    day the suite runs. Instead the span is built by walking BACKWARD from a
+    Monday 12:00 UTC anchor in trading days only: each step skips the weekend
+    closure, so `held_days` is exactly what avg_hold_days will measure.
+    """
     from datetime import datetime, timedelta, timezone
-    created = datetime.now(timezone.utc) - timedelta(days=created_days_ago)
-    closed = created + timedelta(days=held_days)
+
+    def _shift(dt, days):
+        """Move `days` trading days backward, never landing in the closure.
+
+        Whole days step a day at a time (skipping the weekend); the fractional
+        remainder is applied as hours, which is safe because the anchor is
+        mid-week and the remainder is always < 1 day.
+        """
+        whole = int(days)
+        for _ in range(whole):
+            dt = dt - timedelta(days=1)
+            # Fri 21:00 → Sun 21:00 UTC is dead time; step over it and retry
+            # the same trading day rather than consuming a step.
+            while (dt.weekday() == 5
+                   or (dt.weekday() == 4 and dt.hour >= 21)
+                   or (dt.weekday() == 6 and dt.hour < 21)):
+                dt = dt - timedelta(days=1)
+        frac = days - whole
+        if frac > 0:
+            dt = dt - timedelta(hours=frac * 24.0)
+        return dt
+
+    # 2026-09-14 is a Monday; 12:00 UTC is safely inside the trading week.
+    anchor = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    closed = _shift(anchor, created_days_ago)
+    created = _shift(closed, held_days)
     return {"status": "closed", "pnl": pnl,
             "created_at": created.isoformat(), "closed_at": closed.isoformat()}
 
@@ -294,18 +326,28 @@ def test_evaluate_exit_reports_behind_days():
 
 def test_position_age_prefers_journal_created_at():
     """Age comes from the journal row first — same value the monitor badge
-    shows — so left_behind and time-stop can't drift from the badge."""
+    shows — so left_behind and time-stop can't drift from the badge.
+
+    The clock is pinned to a Wednesday so the 2.7-day span is pure trading
+    time (age is weekend-aware since 2026-09-19).
+    """
     from datetime import datetime, timedelta, timezone
     from app.integrations.brokers import Position
     from app.workers import position_guard
-    created = datetime.now(timezone.utc) - timedelta(days=2.7)
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)  # Wednesday
+    created = now - timedelta(days=2.7)
     pos = Position(ticket="T1", user_id="u1", asset="GBPUSD",
                    direction="BUY", volume=0.02, entry_price=1.35557,
                    stop_loss=1.34940, take_profit=1.36770,
                    current_price=1.35040)
-    pos.opened_at = datetime.now(timezone.utc)  # stale in-memory clock (deploy reset)
+    pos.opened_at = now  # stale in-memory clock (deploy reset)
     db = _FakeDb([{"ticket": "T1", "created_at": created.isoformat()}])
-    age = position_guard._position_age_days(pos, db)
+    orig = position_guard._utcnow
+    position_guard._utcnow = lambda: now
+    try:
+        age = position_guard._position_age_days(pos, db)
+    finally:
+        position_guard._utcnow = orig
     assert age == _in_range(2.6, 2.8)
 
 

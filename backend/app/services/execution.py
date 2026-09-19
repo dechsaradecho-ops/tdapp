@@ -42,6 +42,8 @@ from app.models.schemas import (
     effective_sl_tp,
     effective_spread,
     is_market_closed,
+    market_closed_days_between,
+    market_open_days_between,
     next_market_open,
     risk_to_lot,
     risk_to_lot_for,
@@ -491,7 +493,8 @@ _AVG_HOLD_FALLBACK_DAYS = 4.0    # neutral default while the sample is thin
 
 
 def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
-    """Mean open→close span in days from closed paper_trades (4.0 fallback).
+    """Mean open→close span in TRADING days from closed paper_trades (4.0
+    fallback).
 
     SINGLE shared definition — guard and monitor MUST call this (guard with
     no args, monitor with its already-fetched closed_rows) so the
@@ -503,6 +506,13 @@ def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
     _AVG_HOLD_MIN_SAMPLE usable rows returns the neutral fallback, so a
     thin/degenerate sample can never shrink the left_behind threshold.
     Never raises.
+
+    WHY trading days (2026-09-19): the span feeds left_behind_days, which is
+    an age threshold — "how long has the market been open to this trade".
+    Counting the weekend inflated every span by ~2 days, which pushed the
+    average up and dragged the threshold up with it, so the rule drifted
+    further from the time stop it is capped by. Weekend closure is now
+    subtracted via the shared schemas.market_open_days_between.
     """
     try:
         rows = closed_rows
@@ -519,7 +529,7 @@ def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
             c = _parse_dt(r.get("created_at"))
             x = _parse_dt(r.get("closed_at"))
             if c and x:
-                span = max(0.0, (x - c).total_seconds() / 86400.0)
+                span = max(0.0, market_open_days_between(c, x))
                 if span >= _AVG_HOLD_MIN_SPAN_DAYS:
                     spans.append(span)
         if len(spans) >= _AVG_HOLD_MIN_SAMPLE:
@@ -1585,7 +1595,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             entry = float(row.get("entry_price") or 0)
             sl = float(row["stop_loss"]) if row.get("stop_loss") is not None else None
             created_dt = _parse_dt(row.get("created_at"))
-            age = ((datetime.now(timezone.utc) - created_dt).total_seconds() / 86400.0
+            age = (market_open_days_between(created_dt, datetime.now(timezone.utc))
                    if created_dt else 0.0)
             age = max(0.0, age)
             d = _se.evaluate_exit(
@@ -1728,12 +1738,19 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         ))
 
     def _holding_days(r: dict) -> float | None:
-        """Realized created_at → closed_at span; None when not closeable."""
+        """Realized created_at → closed_at span in TRADING days; None when
+        not closeable.
+
+        Weekend closure is subtracted (shared schemas.market_open_days_between)
+        so the badge shows the SAME age the guard acted on — otherwise a trade
+        held over a weekend would read 6.9 days in the popup while the guard
+        measured 4.9.
+        """
         c = _parse_dt(r.get("created_at"))
         x = _parse_dt(r.get("closed_at"))
         if c is None or x is None:
             return None
-        return round(max(0.0, (x - c).total_seconds() / 86400.0), 2)
+        return round(max(0.0, market_open_days_between(c, x)), 2)
 
     recent = [MonitorTrade(
         id=str(r.get("id")), asset=r["asset"],

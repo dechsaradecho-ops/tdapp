@@ -68,7 +68,7 @@ function toneOf(reason: string, pnl: number | null): string {
 function explain(t: MonitorTrade, rules?: MonitorExitRules | null): string[] {
   const reason = String(t.close_reason || "");
   const held = t.holding_days ?? null;
-  const heldTxt = held === null ? null : `${fmtNum(held, 1)} วัน`;
+  const heldTxt = held === null ? null : `${fmtNum(held, 1)} วันซื้อขาย`;
 
   // R ตอนปิด — วัดกับ SL เริ่มต้น (SL ที่ถูกเลื่อนจะทำให้ R เพี้ยน)
   const sl = t.initial_stop_loss ?? t.stop_loss ?? null;
@@ -294,7 +294,7 @@ export default function CloseReasonBadge({
           <div className="text-slate-400 mb-1">
             {reason ? <span className="font-mono">{reason}</span> : "ไม่มีรหัสเหตุผล"}
             {trade.holding_days !== null && trade.holding_days !== undefined
-              ? ` · ถือ ${fmtNum(trade.holding_days, 1)} วัน` : ""}
+              ? ` · ถือ ${fmtNum(trade.holding_days, 1)} วันซื้อขาย` : ""}
             {trade.closed_at ? ` · ปิด ${new Date(trade.closed_at).toLocaleString("th-TH")}` : ""}
           </div>
           {trade.pnl !== null && (

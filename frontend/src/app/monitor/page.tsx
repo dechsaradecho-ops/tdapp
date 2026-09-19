@@ -109,7 +109,7 @@ function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_posi
     ["ความผันผวน", f.volatility], ["โอกาสใหม่", f.opportunity_score],
     ["ความเสี่ยงรวม", f.risk_exposure],
   ];
-  const title = `Smart Exit ${fmtNum(info.exit_score, 0)}/100 (${info.quality}) — ${recLabel}\nR: ${fmtNum(info.r_multiple, 2)} | อายุ ${fmtNum(info.position_age_days, 1)} วัน\n${info.reasoning.join("\n")}`;
+  const title = `Smart Exit ${fmtNum(info.exit_score, 0)}/100 (${info.quality}) — ${recLabel}\nR: ${fmtNum(info.r_multiple, 2)} | อายุ ${fmtNum(info.position_age_days, 1)} วันซื้อขาย\n${info.reasoning.join("\n")}`;
   return (
     <>
       <button
@@ -131,7 +131,7 @@ function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_posi
           className="z-50 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-xl text-xs leading-relaxed text-slate-200"
         >
           <div className="font-bold mb-1">Smart Exit {fmtNum(info.exit_score, 0)}/100 ({info.quality}) — {recLabel}</div>
-          <div className="text-slate-400 mb-1">R {fmtNum(info.r_multiple, 2)} · อายุ {fmtNum(info.position_age_days, 1)} วัน · {info.trigger}</div>
+          <div className="text-slate-400 mb-1">R {fmtNum(info.r_multiple, 2)} · อายุ {fmtNum(info.position_age_days, 1)} วันซื้อขาย · {info.trigger}</div>
           {factorRows.map(([label, v]) => (
             <div key={label} className="flex items-center gap-2">
               <span className="w-20 shrink-0 text-slate-400">{label}</span>

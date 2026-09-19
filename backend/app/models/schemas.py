@@ -1288,6 +1288,89 @@ def next_market_open(now: Optional[datetime] = None) -> datetime:
     return candidate
 
 
+def market_closed_days_between(start: datetime,
+                               end: Optional[datetime] = None) -> float:
+    """Days of WEEKEND CLOSURE inside [start, end] — the "dead" wall-clock time.
+
+    SINGLE shared definition (guard / monitor / avg-hold all call this) so the
+    age a position shows and the age the guard acts on can never drift apart.
+
+    WHY (2026-09-19): every age-based rule (time stop, NO-POSITION-LEFT-BEHIND)
+    answers "has this trade had enough time to work?" — a question about time
+    the MARKET was open, not about how many times the planet spun. While the
+    market is shut the price is frozen, so a position is not "aging", it is
+    parked along with the whole market. Counting the weekend inflated age by
+    ~2 days per weekend, which meant a position sitting at 4.9 days on Friday
+    20:59 UTC was cut by the time stop in the very first cycle after the
+    Sunday 21:00 UTC reopen — punished for a holiday it never traded through.
+
+    Counts only the closed window Fri 21:00 UTC → Sun 21:00 UTC (48h = 2.0
+    days per weekend). Never raises; 0.0 when the span is empty/inverted or
+    the inputs are unusable.
+    """
+    try:
+        if end is None:
+            end = datetime.now(timezone.utc)
+        if start is None or end is None:
+            return 0.0
+        # Normalise to aware UTC so naive/aware mixes can't blow up.
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if end <= start:
+            return 0.0
+        # Walk weekend by weekend: find the Friday 21:00 UTC at/before start,
+        # then intersect each [Fri 21:00, Sun 21:00] window with [start, end].
+        # The loop is bounded by the span (a multi-year span is not a real
+        # case here, but the guard keeps it from ever spinning).
+        total = 0.0
+        # Anchor: the Friday 21:00 UTC on or before `start`.
+        anchor = start.replace(hour=21, minute=0, second=0, microsecond=0)
+        anchor -= timedelta(days=(anchor.weekday() - 4) % 7)
+        if anchor > start:
+            anchor -= timedelta(days=7)
+        guard = 0
+        while anchor < end and guard < 10000:
+            guard += 1
+            close_at = anchor                      # Friday 21:00 UTC
+            open_at = anchor + timedelta(days=2)   # Sunday 21:00 UTC
+            lo = max(close_at, start)
+            hi = min(open_at, end)
+            if hi > lo:
+                total += (hi - lo).total_seconds() / 86400.0
+            anchor += timedelta(days=7)
+        return round(total, 6)
+    except Exception:
+        return 0.0
+
+
+def market_open_days_between(start: datetime,
+                             end: Optional[datetime] = None) -> float:
+    """Trading days in [start, end] — wall-clock span MINUS weekend closure.
+
+    The age every age-based rule should use: "how long has the market actually
+    been open to this position". Never raises; 0.0 when the span is empty.
+    """
+    try:
+        if end is None:
+            end = datetime.now(timezone.utc)
+        if start is None or end is None:
+            return 0.0
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        span = (end - start).total_seconds() / 86400.0
+        if span <= 0:
+            return 0.0
+        return round(max(0.0, span - market_closed_days_between(start, end)), 6)
+    except Exception:
+        return 0.0
+
+
 class MarketSessionStatus(BaseModel):
     active_sessions: list[str]
     overlapping: bool

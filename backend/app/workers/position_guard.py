@@ -203,16 +203,39 @@ def _sl_move_kind(pos: Position, db=None) -> str:
         return ""
 
 
+def _utcnow():
+    """Current UTC time — a seam so tests can pin the clock.
+
+    Age rules are weekend-aware (see _position_age_days), so a test that
+    wants to prove "a position held over the weekend is only 2h old" must
+    control now(). Patching datetime.now globally is fragile; this one
+    indirection is not.
+    """
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
 def _position_age_days(pos: Position, db=None) -> float:
-    """Age of a position in days — journal created_at first, opened_at fallback.
+    """Age of a position in TRADING days — journal created_at first, opened_at
+    fallback.
 
     The journal row is authoritative (same created_at the monitor's
     exit_info_for reads), so the guard and the monitor can never disagree
     on age. opened_at (restored from created_at by rehydrate_book) is only
     a fallback for rows missing from the DB. Never raises; 0.0 when
     nothing is known (fresh position).
+
+    WHY trading days (2026-09-19): every age rule here (time stop,
+    NO-POSITION-LEFT-BEHIND) asks "has this trade had enough time to work?" —
+    a question about time the MARKET was open. While the market is shut the
+    price is frozen, so the position is parked, not aging. Counting the
+    weekend added ~2 days per weekend, so a position at 4.9 days on Friday
+    20:59 UTC was cut by the time stop in the first cycle after the Sunday
+    21:00 UTC reopen. Weekend closure is now subtracted via the shared
+    schemas.market_open_days_between.
     """
     from datetime import datetime, timezone
+    from app.models import schemas as _schemas
     if db is not None:
         try:
             rows = db.select("paper_trades",
@@ -222,13 +245,15 @@ def _position_age_days(pos: Position, db=None) -> float:
                 created = rows[0].get("created_at")
                 dt = execution._parse_dt(created)
                 if dt is not None:
-                    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+                    return max(0.0, _schemas.market_open_days_between(
+                        dt, _utcnow()))
         except Exception:
             pass
     opened = getattr(pos, "opened_at", None)
     if opened is not None:
         try:
-            return max(0.0, (datetime.now(timezone.utc) - opened).total_seconds() / 86400.0)
+            return max(0.0, _schemas.market_open_days_between(
+                opened, _utcnow()))
         except Exception:
             pass
     return 0.0
