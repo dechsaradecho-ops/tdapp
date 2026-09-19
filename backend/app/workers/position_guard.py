@@ -356,7 +356,8 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
 
 
 async def _manage_position(db, broker, pos: Position, price: float,
-                           s, notifier: NotificationService) -> dict:
+                           s, notifier: NotificationService,
+                           discretionary_block: str = "") -> dict:
     """Breakeven / trailing / partial-close pass for ONE position.
 
     Returns {"moved_sl": bool, "partial_closed": bool, "new_sl": float,
@@ -366,6 +367,11 @@ async def _manage_position(db, broker, pos: Position, price: float,
     ``old_sl`` is the stop BEFORE the move, so the audit line can say WHICH
     pair moved FROM where to where ("EURCHF@0.93624>0.94337") instead of
     only the destination.
+
+    ``discretionary_block`` (non-empty = market closed) suppresses the TP1
+    partial close — it realises a PnL on a stale mark, so it is a
+    discretionary exit like Smart Exit. Breakeven/trailing SL moves are NOT
+    suppressed: they only tighten protection and never book a PnL.
     """
     out = {"moved_sl": False, "partial_closed": False,
            "new_sl": None, "old_sl": None, "partial_volume": None}
@@ -385,8 +391,11 @@ async def _manage_position(db, broker, pos: Position, price: float,
     partial_trigger = float(getattr(s, "partial_trigger_r", 1.0) or 0)
 
     # ---- 1. partial close (TP1) — once per position -----------------------
+    # Skipped while the market is closed: TP1 realises a PnL, so it is a
+    # discretionary exit (owner 2026-09-19). It fires on the next open cycle.
     if partial_pct > 0 and partial_trigger > 0 and r_multiple >= partial_trigger \
-            and not getattr(pos, "partial_done", False):
+            and not getattr(pos, "partial_done", False) \
+            and not discretionary_block:
         slice_vol = round(pos.volume * partial_pct / 100.0, 2)
         if slice_vol > 0 and slice_vol < pos.volume:
             try:
@@ -555,6 +564,17 @@ async def guard_once(db, broker, notifier: NotificationService,
     # reversal → time → news. SL/TP/trailing/time live in this loop; the AI
     # engine supplies score/reversal/news/left-behind/volatility/profit.
     smart_on = bool(getattr(s, "smart_exit_enabled", True))
+    # ---- Market-closed gate for DISCRETIONARY exits (once per cycle) ------
+    # Owner rule (2026-09-19): "เวลาตลาดปิดไม่สามารถ close ได้". Smart Exit
+    # and the time stop are judgement-based, so they must not book a PnL
+    # against a stale weekend mark. SL/TP, emergency and trailing SL moves
+    # stay live — see `execution.market_closed_discretionary_close_block`.
+    # Computed ONCE per cycle (the clock cannot change mid-loop) and
+    # fail-CLOSED: an unreadable clock blocks the discretionary exits.
+    discretionary_block = execution.market_closed_discretionary_close_block()
+    if discretionary_block:
+        log.info("position guard: discretionary exits blocked — %s",
+                 discretionary_block)
     snaps: dict[str, dict] = {}
     news_status, news_event = "SAFE", ""
     avg_hold = 4.0
@@ -796,7 +816,8 @@ async def guard_once(db, broker, notifier: NotificationService,
 
         # ---- management pass: breakeven / trailing / partial (TP1) ----
         try:
-            mgmt = await _manage_position(db, broker, pos, price, s, notifier)
+            mgmt = await _manage_position(db, broker, pos, price, s, notifier,
+                                          discretionary_block)
             if mgmt.get("moved_sl"):
                 moved += 1
                 _new = mgmt.get("new_sl")
@@ -825,6 +846,12 @@ async def guard_once(db, broker, notifier: NotificationService,
             or (pos.direction == "SELL" and price <= tp))
         if hit_sl or hit_tp:
             pass  # handled by the SL/TP close block after smart-exit skip
+        elif discretionary_block:
+            # Market closed: Smart Exit is a judgement call, not a stop. Skip
+            # the whole evaluation (no snapshot fetch, no broker call) and
+            # record WHY so the Guard tab can explain an untouched position.
+            smart_skipped += 1
+            skip_assets.append(f"{pos.asset}:market_closed")
         elif smart_on:
             # ---- Priorities 5, 6, 8: AI score / reversal / news ---------
             # Only when no hard stop was hit. Blind HOLD when the indicator
@@ -888,8 +915,16 @@ async def guard_once(db, broker, notifier: NotificationService,
             # was touched but the trade has simply been open too long.
             # Age uses the SAME journal-first _position_age_days as Smart
             # Exit — opened_at alone would drift from the badge after deploys.
+            #
+            # Market closed → the time stop is ALSO a discretionary exit
+            # (owner 2026-09-19): it books a PnL on a stale mark, so it waits
+            # for the reopen exactly like Smart Exit. The position simply
+            # ages one more weekend; SL/TP still protect it meanwhile.
             max_hold = int(getattr(s, "max_hold_days", 0) or 0)
-            if max_hold > 0:
+            if max_hold > 0 and discretionary_block:
+                skip_assets.append(f"{pos.asset}:time_market_closed")
+                log.info("time stop held %s: market closed", pos.ticket)
+            elif max_hold > 0:
                 age_days = _position_age_days(pos, db)
                 # R-exemption (2026-09-11, option "ก"): age alone is not a
                 # reason to cut a live winner. The left_behind rule above is

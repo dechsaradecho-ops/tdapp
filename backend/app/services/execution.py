@@ -864,6 +864,38 @@ def market_closed_close_block() -> str:
     return ""
 
 
+def market_closed_discretionary_close_block() -> str:
+    """Thai block reason for a DISCRETIONARY close while the market is closed.
+
+    HARD RULE (owner 2026-09-19, follow-up): "ยังมี smart exit close อยู่ซึ่ง
+    ผิด เวลาตลาดปิดไม่สามารถ close ได้" — Smart Exit and the time stop are
+    OPTIONAL, judgement-based exits. They are not protective stops, so they
+    have no claim on a live mark: closing on a stale Friday price books a
+    fake PnL and can hand the position to Monday's gap anyway. They are
+    therefore blocked for the same window as opening and manual closing.
+
+    WHAT IS STILL ALLOWED while closed (deliberately):
+      * SL / TP hard stops — a stop that cannot fire is a risk the owner
+        never agreed to; these are the protection the owner DID agree to.
+      * Emergency Exit (kill switch) — the whole point is to flatten NOW.
+      * Trailing / breakeven SL moves — they only tighten protection and
+        never realise a PnL, so they are safe to keep running.
+
+    Fail-CLOSED on an unreadable clock, matching `market_closed_block`.
+    """
+    try:
+        if is_market_closed():
+            return ("ตลาดปิด (weekend) — ปิดไม้ตามสัญญาณ (smart exit / time "
+                    "stop) ไม่ได้ ไม่มีราคาจริงให้คิดกำไร/ขาดทุน "
+                    "รอตลาดเปิดก่อน")
+    except Exception as exc:
+        log.warning(
+            "market_closed_discretionary_close_block: clock unreadable (%s) "
+            "— blocking", exc)
+        return "ตรวจสอบเวลาตลาดไม่ได้ — งดปิดไม้ตามสัญญาณ (fail-safe)"
+    return ""
+
+
 def session_filter_block(s: AppSettings) -> str:
     """Thai block reason from the session filter (Gate 3b #3), else "".
 

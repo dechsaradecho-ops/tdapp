@@ -1509,6 +1509,100 @@ class TestPositionGuardManagement:
         assert summary["closed"] == 1
 
     @pytest.mark.asyncio
+    async def test_market_closed_blocks_smart_exit_close(self, monkeypatch):
+        """Owner rule 2026-09-19: "เวลาตลาดปิดไม่สามารถ close ได้".
+
+        Smart Exit is a judgement call, not a protective stop — while the
+        market is closed it must NOT close the position (no live mark to
+        settle at). The skip is recorded as `:market_closed` so the Guard tab
+        can explain an untouched position.
+        """
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        closed: list[str] = []
+        broker = self._broker()
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        db = self._db()
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert summary["closed"] == 0
+        assert summary["smart_closed"] == 0
+        assert "EURUSD:market_closed" in summary["skip_assets"]
+        assert db.rows["paper_trades"][0]["status"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_market_closed_blocks_time_stop(self, monkeypatch):
+        """The time stop is also discretionary → it waits for the reopen."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        closed: list[str] = []
+        broker = self._broker(sl=1.0500)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=6)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(max_hold_days=5, time_stop_min_r=0.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert summary["closed"] == 0
+        assert "EURUSD:time_market_closed" in summary["skip_assets"]
+
+    @pytest.mark.asyncio
+    async def test_market_closed_blocks_tp1_partial(self, monkeypatch):
+        """TP1 realises a PnL → discretionary → blocked while closed."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert partials == []
+        assert summary["partial_closed"] == 0
+        assert db.rows["paper_trades"][0]["partial_done"] is False
+
+    @pytest.mark.asyncio
+    async def test_market_closed_still_moves_sl(self, monkeypatch):
+        """Breakeven/trailing only TIGHTEN protection and never book a PnL,
+        so they keep running while the market is closed."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        moved: list[float] = []
+        broker = self._broker()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        summary = await position_guard.guard_once(
+            self._db(), broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
+        assert summary["moved_sl"] == 1
+        assert moved == [pytest.approx(1.1000)]
+
+    @pytest.mark.asyncio
+    async def test_market_closed_still_closes_on_sl(self, monkeypatch):
+        """A stop that cannot fire is a risk the owner never agreed to —
+        SL/TP must keep working while the market is closed."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        closed: list[str] = []
+        broker = self._broker(sl=1.3000)  # live 1.2500 ≤ SL → hit
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        summary = await position_guard.guard_once(
+            self._db(), broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == ["T1"]
+        assert summary["closed"] == 1
+
+    @pytest.mark.asyncio
     async def test_rehydrate_carries_opened_at(self):
         """rehydrate_book must restore opened_at from created_at — otherwise a
         restart resets the time-stop clock and stale trades live forever."""
