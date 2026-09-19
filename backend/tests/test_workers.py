@@ -1603,6 +1603,69 @@ class TestPositionGuardManagement:
         assert summary["closed"] == 1
 
     @pytest.mark.asyncio
+    async def test_deferred_time_stop_fires_on_first_open_cycle(self, monkeypatch):
+        """Owner rule 2026-09-19: "จะปิดในวันเสาร์แต่ปิดไม่ได้ พอถึงเวลาตลาด
+        เปิดต้องปิดทันที".
+
+        The block must DEFER, not CANCEL. Same aged position, same settings —
+        only the clock changes. Cycle 1 (closed) → untouched; cycle 2 (open)
+        → closed immediately, with no extra condition to satisfy.
+        """
+        from app.workers import position_guard
+        from app.services import execution
+        closed: list[str] = []
+        broker = self._broker(sl=1.0500)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=6)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
+        settings = self._settings(max_hold_days=5, time_stop_min_r=0.0,
+                                  breakeven_trigger_r=0, trail_atr_mult=0)
+
+        # ---- cycle 1: market CLOSED → deferred ---------------------------
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        s1 = await position_guard.guard_once(db, broker, _SilentNotifier(),
+                                             settings=settings)
+        assert closed == []
+        assert s1["closed"] == 0
+        assert "EURUSD:time_market_closed" in s1["skip_assets"]
+        assert db.rows["paper_trades"][0]["status"] == "open"
+
+        # ---- cycle 2: market OPEN → the SAME position closes at once -----
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        s2 = await position_guard.guard_once(db, broker, _SilentNotifier(),
+                                             settings=settings)
+        assert closed == ["T1"]
+        assert s2["closed"] == 1
+        assert db.rows["paper_trades"][0]["status"] == "closed"
+        assert db.rows["paper_trades"][0]["close_reason"] == "time"
+
+    @pytest.mark.asyncio
+    async def test_deferred_tp1_partial_fires_on_first_open_cycle(self, monkeypatch):
+        """TP1 is deferred, not cancelled — it fires on the reopen cycle."""
+        from app.workers import position_guard
+        from app.services import execution
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        settings = self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                  breakeven_trigger_r=0, trail_atr_mult=0)
+
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        s1 = await position_guard.guard_once(db, broker, _SilentNotifier(),
+                                             settings=settings)
+        assert partials == []
+        assert s1["partial_closed"] == 0
+        assert db.rows["paper_trades"][0]["partial_done"] is False
+
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        s2 = await position_guard.guard_once(db, broker, _SilentNotifier(),
+                                             settings=settings)
+        assert partials == [pytest.approx(0.02)]
+        assert s2["partial_closed"] == 1
+        assert db.rows["paper_trades"][0]["partial_done"] is True
+
+    @pytest.mark.asyncio
     async def test_rehydrate_carries_opened_at(self):
         """rehydrate_book must restore opened_at from created_at — otherwise a
         restart resets the time-stop clock and stale trades live forever."""
