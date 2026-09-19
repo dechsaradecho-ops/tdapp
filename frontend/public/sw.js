@@ -12,7 +12,7 @@
  *
  * Bumped on deploy: change CACHE_VERSION to invalidate old caches.
  */
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const SHELL_CACHE = `tdapp-shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `tdapp-assets-${CACHE_VERSION}`;
 
@@ -121,6 +121,17 @@ self.addEventListener("push", (event) => {
       // renotify = สั่น/ดังใหม่แม้ tag เดิม (ต้องมี tag ด้วย)
       renotify: true,
       data: { url: url },
+    }).catch(() => {
+      // showNotification() โยน TypeError ได้ (เช่น SW ยังไม่ activated หรือ
+      // renotify+tag ถูกปฏิเสธ) — ถ้าปล่อยให้ reject Chrome จะขึ้น
+      // "This site has been updated in the background" แทนข้อความจริง
+      // จึงลองใหม่แบบตัด renotify/tag ออก เพื่อให้ข้อความยังขึ้นเสมอ
+      return self.registration.showNotification(title, {
+        body: body,
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-192.png",
+        data: { url: url },
+      });
     })
   );
 });

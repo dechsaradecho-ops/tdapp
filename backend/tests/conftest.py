@@ -46,3 +46,33 @@ def _force_market_open(monkeypatch):
         schemas._real_is_market_closed = schemas.is_market_closed
     monkeypatch.setattr(schemas, "is_market_closed", lambda now=None: False)
     monkeypatch.setattr(execution, "is_market_closed", lambda now=None: False)
+
+
+@pytest.fixture(autouse=True)
+def _force_liquid_session(monkeypatch):
+    """Force the session filter to see a LIQUID (London/NY) session.
+
+    `execution.session_filter_block` (Gate 3b #3) blocks every new order
+    while the real clock sits in a low-liquidity window (e.g. Tokyo-only,
+    ~00:00–07:00 UTC). That is a WALL-CLOCK dependency exactly like the
+    weekend gate above: the order suite would pass during London/NY hours
+    and fail the rest of the day. Tests that want the low-liquidity block
+    monkeypatch `SessionEngine.active` themselves, which overrides this.
+
+    The ORIGINAL is stashed as `SessionEngine._real_active` so session
+    tests can still exercise the real window logic.
+    """
+    from app.models.schemas import MarketSessionStatus, SessionEngine
+
+    if not hasattr(SessionEngine, "_real_active"):
+        SessionEngine._real_active = SessionEngine.active
+
+    def _liquid(cls=None, now=None):
+        return MarketSessionStatus(
+            active_sessions=["London", "New York"],
+            overlapping=True,
+            volatility_hint="high",
+            current_utc_time="13:00 UTC",
+        )
+
+    monkeypatch.setattr(SessionEngine, "active", classmethod(_liquid))

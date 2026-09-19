@@ -469,3 +469,79 @@ def test_push_defaults_are_safe_when_settings_untouched():
     assert SUBSCRIPTIONS_TABLE == "push_subscriptions"
     assert MAX_FAILS == 10
     assert isinstance(AppSettings(), AppSettings)   # schema module importable
+
+
+# ---------------------------------------------------------------------------
+# 10. verify_endpoint — "ปลายทางของเครื่องนี้ยังไม่ตายใช่ไหม?"
+#
+# WHY: a browser cannot detect that its own subscription died (FCM answers 410
+# only to the SERVER). Without this probe the Settings card re-POSTs the dead
+# endpoint forever and the phone stays silent (prod 2026-09-19).
+# ---------------------------------------------------------------------------
+def test_verify_endpoint_alive(monkeypatch):
+    keys_on(monkeypatch)
+    db = FakeDatabase({"push_subscriptions": [device(1)]})
+    monkeypatch.setattr(web_push, "_send_sync", lambda *a, **k: ("ok", ""))
+
+    out = asyncio.run(web_push.verify_endpoint(db, "https://push.example.com/1"))
+    assert out["ok"] is True
+    assert out["known"] is True
+    assert out["alive"] is True
+    assert out["gone"] is False
+
+
+def test_verify_endpoint_gone_signals_resubscribe(monkeypatch):
+    keys_on(monkeypatch)
+    db = FakeDatabase({"push_subscriptions": [device(1)]})
+    monkeypatch.setattr(web_push, "_send_sync",
+                        lambda *a, **k: ("gone", "endpoint หมดอายุ (HTTP 410)"))
+
+    out = asyncio.run(web_push.verify_endpoint(db, "https://push.example.com/1"))
+    assert out["ok"] is True
+    assert out["known"] is True
+    assert out["alive"] is False
+    assert out["gone"] is True
+    assert "หมดอายุ" in out["message"]
+
+
+def test_verify_endpoint_unknown_is_not_an_error(monkeypatch):
+    """A device that never subscribed is a normal state, not a failure."""
+    keys_on(monkeypatch)
+    db = FakeDatabase({"push_subscriptions": []})
+    monkeypatch.setattr(web_push, "_send_sync",
+                        lambda *a, **k: pytest.fail("must not send"))
+
+    out = asyncio.run(web_push.verify_endpoint(db, "https://push.example.com/9"))
+    assert out["ok"] is True
+    assert out["known"] is False
+    assert out["alive"] is False
+
+
+def test_verify_endpoint_without_keys_says_why(monkeypatch):
+    keys_off(monkeypatch)
+    db = FakeDatabase({"push_subscriptions": [device(1)]})
+    out = asyncio.run(web_push.verify_endpoint(db, "https://push.example.com/1"))
+    assert out["ok"] is False
+    assert "VAPID" in out["message"]
+
+
+def test_verify_endpoint_empty_endpoint(monkeypatch):
+    keys_on(monkeypatch)
+    db = FakeDatabase({"push_subscriptions": [device(1)]})
+    out = asyncio.run(web_push.verify_endpoint(db, "   "))
+    assert out["ok"] is False
+    assert out["message"]
+
+
+def test_verify_route_reports_gone(monkeypatch):
+    keys_on(monkeypatch)
+    db = FakeDatabase({"push_subscriptions": [device(1)]})
+    monkeypatch.setattr(web_push, "_send_sync",
+                        lambda *a, **k: ("gone", "HTTP 410"))
+
+    r = asyncio.run(call("POST", "/api/push/verify",
+                         {"endpoint": "https://push.example.com/1"}, db=db))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["gone"] is True
+    assert body["alive"] is False

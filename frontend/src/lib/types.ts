@@ -1381,6 +1381,16 @@ export interface PushTestResult {
   results: PushTestItem[];
 }
 
+/** Response of POST /api/push/verify — "ปลายทางของเครื่องนี้ยังไม่ตายใช่ไหม?" */
+export interface PushVerifyResult {
+  ok: boolean;       // probe ran (not that the endpoint is alive)
+  known: boolean;    // endpoint is registered on the server
+  alive: boolean;    // push service accepted a probe send
+  gone: boolean;     // HTTP 404/410 — must re-subscribe from scratch
+  enabled: boolean;  // server-side row still enabled
+  message: string;
+}
+
 /** One pipeline step of POST /api/line/simulate. */
 export interface SimStep {
   step: string;

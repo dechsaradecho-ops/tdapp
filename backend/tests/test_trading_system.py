@@ -244,14 +244,21 @@ def test_news_risk_caution_window():
 
 
 # ----------------------------------------------------------------- session
-def test_session_london_ny_overlap_is_high_volatility():
+# These two tests assert the REAL wall-clock session windows, so they must
+# opt out of the autouse `_force_liquid_session` fixture (which pins every
+# other test to a London/NY overlap so the order suite is time-independent).
+def test_session_london_ny_overlap_is_high_volatility(monkeypatch):
+    from app.models.schemas import SessionEngine as _SE
+    monkeypatch.setattr(_SE, "active", _SE._real_active)
     now = datetime(2026, 9, 2, 13, 0, tzinfo=timezone.utc)  # 13:00 UTC
     st = SessionEngine.active(now)
     assert "London" in st.active_sessions and "New York" in st.active_sessions
     assert st.overlapping and st.volatility_hint == "high"
 
 
-def test_session_quiet_hours():
+def test_session_quiet_hours(monkeypatch):
+    from app.models.schemas import SessionEngine as _SE
+    monkeypatch.setattr(_SE, "active", _SE._real_active)
     now = datetime(2026, 9, 2, 19, 0, tzinfo=timezone.utc)  # 19:00 UTC: NY only
     st = SessionEngine.active(now)
     assert st.active_sessions == ["New York"]

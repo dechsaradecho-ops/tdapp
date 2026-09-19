@@ -209,6 +209,50 @@ async def push_test_rows(db: Database, title: str, body: str) -> list[dict]:
     return out
 
 
+async def verify_endpoint(db: Database, endpoint: str) -> dict[str, Any]:
+    """Probe ONE endpoint and report whether it is still alive.
+
+    WHY this exists (prod 2026-09-19): a browser cannot tell that its own push
+    subscription died — FCM answers HTTP 410 only to the SERVER. The Settings
+    card therefore asks the server to probe the exact endpoint this device
+    holds; ``gone=True`` is the signal to force a fresh subscription.
+
+    Never raises. ``ok`` means the probe ran, not that the endpoint is alive.
+    """
+    out: dict[str, Any] = {"ok": False, "known": False, "alive": False,
+                           "gone": False, "enabled": True, "message": ""}
+    endpoint = (endpoint or "").strip()
+    if not endpoint:
+        out["message"] = "ไม่พบรหัสอุปกรณ์"
+        return out
+    if not vapid_configured():
+        out["message"] = "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า VAPID"
+        return out
+    row = find_by_endpoint(db, endpoint)
+    if not row or row.get("id") is None:
+        out["ok"] = True
+        out["message"] = "อุปกรณ์นี้ยังไม่ได้ผูกกับเซิร์ฟเวอร์"
+        return out
+    out["known"] = True
+    out["enabled"] = bool(row.get("enabled"))
+    payload = json.dumps({"title": "ตรวจสอบการเชื่อมต่อ", "body": "",
+                          "url": "/settings.html", "tag": "push_verify",
+                          "ntype": "push_verify"}, ensure_ascii=False)
+    status, error = await asyncio.to_thread(_send_sync, dict(row), payload)
+    out["ok"] = True
+    if status == "ok":
+        out["alive"] = True
+        out["message"] = "ปลายทางยังใช้งานได้"
+        return out
+    if status == "gone":
+        out["gone"] = True
+        out["message"] = ("ปลายทางการแจ้งเตือนหมดอายุแล้ว (HTTP 404/410) — "
+                          "ต้องเปิดการแจ้งเตือนบนเครื่องนี้ใหม่")
+        return out
+    out["message"] = f"ตรวจสอบไม่สำเร็จ: {error[:160]}"
+    return out
+
+
 def _device_label(row: dict[str, Any]) -> str:
     """Short human label for a device row (a raw endpoint is unreadable)."""
     ua = str(row.get("user_agent") or "")

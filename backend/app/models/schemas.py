@@ -2337,3 +2337,23 @@ class PushTestResult(BaseModel):
     total: int = 0
     message: str = ""
     results: list[dict] = []
+
+
+class PushVerifyRequest(BaseModel):
+    """POST /api/push/verify — "ปลายทางของเครื่องนี้ยังไม่ตายใช่ไหม?"
+
+    The browser cannot tell that its own subscription died (FCM answers 410
+    only to the SERVER), so the Settings card asks the server to probe the
+    exact endpoint this device holds. ``alive=false`` + ``gone=true`` is the
+    signal to force a fresh subscription (see lib/push.ts forceResubscribe).
+    """
+    endpoint: str = ""
+
+
+class PushVerifyResult(BaseModel):
+    ok: bool = False          # probe ran (not that the endpoint is alive)
+    known: bool = False       # endpoint is registered on the server
+    alive: bool = False       # push service accepted a probe send
+    gone: bool = False        # HTTP 404/410 — must re-subscribe from scratch
+    enabled: bool = True      # server-side row still enabled
+    message: str = ""

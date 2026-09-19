@@ -34,6 +34,7 @@ import {
   PushSubscribeResult,
   PushSubscriptionsResponse,
   PushTestResult,
+  PushVerifyResult,
   QuoteLogsResponse,
   QuoteTestResult,
   RiskLogsResponse,
@@ -345,6 +346,8 @@ export const api = {
     post<PushSubscribeResult>("/api/push/unsubscribe", { endpoint }),
   pushSubscriptions: () => get<PushSubscriptionsResponse>("/api/push/subscriptions"),
   pushTest: () => post<PushTestResult>("/api/push/test", {}),
+  pushVerify: (endpoint: string) =>
+    post<PushVerifyResult>("/api/push/verify", { endpoint }),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

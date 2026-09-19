@@ -185,6 +185,47 @@ export async function unsubscribePush(): Promise<string | null> {
 }
 
 /**
+ * Drop the browser's current subscription and create a BRAND-NEW one.
+ *
+ * WHY this exists (prod 2026-09-19): a push endpoint can die server-side
+ * (FCM answers HTTP 410 Gone) while the browser still holds it —
+ * `pushManager.getSubscription()` keeps returning the dead object because the
+ * browser only learns it is dead when a push fails. Re-POSTing that same dead
+ * endpoint (what resyncPush used to do) therefore never heals anything: the
+ * server keeps pushing into a void and the phone stays silent.
+ *
+ * The only cure is to unsubscribe locally and subscribe again, which makes the
+ * push service mint a fresh endpoint. Needs the VAPID public key.
+ */
+export async function forceResubscribe(
+  publicKey: string
+): Promise<PushPayload | null> {
+  if (!pushSupported() || !publicKey) return null;
+  try {
+    const reg = await registration();
+    const old = await reg.pushManager.getSubscription();
+    if (old) {
+      // unsubscribe() can reject when the endpoint is already gone — the
+      // local object is dropped either way, which is all we need.
+      await old.unsubscribe().catch(() => {});
+    }
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+    const json = sub.toJSON();
+    if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) return null;
+    return {
+      endpoint: json.endpoint,
+      keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+      user_agent: navigator.userAgent,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Re-register the current subscription with the server without prompting.
  *
  * Called when the Settings card opens AND on every app start (PwaRegister):

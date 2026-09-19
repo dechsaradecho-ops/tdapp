@@ -20,6 +20,7 @@ import Icon from "@/components/Icon";
 import { api } from "@/lib/api";
 import {
   currentEndpoint,
+  forceResubscribe,
   isInAppBrowser,
   isIosNeedsInstall,
   permissionState,
@@ -28,7 +29,7 @@ import {
   subscribePush,
   unsubscribePush,
 } from "@/lib/push";
-import type { PushKeyInfo, PushSubscriptionsResponse, PushTestResult } from "@/lib/types";
+import type { PushKeyInfo, PushSubscriptionsResponse, PushTestResult, PushVerifyResult } from "@/lib/types";
 
 export default function PushNotificationCard() {
   const [info, setInfo] = useState<PushKeyInfo | null>(null);
@@ -42,6 +43,10 @@ export default function PushNotificationCard() {
   // answer at all" — otherwise a down backend paints a red X next to a setting
   // the owner has not actually forgotten to configure.
   const [loadErr, setLoadErr] = useState(false);
+  // Result of probing THIS device's endpoint. A browser cannot tell that its
+  // own subscription died (FCM answers 410 only to the server), so the card
+  // asks the server — and force-resubscribes when the endpoint is gone.
+  const [verify, setVerify] = useState<PushVerifyResult | null>(null);
 
   // Environment facts are stable for the page's lifetime — compute once.
   const supported = useMemo(() => pushSupported(), []);
@@ -70,6 +75,26 @@ export default function PushNotificationCard() {
     if (keyInfo?.enabled && ep && perm === "granted") {
       const resent = await resyncPush(api.pushSubscribe);
       if (resent) api.pushSubscriptions().then(setSubs).catch(() => {});
+      // ตรวจว่าปลายทางของเครื่องนี้ยังไม่ตาย (FCM ตอบ 410 ให้ "เซิร์ฟเวอร์"
+      // เท่านั้น — เบราว์เซอร์เองไม่รู้) ถ้าตายแล้วต้องบังคับสมัครใหม่ทั้งอัน
+      // ไม่งั้นจะ POST endpoint เดิมที่ตายแล้วซ้ำ ๆ และมือถือเงียบตลอดไป
+      try {
+        const v = await api.pushVerify(ep);
+        setVerify(v);
+        if (v.gone && keyInfo.public_key) {
+          const fresh = await forceResubscribe(keyInfo.public_key);
+          if (fresh) {
+            await api.pushSubscribe(fresh);
+            const ep2 = await currentEndpoint();
+            setMyEndpoint(ep2);
+            const v2 = ep2 ? await api.pushVerify(ep2) : null;
+            setVerify(v2);
+            api.pushSubscriptions().then(setSubs).catch(() => {});
+          }
+        }
+      } catch {
+        setVerify(null);
+      }
     }
   }, [perm]);
 
@@ -132,6 +157,34 @@ export default function PushNotificationCard() {
     }
   };
 
+  // ซ่อมปลายทางที่ตายแล้ว: ลบ subscription เดิมในเบราว์เซอร์ แล้วสมัครใหม่
+  // (endpoint ใหม่) — ทางเดียวที่ทำให้มือถือกลับมารับ push ได้
+  const repair = async () => {
+    setBusy(true); setMsg(""); setMsgOk(null); setTestRes(null);
+    try {
+      if (!info?.enabled || !info.public_key) {
+        setMsgOk(false);
+        setMsg("เซิร์ฟเวอร์ยังไม่มีกุญแจ VAPID — ซ่อมไม่ได้");
+        return;
+      }
+      const fresh = await forceResubscribe(info.public_key);
+      if (!fresh) {
+        setMsgOk(false);
+        setMsg("ซ่อมไม่สำเร็จ — ลองปิด/เปิดการแจ้งเตือนบนเครื่องนี้ใหม่");
+        return;
+      }
+      const r = await api.pushSubscribe(fresh);
+      setMsgOk(r.ok);
+      setMsg(r.ok ? "ซ่อมการเชื่อมต่อแล้ว — ลองกด \"ทดสอบการแจ้งเตือน\" อีกครั้ง" : r.message);
+      await load();
+    } catch (e) {
+      setMsgOk(false);
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // เหตุผลที่ปุ่ม "เปิดการแจ้งเตือน" กดไม่ได้ — ต้องบอกให้ชัด ไม่ใช่ disable เงียบ ๆ
   const blockedReason = (() => {
     if (inApp) return "เบราว์เซอร์ในแอป (LINE/Facebook ฯลฯ) ไม่รองรับการแจ้งเตือน — เปิดลิงก์นี้ใน Chrome หรือ Safari แทน";
@@ -179,6 +232,15 @@ export default function PushNotificationCard() {
               เปิดการแจ้งเตือนบนอุปกรณ์นี้
             </button>
           )}
+          {thisDeviceOn && verify && !verify.alive && (
+            <button
+              onClick={repair}
+              disabled={busy || !supported}
+              className="text-xs text-amber-300 border border-amber-700 rounded px-3 min-h-[44px] active:bg-amber-900/40 disabled:opacity-40"
+            >
+              ซ่อมการเชื่อมต่อ
+            </button>
+          )}
         </div>
       </div>
 
@@ -208,6 +270,18 @@ export default function PushNotificationCard() {
           }
         />
         <StatusRow label="อุปกรณ์นี้ผูกกับเซิร์ฟเวอร์แล้ว" ok={thisDeviceOn} />
+        {thisDeviceOn && verify && (
+          <StatusRow
+            label="ปลายทางการแจ้งเตือนยังใช้งานได้"
+            ok={verify.alive}
+            note={
+              verify.alive ? undefined
+                : verify.gone
+                  ? "หมดอายุแล้ว (HTTP 410) — กำลังซ่อมให้อัตโนมัติ หรือกด \"ซ่อมการเชื่อมต่อ\""
+                  : verify.message || "ตรวจสอบไม่สำเร็จ"
+            }
+          />
+        )}
         <StatusRow
           label="เซิร์ฟเวอร์พร้อมส่ง (VAPID key)"
           ok={Boolean(info?.enabled)}

@@ -27,6 +27,8 @@ from app.models.schemas import (
     PushSubscriptionsResponse,
     PushTestResult,
     PushUnsubscribeRequest,
+    PushVerifyRequest,
+    PushVerifyResult,
 )
 
 log = logging.getLogger(__name__)
@@ -156,6 +158,23 @@ async def push_subscriptions(request: Request) -> PushSubscriptionsResponse:
         enabled_count=sum(1 for d in devices if d.get("enabled")),
         devices=devices,
     )
+
+
+@router.post("/verify", response_model=PushVerifyResult)
+async def push_verify(payload: PushVerifyRequest,
+                      request: Request) -> PushVerifyResult:
+    """Probe THIS device's endpoint and say whether it is still alive.
+
+    WHY: a browser cannot detect that its own subscription died (FCM answers
+    HTTP 410 only to the server), so the Settings card asks the server to probe
+    the exact endpoint the device holds. ``gone=true`` tells the card to force
+    a fresh subscription instead of re-POSTing the dead one forever.
+    """
+    db = request.app.state.db
+    if not db.available:
+        return PushVerifyResult(ok=False, message="ฐานข้อมูลไม่พร้อม")
+    out = await web_push.verify_endpoint(db, payload.endpoint)
+    return PushVerifyResult(**out)
 
 
 @router.post("/test", response_model=PushTestResult)
