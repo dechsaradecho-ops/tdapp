@@ -5,6 +5,7 @@ import AutoTradeReadinessCard from "@/components/AutoTradeReadinessCard";
 import GoalForm from "@/components/GoalForm";
 import GlassSelect from "@/components/GlassSelect";
 import LoadingGraphic from "@/components/LoadingGraphic";
+import MarketClosedBanner from "@/components/MarketClosedBanner";
 import OpportunityScore from "@/components/OpportunityScore";
 import TradingViewChart from "@/components/TradingViewChart";
 import { GIT_SHA } from "@/lib/gitVersion";
@@ -33,6 +34,10 @@ export default function DashboardPage() {
   // Monthly Goal stat — reflects the last assessed target (persisted by
   // GoalForm in localStorage), not a hardcoded 3%.
   const [goalPct, setGoalPct] = useState(3);
+  // Market clock — ตลาดปิดสุดสัปดาห์ → ขึ้นแบนเนอร์ "ตลาดปิด" ด้านบนสุด
+  // (backend บังคับ Gate 0b ห้ามเปิดออเดอร์ใหม่; นี่คือหน้าตาของกฎนั้น)
+  const [marketClosed, setMarketClosed] = useState(false);
+  const [nextOpenUtc, setNextOpenUtc] = useState<string | null>(null);
   const { capital, equity, pnl } = usePortfolio();
 
   useEffect(() => {
@@ -48,6 +53,13 @@ export default function DashboardPage() {
     // allowed_assets (trading whitelist) — ใช้แยก badge "ดูอย่างเดียว" ให้
     // สัญลักษณ์ที่ประเมินแต่ไม่เข้าระบบสัญญาณ/เทรด; ล้มเหลวได้ (auth) — หน้ายังใช้ได้
     api.getSettings().then(setSettings).catch(() => { });
+    // Market clock สำหรับแบนเนอร์ "ตลาดปิด" — ล้มเหลวได้ (auth) หน้าไม่พัง
+    api.monitor()
+      .then((m) => {
+        setMarketClosed(Boolean(m.market_closed));
+        setNextOpenUtc(m.next_open_utc ?? null);
+      })
+      .catch(() => { });
   }, []);
 
   // ปุ่มสัญลักษณ์ = ทุก asset ใน summary.opportunities (follows allowed_assets)
@@ -99,6 +111,9 @@ export default function DashboardPage() {
       {/* เนื้อหาทั้งหน้า — ยกขึ้นชั้นบน (z-10) ให้ลอยเหนือแบ็กกราวด์
           (ตอนนี้ .zoom-hero มี z-index: -1 จึงไม่จำเป็นแล้ว แต่คงไว้เพื่อความชัดเจน) */}
       <div className="relative z-10 space-y-6">
+        {/* ---------- ตลาดปิด: ห้ามเปิดออเดอร์ใหม่ (Gate 0b) ---------- */}
+        <MarketClosedBanner marketClosed={marketClosed} nextOpenUtc={nextOpenUtc} />
+
         <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Stat label="Capital" value={fmtMoney(capital)} />
           <Stat label="Current Equity" value={fmtMoney(equity)} positive={pnl >= 0} />

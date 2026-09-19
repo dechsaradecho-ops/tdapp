@@ -441,8 +441,18 @@ function buildFactors(
     });
   }
 
-  // Gate 3b (3): session / ตลาดปิด — ด่านระดับพอร์ตจริง blocking จึงฟันธงได้
-  if (!gp.session.enabled) {
+  // Gate 0b (ตลาดปิด) + Gate 3b (3) session — ด่านระดับพอร์ตจริง blocking
+  // จึงฟันธงได้. ตลาดปิดเป็นกฎเหล็ก (ไม่ใช่ setting) → ต้องขึ้น fail เสมอ
+  // แม้ session filter จะปิดอยู่ (ไม่งั้นการ์ดจะโกหกว่ายิงออเดอร์ได้ทุกช่วงเวลา)
+  if (gp.session.market_closed) {
+    f.push({
+      state: "fail",
+      label: "ช่วงเวลาเทรด",
+      detail:
+        gp.session.market_block ||
+        "ตลาดปิด (weekend) — ห้ามเปิดออเดอร์ใหม่ กัน gap วันจันทร์",
+    });
+  } else if (!gp.session.enabled) {
     f.push({
       state: "warn",
       label: "ช่วงเวลาเทรด",

@@ -583,7 +583,13 @@ export interface GatePreview {
   };
   session: {
     enabled: boolean;
+    /** ตลาด FX/ทองคำปิดอยู่ (สุดสัปดาห์) — รายงานเสมอ ไม่ขึ้นกับ enabled */
     market_closed: boolean;
+    /**
+     * Gate 0b (กฎเหล็ก ไม่ใช่ setting): เหตุผลที่ห้ามเปิดออเดอร์ตอนตลาดปิด
+     * — บล็อกแม้ session filter ปิดอยู่ (ว่าง = ไม่บล็อก)
+     */
+    market_block: string;
     overlapping: boolean;
     volatility_hint: string;
     active_sessions: string[];
@@ -1146,6 +1152,10 @@ export interface MonitorSnapshot {
   risk?: RiskStatus | null;
   /** Live exit-rule thresholds for the close-reason popup. */
   exit_rules?: MonitorExitRules | null;
+  /** ตลาด FX/ทองคำปิดอยู่ (สุดสัปดาห์) — ใช้ขึ้นแบนเนอร์หน้าหลัก */
+  market_closed?: boolean;
+  /** เวลาเปิดตลาดอีกครั้ง (ISO) — มีค่าเมื่อ market_closed เท่านั้น */
+  next_open_utc?: string | null;
 }
 
 /** Response of POST /api/trading/positions/close (manual close popup). */

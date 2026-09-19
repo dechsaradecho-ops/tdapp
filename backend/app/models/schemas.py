@@ -1937,6 +1937,12 @@ class MonitorSnapshot(BaseModel):
     pnl: float = 0.0
     # Live exit-rule thresholds for the close-reason popup on a closed row.
     exit_rules: Optional[MonitorExitRules] = None
+    # Market clock — the home page shows a "ตลาดปิด" banner and the hard
+    # Gate 0b refuses every new order while this is true (owner rule
+    # 2026-09-19: no trading while the market is closed).
+    market_closed: bool = False
+    # ISO timestamp of the next reopen (present only when market_closed).
+    next_open_utc: Optional[datetime] = None
 
 
 # ---------- Auth: 6-digit PIN gate ----------

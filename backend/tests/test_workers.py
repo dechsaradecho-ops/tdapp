@@ -598,22 +598,25 @@ class TestMarketScanner:
         """Unit-check the weekend window: Fri 21:00 UTC → Sun 21:00 UTC.
 
         Calls the SHARED helper directly — the scanner's _market_closed is
-        monkeypatched to False by the autouse _market_open fixture.
+        monkeypatched to False by the autouse _market_open fixture, and the
+        conftest _force_market_open fixture patches the module attribute, so
+        we use the original stashed as `_real_is_market_closed`.
         """
-        from app.models.schemas import is_market_closed
+        from app.models import schemas as _schemas
         from datetime import datetime, timezone
+        real = _schemas._real_is_market_closed
         # Fri 2026-09-04 20:59 UTC → open; 21:00 UTC → closed
-        assert is_market_closed(
+        assert real(
             datetime(2026, 9, 4, 20, 59, tzinfo=timezone.utc)) is False
-        assert is_market_closed(
+        assert real(
             datetime(2026, 9, 4, 21, 0, tzinfo=timezone.utc)) is True
         # Sat any hour → closed
-        assert is_market_closed(
+        assert real(
             datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)) is True
         # Sun 20:59 UTC → closed; 21:00 UTC → open again
-        assert is_market_closed(
+        assert real(
             datetime(2026, 9, 6, 20, 59, tzinfo=timezone.utc)) is True
-        assert is_market_closed(
+        assert real(
             datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc)) is False
 
     @pytest.mark.asyncio

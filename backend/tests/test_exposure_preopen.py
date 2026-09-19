@@ -337,13 +337,52 @@ def test_pre_news_zero_disables():
 # Gate 3b — session filter
 # ---------------------------------------------------------------------------
 def test_session_filter_blocks_when_market_closed(monkeypatch):
-    """Weekend close → blocked with the gap reason."""
+    """Weekend close → blocked with the gap reason.
+
+    The weekend close moved OUT of `session_filter_block` into the
+    unconditional Gate 0b (`market_closed_block`) — see
+    test_market_closed_block_is_unconditional below. `pre_open_block` no
+    longer reports it, so this asserts the new home of the rule.
+    """
     monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
-    db = FakeDatabase(rows={})
-    s = clean_settings(session_filter_enabled=True)
-    msg = execution.pre_open_block(
-        db, s, "EURUSD", entry=1.10000, stop_loss=1.09000)
+    msg = execution.market_closed_block()
     assert "ตลาดปิด" in msg
+
+
+def test_market_closed_block_is_unconditional(monkeypatch):
+    """Gate 0b blocks the weekend close even with session_filter_enabled=False.
+
+    Owner rule 2026-09-19: "เวลาตลาดปิด ห้ามมีการซื้อขาย หรือเปิด order" —
+    the close is a fact of the market, not a user preference, so it must
+    NOT be behind the session-filter switch (which the aggressive preset
+    ships as False).
+    """
+    monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+    assert "ตลาดปิด" in execution.market_closed_block()
+    # The session filter itself stays silent (its own switch is off)…
+    s = clean_settings(session_filter_enabled=False)
+    assert execution.session_filter_block(s) == ""
+    # …but the hard gate still refuses the order through the full pipeline.
+    db = FakeDatabase(rows={})
+    report = execution._gate_blocked(
+        db, s, "demo", "EURUSD", 85.0, 80.0,
+        entry=1.10000, stop_loss=1.09000, direction="BUY")
+    assert not report.allowed
+    assert any("ตลาดปิด" in r for r in report.rejects)
+
+
+def test_market_closed_block_fails_closed_on_clock_error(monkeypatch):
+    """An unreadable clock must BLOCK (fail-closed), never wave the order in."""
+    def boom(*a, **k):
+        raise RuntimeError("clock down")
+    monkeypatch.setattr(execution, "is_market_closed", boom)
+    assert execution.market_closed_block() != ""
+
+
+def test_market_open_block_is_empty(monkeypatch):
+    """Open market → no block reason (the normal weekday path)."""
+    monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+    assert execution.market_closed_block() == ""
 
 
 def test_session_filter_blocks_low_liquidity(monkeypatch):
@@ -362,8 +401,17 @@ def test_session_filter_blocks_low_liquidity(monkeypatch):
 
 
 def test_session_filter_disabled_allows(monkeypatch):
-    """session_filter_enabled False → closed market still passes."""
-    monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+    """session_filter_enabled False → the low-liquidity rule is off.
+
+    (The weekend close is NOT part of this switch any more — it is the
+    unconditional Gate 0b, covered above.)
+    """
+    monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+    monkeypatch.setattr(
+        execution.SessionEngine, "active",
+        staticmethod(lambda *a, **k: SimpleNamespace(
+            active_sessions=["Sydney"], overlapping=False,
+            volatility_hint="low", market_closed=False, next_open_utc=None)))
     db = FakeDatabase(rows={})
     s = clean_settings(session_filter_enabled=False)
     assert execution.pre_open_block(
@@ -372,7 +420,7 @@ def test_session_filter_disabled_allows(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gate3b_blocks_through_pipeline(broker, notifier, monkeypatch):
-    """The pre-open guard surfaces in checks[]/rejects[]/signal_logs."""
+    """The market-closed guard surfaces in checks[]/rejects[]/signal_logs."""
     monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
     db = FakeDatabase(rows={})
     s = clean_settings(session_filter_enabled=True)
@@ -383,7 +431,7 @@ async def test_gate3b_blocks_through_pipeline(broker, notifier, monkeypatch):
         confidence=85.0, opportunity=80.0, signal_id="sig-pre-1", source="auto",
     )
     assert not report.allowed
-    assert any("pre_open=blocked" in c for c in report.checks)
+    assert any("market=CLOSED" in c for c in report.checks)
     assert any("ตลาดปิด" in r for r in report.rejects)
     assert broker.orders == []
     blocked = [row for table, row in db.inserted

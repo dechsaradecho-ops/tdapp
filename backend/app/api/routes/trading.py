@@ -575,21 +575,28 @@ async def get_gate_preview(request: Request) -> dict:
     }
 
     # ---- Gate 3b (3): session filter — the portfolio-wide guard ----------
+    # NOTE: the weekend close is Gate 0b (`execution.market_closed_block`),
+    # which is NOT behind `session_filter_enabled`. It is reported here as
+    # `market_closed` + `market_block` so the dashboard can show the hard
+    # rule even when the session filter itself is switched off.
     session_enabled = bool(getattr(s, "session_filter_enabled", False))
     market_closed = False
     sess_overlap = True
     sess_vol = "medium"
     sess_names: list[str] = []
-    if session_enabled:
-        try:
-            market_closed = bool(is_market_closed())
-            sess = SessionEngine.active()
-            sess_overlap = bool(sess.overlapping)
-            sess_vol = str(sess.volatility_hint)
-            sess_names = list(sess.active_sessions or [])
-        except Exception:
-            pass
+    try:
+        market_closed = bool(is_market_closed())
+        sess = SessionEngine.active()
+        sess_overlap = bool(sess.overlapping)
+        sess_vol = str(sess.volatility_hint)
+        sess_names = list(sess.active_sessions or [])
+    except Exception:
+        pass
     # Verdict text comes from the shared helper the gate itself calls.
+    try:
+        market_block = execution.market_closed_block()
+    except Exception:
+        market_block = ""
     try:
         session_block = execution.session_filter_block(s)
     except Exception:
@@ -597,11 +604,13 @@ async def get_gate_preview(request: Request) -> dict:
     session = {
         "enabled": session_enabled,
         "market_closed": market_closed,
+        # Hard rule (Gate 0b) — blocks regardless of `enabled`.
+        "market_block": market_block,
         "overlapping": sess_overlap,
         "volatility_hint": sess_vol,
         "active_sessions": sess_names,
-        "blocking": bool(session_block),
-        "reason": session_block,
+        "blocking": bool(session_block or market_block),
+        "reason": session_block or market_block,
     }
 
     # ---- Gate 4b: currency exposure (risk at stop) -----------------------

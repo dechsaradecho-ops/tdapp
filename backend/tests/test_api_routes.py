@@ -920,6 +920,102 @@ class TestClosePosition:
 
 
 # ---------------------------------------------------------------------------
+# Market-closed hard rule (Gate 0b) — owner rule 2026-09-19:
+# "เวลาตลาดปิด ห้ามมีการซื้อขาย หรือเปิด order"
+# ---------------------------------------------------------------------------
+class TestMarketClosedGate:
+    @pytest.mark.asyncio
+    async def test_gate_preview_reports_market_closed_with_filter_off(
+            self, monkeypatch):
+        """`session.market_closed` must be True even when the session filter
+        is switched off — the home card reads this to show the banner."""
+        import app.api.routes.trading as trading_route
+        import app.api.routes.settings as settings_route
+        from app.services import execution
+
+        db = FakeDatabase(rows={})
+        set_state(db)
+        # `market_closed_block` reads execution.is_market_closed; the route's
+        # own `is_market_closed` drives the reported `market_closed` flag.
+        monkeypatch.setattr(execution, "is_market_closed",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(trading_route, "is_market_closed",
+                            lambda *a, **k: True)
+        # session filter OFF (aggressive preset ships it False)
+        monkeypatch.setattr(
+            settings_route, "get_app_settings",
+            lambda _db: SimpleNamespace(session_filter_enabled=False))
+        body = (await call("GET", "/api/trading/gate-preview")).json()
+        assert body["session"]["enabled"] is False
+        assert body["session"]["market_closed"] is True
+        assert body["session"]["blocking"] is True
+        assert "ตลาดปิด" in body["session"]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_gate_preview_market_open_not_blocking(self, monkeypatch):
+        import app.api.routes.trading as trading_route
+        import app.api.routes.settings as settings_route
+        from app.services import execution
+
+        db = FakeDatabase(rows={})
+        set_state(db)
+        monkeypatch.setattr(execution, "is_market_closed",
+                            lambda *a, **k: False)
+        monkeypatch.setattr(trading_route, "is_market_closed",
+                            lambda *a, **k: False)
+        monkeypatch.setattr(
+            settings_route, "get_app_settings",
+            lambda _db: SimpleNamespace(session_filter_enabled=False))
+        body = (await call("GET", "/api/trading/gate-preview")).json()
+        assert body["session"]["market_closed"] is False
+        assert body["session"]["blocking"] is False
+
+    @pytest.mark.asyncio
+    async def test_monitor_snapshot_carries_market_clock(self, monkeypatch):
+        """`/api/monitor` exposes market_closed + next_open_utc for the home
+        banner, using the same helper the hard gate uses."""
+        from app.services import execution
+
+        db = FakeDatabase(rows={})
+        set_state(db)
+        monkeypatch.setattr(execution, "is_market_closed",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(execution, "next_market_open",
+                            lambda *a, **k: datetime(
+                                2026, 9, 6, 21, 0, tzinfo=timezone.utc))
+        body = (await call("GET", "/api/trading/monitor")).json()
+        assert body["market_closed"] is True
+        assert body["next_open_utc"] is not None
+
+    @pytest.mark.asyncio
+    async def test_close_position_allowed_while_market_closed(self, monkeypatch):
+        """Closing must stay possible when the market is closed — the user
+        needs to exit positions; only OPENING is blocked."""
+        import app.api.routes.trading as trading_route
+
+        row = {
+            "id": "row-1", "ticket": "PAPER-000001", "asset": "EURUSD",
+            "direction": "buy", "volume": 0.01, "entry_price": 1.08500,
+            "stop_loss": 1.08000, "take_profit": 1.09500,
+            "status": "open", "source": "auto",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        db = FakeDatabase(rows={"paper_trades": [row]})
+        set_state(db)
+        monkeypatch.setattr(trading_route, "is_market_closed",
+                            lambda *a, **k: True)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.09500}, {}
+
+        monkeypatch.setattr(trading_route, "_spot_prices", fake_spot)
+        body = (await call("POST", "/api/trading/positions/close",
+                           {"ticket": "PAPER-000001"})).json()
+        assert body["ok"] is True
+        assert row["status"] == "closed"
+
+
+# ---------------------------------------------------------------------------
 # /api/trading/positions/close-group — ปิดกำไร/ปิดขาดทุน (monitor buttons)
 # ---------------------------------------------------------------------------
 class TestCloseGroup:

@@ -42,6 +42,7 @@ from app.models.schemas import (
     effective_sl_tp,
     effective_spread,
     is_market_closed,
+    next_market_open,
     risk_to_lot,
     risk_to_lot_for,
 )
@@ -812,6 +813,31 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
             f"— ไม้เปิดทับสกุลเดียวกัน รอปิดไม้เดิมก่อน")
 
 
+def market_closed_block() -> str:
+    """Thai block reason when the FX/gold market is closed, else "".
+
+    HARD RULE (owner 2026-09-19): "เวลาตลาดปิด ห้ามมีการซื้อขาย หรือเปิด
+    order" — this is NOT a user setting. It is checked BEFORE every other
+    gate and is deliberately NOT behind `session_filter_enabled`, because
+    that switch also governs the low-liquidity session rule (a preference).
+    The weekend close is a fact of the market: no order may be opened while
+    it is closed, whatever the risk profile says.
+
+    Fail-CLOSED on an unreadable clock: if we cannot prove the market is
+    open, we do not open an order. (Contrast with the other guards, which
+    fail open — a wrong "closed" only delays a trade, a wrong "open" opens
+    one into a gap.)
+    """
+    try:
+        if is_market_closed():
+            return ("ตลาดปิด (weekend) — ห้ามเปิดออเดอร์ใหม่ "
+                    "กัน gap วันจันทร์")
+    except Exception as exc:
+        log.warning("market_closed_block: clock unreadable (%s) — blocking", exc)
+        return "ตรวจสอบเวลาตลาดไม่ได้ — งดเปิดออเดอร์ใหม่ (fail-safe)"
+    return ""
+
+
 def session_filter_block(s: AppSettings) -> str:
     """Thai block reason from the session filter (Gate 3b #3), else "".
 
@@ -820,12 +846,14 @@ def session_filter_block(s: AppSettings) -> str:
     out of `pre_open_block` so the dashboard's gate preview can ask the exact
     same question without having to invent a symbol to pass in (no drift).
     Fail-open ("") when the session clock is unreadable.
+
+    NOTE: the weekend close is NOT decided here any more — it moved to
+    `market_closed_block`, which runs unconditionally (Gate 0b) so the
+    "ห้ามเทรดตอนตลาดปิด" rule can never be switched off from Settings.
     """
     if not bool(getattr(s, "session_filter_enabled", False)):
         return ""
     try:
-        if is_market_closed():
-            return "ตลาดปิด (weekend) — งดเปิดไม้ใหม่ กัน gap วันจันทร์"
         sess = SessionEngine.active()
         if not sess.overlapping and sess.volatility_hint == "low":
             names = ", ".join(sess.active_sessions) or "ไม่มี"
@@ -846,8 +874,9 @@ def pre_open_block(db, s: AppSettings, asset: str,
          spread on a tight stop means the edge is gone before entry.
       2. pre-news flatten — a high-impact event for one of the pair's
          currencies inside `pre_news_flatten_min` minutes.
-      3. session filter — market closed (weekend gap) or only a low-liquidity
-         session open (Sydney-only hours).
+      3. session filter — only a low-liquidity session open (Sydney-only
+         hours). The weekend close is NOT here: it is the unconditional
+         Gate 0b (`market_closed_block`), which no setting can disable.
 
     Fail-open ("") on any read error — the news/session gates still protect.
     Shared with the signal-card preview so the card explains the block first.
@@ -912,6 +941,16 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     """
     rejects: list[str] = []
     checks: list[str] = []
+
+    # ---- Gate 0b: market closed (HARD, not a setting) ---------------------
+    # Owner rule 2026-09-19: "เวลาตลาดปิด ห้ามมีการซื้อขาย หรือเปิด order".
+    # Runs FIRST so the reason reported is always the market clock, never a
+    # downstream quota/news message that would hide it. Deliberately NOT
+    # behind `session_filter_enabled` — see `market_closed_block`.
+    _closed = market_closed_block()
+    if _closed:
+        rejects.append(_closed)
+    checks.append(f"market={'CLOSED' if _closed else 'open'}")
 
     # ---- Gate 0: manual pause switch -------------------------------------
     pause = get_pause(db)
@@ -1735,6 +1774,14 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         log.warning("monitor: risk eval failed: %s", exc)
         risk_status = None
 
+    # Market clock for the home-page banner — same shared helper the hard
+    # Gate 0b uses, so the banner and the gate can never disagree.
+    try:
+        _mkt_closed = bool(is_market_closed())
+        _mkt_next = next_market_open() if _mkt_closed else None
+    except Exception:
+        _mkt_closed, _mkt_next = False, None
+
     return MonitorSnapshot(
         pause=get_pause(db), order_mode=s.order_mode, capital=s.capital,
         kill=kill, risk=risk_status, stats=stats, open_positions=open_positions, recent=recent,
@@ -1742,4 +1789,5 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         feed_status=feed_status,
         equity=live_equity, pnl=live_pnl,
         exit_rules=exit_rules,
+        market_closed=_mkt_closed, next_open_utc=_mkt_next,
     )
