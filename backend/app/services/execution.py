@@ -865,34 +865,32 @@ def market_closed_close_block() -> str:
 
 
 def market_closed_discretionary_close_block() -> str:
-    """Thai block reason for a DISCRETIONARY close while the market is closed.
+    """Thai block reason for ANY close while the market is closed.
 
-    HARD RULE (owner 2026-09-19, follow-up): "ยังมี smart exit close อยู่ซึ่ง
-    ผิด เวลาตลาดปิดไม่สามารถ close ได้" — Smart Exit and the time stop are
-    OPTIONAL, judgement-based exits. They are not protective stops, so they
-    have no claim on a live mark: closing on a stale Friday price books a
-    fake PnL and can hand the position to Monday's gap anyway. They are
-    therefore blocked for the same window as opening and manual closing.
+    HARD RULE (owner 2026-09-19, final): "ห้ามปิดด้วยเพราะว่าในแอพจริงปิด
+    ไม่ได้เช่นกัน และจะไม่เกิดตอนตลาดปิดเพราะราคาจะนิ่ง" — the real broker
+    cannot close while the market is shut, and the price is frozen anyway, so
+    NOTHING may close: not Smart Exit, not the time stop, not TP1, and not
+    even SL/TP or the Emergency Exit. A frozen mark cannot legitimately
+    trigger a stop, so a "hit" while closed is an artefact of a stale price,
+    not a real market event.
 
-    WHAT IS STILL ALLOWED while closed (deliberately):
-      * SL / TP hard stops — a stop that cannot fire is a risk the owner
-        never agreed to; these are the protection the owner DID agree to.
-      * Emergency Exit (kill switch) — the whole point is to flatten NOW.
-      * Trailing / breakeven SL moves — they only tighten protection and
-        never realise a PnL, so they are safe to keep running.
+    This is the SINGLE gate for every close path in the position guard. It
+    replaced the earlier split (which kept SL/TP, emergency and trailing SL
+    moves live) because those paths cannot execute at a real broker either.
 
     Fail-CLOSED on an unreadable clock, matching `market_closed_block`.
     """
     try:
         if is_market_closed():
-            return ("ตลาดปิด (weekend) — ปิดไม้ตามสัญญาณ (smart exit / time "
-                    "stop) ไม่ได้ ไม่มีราคาจริงให้คิดกำไร/ขาดทุน "
-                    "รอตลาดเปิดก่อน")
+            return ("ตลาดปิด (weekend) — ปิดไม้ไม่ได้ทุกกรณี "
+                    "(รวม SL/TP และ Emergency Exit) เพราะราคานิ่ง "
+                    "ไม่มีราคาจริงให้คิดกำไร/ขาดทุน รอตลาดเปิดก่อน")
     except Exception as exc:
         log.warning(
             "market_closed_discretionary_close_block: clock unreadable (%s) "
             "— blocking", exc)
-        return "ตรวจสอบเวลาตลาดไม่ได้ — งดปิดไม้ตามสัญญาณ (fail-safe)"
+        return "ตรวจสอบเวลาตลาดไม่ได้ — งดปิดไม้ทุกกรณี (fail-safe)"
     return ""
 
 

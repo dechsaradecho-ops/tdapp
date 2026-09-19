@@ -1571,9 +1571,14 @@ class TestPositionGuardManagement:
         assert db.rows["paper_trades"][0]["partial_done"] is False
 
     @pytest.mark.asyncio
-    async def test_market_closed_still_moves_sl(self, monkeypatch):
-        """Breakeven/trailing only TIGHTEN protection and never book a PnL,
-        so they keep running while the market is closed."""
+    async def test_market_closed_blocks_sl_move(self, monkeypatch):
+        """Owner rule 2026-09-19 (final): "ห้ามปิดด้วยเพราะว่าในแอพจริงปิด
+        ไม่ได้เช่นกัน และจะไม่เกิดตอนตลาดปิดเพราะราคาจะนิ่ง".
+
+        The real broker cannot modify a stop while the market is shut, and the
+        frozen mark makes the R-multiple meaningless — so breakeven/trailing
+        is deferred too, not just the closes.
+        """
         from app.workers import position_guard
         from app.services import execution
         monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
@@ -1583,24 +1588,67 @@ class TestPositionGuardManagement:
         summary = await position_guard.guard_once(
             self._db(), broker, _SilentNotifier(),
             settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=0))
-        assert summary["moved_sl"] == 1
-        assert moved == [pytest.approx(1.1000)]
+        assert summary["moved_sl"] == 0
+        assert moved == []
 
     @pytest.mark.asyncio
-    async def test_market_closed_still_closes_on_sl(self, monkeypatch):
-        """A stop that cannot fire is a risk the owner never agreed to —
-        SL/TP must keep working while the market is closed."""
+    async def test_market_closed_blocks_sl_hit(self, monkeypatch):
+        """A frozen mark cannot legitimately trigger a stop — and the real
+        broker cannot fill the close anyway. SL/TP is deferred to the reopen."""
         from app.workers import position_guard
         from app.services import execution
         monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
         closed: list[str] = []
-        broker = self._broker(sl=1.3000)  # live 1.2500 ≤ SL → hit
+        broker = self._broker(sl=1.3000)  # live 1.2500 ≤ SL → would hit
         broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
         summary = await position_guard.guard_once(
             self._db(), broker, _SilentNotifier(),
             settings=self._settings(breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert summary["closed"] == 0
+        assert "EURUSD:sl_market_closed" in summary["skip_assets"]
+
+    @pytest.mark.asyncio
+    async def test_market_closed_blocks_emergency_exit(self, monkeypatch):
+        """The kill switch cannot flatten while the market is shut — the real
+        broker cannot fill it, so it would only book a fake PnL."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        monkeypatch.setattr(execution, "evaluate_kill",
+                            lambda *a, **k: SimpleNamespace(engaged=True,
+                                                            triggers=["test"]))
+        closed: list[str] = []
+        broker = self._broker()
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        summary = await position_guard.guard_once(
+            self._db(), broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=0, trail_atr_mult=0))
+        assert closed == []
+        assert summary["emergency_closed"] == 0
+        assert "EURUSD:kill_market_closed" in summary["skip_assets"]
+
+    @pytest.mark.asyncio
+    async def test_deferred_sl_hit_fires_on_first_open_cycle(self, monkeypatch):
+        """The SL block DEFERS, not cancels — the stop fires on the reopen."""
+        from app.workers import position_guard
+        from app.services import execution
+        closed: list[str] = []
+        broker = self._broker(sl=1.3000)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        settings = self._settings(breakeven_trigger_r=0, trail_atr_mult=0)
+
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        s1 = await position_guard.guard_once(self._db(), broker,
+                                             _SilentNotifier(), settings=settings)
+        assert closed == []
+        assert s1["closed"] == 0
+
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        s2 = await position_guard.guard_once(self._db(), broker,
+                                             _SilentNotifier(), settings=settings)
         assert closed == ["T1"]
-        assert summary["closed"] == 1
+        assert s2["closed"] == 1
 
     @pytest.mark.asyncio
     async def test_deferred_time_stop_fires_on_first_open_cycle(self, monkeypatch):

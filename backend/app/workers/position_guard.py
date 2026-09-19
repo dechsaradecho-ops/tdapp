@@ -368,10 +368,11 @@ async def _manage_position(db, broker, pos: Position, price: float,
     pair moved FROM where to where ("EURCHF@0.93624>0.94337") instead of
     only the destination.
 
-    ``discretionary_block`` (non-empty = market closed) suppresses the TP1
-    partial close — it realises a PnL on a stale mark, so it is a
-    discretionary exit like Smart Exit. Breakeven/trailing SL moves are NOT
-    suppressed: they only tighten protection and never book a PnL.
+    ``discretionary_block`` (non-empty = market closed) suppresses EVERY
+    action in this pass — the TP1 partial close AND the breakeven/trailing SL
+    move. Owner rule 2026-09-19 (final): the real broker cannot close or
+    modify a stop while the market is shut, and the frozen mark makes the
+    R-multiple meaningless. Everything is deferred to the first open cycle.
     """
     out = {"moved_sl": False, "partial_closed": False,
            "new_sl": None, "old_sl": None, "partial_volume": None}
@@ -438,7 +439,12 @@ async def _manage_position(db, broker, pos: Position, price: float,
                 log.warning("partial close %s failed: %s", pos.ticket, exc)
 
     # ---- 2. breakeven + trailing (+ R-ladder floor when enabled) ---------
+    # Market closed → no SL move either (owner 2026-09-19, final): the real
+    # broker cannot modify a stop while the market is shut, and the frozen
+    # mark makes the R-multiple meaningless. Deferred to the first open cycle.
     new_sl: float | None = None
+    if discretionary_block:
+        return out
     if be_trigger > 0 and r_multiple >= be_trigger:
         be_price = pos.entry_price
         if trail_mult > 0:
@@ -564,16 +570,17 @@ async def guard_once(db, broker, notifier: NotificationService,
     # reversal → time → news. SL/TP/trailing/time live in this loop; the AI
     # engine supplies score/reversal/news/left-behind/volatility/profit.
     smart_on = bool(getattr(s, "smart_exit_enabled", True))
-    # ---- Market-closed gate for DISCRETIONARY exits (once per cycle) ------
-    # Owner rule (2026-09-19): "เวลาตลาดปิดไม่สามารถ close ได้". Smart Exit
-    # and the time stop are judgement-based, so they must not book a PnL
-    # against a stale weekend mark. SL/TP, emergency and trailing SL moves
-    # stay live — see `execution.market_closed_discretionary_close_block`.
+    # ---- Market-closed gate for ALL closes (once per cycle) ---------------
+    # Owner rule (2026-09-19, final): "ห้ามปิดด้วยเพราะว่าในแอพจริงปิดไม่ได้
+    # เช่นกัน และจะไม่เกิดตอนตลาดปิดเพราะราคาจะนิ่ง". While the market is
+    # shut NOTHING closes — not Smart Exit, not the time stop, not TP1, and
+    # not even SL/TP or the Emergency Exit: a frozen mark cannot legitimately
+    # trigger a stop, and the real broker cannot fill a close either.
     # Computed ONCE per cycle (the clock cannot change mid-loop) and
-    # fail-CLOSED: an unreadable clock blocks the discretionary exits.
+    # fail-CLOSED: an unreadable clock blocks every close.
     discretionary_block = execution.market_closed_discretionary_close_block()
     if discretionary_block:
-        log.info("position guard: discretionary exits blocked — %s",
+        log.info("position guard: all closes blocked — %s",
                  discretionary_block)
     snaps: dict[str, dict] = {}
     news_status, news_event = "SAFE", ""
@@ -781,6 +788,16 @@ async def guard_once(db, broker, notifier: NotificationService,
         # ``kill_engaged`` is already False when the exit is on HOLD (an
         # unanswered confirmation request) — then the position falls through
         # to the normal management pass, so SL/TP keep protecting it.
+        #
+        # Market closed → the emergency exit is ALSO blocked (owner
+        # 2026-09-19, final): the real broker cannot fill a close while the
+        # market is shut, so flattening here would only book a fake PnL on a
+        # frozen mark. It fires on the first open cycle instead.
+        if kill_engaged and discretionary_block:
+            emergency_held = len(positions)
+            skip_assets.append(f"{pos.asset}:kill_market_closed")
+            log.info("emergency exit held %s: market closed", pos.ticket)
+            continue
         if kill_engaged:
             try:
                 result = await broker.close_position(pos.ticket)
@@ -847,9 +864,9 @@ async def guard_once(db, broker, notifier: NotificationService,
         if hit_sl or hit_tp:
             pass  # handled by the SL/TP close block after smart-exit skip
         elif discretionary_block:
-            # Market closed: Smart Exit is a judgement call, not a stop. Skip
-            # the whole evaluation (no snapshot fetch, no broker call) and
-            # record WHY so the Guard tab can explain an untouched position.
+            # Market closed: NOTHING closes — not even a hard stop. Skip the
+            # whole evaluation (no snapshot fetch, no broker call) and record
+            # WHY so the Guard tab can explain an untouched position.
             smart_skipped += 1
             skip_assets.append(f"{pos.asset}:market_closed")
         elif smart_on:
@@ -975,6 +992,14 @@ async def guard_once(db, broker, notifier: NotificationService,
             continue
 
         reason = "sl" if hit_sl else "tp"
+        # Market closed → even a hard stop cannot fire (owner 2026-09-19,
+        # final): the mark is frozen, so a "hit" is an artefact of a stale
+        # price, not a real market event, and the real broker cannot fill the
+        # close anyway. Deferred to the first open cycle.
+        if discretionary_block:
+            skip_assets.append(f"{pos.asset}:{reason}_market_closed")
+            log.info("%s hit %s held: market closed", reason, pos.ticket)
+            continue
         result = await broker.close_position(pos.ticket)
         if not result.ok:
             log.warning("close %s failed: %s", pos.ticket, result.message)

@@ -411,17 +411,19 @@ def test_market_closed_close_block_fails_closed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Discretionary closes (Smart Exit / time stop / TP1) while the market is
-# closed. Owner rule 2026-09-19 (follow-up): "ยังมี smart exit close อยู่ซึ่ง
-# ผิด เวลาตลาดปิดไม่สามารถ close ได้" — these are judgement calls, not stops,
-# so they must not book a PnL against a stale weekend mark.
+# ALL closes while the market is closed. Owner rule 2026-09-19 (final):
+# "ห้ามปิดด้วยเพราะว่าในแอพจริงปิดไม่ได้เช่นกัน และจะไม่เกิดตอนตลาดปิดเพราะ
+# ราคาจะนิ่ง" — the real broker cannot close while the market is shut, so
+# nothing closes: not Smart Exit, not the time stop, not TP1, and not even
+# SL/TP or the Emergency Exit.
 # ---------------------------------------------------------------------------
 def test_discretionary_close_block_blocks(monkeypatch):
     monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
     msg = execution.market_closed_discretionary_close_block()
     assert "ตลาดปิด" in msg
-    assert "smart exit" in msg
-    assert "time stop" in msg
+    assert "ทุกกรณี" in msg
+    assert "SL/TP" in msg
+    assert "Emergency Exit" in msg
 
 
 def test_discretionary_close_block_empty_when_open(monkeypatch):
@@ -438,7 +440,7 @@ def test_discretionary_close_block_fails_closed(monkeypatch):
 
 def test_discretionary_block_is_separate_from_manual_block(monkeypatch):
     """The two guards must stay independent — the manual one is used by the
-    API routes, the discretionary one by the position guard."""
+    API routes, the guard one by the position guard."""
     monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
     manual = execution.market_closed_close_block()
     disc = execution.market_closed_discretionary_close_block()
