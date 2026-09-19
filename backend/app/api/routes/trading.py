@@ -903,6 +903,13 @@ async def close_position(payload: ClosePositionRequest,
     ticket = payload.ticket.strip()
     s = _settings(request)
 
+    # ---- market-closed guard (owner rule 2026-09-19) ---------------------
+    # "ตอนตลาดปิด ห้ามปิดไม้ด้วย" — no live mark exists while the market is
+    # closed, so a manual close would settle against a stale/absent price.
+    _closed = execution.market_closed_close_block()
+    if _closed:
+        return ClosePositionResult(ok=False, ticket=ticket, message=_closed)
+
     # ---- find the open journal row ---------------------------------------
     rows = db.select("paper_trades", filters={"ticket": ticket, "status": "open"},
                      limit=1)
@@ -1270,6 +1277,11 @@ async def close_all_positions(payload: CloseAllRequest,
         return CloseAllResult(ok=False, closed=0, failed=0,
                               message="ต้องยืนยัน (confirm=true) ก่อนปิดทั้งหมด")
 
+    # ---- market-closed guard (owner rule 2026-09-19) ---------------------
+    _closed = execution.market_closed_close_block()
+    if _closed:
+        return CloseAllResult(ok=False, closed=0, failed=0, message=_closed)
+
     open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
     if not open_rows:
         return CloseAllResult(ok=True, closed=0, failed=0,
@@ -1385,6 +1397,11 @@ async def close_group_positions(payload: CloseGroupRequest,
     if payload.group not in ("profit", "loss"):
         return CloseAllResult(ok=False, closed=0, failed=0,
                               message="group ต้องเป็น 'profit' หรือ 'loss'")
+
+    # ---- market-closed guard (owner rule 2026-09-19) ---------------------
+    _closed = execution.market_closed_close_block()
+    if _closed:
+        return CloseAllResult(ok=False, closed=0, failed=0, message=_closed)
 
     open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
     if not open_rows:

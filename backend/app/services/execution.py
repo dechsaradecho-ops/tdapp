@@ -838,6 +838,32 @@ def market_closed_block() -> str:
     return ""
 
 
+def market_closed_close_block() -> str:
+    """Thai block reason when the market is closed and a CLOSE was requested.
+
+    HARD RULE (owner 2026-09-19): "ตอนตลาดปิด ห้ามปิดไม้ด้วย" — while the
+    market is closed there is no live price to settle at, so a manual close
+    would book a PnL against a stale/absent mark (the exit mark falls back to
+    the entry price → a fake flat result, or to a Friday close that no longer
+    exists). Closing is therefore blocked for the same window as opening.
+
+    NOTE: this guards the MANUAL close endpoints only. The position guard's
+    SL/TP/emergency exits are deliberately NOT blocked — a stop that cannot
+    fire is a risk the owner never agreed to, and those paths only run on a
+    live mark anyway.
+
+    Fail-CLOSED on an unreadable clock, matching `market_closed_block`.
+    """
+    try:
+        if is_market_closed():
+            return ("ตลาดปิด (weekend) — ปิดไม้ไม่ได้ " 
+                    "ไม่มีราคาจริงให้คิดกำไร/ขาดทุน รอตลาดเปิดก่อน")
+    except Exception as exc:
+        log.warning("market_closed_close_block: clock unreadable (%s) — blocking", exc)
+        return "ตรวจสอบเวลาตลาดไม่ได้ — งดปิดไม้ (fail-safe)"
+    return ""
+
+
 def session_filter_block(s: AppSettings) -> str:
     """Thai block reason from the session filter (Gate 3b #3), else "".
 

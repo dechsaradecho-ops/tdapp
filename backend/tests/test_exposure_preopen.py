@@ -385,6 +385,31 @@ def test_market_open_block_is_empty(monkeypatch):
     assert execution.market_closed_block() == ""
 
 
+def test_market_closed_close_block_blocks(monkeypatch):
+    """Owner rule 2026-09-19: "ตอนตลาดปิด ห้ามปิดไม้ด้วย".
+
+    A manual close while the market is closed has no live mark to settle at,
+    so it must be refused with a Thai reason.
+    """
+    monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+    msg = execution.market_closed_close_block()
+    assert "ตลาดปิด" in msg
+    assert "ปิดไม้ไม่ได้" in msg
+
+
+def test_market_closed_close_block_empty_when_open(monkeypatch):
+    monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+    assert execution.market_closed_close_block() == ""
+
+
+def test_market_closed_close_block_fails_closed(monkeypatch):
+    """Unreadable clock → refuse the close (fail-closed), same as opening."""
+    def boom(*a, **k):
+        raise RuntimeError("clock down")
+    monkeypatch.setattr(execution, "is_market_closed", boom)
+    assert execution.market_closed_close_block() != ""
+
+
 def test_session_filter_blocks_low_liquidity(monkeypatch):
     """Sydney-only (low volatility, no overlap) → blocked."""
     monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)

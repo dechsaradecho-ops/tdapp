@@ -496,6 +496,9 @@ export default function MonitorPage() {
   const [resetting, setResetting] = useState(false);
   const [resetMsg, setResetMsg] = useState("");
   const [closeAllMsg, setCloseAllMsg] = useState("");
+  // ตลาดปิด (weekend) → ห้ามปิดไม้ (owner rule 2026-09-19) — backend บล็อกอยู่แล้ว
+  // แต่ปุ่มต้องกดไม่ได้ด้วย เพื่อไม่ให้ผู้ใช้กดแล้วเจอ error เปล่า ๆ
+  const [marketClosed, setMarketClosed] = useState(false);
   // Risk Engine Status — ค่าจริงจาก backend (snap.risk คำนวณพร้อม monitor
   // ด้วย inputs เดียวกับ worker — แทนการยิง /risk/check ด้วยค่าปลอมเดิม
   // ที่ทำให้การ์ดโชว์ low ทั้งที่ระบบ pause อยู่)
@@ -513,6 +516,7 @@ export default function MonitorPage() {
     try {
       const s = await api.monitor();
       setSnap(s);
+      setMarketClosed(Boolean(s.market_closed));
       setErr("");
       setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
       // ไทม์ไลน์ SL/TP: ดึง signal-logs แล้วจัดกลุ่มตาม ticket — เฉพาะ
@@ -927,8 +931,9 @@ export default function MonitorPage() {
                         {notes.length > 0 && <CalcNotesBadge notes={notes} />}
                         <button
                           onClick={() => setConfirmPos(p)}
-                          disabled={!p.ticket || closingTicket === p.ticket}
+                          disabled={!p.ticket || closingTicket === p.ticket || marketClosed}
                           className="bg-loss text-white font-semibold rounded px-2.5 py-1.5 text-xs min-h-[32px] disabled:opacity-50 active:brightness-90"
+                          title={marketClosed ? "ตลาดปิด — ปิดไม้ไม่ได้" : "ปิดไม้นี้"}
                         >
                           {closingTicket === p.ticket ? "..." : "ปิด"}
                         </button>
@@ -956,20 +961,25 @@ export default function MonitorPage() {
         )}
 
         {/* ---------- ปุ่มจัดการกลุ่ม — ย้ายมาไว้ด้านล่างตาราง (ใช้งานสะดวกบนมือถือ) ---------- */}
+        {marketClosed && (
+          <p className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2 mt-4">
+            ตลาดปิดอยู่ — ปิดไม้ไม่ได้ (ไม่มีราคาจริงให้คิดกำไร/ขาดทุน) รอตลาดเปิดก่อน
+          </p>
+        )}
         <div className="flex items-center flex-wrap gap-2 mt-4">
-          <button onClick={() => openGroupModal("all")} disabled={groupBusy}
+          <button onClick={() => openGroupModal("all")} disabled={groupBusy || marketClosed}
             className="bg-loss text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
-            title="ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน">
+            title={marketClosed ? "ตลาดปิด — ปิดไม้ไม่ได้" : "ปิดไม้ที่เปิดค้างทุกไม้ที่ราคาปัจจุบัน"}>
             ปิดทั้งหมด
           </button>
-          <button onClick={() => openGroupModal("profit")} disabled={groupBusy}
+          <button onClick={() => openGroupModal("profit")} disabled={groupBusy || marketClosed}
             className="bg-profit text-white font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50"
-            title="ปิดเฉพาะไม้ที่กำไร (ที่ราคาปัจจุบัน)">
+            title={marketClosed ? "ตลาดปิด — ปิดไม้ไม่ได้" : "ปิดเฉพาะไม้ที่กำไร (ที่ราคาปัจจุบัน)"}>
             ปิดกำไร
           </button>
-          <button onClick={() => openGroupModal("loss")} disabled={groupBusy}
+          <button onClick={() => openGroupModal("loss")} disabled={groupBusy || marketClosed}
             className="border border-loss text-loss font-semibold rounded px-3 py-2 text-sm min-h-[40px] disabled:opacity-50 active:bg-loss/10"
-            title="ปิดเฉพาะไม้ที่ขาดทุน (cut loss ทั้งกลุ่ม)">
+            title={marketClosed ? "ตลาดปิด — ปิดไม้ไม่ได้" : "ปิดเฉพาะไม้ที่ขาดทุน (cut loss ทั้งกลุ่ม)"}>
             ปิดขาดทุน
           </button>
           <button onClick={handleResetStats} disabled={resetting}
