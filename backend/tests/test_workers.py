@@ -1238,6 +1238,58 @@ class TestPositionGuardManagement:
         assert summary["closed_assets"] == "EURUSD:tp1"
 
     @pytest.mark.asyncio
+    async def test_partial_close_notifies_trade_closed(self, monkeypatch):
+        """Partial close ต้องยิงแจ้งเตือน type=trade_closed (critical → push ทันที).
+
+        Prod 2026-09-21: partial_close_pct เพิ่งเปิดใช้ (เดิม 0.0) → ยังไม่เคย
+        ยิงจริง. เทสนี้ล็อกสัญญา: broker.partial_close ถูกเรียก + notifier.notify
+        ได้ (user_id, "trade_closed", ข้อความที่มี "Partial Close (TP1)").
+        """
+        from app.workers import position_guard
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        notifier = _SilentNotifier(db=db)
+        summary = await position_guard.guard_once(
+            db, broker, notifier,
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert summary["partial_closed"] == 1
+        # 1) แจ้งเตือนถูกยิงด้วย type ที่เป็น critical
+        assert len(notifier.sent) == 1
+        user_id, ntype, message = notifier.sent[0]
+        assert user_id == "u1"
+        assert ntype == "trade_closed"
+        assert "Partial Close (TP1)" in message
+        assert "EURUSD" in message
+        assert "0.02" in message          # ปิด 50% ของ 0.04
+        # 2) แถว notifications ถูกเขียนลง DB (คิวส่งจริง)
+        notif_rows = [r for _, r in db.inserted if r.get("type") == "trade_closed"]
+        assert len(notif_rows) == 1
+        assert "Partial Close (TP1)" in notif_rows[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_partial_close_suppressed_when_market_closed(self, monkeypatch):
+        """discretionary_block (ตลาดปิด) → ห้าม partial close + ห้ามแจ้งเตือน."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: True)
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        notifier = _SilentNotifier(db=db)
+        summary = await position_guard.guard_once(
+            db, broker, notifier,
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert summary["partial_closed"] == 0
+        assert partials == []
+        assert notifier.sent == []
+        assert db.rows["paper_trades"][0]["partial_done"] is False
+
+    @pytest.mark.asyncio
     async def test_breakeven_audit_names_symbol_and_new_sl(self):
         """"moved_sl=2" ต้องรู้ว่าคู่ไหนถูกขยับ จากราคาไหนไปราคาไหน
 
