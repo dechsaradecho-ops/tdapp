@@ -358,90 +358,104 @@ TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
 # min_confidence_gold / min_lot_gold overrides, min_lot floor, paper_spread /
 # spread_overrides, order_mode, default_equity / paper_virtual_capital,
 # backtest_*, monitor/signals_refresh_sec, notify_*, allowed_assets.
-# The moderate preset is byte-identical to AppSettings field defaults so an
-# empty row keeps behaving exactly like today (locked by test_settings.py).
+#
+# "moderate" is the live production configuration (capital $500, XAUUSD 0.01 /
+# forex 0.02, sl_distance_mode="short" 0.3–0.8%) captured after the
+# 2026-09 account tuning — it is deliberately NOT equal to the AppSettings
+# field defaults any more. conservative/aggressive are scaled around it
+# (~0.5× / ~1.5× risk appetite).
+# Kill-switch levels were normalized to sane values on purpose: prod carried
+# kill_daily/weekly/monthly = 60/70/70% (test leftovers) which effectively
+# disabled the kill switch. The preset keeps the *ratio* of prod
+# (max_drawdown 15 > throttle 8.5) but with usable thresholds.
 RISK_PRESETS: dict[RiskProfile, dict[str, object]] = {
     RiskProfile.conservative: {
-        # frequency — fewer, smaller bets
-        "max_trades_daily": 3, "max_trades_weekly": 15,
-        "max_open_positions": 2, "risk_per_trade_pct": 0.5,
+        # frequency — half of prod, longer cooldown
+        "max_trades_daily": 5, "max_trades_weekly": 15,
+        "max_open_positions": 6, "risk_per_trade_pct": 1.0,
         "reentry_cooldown_min": 60,
-        # signal gates — demand higher quality, gold breakout only
-        "min_confidence": 75.0, "min_opportunity": 65.0,
-        "gold_breakout_only": True, "sl_distance_mode": "medium",
-        "rr_target": 1.5, "sl_distance_min_pct": 0.0,
-        "sl_distance_max_pct": 0.0, "sl_cap_enabled": True,
+        # signal gates — demand higher quality
+        "min_confidence": 72.0, "min_opportunity": 65.0,
+        "gold_breakout_only": True, "sl_distance_mode": "short",
+        "rr_target": 1.5, "sl_distance_min_pct": 0.3,
+        "sl_distance_max_pct": 0.8, "sl_cap_enabled": True,
         # position mgmt — protect early, hold briefly
-        "breakeven_trigger_r": 0.8, "trail_atr_mult": 1.5,
+        "breakeven_trigger_r": 0.8, "trail_atr_mult": 1.2,
         "partial_close_pct": 50.0, "partial_trigger_r": 1.0,
         "max_hold_days": 3,
         # smart exit — exit weak holds fast, guard winners tightly
-        "smart_exit_enabled": True, "exit_score_close": 55.0,
-        "profit_protect_r": 1.5, "reversal_opp_min": 55.0,
-        "news_exit_enabled": True, "news_exit_min_r": 0.5,
-        "volatility_exit_atr": 2.0, "no_behind_min_r": 0.3,
+        "smart_exit_enabled": True, "exit_score_close": 60.0,
+        "profit_protect_r": 1.0, "reversal_opp_min": 55.0,
+        "news_exit_enabled": True, "news_exit_min_r": 0.7,
+        "volatility_exit_atr": 1.8, "no_behind_min_r": 0.4,
         "no_behind_hold_mult": 1.25, "no_behind_min_days": 1.5,
-        "time_stop_min_r": 2.0, "trailing_ladder": True,
+        "time_stop_min_r": 1.5, "trailing_ladder": True,
         # kill / risk / news / correlation — tight leash
-        "max_drawdown_pct": 8.0, "kill_daily_loss_pct": 1.5,
+        "max_drawdown_pct": 10.0, "kill_daily_loss_pct": 1.5,
         "kill_weekly_loss_pct": 4.0, "kill_monthly_loss_pct": 6.0,
-        "drawdown_throttle_pct": 3.0, "correlation_cap": 70.0,
+        "drawdown_throttle_pct": 5.0, "correlation_cap": 70.0,
         "news_block_minutes": 45, "news_caution_minutes": 180,
         # exposure / pre-open guards — tight leash
-        "max_currency_exposure_pct": 40.0, "spread_guard_max_pct": 20.0,
+        "max_currency_exposure_pct": 35.0, "spread_guard_max_pct": 18.0,
         "pre_news_flatten_min": 45, "session_filter_enabled": True,
     },
     RiskProfile.moderate: {
-        "max_trades_daily": 6, "max_trades_weekly": 30,
-        "max_open_positions": 4, "risk_per_trade_pct": 1.0,
+        # frequency — live prod values
+        "max_trades_daily": 10, "max_trades_weekly": 30,
+        "max_open_positions": 12, "risk_per_trade_pct": 2.0,
         "reentry_cooldown_min": 30,
-        "min_confidence": 70.0, "min_opportunity": 60.0,
-        "gold_breakout_only": True, "sl_distance_mode": "medium",
-        "rr_target": 2.0, "sl_distance_min_pct": 0.0,
-        "sl_distance_max_pct": 0.0, "sl_cap_enabled": True,
-        "breakeven_trigger_r": 1.0, "trail_atr_mult": 2.0,
-        "partial_close_pct": 0.0, "partial_trigger_r": 1.0,
+        # signal gates — live prod values
+        "min_confidence": 65.0, "min_opportunity": 60.0,
+        "gold_breakout_only": True, "sl_distance_mode": "short",
+        "rr_target": 1.5, "sl_distance_min_pct": 0.3,
+        "sl_distance_max_pct": 0.8, "sl_cap_enabled": True,
+        # position mgmt — live prod values
+        "breakeven_trigger_r": 1.0, "trail_atr_mult": 1.5,
+        "partial_close_pct": 50.0, "partial_trigger_r": 1.0,
         "max_hold_days": 5,
-        "smart_exit_enabled": True, "exit_score_close": 45.0,
-        "profit_protect_r": 2.0, "reversal_opp_min": 50.0,
+        # smart exit — live prod values
+        "smart_exit_enabled": True, "exit_score_close": 56.0,
+        "profit_protect_r": 1.5, "reversal_opp_min": 50.0,
         "news_exit_enabled": True, "news_exit_min_r": 1.0,
-        "volatility_exit_atr": 2.5, "no_behind_min_r": 0.5,
+        "volatility_exit_atr": 2.0, "no_behind_min_r": 0.5,
         "no_behind_hold_mult": 1.75, "no_behind_min_days": 2.0,
         "time_stop_min_r": 1.0, "trailing_ladder": True,
-        "max_drawdown_pct": 10.0, "kill_daily_loss_pct": 2.0,
-        "kill_weekly_loss_pct": 5.0, "kill_monthly_loss_pct": 8.0,
-        "drawdown_throttle_pct": 5.0, "correlation_cap": 80.0,
+        # kill / risk / news / correlation — prod ratio, usable thresholds
+        "max_drawdown_pct": 15.0, "kill_daily_loss_pct": 1.5,
+        "kill_weekly_loss_pct": 4.0, "kill_monthly_loss_pct": 6.0,
+        "drawdown_throttle_pct": 8.5, "correlation_cap": 80.0,
         "news_block_minutes": 30, "news_caution_minutes": 120,
+        # exposure / pre-open guards — live prod values
         "max_currency_exposure_pct": 50.0, "spread_guard_max_pct": 25.0,
         "pre_news_flatten_min": 30, "session_filter_enabled": True,
     },
     RiskProfile.aggressive: {
-        # frequency — more, bigger bets
-        "max_trades_daily": 10, "max_trades_weekly": 50,
-        "max_open_positions": 8, "risk_per_trade_pct": 2.0,
+        # frequency — 1.5× prod
+        "max_trades_daily": 15, "max_trades_weekly": 50,
+        "max_open_positions": 18, "risk_per_trade_pct": 3.0,
         "reentry_cooldown_min": 15,
-        # signal gates — accept lower quality, gold trades every setup
-        "min_confidence": 65.0, "min_opportunity": 55.0,
-        "gold_breakout_only": False, "sl_distance_mode": "long",
-        "rr_target": 3.0, "sl_distance_min_pct": 0.0,
-        "sl_distance_max_pct": 0.0, "sl_cap_enabled": True,
+        # signal gates — accept lower quality
+        "min_confidence": 60.0, "min_opportunity": 55.0,
+        "gold_breakout_only": False, "sl_distance_mode": "short",
+        "rr_target": 1.2, "sl_distance_min_pct": 0.2,
+        "sl_distance_max_pct": 1.2, "sl_cap_enabled": False,
         # position mgmt — let winners run, hold longer
-        "breakeven_trigger_r": 1.5, "trail_atr_mult": 3.0,
-        "partial_close_pct": 0.0, "partial_trigger_r": 2.0,
+        "breakeven_trigger_r": 1.5, "trail_atr_mult": 2.0,
+        "partial_close_pct": 30.0, "partial_trigger_r": 1.5,
         "max_hold_days": 10,
-        # smart exit — tolerate weak holds, exit only when clearly bad
-        "smart_exit_enabled": True, "exit_score_close": 35.0,
-        "profit_protect_r": 3.0, "reversal_opp_min": 40.0,
-        "news_exit_enabled": True, "news_exit_min_r": 2.0,
-        "volatility_exit_atr": 3.5, "no_behind_min_r": 0.2,
+        # smart exit — tolerate weak holds
+        "smart_exit_enabled": True, "exit_score_close": 45.0,
+        "profit_protect_r": 2.5, "reversal_opp_min": 40.0,
+        "news_exit_enabled": True, "news_exit_min_r": 1.5,
+        "volatility_exit_atr": 3.0, "no_behind_min_r": 0.2,
         "no_behind_hold_mult": 3.0, "no_behind_min_days": 4.0,
         "time_stop_min_r": 0.5, "trailing_ladder": True,
         # kill / risk / news / correlation — loose leash
-        "max_drawdown_pct": 15.0, "kill_daily_loss_pct": 3.0,
+        "max_drawdown_pct": 25.0, "kill_daily_loss_pct": 3.0,
         "kill_weekly_loss_pct": 7.0, "kill_monthly_loss_pct": 12.0,
-        "drawdown_throttle_pct": 7.0, "correlation_cap": 90.0,
+        "drawdown_throttle_pct": 12.0, "correlation_cap": 90.0,
         "news_block_minutes": 15, "news_caution_minutes": 60,
-        "max_currency_exposure_pct": 60.0, "spread_guard_max_pct": 35.0,
+        "max_currency_exposure_pct": 65.0, "spread_guard_max_pct": 35.0,
         "pre_news_flatten_min": 15, "session_filter_enabled": False,
     },
 }

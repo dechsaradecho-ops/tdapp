@@ -362,11 +362,19 @@ export default function SettingsPage() {
 
   const exportCfg = () => {
     if (!cfg) return;
-    const blob = new Blob([JSON.stringify(cfg, null, 2)],
-      { type: "application/json" });
-    const url = URL.createObjectURL(blob);
     const d = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const doc = {
+      _format: "tdapp-settings",
+      _version: 1,
+      _exported_at: stamp,
+      _fields: Object.keys(DEFAULT_SETTINGS).length,
+      settings: cfg,
+    };
+    const blob = new Blob([JSON.stringify(doc, null, 2)],
+      { type: "application/json" });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `tdapp-settings-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
@@ -378,17 +386,31 @@ export default function SettingsPage() {
 
   const importCfg = async (f: File) => {
     try {
-      const raw = JSON.parse(await f.text());
-      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      const parsed = JSON.parse(await f.text());
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
         throw new Error("ไฟล์ไม่ใช่ JSON การตั้งค่า");
+      const obj = parsed as Record<string, unknown>;
+      // Accept both the current envelope ({_format, settings:{...}}) and a
+      // bare settings object exported by older builds.
+      const raw = (obj._format === "tdapp-settings" && obj.settings
+        && typeof obj.settings === "object" && !Array.isArray(obj.settings))
+        ? obj.settings as Record<string, unknown>
+        : obj;
       const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
       const patch: Partial<AppSettings> = {};
-      for (const [k, v] of Object.entries(raw))
+      const dropped: string[] = [];
+      for (const [k, v] of Object.entries(raw)) {
+        if (k.startsWith("_")) continue;            // envelope metadata
         if (allowed.has(k)) (patch as Record<string, unknown>)[k] = v;
+        else dropped.push(k);
+      }
       if (Object.keys(patch).length === 0)
         throw new Error("ไม่พบฟิลด์การตั้งค่าในไฟล์");
       setCfg((c) => (c ? { ...c, ...patch } as AppSettings : c));
-      setSaveMsg(`โหลดไฟล์แล้ว (${Object.keys(patch).length} ช่อง) — ตรวจค่าแล้วกด “บันทึกการตั้งค่า” เพื่อลง DB`);
+      const droppedNote = dropped.length
+        ? ` — ข้าม ${dropped.length} ฟิลด์ที่ไม่รู้จัก (${dropped.slice(0, 5).join(", ")}${dropped.length > 5 ? ", …" : ""})`
+        : "";
+      setSaveMsg(`โหลดไฟล์แล้ว (${Object.keys(patch).length} ช่อง)${droppedNote} — ตรวจค่าแล้วกด “บันทึกการตั้งค่า” เพื่อลง DB`);
     } catch (e) {
       setSaveMsg(e instanceof Error ? e.message : String(e));
     }
@@ -421,7 +443,7 @@ export default function SettingsPage() {
   const set = <K extends keyof AppSettings>(key: K, v: AppSettings[K]) =>
     setCfg((c) => (c ? { ...c, [key]: v } : c));
 
-  // --- risk preset (38 ช่องความเสี่ยงตามโปรไฟล์) — ดึงค่ามาใส่ฟอร์มเฉย ๆ
+  // --- risk preset (42 ช่องความเสี่ยงตามโปรไฟล์) — ดึงค่ามาใส่ฟอร์มเฉย ๆ
   // ยังไม่บันทึกลง DB จนกว่าจะกด “บันทึกการตั้งค่า” (กันเผลอกดแล้วค่าเปลี่ยนทันที) ---
   const [presetBusy, setPresetBusy] = useState(false);
   const [presetMsg, setPresetMsg] = useState("");
@@ -873,7 +895,7 @@ export default function SettingsPage() {
                       options={RISK_PROFILES} />
                   </div>
                   <button type="button" onClick={applyPreset} disabled={presetBusy}
-                    title="ใส่ค่า 38 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
+                    title="ใส่ค่า 42 ช่องความเสี่ยงตามโปรไฟล์ที่เลือก — ยังไม่ลง DB จนกว่าจะกดบันทึกการตั้งค่า (ทุน/lot/spread/คู่เงิน/แจ้งเตือนไม่เปลี่ยน)"
                     className="shrink-0 bg-accent text-white text-xs font-semibold rounded px-3 min-h-[40px] disabled:opacity-50 active:brightness-90">
                     <span className="inline-flex items-center gap-1.5">
                       {presetBusy && <Icon n="spinner" size={13} className="animate-spin" />}
@@ -883,7 +905,7 @@ export default function SettingsPage() {
                 </div>
                 <span className="block text-xs text-slate-500 mt-1">
                   เปลี่ยน dropdown อย่างเดียว = เปลี่ยนชื่อโปรไฟล์เฉย ๆ — กด “ใช้ preset”
-                  เพื่อใส่ค่าความเสี่ยงทั้ง 38 ช่องลงฟอร์ม (ลิมิตเทรด, signal gate, จัดการไม้,
+                  เพื่อใส่ค่าความเสี่ยงทั้ง 42 ช่องลงฟอร์ม (ลิมิตเทรด, signal gate, จัดการไม้,
                   Smart Exit, kill switch, ข่าว, correlation) แล้วกด “บันทึกการตั้งค่า” เพื่อลง DB
                   {presetMsg && <span className="text-accent"> · {presetMsg}</span>}
                 </span>

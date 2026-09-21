@@ -280,7 +280,7 @@ def get_risk_presets() -> dict[str, dict[str, object]]:
 @router.post("/preset/{profile}", response_model=SettingsSaveResult)
 def apply_preset(request: Request, profile: RiskProfile) -> SettingsSaveResult:
     """POST /api/settings/preset/{conservative|moderate|aggressive} — apply a
-    full risk preset onto the stored row (merge-patch semantics: only the 34
+    full risk preset onto the stored row (merge-patch semantics: only the 42
     preset-owned fields + risk_profile change; capital, lots, spreads,
     universe, notify and UI prefs survive). Reuses the save_settings upsert
     path (incl. PGRST204 retry) so behaviour is identical to a manual save."""

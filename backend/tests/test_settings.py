@@ -628,17 +628,38 @@ async def test_put_settings_missing_column_get_falls_back_cleanly():
 
 
 # ---------------------------------------------------------------------------
-# Full risk presets — profile owns 38 risk fields, not just 4 frequency ones
+# Full risk presets — profile owns 42 risk fields, not just 4 frequency ones
 # ---------------------------------------------------------------------------
-def test_risk_presets_moderate_matches_defaults():
-    """moderate preset must be byte-identical to AppSettings field defaults
-    (otherwise switching profile silently drifts an untouched row)."""
+def test_risk_presets_moderate_mirrors_live_prod_profile():
+    """moderate is the live production tuning (capital $500, XAUUSD 0.01 /
+    forex 0.02, sl_distance_mode="short" 0.3-0.8%) — it is intentionally no
+    longer identical to AppSettings field defaults, so pin the values that
+    define the live account and assert structural completeness instead."""
     from app.models.schemas import RISK_PRESETS, RISK_PRESET_FIELDS, RiskProfile
     assert set(RISK_PRESETS.keys()) == {
         RiskProfile.conservative, RiskProfile.moderate, RiskProfile.aggressive}
-    defaults = AppSettings()
-    for field, value in RISK_PRESETS[RiskProfile.moderate].items():
-        assert getattr(defaults, field) == value, field
+    mod = RISK_PRESETS[RiskProfile.moderate]
+    # spot-check the live production values
+    assert mod["max_trades_daily"] == 10 and mod["max_trades_weekly"] == 30
+    assert mod["max_open_positions"] == 12
+    assert mod["risk_per_trade_pct"] == 2.0 and mod["reentry_cooldown_min"] == 30
+    assert mod["min_confidence"] == 65.0 and mod["min_opportunity"] == 60.0
+    assert mod["gold_breakout_only"] is True
+    assert mod["sl_distance_mode"] == "short"
+    assert mod["sl_distance_min_pct"] == 0.3 and mod["sl_distance_max_pct"] == 0.8
+    assert mod["rr_target"] == 1.5 and mod["trail_atr_mult"] == 1.5
+    assert mod["partial_close_pct"] == 50.0 and mod["max_hold_days"] == 5
+    assert mod["exit_score_close"] == 56.0 and mod["profit_protect_r"] == 1.5
+    assert mod["max_drawdown_pct"] == 15.0
+    assert mod["drawdown_throttle_pct"] == 8.5
+    assert mod["correlation_cap"] == 80.0
+    assert mod["max_currency_exposure_pct"] == 50.0
+    assert mod["spread_guard_max_pct"] == 25.0
+    # kill switch is normalized to usable thresholds — prod carried 60/70/70
+    # (test leftovers that effectively disabled the kill switch)
+    assert mod["kill_daily_loss_pct"] == 1.5
+    assert mod["kill_weekly_loss_pct"] == 4.0
+    assert mod["kill_monthly_loss_pct"] == 6.0
     # no default field the preset forgot (except deliberately excluded identity)
     excluded = {"capital", "min_confidence_gold", "min_lot",
                 "min_lot_gold", "paper_spread", "spread_overrides", "order_mode",
@@ -676,9 +697,9 @@ def test_apply_risk_preset_only_touches_owned_fields():
                        notify_trade_opened=False)
     out = apply_risk_preset(base, RiskProfile.aggressive)
     assert out.risk_profile == RiskProfile.aggressive
-    assert out.max_trades_daily == 10 and out.risk_per_trade_pct == 2.0
-    assert out.min_confidence == 65.0 and out.gold_breakout_only is False
-    assert out.exit_score_close == 35.0 and out.kill_daily_loss_pct == 3.0
+    assert out.max_trades_daily == 15 and out.risk_per_trade_pct == 3.0
+    assert out.min_confidence == 60.0 and out.gold_breakout_only is False
+    assert out.exit_score_close == 45.0 and out.kill_daily_loss_pct == 3.0
     # identity survives
     assert out.capital == 50_000 and out.min_lot == 0.05
     assert out.allowed_assets == ["EURUSD"]
@@ -702,9 +723,9 @@ async def test_get_presets_returns_all_three_levels():
     assert res.status_code == 200
     body = res.json()
     assert set(body.keys()) == {"conservative", "moderate", "aggressive"}
-    assert body["moderate"]["max_trades_daily"] == 6
-    assert body["conservative"]["risk_per_trade_pct"] == 0.5
-    assert body["aggressive"]["risk_per_trade_pct"] == 2.0
+    assert body["moderate"]["max_trades_daily"] == 10
+    assert body["conservative"]["risk_per_trade_pct"] == 1.0
+    assert body["aggressive"]["risk_per_trade_pct"] == 3.0
 
 
 @pytest.mark.asyncio
@@ -717,8 +738,8 @@ async def test_post_preset_applies_and_keeps_identity():
     body = res.json()
     assert body["ok"] is True
     assert body["settings"]["risk_profile"] == "conservative"
-    assert body["settings"]["max_trades_daily"] == 3
-    assert body["settings"]["min_confidence"] == 75.0
+    assert body["settings"]["max_trades_daily"] == 5
+    assert body["settings"]["min_confidence"] == 72.0
     # identity survives the preset switch
     assert body["settings"]["capital"] == 50_000
     assert body["settings"]["min_lot"] == 0.05
