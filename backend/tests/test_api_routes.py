@@ -1930,6 +1930,73 @@ class TestPerformanceSources:
             "key": "bull_trend", "trades": 1,
             "win_rate_pct": 100.0, "total_pnl": 12.0}]
 
+    @pytest.mark.asyncio
+    async def test_pnl_breakdown_groups_by_reason_and_asset(self):
+        """/pnl-breakdown: worst-PnL-first rows + wins/losses split.
+
+        Home page shows "−$19.30 (W3/L3)" — a loss made of 3 winners and 3
+        losers reads differently from 0W/6L, so the split must be reported.
+        """
+        def _c(rid, asset, pnl, reason):
+            row = self._closed(rid, asset, pnl, f"sig-{rid}")
+            row["close_reason"] = reason
+            return row
+
+        db = FakeDatabase(rows={"paper_trades": [
+            _c("c1", "GBPNZD", 10.0, "sl"),
+            _c("c2", "GBPNZD", -19.30, "sl"),
+            _c("c3", "GBPNZD", 5.0, "sl"),
+            _c("c4", "XAUUSD", -14.72, "smart_exit:left_behind"),
+            _c("c5", "XAUUSD", -2.00, "manual"),
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/trading/pnl-breakdown")).json()
+
+        assert body["period_days"] == 0
+        assert body["total_trades"] == 5
+        assert body["total_pnl"] == pytest.approx(-21.02)
+
+        # by_reason: worst first ("smart_exit:left_behind" −14.72 then "sl").
+        reasons = {r["key"]: r for r in body["by_reason"]}
+        assert reasons["sl"] == {
+            "key": "sl", "trades": 3, "wins": 2, "losses": 1,
+            "pnl": pytest.approx(-4.30)}
+        assert body["by_reason"][0]["key"] == "smart_exit:left_behind"
+
+        # by_asset: GBPNZD −4.30 before XAUUSD −16.72? No — worst first:
+        assets = {r["key"]: r for r in body["by_asset"]}
+        assert assets["GBPNZD"]["wins"] == 2 and assets["GBPNZD"]["losses"] == 1
+        assert assets["XAUUSD"] == {
+            "key": "XAUUSD", "trades": 2, "wins": 0, "losses": 2,
+            "pnl": pytest.approx(-16.72)}
+        assert body["by_asset"][0]["key"] == "XAUUSD"
+
+    @pytest.mark.asyncio
+    async def test_pnl_breakdown_empty_is_honest(self):
+        """No closed trades → empty lists, zero totals (no fake data)."""
+        set_state(FakeDatabase(rows={"paper_trades": []}))
+        body = (await call("GET", "/api/trading/pnl-breakdown")).json()
+        assert body["total_trades"] == 0
+        assert body["total_pnl"] == 0.0
+        assert body["by_reason"] == []
+        assert body["by_asset"] == []
+
+    @pytest.mark.asyncio
+    async def test_pnl_breakdown_days_filter(self):
+        """days=N drops trades closed before the cutoff."""
+        old = "2020-01-01T00:00:00+00:00"
+        r_old = self._closed("o", "EURUSD", 50.0, "s-old")
+        r_old["closed_at"] = old
+        r_new = self._closed("n", "EURUSD", -3.0, "s-new")
+        set_state(FakeDatabase(rows={"paper_trades": [r_old, r_new]}))
+        body = (await call("GET", "/api/trading/pnl-breakdown?days=30")).json()
+        assert body["period_days"] == 30
+        assert body["total_trades"] == 1
+        assert body["total_pnl"] == pytest.approx(-3.0)
+        assert body["by_asset"] == [{
+            "key": "EURUSD", "trades": 1, "wins": 0, "losses": 1,
+            "pnl": pytest.approx(-3.0)}]
+
 
 class TestExtendedAnalysisSync:
     """Regression (2026-09-11, "Performance Walk Forward + Extended ไม่สอดคล้อง

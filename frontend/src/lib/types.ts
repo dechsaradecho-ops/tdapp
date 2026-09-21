@@ -1246,6 +1246,24 @@ export interface SignalReport {
   by_regime: SignalReportRow[];
 }
 
+/** One aggregated group of closed trades (a close reason OR an asset). */
+export interface PnlBreakdownRow {
+  key: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+}
+
+/** Response of GET /api/trading/pnl-breakdown (home-page stats panels). */
+export interface PnlBreakdown {
+  period_days: number;
+  total_trades: number;
+  total_pnl: number;
+  by_reason: PnlBreakdownRow[];
+  by_asset: PnlBreakdownRow[];
+}
+
 // ---------- Auth: 6-digit PIN gate ----------
 export interface PinStatus {
   pin_set: boolean;

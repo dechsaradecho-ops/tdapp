@@ -22,6 +22,7 @@ import {
   MarketCandlesResponse,
   MarketSummary,
   MonitorSnapshot,
+  PnlBreakdown,
   NewsLogsResponse,
   NewsRisk,
   OrderPlan,
@@ -286,6 +287,11 @@ export const api = {
   // GET /api/trading/signal-report — win rate by asset/band/regime
   signalReport: (days = 30) =>
     get<SignalReport>(`/api/trading/signal-report?days=${days}`),
+
+  // GET /api/trading/pnl-breakdown — realized PnL by close reason + asset
+  // (days=0 → all-time; home page shows the whole journal).
+  pnlBreakdown: (days = 0) =>
+    get<PnlBreakdown>(`/api/trading/pnl-breakdown?days=${days}`),
 
   // ---------- Quote API call log (7-day auto-expiry, server paging) ----------
   quoteLogs: (limit = 100, offset = 0, category = "all", provider = "all") =>

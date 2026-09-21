@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from itertools import combinations
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -1556,6 +1556,73 @@ class JournalAnalysis(BaseModel):
     average_rr: float
     best_setup: Optional[JournalEntry] = None
     worst_setup: Optional[JournalEntry] = None
+
+
+# ---------- PnL breakdown (home page: by close reason + by asset) ----------
+class PnlBreakdownRow(BaseModel):
+    """One group (a close reason or an asset) of closed trades.
+
+    ``key`` is the raw close_reason ("sl" / "smart_exit:left_behind" /
+    "manual") or the asset code.  ``pnl`` is the realized sum; wins/losses
+    split that group so the home page can show "(W3/L3)" next to the PnL —
+    a −$19.30 over 6 trades reads very differently when it is 3W/3L than
+    when it is 0W/6L.
+    """
+    key: str
+    trades: int
+    wins: int
+    losses: int
+    pnl: float
+
+
+class PnlBreakdown(BaseModel):
+    period_days: int
+    total_trades: int
+    total_pnl: float
+    by_reason: list[PnlBreakdownRow] = Field(default_factory=list)
+    by_asset: list[PnlBreakdownRow] = Field(default_factory=list)
+
+
+def analyze_pnl_breakdown(entries: list[JournalEntry],
+                          period_days: int = 0) -> PnlBreakdown:
+    """Group CLOSED trades by close_reason and by asset.
+
+    Same source as analyze_journal (closed paper_trades) so the home-page
+    numbers reconcile with the Journal Insight panel.  Group order is
+    worst PnL first — the loss-makers bubble up so the owner sees what to
+    fix without scanning the whole list.  Ties fall back to trade count
+    (bigger sample first), then key.
+    """
+    closed = [e for e in entries if e.pnl is not None]
+
+    def _group(key_of) -> list[PnlBreakdownRow]:
+        acc: dict[str, dict[str, Any]] = {}
+        for e in closed:
+            key = key_of(e) or "—"
+            g = acc.setdefault(key, {"trades": 0, "wins": 0, "losses": 0,
+                                     "pnl": 0.0})
+            g["trades"] += 1
+            g["pnl"] += float(e.pnl or 0.0)
+            if (e.pnl or 0.0) > 0:
+                g["wins"] += 1
+            else:
+                g["losses"] += 1
+        rows = [
+            PnlBreakdownRow(
+                key=k, trades=v["trades"], wins=v["wins"], losses=v["losses"],
+                pnl=round(v["pnl"], 2))
+            for k, v in acc.items()
+        ]
+        rows.sort(key=lambda r: (r.pnl, -r.trades, r.key))
+        return rows
+
+    return PnlBreakdown(
+        period_days=period_days,
+        total_trades=len(closed),
+        total_pnl=round(sum(float(e.pnl or 0.0) for e in closed), 2),
+        by_reason=_group(lambda e: (e.ai_explanation or "").strip()),
+        by_asset=_group(lambda e: (e.asset or "").strip()),
+    )
 
 
 def analyze_journal(entries: list[JournalEntry], period_days: int = 30) -> JournalAnalysis:

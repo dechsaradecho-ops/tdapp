@@ -32,6 +32,7 @@ from app.models.schemas import (
     OrderStrategyEngine,
     PaperTradingStatus,
     PauseStatus,
+    PnlBreakdown,
     RiskOfficer,
     RiskOfficerReview,
     RiskProfile,
@@ -39,6 +40,7 @@ from app.models.schemas import (
     TradeLimits,
     WalkForwardResult,
     analyze_journal,
+    analyze_pnl_breakdown,
     effective_min_confidence,
     effective_spread,
     is_market_closed,
@@ -1695,6 +1697,35 @@ async def journal_analysis(request: Request, days: int = 30) -> JournalAnalysis:
         entries = [e for e in entries
                    if str(e.closed_at or e.created_at or "")[:10] >= cutoff]
     return analyze_journal(entries, period_days=days)
+
+
+@router.get("/pnl-breakdown", response_model=PnlBreakdown)
+async def pnl_breakdown(request: Request, days: int = 0) -> PnlBreakdown:
+    """Home-page PnL breakdown: closed trades grouped by close reason + asset.
+
+    ``days=0`` (default) = all-time, matching the "สถิติรวม" view the owner
+    asked for on the home page. Same source as /journal (closed paper_trades)
+    so the numbers reconcile with the Journal Insight panel.
+
+    close_reason values are the raw guard reasons ("sl" / "tp" /
+    "smart_exit:left_behind" / "manual" / "time" / "emergency"); the UI maps
+    them to Thai labels. Rows are ordered worst-PnL-first.
+    """
+    db = request.app.state.db
+    try:
+        rows = db.select_paged("paper_trades", filters={"status": "closed"})
+    except Exception:
+        try:
+            rows = db.select("paper_trades", filters={"status": "closed"},
+                             limit=500)
+        except Exception:
+            rows = []
+    entries = _journal_entries_from_paper_trades(rows)
+    if days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        entries = [e for e in entries
+                   if str(e.closed_at or e.created_at or "")[:10] >= cutoff]
+    return analyze_pnl_breakdown(entries, period_days=days)
 
 
 @router.post("/journal")
