@@ -119,15 +119,37 @@ async def _live_marks(assets: list[str]) -> dict[str, float]:
         return {}
 
 
-def _atr_for(pos: Position, fallback_distance: float) -> float:
-    """ATR estimate for trailing: 20% of the SL distance (≈ 1.5× ATR tier).
+def _atr_for(pos: Position, fallback_distance: float, db=None) -> float:
+    """ATR estimate for trailing: 20% of the ORIGINAL SL distance.
 
     The guard has no candle history per ticket; the SL distance the signal
     was sized from is a stable proxy (SL = 1.5 × ATR at entry by default).
+
+    CRITICAL: the denominator must be the INITIAL stop, never the current
+    one. Breakeven / trailing move the stop toward (or past) entry, so
+    `abs(entry - stop_loss)` collapses as the trail tightens — the ATR proxy
+    shrinks with it and the trail hugs price ever tighter (ratchet collapse).
+    That strangled every winner at ~+0.7R while losers ran the full −1.0R,
+    inverting reward:risk. `initial_stop_loss` (migration 021, the same field
+    `_r_multiple_at` and the monitor badge read) is used first; the current
+    SL is only a fallback when the journal row is unavailable.
     """
-    if pos.stop_loss is None:
+    risk = None
+    if db is not None:
+        try:
+            rows = db.select(
+                "paper_trades",
+                filters={"ticket": str(getattr(pos, "ticket", "") or "")},
+                limit=1)
+            if rows:
+                risk = rows[0].get("initial_stop_loss")
+        except Exception:
+            risk = None
+    if risk is None:
+        risk = getattr(pos, "stop_loss", None)
+    if risk is None:
         return fallback_distance * 0.2
-    return abs(pos.entry_price - pos.stop_loss) * 0.2
+    return abs(pos.entry_price - float(risk)) * 0.2
 
 
 def _r_multiple_at(pos: Position, price: float, db=None) -> float:
@@ -405,7 +427,19 @@ async def _manage_position(db, broker, pos: Position, price: float,
         return out
 
     sign = 1 if pos.direction == "BUY" else -1
+    # R unit = the ORIGINAL risk distance, never the current stop. Breakeven /
+    # trailing move the stop toward entry, so `abs(entry - stop_loss)` would
+    # collapse and report a fantasy R (and shrink the trailing ATR proxy).
+    # `initial_stop_loss` (migration 021) is the source of truth; the current
+    # SL is only a fallback when the journal row is unavailable.
     r_distance = abs(pos.entry_price - pos.stop_loss)
+    try:
+        rows = db.select("paper_trades",
+                         filters={"ticket": str(pos.ticket or "")}, limit=1)
+        if rows and rows[0].get("initial_stop_loss") is not None:
+            r_distance = abs(pos.entry_price - float(rows[0]["initial_stop_loss"]))
+    except Exception:
+        pass
     if r_distance <= 0:
         return out
     profit_distance = (price - pos.entry_price) * sign  # >0 when winning
@@ -473,7 +507,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
     if be_trigger > 0 and r_multiple >= be_trigger:
         be_price = pos.entry_price
         if trail_mult > 0:
-            atr = _atr_for(pos, r_distance)
+            atr = _atr_for(pos, r_distance, db)
             trail_price = price - sign * trail_mult * atr
             # trail only ever TIGHTENS: never below breakeven (BUY) or above
             # it (SELL), and never looser than the current SL.

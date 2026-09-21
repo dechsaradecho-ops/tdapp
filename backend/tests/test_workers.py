@@ -1372,6 +1372,57 @@ class TestPositionGuardManagement:
         assert row["stop_loss"] == 1.0900  # original
         assert row.get("sl_moved_at") is None
 
+    # ---- trailing ATR proxy must use the INITIAL stop (ratchet fix) ------
+    @pytest.mark.asyncio
+    async def test_trailing_atr_uses_initial_stop_not_current(self, monkeypatch):
+        """Regression (prod 2026-09-21): the trailing ATR proxy must be sized
+        from the ORIGINAL risk distance, never the current stop.
+
+        Bug: `_atr_for` used `abs(entry - stop_loss) × 0.2`. Once breakeven /
+        trailing moved the stop toward entry, that distance collapsed, so the
+        ATR proxy shrank every cycle and the trail hugged price ever tighter
+        (ratchet collapse). Winners were strangled at ~+0.7R while losers ran
+        the full −1.0R → negative expectancy at a 57% win rate.
+
+        Fixture: entry 1.1000, initial SL 1.0900 (R = 0.0100), live 1.2500.
+        The journal row carries initial_stop_loss = 1.0900 while the CURRENT
+        stop has already been trailed up to 1.2000. The ATR proxy must stay
+        0.2 × 0.0100 = 0.0020 (trail = 1.2500 − 2×0.0020 = 1.2460), NOT
+        0.2 × |1.1000 − 1.2000| = 0.0200 (which would park the stop at 1.2100).
+        """
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker._positions["T1"].stop_loss = 1.2000  # already trailed up
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = self._db(stop_loss=1.2000, initial_stop_loss=1.0900)
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0))
+        # stable ATR proxy from the INITIAL stop → 1.2460, not 1.2100
+        assert moved and moved[0] == pytest.approx(1.2460, abs=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_r_multiple_uses_initial_stop_for_ladder(self, monkeypatch):
+        """The R-ladder floor must also be measured against the initial risk.
+
+        With the current stop already at 1.2000, `abs(entry - stop_loss)` would
+        report a fantasy R and mis-place the ladder. Using initial_stop_loss
+        (1.0900) keeps R = 0.0100, so at +15R the ladder floor is entry + 2R.
+        """
+        from app.workers import position_guard
+        moved: list[float] = []
+        broker = self._broker()
+        broker._positions["T1"].stop_loss = 1.2000
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        db = self._db(stop_loss=1.2000, initial_stop_loss=1.0900)
+        await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0,
+                                    trailing_ladder=True))
+        # ladder at ≥3R → entry + 2R = 1.1200; trail 1.2460 wins (tighter)
+        assert moved and moved[0] == pytest.approx(1.2460, abs=1e-6)
+
     # ---- Strategy E: time stop (max_hold_days) ---------------------------
     @pytest.mark.asyncio
     async def test_time_stop_closes_aged_position(self, monkeypatch):
