@@ -688,8 +688,10 @@ async def pnl_rate_debug(request: Request) -> dict:
     rates = await fetch_pnl_rates(assets, seed=seed)
     # Also run the REAL monitor snapshot to see what it reports.
     try:
+        from app.api.routes.settings import get_app_settings
+        s = get_app_settings(db)
         snap = await execution.monitor_snapshot(
-            db, request.app.state.broker, request.app.state.settings)
+            db, request.app.state.broker, s)
         monitor = {p.asset: p.unrealized_pnl for p in snap.open_positions}
     except Exception as exc:
         monitor = {"error": f"{exc.__class__.__name__}: {exc}"}
