@@ -351,6 +351,15 @@ async def scan_once(db: Database) -> list[dict]:
                 # เก็บเหตุผลครบทุกข้อ (build_proposal ให้สูงสุด 6) — หน้า
                 # signals แตกกลับเป็นรายข้อเพื่อจัดหมวด (เดิมตัด [:4])
                 "approval": "pending", "explanation": " | ".join(proposal.reason),
+                # P0-5 baseline: ค่าอินดิเคเตอร์ ณ ตอนสร้างสัญญาณ ใช้ให้
+                # thesis gate แยกได้ว่า Supertrend "สวนมาตั้งแต่ต้น"
+                # (supertrend_conflict) หรือ "เดิมเห็นด้วยแล้วค่อยพลิก"
+                # (supertrend_flipped) — EMA เป็น thesis หลัก เส้นทางนี้
+                # จึงเก็บทั้ง EMA, Supertrend และ MACD ไว้เทียบภายหลัง
+                "baseline_supertrend_dir": int(ind.supertrend_dir),
+                "baseline_macd_hist": float(ind.macd_hist),
+                "baseline_ema_fast": float(ind.ema_fast),
+                "baseline_ema_slow": float(ind.ema_slow),
             })
             # Intra-cycle count: today's tally grows with every emit so the
             # frequency note on later cards in the SAME cycle stays honest.

@@ -23,6 +23,31 @@ DESIGN
   produced by ``quotes.snapshot_from_candles`` / ``fetch_all_snapshots``) and
   returns a ``ThesisValidation``. It never raises and never touches the DB or
   the network — the caller fetches and passes the snapshot in.
+* PRIMARY THESIS = EMA. The scanner derives BUY/SELL from EMA-fast vs
+  EMA-slow, so the EMA trend is the ONE thing that must still hold: if it
+  flips against the signal direction the order is BLOCKED (``trend_flipped``).
+* CONFIRMATION (not a sole veto) = Supertrend (+MACD). A single coarse
+  indicator drifting against the signal is NOT enough to kill a trade — the
+  current ``_supertrend_dir`` is a coarse SMA-band heuristic with no backtest
+  confirmation as a hard gate, and the scanner never cites it as the reason a
+  card exists. So:
+    - Supertrend alone opposing → recorded as a NON-BLOCKING WARNING
+      (``supertrend_conflict`` / ``supertrend_flipped``); the order still
+      fires but the conflict is logged for telemetry/confidence.
+    - Supertrend AND MACD opposing TOGETHER → BLOCKED
+      (``thesis_corroboration_failed``): TWO independent momentum/trend
+      confirmations disagreeing is treated as a failed corroboration.
+* BASELINE COMPARISON: the signal row stores the indicator values captured at
+  signal-creation time (``baseline_*`` columns). Comparing them against the
+  fresh snapshot lets the gate say WHY Supertrend disagrees:
+    - ``supertrend_conflict``  — it was ALREADY opposing when the card was
+      created (the scanner's Supertrend disagreed from the start; purely
+      informational).
+    - ``supertrend_flipped``   — it AGREED at creation and flipped later (a
+      genuine change of state since the signal was stored).
+  Signals created before this change carry no baseline; they are treated as
+  ``supertrend_conflict`` (never a flip) so the missing column cannot falsely
+  blame a flip — and they are expired on deploy (TTL is only 30 min).
 * FAIL-CLOSED at the seam (``execution.execute_signal``): a MISSING snapshot
   (``snapshot is None`` / empty) BLOCKS the order with
   ``latest_snapshot_unavailable`` — a thesis that cannot be re-verified must
@@ -36,9 +61,14 @@ MACHINE-READABLE REASON CODES (verbatim, stable)
       stated an explicit thesis and the fresh data no longer supports the
       direction at all. (Umbrella code; specific codes below take precedence.)
 * ``trend_flipped``               — the fresh EMA trend (EMA-fast vs EMA-slow)
-      now CONTRADICTS the signal direction.
-* ``supertrend_flipped``          — the fresh Supertrend direction contradicts
-      the signal direction.
+      now CONTRADICTS the signal direction. BLOCKS (primary thesis).
+* ``thesis_corroboration_failed`` — BOTH Supertrend AND MACD now oppose the
+      signal direction (two independent confirmations disagree). BLOCKS.
+* ``supertrend_flipped``          — Supertrend flipped against the direction
+      since the signal was created (it agreed at creation). Warning (does NOT
+      block on its own).
+* ``supertrend_conflict``         — Supertrend already opposed at creation
+      (no baseline change). Warning (does NOT block on its own).
 * ``breakout_invalidated``        — XAUUSD Strategy-D only: the stored signal
       was a breakout/retest entry but the fresh snapshot no longer shows a
       valid breakout for that direction (structure gone / flipped).
@@ -55,7 +85,9 @@ NOTE on back-compat: callers that pass no ``signal`` row, or a signal with no
 ``created_at``, keep the previous behaviour (no expiry check). The trend /
 Supertrend / regime checks only run when the snapshot actually carries those
 fields (all-zero / missing ⇒ skipped), so a data feed that does not compute an
-indicator for an asset never produces a false block.
+indicator for an asset never produces a false block. A signal row without a
+``baseline_supertrend_dir`` is read as "no baseline" ⇒ ``supertrend_conflict``
+(never a false ``supertrend_flipped``).
 """
 
 from __future__ import annotations
@@ -170,6 +202,21 @@ def _num(snapshot: dict, key: str, default: float = 0.0) -> float:
         return default
 
 
+def _opt_num(source: Any, key: str) -> Optional[float]:
+    """Like ``_num`` but returns ``None`` when the key is absent/blank/invalid
+    (used for the OPTIONAL ``baseline_*`` signal columns: ``None`` means \"no
+    baseline recorded\", which is distinct from 0)."""
+    if not source:
+        return None
+    raw = source.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
                     now: Optional[datetime] = None,
                     max_age_min: Optional[int] = None) -> ThesisValidation:
@@ -237,6 +284,7 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
     ema_fast = _num(snapshot, "ema_fast")
     ema_slow = _num(snapshot, "ema_slow")
     supertrend_dir = int(_num(snapshot, "supertrend_dir"))
+    macd_hist = _num(snapshot, "macd_hist")
     breakout_state = int(_num(snapshot, "breakout_state"))
     breakout_level = _num(snapshot, "breakout_level")
     adx = _num(snapshot, "adx")
@@ -244,12 +292,20 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
     news_now = bool(snapshot.get("high_impact_event"))
     regime = _regime_of(snapshot)
 
+    # Baseline indicator values captured when the signal was created (may be
+    # absent on pre-migration signals ⇒ read as None ⇒ "no baseline").
+    base_supertrend = _opt_num(signal, "baseline_supertrend_dir")
+    base_macd = _opt_num(signal, "baseline_macd_hist")
+
     values = {
         "asset": asset,
         "direction": direction,
         "ema_fast": ema_fast,
         "ema_slow": ema_slow,
         "supertrend_dir": supertrend_dir,
+        "macd_hist": macd_hist,
+        "baseline_supertrend_dir": base_supertrend,
+        "baseline_macd_hist": base_macd,
         "breakout_state": breakout_state,
         "breakout_level": breakout_level,
         "adx": adx,
@@ -259,8 +315,9 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
     }
 
     # ---- trend flip (EMA fast vs slow) ------------------------------------
-    # Only evaluated when the feed actually computed both EMAs for this asset;
-    # an all-zero snapshot would otherwise read as "bear_trend" and false-block.
+    # PRIMARY THESIS. Only evaluated when the feed actually computed both EMAs
+    # for this asset; an all-zero snapshot would otherwise read as "bear_trend"
+    # and false-block.
     if ema_fast and ema_slow and (is_buy or is_sell):
         trend_up = ema_fast > ema_slow
         if (is_buy and not trend_up) or (is_sell and trend_up):
@@ -271,13 +328,48 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
                          f"— ทิศทาง {direction} ไม่สอดคล้องแล้ว"),
             ))
 
-    # ---- Supertrend flip --------------------------------------------------
-    if supertrend_dir != 0 and (is_buy or is_sell):
-        if (is_buy and supertrend_dir < 0) or (is_sell and supertrend_dir > 0):
+    # ---- Supertrend / MACD confirmation (NOT a sole veto) -----------------
+    # EMA is the primary thesis (above) and does the actual blocking. The
+    # coarse Supertrend (and MACD) act as CONFIRMATION: a SINGLE indicator
+    # drifting against the signal is recorded as a non-blocking WARNING, only
+    # when BOTH disagree together do we treat it as a failed corroboration and
+    # block ("thesis_corroboration_failed").
+    if (is_buy or is_sell):
+        st_opposes = (supertrend_dir != 0 and
+                      ((is_buy and supertrend_dir < 0) or
+                       (is_sell and supertrend_dir > 0)))
+        macd_opposes = (macd_hist != 0 and
+                        ((is_buy and macd_hist < 0) or
+                         (is_sell and macd_hist > 0)))
+        if st_opposes:
+            # Distinguish a genuine FLIP (agreed at creation, opposed now) from
+            # a from-the-start CONFLICT using the stored baseline. No baseline
+            # ⇒ treat as conflict (never falsely blame a flip).
+            flipped = None
+            if base_supertrend is not None and int(base_supertrend) != 0:
+                base_dir = int(base_supertrend)
+                base_agreed = ((is_buy and base_dir > 0) or
+                               (is_sell and base_dir < 0))
+                flipped = bool(base_agreed)
+            if flipped:
+                code = "supertrend_flipped"
+                msg = ("Supertrend พลิกสวนทางกับสัญญาณ (ตอนสร้างเห็นด้วย "
+                       f"baseline={int(base_supertrend):+d} → "
+                       f"dir={supertrend_dir:+d})")
+            else:
+                code = "supertrend_conflict"
+                msg = ("Supertrend สวนทางกับสัญญาณมาตั้งแต่ต้น "
+                       f"(dir={supertrend_dir:+d}) — บันทึกเป็นข้อขัดแย้ง "
+                       "ไม่บล็อก (ใช้ EMA เป็น thesis หลัก)")
+            issues.append(ThesisIssue(code=code, message=msg,
+                                      severity="warning"))
+        if st_opposes and macd_opposes:
+            # TWO independent confirmations disagree ⇒ corroboration failed.
             issues.append(ThesisIssue(
-                code="supertrend_flipped",
-                message=("Supertrend พลิกสวนทางกับสัญญาณ "
-                         f"(dir={supertrend_dir:+d}) — thesis ถูกหักล้าง"),
+                code="thesis_corroboration_failed",
+                message=("ทั้ง Supertrend และ MACD สวนทางกับสัญญาณพร้อมกัน "
+                         f"(st={supertrend_dir:+d}, macd={macd_hist:+.4f}) "
+                         "— การยืนยันล้มเหลว"),
             ))
 
     # ---- regime block -----------------------------------------------------
@@ -332,6 +424,13 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
 
     if not issues:
         return ThesisValidation(status=STATUS_VALID, source="live", values=values)
+
+    # Warnings (e.g. Supertrend-only conflict/flip — P0-5 refinement: EMA is
+    # the primary thesis, Supertrend is CONFIRMATION not a sole veto) are
+    # recorded for telemetry but NEVER block. Only an error code invalidates.
+    if not any(i.severity == "error" for i in issues):
+        return ThesisValidation(status=STATUS_VALID, issues=issues,
+                                source="live", values=values)
 
     # Umbrella code: always present on an INVALID result so a caller that only
     # switches on ``signal_thesis_invalidated`` still catches EVERY thesis

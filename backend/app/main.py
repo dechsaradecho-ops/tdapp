@@ -22,6 +22,7 @@ from app.services.database import Database
 from app.services.notification_service import NotificationService
 from app.services import quote_log
 from app.services import scheduler_log
+from app.services.execution import expire_unbaselined_pending_signals
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
 from app.workers import (auto_trader, calendar_sync, daily_digest,
@@ -245,6 +246,19 @@ async def lifespan(app: FastAPI):
         position_guard.seed_order_sequence(app.state.db, app.state.broker)
     except Exception:
         log.exception("order-sequence seed failed (continuing)")
+
+    # P0-5 refinement deploy cleanup: pending signals created before migration
+    # 045 carry no Supertrend/MACD baseline, so the thesis gate cannot tell a
+    # from-the-start conflict from a later flip for them. Expire them once on
+    # boot (they are short-lived anyway — SIGNAL_TTL_MIN = 30) instead of
+    # letting them be judged without that context.
+    try:
+        _n_unbaselined = expire_unbaselined_pending_signals(app.state.db)
+        if _n_unbaselined:
+            log.info("P0-5: expired %d pending signal(s) lacking a thesis "
+                     "baseline", _n_unbaselined)
+    except Exception:
+        log.exception("expire unbaselined pending signals failed (continuing)")
 
     # Background workers run inside this single web service when
     # ENABLE_WORKERS=1 (set on tdapp-api only — never on more than one

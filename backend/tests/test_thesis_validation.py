@@ -60,6 +60,13 @@ def _signal(**over) -> dict:
         "take_profit": 1.1100,
         "confidence": 80.0,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        # P0-5 baseline captured at signal creation (migration 045).
+        # These tests model a POST-045 row: at creation the trend was bullish
+        # and Supertrend agreed (+1).
+        "baseline_supertrend_dir": 1,
+        "baseline_macd_hist": 0.1,
+        "baseline_ema_fast": 1.1050,
+        "baseline_ema_slow": 1.0900,
     }
     base.update(over)
     return base
@@ -115,16 +122,87 @@ class TestTrendFlipped:
         assert "trend_flipped" in r.error_codes
 
 
-class TestSupertrendFlipped:
-    def test_buy_with_down_supertrend_blocks(self):
-        snap = _snapshot(supertrend_dir=-1)
-        r = tv.validate_thesis(_signal(direction="BUY"), snap)
-        assert "supertrend_flipped" in r.error_codes
+class TestSupertrendConfirmation:
+    """P0-5 refinement: EMA is the primary thesis; Supertrend is CONFIRMATION.
 
-    def test_sell_with_up_supertrend_blocks(self):
-        snap = _snapshot(supertrend_dir=1)
+    A single opposing Supertrend reading is a NON-BLOCKING warning
+    (``supertrend_conflict`` from the start, ``supertrend_flipped`` when it
+    agreed at creation and flipped later). Only when Supertrend AND MACD
+    oppose TOGETHER does the order block (``thesis_corroboration_failed``).
+    """
+
+    def test_buy_with_down_supertrend_warns_but_does_not_block(self):
+        snap = _snapshot(supertrend_dir=-1)
+        sig = _signal(direction="BUY", baseline_supertrend_dir=-1)
+        r = tv.validate_thesis(sig, snap)
+        assert r.ok is True
+        assert "supertrend_conflict" in [i.code for i in r.issues]
+        assert "supertrend_flipped" not in r.error_codes
+        assert r.error_codes == []
+
+    def test_sell_with_up_supertrend_warns_but_does_not_block(self):
+        # Bearish EMA snapshot (so a SELL is not regime-blocked); Supertrend
+        # points UP (opposes the SELL) with a matching baseline ⇒ conflict.
+        # MACD must AGREE with the sell (-0.1) or it would be a corroboration
+        # failure (both confirming indicators opposing).
+        snap = _snapshot(supertrend_dir=1, ema_fast=1.0900, ema_slow=1.1050,
+                         macd_hist=-0.1)
+        sig = _signal(direction="SELL", baseline_supertrend_dir=1)
+        r = tv.validate_thesis(sig, snap)
+        assert r.ok is True
+        assert "supertrend_conflict" in [i.code for i in r.issues]
+
+    def test_no_baseline_reads_as_conflict_not_flip(self):
+        # A pre-045 signal has no baseline column ⇒ conflict (never a false
+        # "flipped" blame).
+        snap = _snapshot(supertrend_dir=-1)
+        sig = _signal(direction="BUY", baseline_supertrend_dir=None,
+                      baseline_macd_hist=None)
+        r = tv.validate_thesis(sig, snap)
+        codes = [i.code for i in r.issues]
+        assert "supertrend_conflict" in codes
+        assert "supertrend_flipped" not in codes
+
+    def test_missing_baseline_columns_read_as_conflict(self):
+        # Keys entirely absent (old row dict) behave the same as None.
+        sig = _signal(direction="BUY")
+        sig.pop("baseline_supertrend_dir")
+        r = tv.validate_thesis(sig, _snapshot(supertrend_dir=-1))
+        assert "supertrend_conflict" in [i.code for i in r.issues]
+
+    def test_baseline_agreed_then_flip_is_supertrend_flipped(self):
+        # At creation Supertrend agreed (baseline +1, BUY); now it opposes.
+        sig = _signal(direction="BUY", baseline_supertrend_dir=1)
+        r = tv.validate_thesis(sig, _snapshot(supertrend_dir=-1))
+        codes = [i.code for i in r.issues]
+        assert "supertrend_flipped" in codes
+        assert "supertrend_conflict" not in codes
+        assert r.ok is True                     # still non-blocking
+
+    def test_baseline_opposed_stays_conflict(self):
+        # At creation Supertrend already opposed (baseline -1, BUY).
+        sig = _signal(direction="BUY", baseline_supertrend_dir=-1)
+        r = tv.validate_thesis(sig, _snapshot(supertrend_dir=-1))
+        codes = [i.code for i in r.issues]
+        assert "supertrend_conflict" in codes
+        assert "supertrend_flipped" not in codes
+
+    def test_supertrend_and_macd_together_block(self):
+        snap = _snapshot(supertrend_dir=-1, macd_hist=-0.2)
+        r = tv.validate_thesis(_signal(direction="BUY"), snap)
+        assert r.status == tv.STATUS_INVALID
+        assert "thesis_corroboration_failed" in r.error_codes
+
+    def test_supertrend_and_macd_together_block_for_sell(self):
+        snap = _snapshot(supertrend_dir=1, macd_hist=0.2)
         r = tv.validate_thesis(_signal(direction="SELL"), snap)
-        assert "supertrend_flipped" in r.error_codes
+        assert "thesis_corroboration_failed" in r.error_codes
+
+    def test_macd_only_opposing_does_not_block(self):
+        # MACD disagrees but Supertrend agrees ⇒ not a failed corroboration.
+        snap = _snapshot(supertrend_dir=1, macd_hist=-0.2)
+        r = tv.validate_thesis(_signal(direction="BUY"), snap)
+        assert r.ok is True
 
 
 class TestRegimeBlocked:
@@ -225,7 +303,8 @@ class TestSummaryAndDict:
 
     def test_as_dict_shape(self):
         d = tv.validate_thesis(_signal(direction="BUY"),
-                               _snapshot(supertrend_dir=-1)).as_dict()
+                               _snapshot(ema_fast=1.0900,
+                                         ema_slow=1.1050)).as_dict()
         assert d["status"] == tv.STATUS_INVALID
         assert d["ok"] is False
         assert d["reason"]
@@ -262,7 +341,9 @@ def _patch_snapshots(monkeypatch, snaps):
 
 class TestExecuteSignalThesisSeam:
     def test_inflated_signal_blocks_and_never_reaches_broker(self, monkeypatch):
-        _patch_snapshots(monkeypatch, _snapshot(supertrend_dir=-1))
+        # EMA flipped (primary thesis) ⇒ BLOCKS, never reaches the broker.
+        _patch_snapshots(monkeypatch, _snapshot(ema_fast=1.0900,
+                                                ema_slow=1.1050))
         db = FakeDatabase()
         broker = _RecordingBroker()
         notifier = _RecordingNotifier()
@@ -273,9 +354,26 @@ class TestExecuteSignalThesisSeam:
             confidence=90.0, opportunity=90.0, signal_id="sig-1",
             source="approved", signal_row=_signal(direction="BUY")))
         assert report.allowed is False
-        assert report.thesis_error == "supertrend_flipped"
+        assert report.thesis_error == "trend_flipped"
         assert any("thesis_error" in r for r in report.rejects)
         assert broker.orders == []
+
+    def test_supertrend_only_conflict_does_not_block(self, monkeypatch):
+        # Supertrend alone opposes (EMA still agrees) ⇒ order FIRES.
+        _patch_snapshots(monkeypatch, _snapshot(supertrend_dir=-1,
+                                                macd_hist=0.1))
+        db = FakeDatabase()
+        broker = _RecordingBroker()
+        notifier = _RecordingNotifier()
+        report = asyncio.run(execution.execute_signal(
+            db, broker, notifier, AppSettings(capital=10_000),
+            user_id="demo", asset="EURUSD", direction="BUY",
+            entry=1.1000, stop_loss=1.0950, take_profit=1.1100,
+            confidence=90.0, opportunity=90.0, signal_id="sig-1",
+            source="approved", signal_row=_signal(direction="BUY")))
+        assert report.allowed is True
+        assert report.thesis_error is None
+        assert len(broker.orders) == 1
 
     def test_unavailable_snapshot_blocks_fail_closed(self, monkeypatch):
         _patch_snapshots(monkeypatch, None)      # empty → no snapshot

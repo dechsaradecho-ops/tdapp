@@ -418,6 +418,32 @@ async def test_expire_stale_logs_expired_event():
 
 
 @pytest.mark.asyncio
+async def test_expire_unbaselined_expires_only_null_baseline():
+    """P0-5 deploy cleanup: pending rows WITHOUT a baseline expire; a pending
+    row that already carries a baseline is left untouched."""
+    from app.services import execution
+
+    db = FakeDatabase(rows={"signals": [
+        {"id": "s-no-base", "asset": "USDJPY", "direction": "sell",
+         "confidence": 80.0, "entry": 150.0, "approval": "pending",
+         "created_at": datetime.now(timezone.utc).isoformat()},
+        {"id": "s-based", "asset": "GBPNZD", "direction": "buy",
+         "confidence": 75.0, "entry": 2.1, "approval": "pending",
+         "created_at": datetime.now(timezone.utc).isoformat(),
+         "baseline_supertrend_dir": -1, "baseline_macd_hist": -0.2},
+    ]})
+    n = execution.expire_unbaselined_pending_signals(db)
+    assert n == 1
+    by_id = {r["id"]: r for r in db.rows["signals"]}
+    assert by_id["s-no-base"]["approval"] == "expired"
+    assert by_id["s-based"]["approval"] == "pending"
+    expired = [row for table, row in db.inserted
+               if table == "signal_logs" and row.get("event") == "expired"]
+    assert len(expired) == 1
+    assert expired[0]["signal_id"] == "s-no-base"
+
+
+@pytest.mark.asyncio
 async def test_approve_reject_logs_rejected_event():
     from app.main import app
     from tests.test_api_routes import call, set_state

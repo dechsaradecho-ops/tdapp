@@ -129,6 +129,40 @@ def is_stale(row: dict, max_age_min: int = SIGNAL_TTL_MIN) -> bool:
     return (datetime.now(timezone.utc) - dt).total_seconds() / 60 > max_age_min
 
 
+def expire_unbaselined_pending_signals(db) -> int:
+    """One-shot deploy cleanup: expire pending signals with NO P0-5 baseline.
+
+    Migration 045 added ``signals.baseline_*`` so the thesis gate can tell a
+    Supertrend conflict (opposed from the start) from a flip (agreed, then
+    flipped). Signals created BEFORE 045 carry NULL baselines; rather than let
+    them be judged without that context, we expire them on deploy — they are
+    short-lived anyway (SIGNAL_TTL_MIN = 30). Returns the number expired.
+    """
+    if not db or not getattr(db, "available", False) \
+            or not callable(getattr(db, "select", None)):
+        return 0
+    try:
+        pending = db.select("signals", filters={"approval": "pending"}, limit=200)
+    except Exception:
+        return 0
+    expired = 0
+    for sig in pending or []:
+        if sig.get("baseline_supertrend_dir") is not None:
+            continue  # already has a baseline (post-045 or backfilled)
+        if not db.update("signals", sig["id"], {"approval": "expired"}):
+            db.update("signals", sig["id"], {"approval": "rejected"})
+        expired += 1
+        signal_log.log_event(
+            db=db, event="expired", signal_id=str(sig.get("id") or ""),
+            asset=str(sig.get("asset") or ""),
+            direction=str(sig.get("direction") or ""),
+            confidence=sig.get("confidence"), entry=sig.get("entry"),
+            source="scanner",
+            reason=("สัญญาณก่อน migration 045 ไม่มีค่า baseline ของ thesis — "
+                    "หมดอายุตอน deploy เพื่อให้ gate ตัดสินด้วยข้อมูลครบถ้วน"))
+    return expired
+
+
 def now_iso() -> str:
     """UTC timestamp for *_at stamps (signals.approved_at etc.)."""
     return datetime.now(timezone.utc).isoformat()
@@ -1525,6 +1559,13 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         _thesis_snapshot = await _fresh_thesis_snapshot(db, asset)
         _thesis = thesis_validation.validate_thesis(
             signal_row, _thesis_snapshot, max_age_min=SIGNAL_TTL_MIN)
+        # Non-blocking confirmations (Supertrend-only conflict/flip — P0-5
+        # refinement: EMA is the primary thesis, Supertrend is CONFIRMATION).
+        # Log them so the conflict is auditable but DO NOT stop the order.
+        for _warn in _thesis.issues:
+            if _warn.severity == "warning":
+                log.info("Thesis warning %s %s: %s", direction, asset,
+                         _warn.message)
         if not _thesis.ok:
             _thesis_reason = _thesis.reason or "signal_thesis_invalidated"
             report.allowed = False
