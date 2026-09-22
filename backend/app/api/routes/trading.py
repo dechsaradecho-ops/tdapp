@@ -345,6 +345,12 @@ async def extended_open(payload: ExtendedOpenRequest,
         confidence = float(body.get("confidence") or 0)
     except (TypeError, ValueError):
         confidence = 0.0
+    # P1-3: opportunity is the SETUP-QUALITY axis, independent of confidence.
+    # Pass the SAME value FINAL gated on (never re-derive it here).
+    try:
+        opportunity = float(body.get("opportunity") or 0)
+    except (TypeError, ValueError):
+        opportunity = 0.0
     if not confidence:
         try:
             _rows = db.select("market_analysis", limit=50) or []
@@ -359,6 +365,8 @@ async def extended_open(payload: ExtendedOpenRequest,
                 _seen.add(_a)
                 if _a == asset:
                     confidence = float(_r.get("confidence") or 0)
+                    if not opportunity:
+                        opportunity = float(_r.get("opportunity_score") or 0)
                     break
         except (TypeError, ValueError):
             pass
@@ -371,7 +379,7 @@ async def extended_open(payload: ExtendedOpenRequest,
         user_id=execution.DEFAULT_USER,
         asset=asset, direction=direction,  # type: ignore[arg-type]
         entry=entry, stop_loss=stop_loss, take_profit=take_profit,
-        confidence=confidence, opportunity=confidence,
+        confidence=confidence, opportunity=opportunity,
         signal_id=None, source="extended", volume=plan_volume,
     )
     if not report.allowed:
@@ -1845,12 +1853,19 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
     # newest row: limit=5 + rows[0] picked an arbitrary asset, so Extended
     # disagreed with every other surface). limit=50 keeps the full ~28-row
     # scanner cycle; dedupe keeps the newest row per asset.
+    #
+    # P1-3: market_analysis carries TWO independent columns now —
+    # ``confidence`` (evidence agreement) and ``opportunity_score`` (setup
+    # quality). The top scorer is still ranked by confidence (the dashboard
+    # ranking metric), but the officer / FINAL decision need the OPPORTUNITY
+    # score separately, so both are tracked from here on.
     try:
         _rows = db.select("market_analysis", limit=50) or []
     except Exception:
         _rows = []
     _seen: set[str] = set()
     _per_asset: dict[str, tuple[float, str]] = {}
+    _per_opp: dict[str, float] = {}
     for _r in _rows:
         _a = str(_r.get("asset") or "").upper()
         if not _a or _a in _seen:
@@ -1861,11 +1876,16 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
         except (TypeError, ValueError):
             _score = 0.0
         _per_asset[_a] = (_score, str(_r.get("regime") or "sideway"))
+        try:
+            _per_opp[_a] = float(_r.get("opportunity_score") or 0)
+        except (TypeError, ValueError):
+            _per_opp[_a] = 0.0
     if _per_asset:
         asset, (_conf, regime) = max(_per_asset.items(), key=lambda kv: kv[1][0])
         confidence = float(_conf or 0)
+        opportunity = float(_per_opp.get(asset, 0.0))
     else:
-        asset, regime, confidence = "EURUSD", "sideway", 0.0
+        asset, regime, confidence, opportunity = "EURUSD", "sideway", 0.0, 0.0
 
     # --- explicit symbol request (ORDER STRATEGY dropdown) ---------------
     # Validated against the feed universe so a typo can never inject an
@@ -1879,10 +1899,11 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
             _hit = _per_asset.get(requested)
             if _hit is not None:
                 confidence, regime = float(_hit[0] or 0), str(_hit[1] or regime)
+                opportunity = float(_per_opp.get(requested, 0.0))
             else:
                 # not in the last scan cycle — the live snapshot below
                 # overwrites both confidence and regime anyway.
-                confidence, regime = 0.0, "sideway"
+                confidence, regime, opportunity = 0.0, "sideway", 0.0
 
     # Frequency aligned with the execution gate (same counting + bull_trend
     # bypass + per-asset quality bar) so FINAL can reach TRADE on a clean
@@ -1897,7 +1918,7 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
     journal = await journal_analysis(request, days=30)
     paper = await paper_trading(request)
     officer = RiskOfficer().review_trade(
-        confidence=confidence, opportunity_score=confidence,
+        confidence=confidence, opportunity_score=opportunity,
         frequency=freq, news_risk=news, kill_switch=ks,
         correlation_score=corr["portfolio_correlation"],
         correlation_cap=s.correlation_cap,
@@ -1941,6 +1962,9 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
             _sl = float(_prop.stop_loss or 0)
             _tp = float(_prop.take_profit or 0)
             confidence = float(_prop.confidence or confidence)
+            # P1-3: opportunity is the SETUP-QUALITY axis (independent of
+            # evidence-confidence). Keep it separate for the officer/FINAL gate.
+            opportunity = float(_opp.score or 0)
             regime = _regime_of(_ind)
         except Exception:
             pass
@@ -1982,7 +2006,7 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
     # reviewed the scanner-row score but displayed dummy BUY legs).
     freq = _evaluate_frequency(db, s, confidence=confidence, asset=asset)
     officer = RiskOfficer().review_trade(
-        confidence=confidence, opportunity_score=confidence,
+        confidence=confidence, opportunity_score=opportunity,
         frequency=freq, news_risk=news, kill_switch=ks,
         correlation_score=corr["portfolio_correlation"],
         correlation_cap=s.correlation_cap,
@@ -2031,6 +2055,7 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
                                  key=lambda kv: kv[1][0], reverse=True)
         ],
         "confidence": confidence,
+        "opportunity": opportunity,
         "direction": _direction,
         "regime": regime,
         "news_calendar": f"{news.status}: {news.reason}",
@@ -2049,7 +2074,8 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
         "backtest_result": _bt_text,
         "paper_trading_status": f"readiness {paper.live_readiness_score}/100 — {paper.ai_coaching}",
         "kill_switch_status": ks.message,
-        "final_decision": _final_decision(officer, news, ks, confidence, asset, s),
+        "final_decision": _final_decision(officer, news, ks, confidence, asset, s,
+                                          opportunity=opportunity),
         "context_block": ctx,
     }
 
@@ -2060,7 +2086,8 @@ def get_session_sync() -> MarketSessionStatus:
 
 def _final_decision(officer: RiskOfficerReview, news: NewsRiskStatus,
                     ks: KillSwitchStatus, confidence: float,
-                    asset: str = "", s: AppSettings | None = None) -> str:
+                    asset: str = "", s: AppSettings | None = None,
+                    opportunity: float | None = None) -> str:
     if ks.engaged:
         return "WAIT — Kill Switch ทำงานอยู่"
     if officer.verdict == "REJECTED":
@@ -2070,6 +2097,13 @@ def _final_decision(officer: RiskOfficerReview, news: NewsRiskStatus,
     # Per-asset quality gate — gold uses Min Confidence (gold) when set.
     threshold = (effective_min_confidence(s, asset)
                  if s is not None else 70.0)
-    if confidence >= threshold:
-        return "TRADE — ผ่านทุกด่าน อนุมัติเข้าไม้ตามแผน"
-    return "WAIT — Confidence ต่ำกว่าเกณฑ์"
+    if confidence < threshold:
+        return "WAIT — Confidence ต่ำกว่าเกณฑ์"
+    # P1-3: SETUP-QUALITY gate — the OPPORTUNITY score is an axis independent
+    # of evidence-confidence (a choppy market can have high agreement yet a
+    # low-quality setup). Only gate when the caller supplied the score (the
+    # other callers pass None and keep the pre-P1-3 confidence-only check).
+    if opportunity is not None and s is not None:
+        if opportunity < float(getattr(s, "min_opportunity", 60.0) or 0.0):
+            return "WAIT — Opportunity Score ต่ำกว่าเกณฑ์"
+    return "TRADE — ผ่านทุกด่าน อนุมัติเข้าไม้ตามแผน"

@@ -275,7 +275,287 @@ def validate_settings(s: Optional[AppSettings], *,
                             values=effective_values(s))
 
 
+# =========================================================================
+# P1-4 — EffectiveTradingSettings: per-field VALUE + SOURCE
+# =========================================================================
+#
+# BEFORE P1-4 there was no single place that could answer "where did this
+# number come from?". ``trading_settings`` (DB) is the runtime source of
+# truth, but a value could ALSO arrive from a risk PRESET, from the legacy
+# ENV fallback in ``core.config.Settings`` (default_risk_per_trade etc.), or
+# from the schema DEFAULT compiled into ``AppSettings``. When they disagreed
+# (the 2026-09-07 "daily loss limit still 2%" report) there was no way to
+# tell WHICH layer won without reading four files.
+#
+# ``EffectiveTradingSettings`` resolves every safety-relevant field to one
+# ``EffectiveField(value, source)`` so ``check_config.py`` (and the /settings
+# API) can print exactly what the engine will use and why.
+#
+# SOURCE PRECEDENCE (highest first):
+#   PRESET   the stored value equals the risk_profile's preset value and the
+#            field is preset-owned (RISK_PRESET_FIELDS) — i.e. the profile is
+#            governing this field (indistinguishable from a manual entry set
+#            to the same number; the EFFECTIVE value is identical either way)
+#   DB       the trading_settings row (id=1) supplied a value that differs
+#            from both the preset and the schema default
+#   DEFAULT  neither preset nor DB — the schema default in AppSettings applies
+#   UNKNOWN  the settings row could NOT be read (fail-closed; value is None)
+#
+# NOTE the ENV fallback in ``core.config.Settings`` is documented per field as
+# ``env_default`` (a DIFFERENT layer from the schema default); it is the
+# fallback for the RiskEngine when a field is missing, never the live limit.
+
+SOURCE_DB = "DB"
+SOURCE_PRESET = "preset"
+SOURCE_FALLBACK = "fallback"
+SOURCE_DEFAULT = "default"
+SOURCE_UNKNOWN = "unknown"
+
+#: Sources that are safe to trade on (a real value was resolved).
+_RESOLVED_SOURCES = (SOURCE_DB, SOURCE_PRESET, SOURCE_FALLBACK, SOURCE_DEFAULT)
+
+
+@dataclass
+class EffectiveField:
+    """One resolved setting: its effective value and where it came from."""
+
+    name: str
+    value: Any
+    source: str = SOURCE_DEFAULT
+    schema_default: Any = None
+    env_default: Any = None      # legacy core.config.Settings fallback (or None)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "value": self.value,
+            "source": self.source,
+            "schema_default": self.schema_default,
+            "env_default": self.env_default,
+        }
+
+
+def _same(a: Any, b: Any) -> bool:
+    """Loose equality that treats numeric 2 and 2.0 as equal, None==None."""
+    if a is None or b is None:
+        return a is b
+    try:
+        return abs(float(a) - float(b)) <= 1e-9
+    except (TypeError, ValueError):
+        return a == b
+
+
+#: Legacy ENV fallback field map — ``AppSettings`` field → ``core.config``
+#: Settings attribute. Only the risk defaults have an ENV layer.
+_ENV_FALLBACK_FIELDS: dict[str, str] = {
+    "risk_per_trade_pct": "default_risk_per_trade",
+    "kill_daily_loss_pct": "default_max_daily_loss",
+    "kill_weekly_loss_pct": "default_max_weekly_loss",
+    "kill_monthly_loss_pct": "default_max_monthly_loss",
+    "max_drawdown_pct": "default_max_drawdown",
+}
+
+
+@dataclass
+class EffectiveTradingSettings:
+    """Every safety-relevant setting resolved to ``(value, source)`` (P1-4).
+
+    Built by :func:`resolve_effective_settings`. ``settings`` is the underlying
+    ``AppSettings`` (or ``None`` when the DB row could not be read). The
+    ``validation`` carries the same status/ok fail-closed contract as
+    ``validate_settings`` so callers can do BOTH "what value" and "is it safe"
+    from one object.
+    """
+
+    settings: Optional[AppSettings] = None
+    fields: dict[str, EffectiveField] = field(default_factory=dict)
+    source: str = SOURCE_UNKNOWN
+    validation: Optional["ConfigValidation"] = None
+    deprecated: list[dict[str, Any]] = field(default_factory=list)
+
+    # -- fail-closed contract --------------------------------------------
+    @property
+    def readable(self) -> bool:
+        """False when the settings row could NOT be read (fail-closed)."""
+        return self.settings is not None
+
+    @property
+    def ok(self) -> bool:
+        """True only when readable AND validated VALID — either failure blocks."""
+        return self.readable and (self.validation is not None
+                                  and self.validation.ok)
+
+    def value_of(self, name: str, default: Any = None) -> Any:
+        f = self.fields.get(name)
+        return default if f is None else f.value
+
+    def source_of(self, name: str) -> str:
+        f = self.fields.get(name)
+        return SOURCE_UNKNOWN if f is None else f.source
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "readable": self.readable,
+            "ok": self.ok,
+            "validation": self.validation.as_dict() if self.validation else None,
+            "fields": {n: f.as_dict() for n, f in self.fields.items()},
+            "deprecated": list(self.deprecated),
+        }
+
+    def report_lines(self) -> list[str]:
+        """Human-readable ``name = value [SOURCE]`` lines (for check_config)."""
+        lines: list[str] = []
+        for name in _EFFECTIVE_FIELDS:
+            f = self.fields.get(name)
+            if f is None:
+                continue
+            tag = f.source.upper() if f.source != SOURCE_UNKNOWN else "UNKNOWN"
+            suffix = ""
+            if f.source == SOURCE_DEFAULT and f.env_default is not None \
+                    and not _same(f.value, f.env_default):
+                suffix = f"  (ENV fallback = {f.env_default})"
+            lines.append(f"{name} = {f.value} [{tag}]{suffix}")
+        return lines
+
+
+def _deprecated_fields(s: AppSettings) -> list[dict[str, Any]]:
+    """Legacy/derived fields the owner may still have set (P1-4).
+
+    ``order_mode`` is the P1-2 legacy axis: it is still read to DERIVE
+    ``entry_mode`` / ``position_management_mode`` when those are empty, so a
+    row carrying it is not wrong — but it is superseded and the report should
+    say so instead of letting the two silently disagree.
+    """
+    out: list[dict[str, Any]] = []
+    entry = str(getattr(s, "entry_mode", "") or "").strip()
+    mgmt = str(getattr(s, "position_management_mode", "") or "").strip()
+    legacy = str(getattr(s, "order_mode", "") or "").strip()
+    if legacy and not (entry and mgmt):
+        out.append({
+            "name": "order_mode",
+            "value": legacy,
+            "reason": "superseded by entry_mode / position_management_mode "
+                      "(P1-2) — still read as the derive-fallback when the "
+                      "new fields are empty",
+        })
+    return out
+
+
+def resolve_effective_settings(
+    settings: Optional[AppSettings],
+    *,
+    db_ok: bool = True,
+    source: Optional[str] = None,
+    env_settings: Any = None,
+) -> EffectiveTradingSettings:
+    """Resolve per-field value + source and validate (P1-4).
+
+    ``settings`` is the DB row (``AppSettings``) or ``None`` when the read
+    FAILED. ``db_ok`` says whether the DB layer is reachable at all — a
+    ``None`` settings with ``db_ok=False`` is an UNKNOWN read (fail-closed),
+    the same contract as ``validate_settings(None)``.
+
+    Never raises. Never mutates the values — this is a REPORTING/verification
+    layer; it does not change any production setting.
+    """
+    # Read failure → fail-closed UNKNOWN (no silent default substitution).
+    if settings is None:
+        validation = validate_settings(None, source="unknown")
+        eff_source = SOURCE_UNKNOWN
+        if db_ok:
+            eff_source = SOURCE_UNKNOWN  # row missing is also UNKNOWN here
+        return EffectiveTradingSettings(
+            settings=None, fields={}, source=eff_source,
+            validation=validation, deprecated=[])
+
+    eff_source = source or SOURCE_DB
+    validation = validate_settings(settings, source=eff_source)
+
+    # Resolve the legacy ENV layer lazily (only for the risk-default fields).
+    if env_settings is None:
+        try:                                    # pragma: no cover - env
+            from app.core.config import get_settings as _get_env_settings
+            env_settings = _get_env_settings()
+        except Exception:                       # pragma: no cover - env
+            env_settings = None
+
+    profile = getattr(settings, "risk_profile", None)
+    preset: dict[str, Any] = {}
+    try:
+        from app.models.schemas import RISK_PRESETS, RiskProfile
+        p = profile if isinstance(profile, RiskProfile) else RiskProfile(
+            str(profile or RiskProfile.moderate.value))
+        preset = dict(RISK_PRESETS.get(p, {}))
+    except Exception:                           # pragma: no cover - defensive
+        preset = {}
+
+    fields: dict[str, EffectiveField] = {}
+    for name in _EFFECTIVE_FIELDS:
+        if not hasattr(AppSettings, "model_fields") or \
+                name not in AppSettings.model_fields:
+            continue
+        schema_default = AppSettings.model_fields[name].default
+        value = getattr(settings, name, schema_default)
+        env_name = _ENV_FALLBACK_FIELDS.get(name)
+        env_default = getattr(env_settings, env_name, None) if env_name else None
+
+        # DB wins whenever the stored value differs from the schema default.
+        if name in preset and _same(value, preset.get(name)):
+            # PRESET-owned field sitting exactly at the active profile's
+            # preset value → report PRESET (the profile governs this field).
+            # NOTE: this is indistinguishable from a manual entry that
+            # happens to equal the preset — either way the EFFECTIVE value is
+            # identical, so the label states the profile that owns it.
+            fsource = SOURCE_PRESET
+        elif not _same(value, schema_default):
+            fsource = SOURCE_DB
+        else:
+            fsource = SOURCE_DEFAULT
+
+        fields[name] = EffectiveField(
+            name=name, value=value, source=fsource,
+            schema_default=schema_default, env_default=env_default)
+
+    return EffectiveTradingSettings(
+        settings=settings, fields=fields, source=eff_source,
+        validation=validation, deprecated=_deprecated_fields(settings))
+
+
+def format_effective_report(eff: EffectiveTradingSettings) -> list[str]:
+    """Full P1-4 report block (effective values + validation + deprecated)."""
+    lines: list[str] = ["=== Effective risk configuration ==="]
+    if not eff.readable:
+        lines.append("(trading_settings could not be read — fail-closed: "
+                     "new orders blocked)")
+        lines.append("")
+        lines.append("=== Validation ===")
+        lines.append("source = unknown")
+        lines.append(f"status = {eff.validation.status if eff.validation else STATUS_UNKNOWN}")
+        lines.append("reason = settings_read_failed")
+        return lines
+    lines.extend(eff.report_lines())
+    lines.append("")
+    lines.append("=== Validation ===")
+    lines.append(f"source = {eff.source}")
+    if eff.validation:
+        lines.append(f"status = {eff.validation.status}")
+        for issue in eff.validation.issues:
+            lines.append(f"  [{issue.severity.upper()}] {issue.code}: "
+                         f"{issue.message}")
+        lines.append(f"reason = {eff.validation.reason or '-'}")
+    if eff.deprecated:
+        lines.append("")
+        lines.append("=== Deprecated fields ===")
+        for d in eff.deprecated:
+            lines.append(f"  {d['name']} = {d['value']} — {d['reason']}")
+    return lines
+
+
 __all__ = [
     "ConfigIssue", "ConfigValidation", "validate_settings",
     "effective_values", "STATUS_VALID", "STATUS_INVALID", "STATUS_UNKNOWN",
+    "EffectiveField", "EffectiveTradingSettings", "resolve_effective_settings",
+    "format_effective_report", "SOURCE_DB", "SOURCE_PRESET", "SOURCE_FALLBACK",
+    "SOURCE_DEFAULT", "SOURCE_UNKNOWN",
 ]

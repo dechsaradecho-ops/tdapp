@@ -67,16 +67,14 @@ def _load_effective_settings():
 
 
 def _field_source(s: AppSettings, name: str) -> str:
-    """[DB] when the value differs from the schema default → stored; else
-    [DEFAULT]. (A stored value that happens to equal the default is reported
-    [DEFAULT] — a conservative, honest label: either way the engine uses the
-    same number.)"""
-    default = AppSettings.model_fields[name].default
-    current = getattr(s, name, None)
-    try:
-        return "[DB]" if abs(float(current) - float(default)) > 1e-9 else "[DEFAULT]"
-    except (TypeError, ValueError):
-        return "[DB]" if current != default else "[DEFAULT]"
+    """Deprecated shim — P1-4 resolves the source in ``config_validation``.
+
+    Kept because some operators' muscle memory greps this symbol; it now
+    delegates to the single resolver so the label can never drift from the
+    per-field source printed by ``format_effective_report``.
+    """
+    eff = config_validation.resolve_effective_settings(s)
+    return f"[{eff.source_of(name).upper()}]"
 
 
 def main() -> int:
@@ -95,24 +93,14 @@ def main() -> int:
     print()
 
     s, source = _load_effective_settings()
-    result = config_validation.validate_settings(s, source=source)
+    # P1-4: one resolver yields per-field value + source + validation +
+    # deprecated fields, so what is printed is exactly what the engine uses.
+    eff = config_validation.resolve_effective_settings(s, source=source)
+    result = eff.validation or config_validation.validate_settings(
+        s, source=source)
 
-    print("=== Effective risk configuration ===")
-    if s is not None:
-        for name, val in result.values.items():
-            print(f"{name} = {val} {_field_source(s, name)}")
-    else:
-        print("(trading_settings could not be read — showing nothing)")
-    print()
-
-    print("=== Validation ===")
-    print(f"source = {result.source}")
-    print(f"status = {result.status}")
-    if result.issues:
-        for issue in result.issues:
-            tag = issue.severity.upper()
-            print(f"  [{tag}] {issue.code}: {issue.message}")
-    print(f"reason = {result.reason or '-'}")
+    for line in config_validation.format_effective_report(eff):
+        print(line)
     print()
 
     if result.status == config_validation.STATUS_VALID:

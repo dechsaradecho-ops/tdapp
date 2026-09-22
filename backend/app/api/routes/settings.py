@@ -301,6 +301,28 @@ def get_risk_presets() -> dict[str, dict[str, object]]:
             for profile, values in RISK_PRESETS.items()}
 
 
+@router.get("/effective")
+def get_effective_settings(request: Request) -> dict[str, Any]:
+    """GET /api/settings/effective — P1-4 per-field value + source + validation.
+
+    Additive read-only view (the primary ``GET /api/settings`` response is
+    unchanged). Answers "which layer supplied this number?" — DB / preset /
+    default / unknown — and reports validation + deprecated fields, so the
+    Settings page (and operators) can see EXACTLY what the engine enforces
+    without guessing schema defaults.
+
+    Read failure → ``readable=false`` + ``ok=false`` (fail-closed), never a
+    silent default substitution.
+    """
+    from app.core import config_validation
+
+    db = request.app.state.db
+    strict = try_load_settings(db)               # None = read FAILED
+    db_ok = bool(db and db.available)
+    eff = config_validation.resolve_effective_settings(strict, db_ok=db_ok)
+    return eff.as_dict()
+
+
 @router.post("/preset/{profile}", response_model=SettingsSaveResult)
 def apply_preset(request: Request, profile: RiskProfile) -> SettingsSaveResult:
     """POST /api/settings/preset/{conservative|moderate|aggressive} — apply a

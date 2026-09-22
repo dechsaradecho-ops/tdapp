@@ -2056,7 +2056,8 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         _mkt_closed, _mkt_next = False, None
 
     return MonitorSnapshot(
-        pause=get_pause(db), order_mode=s.order_mode, capital=s.capital,
+        pause=get_pause(db), order_mode=s.effective_entry_mode(),
+        capital=s.capital,
         kill=kill, risk=risk_status, stats=stats, open_positions=open_positions, recent=recent,
         generated_at=now,
         feed_status=feed_status,

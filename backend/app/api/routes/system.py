@@ -389,6 +389,8 @@ async def autotrader_dry_run(request: Request) -> dict:
 
     s = execution.get_app_settings(db)
     out["order_mode"] = s.order_mode
+    out["entry_mode"] = s.effective_entry_mode()
+    out["position_management_mode"] = s.effective_position_management_mode()
     out["capital"] = s.capital
 
     # Post-state: did anything actually open?

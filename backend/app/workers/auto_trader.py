@@ -1,9 +1,10 @@
 """Worker #5 — AutoTrader (every 1 min).
 
-Reads order_mode from trading_settings:
+Reads entry_mode from trading_settings (P1-2; falls back to the legacy
+order_mode when entry_mode is unset — see AppSettings.effective_entry_mode):
     auto      → pick up pending signals, run the full execution gate, fire orders
-    semi_auto → do nothing (signals wait for human /approve)
-    manual    → do nothing at all
+    confirm   → do nothing (signals wait for a human /approve; legacy semi_auto)
+    advisory  → do nothing at all (signals are informational; legacy manual)
 
 All orders go through app.services.execution.execute_signal — the same path as
 /approve — so the pause switch, kill switch, frequency limits, news block,
@@ -24,11 +25,12 @@ log = logging.getLogger(__name__)
 async def trade_once(db, broker, notifier) -> dict:
     """One auto-trader cycle. Returns a small summary for logs/tests."""
     s: AppSettings = execution.get_app_settings(db)
-    if s.order_mode != "auto":
+    if not s.entry_is_auto():
         # Still expire stale pending signals so the signals page never shows
         # dead entries — expiry is not an auto-mode-only concern.
         expired = expire_stale_pending_signals(db)
-        return {"mode": s.order_mode, "picked": 0, "fired": 0, "expired": expired}
+        return {"mode": s.effective_entry_mode(), "picked": 0, "fired": 0,
+                "expired": expired}
 
     expired = expire_stale_pending_signals(db)
     pending = db.select("signals", filters={"approval": "pending"}, limit=10)

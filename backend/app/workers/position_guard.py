@@ -638,6 +638,12 @@ async def guard_once(db, broker, notifier: NotificationService,
     # reversal → time → news. SL/TP/trailing/time live in this loop; the AI
     # engine supplies score/reversal/news/left-behind/volatility/profit.
     smart_on = bool(getattr(s, "smart_exit_enabled", True))
+    # ---- P1-2: position_management_mode gates DISCRETIONARY management -----
+    # "auto" = full guard. "protective_only" / "advisory" = NO discretionary
+    # management (partial / breakeven / trailing / R-ladder / smart-exit /
+    # time stop). Hard SL/TP + Emergency Exit REMAIN active in every mode —
+    # a hard stop is a safety INVARIANT, never something the guard may drop.
+    mgmt_discretionary = bool(s.management_allows_discretionary())
     # ---- Market-closed gate for ALL closes (once per cycle) ---------------
     # Owner rule (2026-09-19, final): "ห้ามปิดด้วยเพราะว่าในแอพจริงปิดไม่ได้
     # เช่นกัน และจะไม่เกิดตอนตลาดปิดเพราะราคาจะนิ่ง". While the market is
@@ -975,29 +981,12 @@ async def guard_once(db, broker, notifier: NotificationService,
                 f"{pos.entry_price:g}→{price:g} PnL {pnl:+,.2f}")
             continue
 
-        # ---- management pass: breakeven / trailing / partial (TP1) ----
-        try:
-            mgmt = await _manage_position(db, broker, pos, price, s, notifier,
-                                          discretionary_block)
-            if mgmt.get("moved_sl"):
-                moved += 1
-                _new = mgmt.get("new_sl")
-                _old = mgmt.get("old_sl")
-                # "EURCHF@0.93624>0.94337" — from > to, so the Logs > Guard
-                # chip answers "ขยับจากเท่าไร" without opening the journal.
-                if _new is not None and _old is not None:
-                    sl_assets.append(f"{pos.asset}@{_old:g}>{_new:g}")
-                elif _new is not None:
-                    sl_assets.append(f"{pos.asset}@{_new:g}")
-                else:
-                    sl_assets.append(str(pos.asset or ""))
-            if mgmt.get("partial_closed"):
-                partials += 1
-                closed_assets.append(f"{pos.asset}:tp1")
-        except Exception as exc:
-            log.warning("manage %s failed: %s", pos.ticket, exc)
-
-        # ---- Priorities 2-3: SL/TP hard stops win over everything below --
+        # ---- Priorities 2-3: compute HARD SL/TP BEFORE any discretionary
+        # management. P1-1: a hard stop is TERMINAL and must win over every
+        # softer rule. Computing it here (instead of after the management
+        # pass) means a cycle that already hit SL or TP will NOT partial-close
+        # / breakeven / trail the position first — the position closes at the
+        # touched level with no side effects on a position about to be gone.
         sl, tp = pos.stop_loss, pos.take_profit
         hit_sl = sl is not None and (
             (pos.direction == "BUY" and price <= sl)
@@ -1005,6 +994,35 @@ async def guard_once(db, broker, notifier: NotificationService,
         hit_tp = tp is not None and (
             (pos.direction == "BUY" and price >= tp)
             or (pos.direction == "SELL" and price <= tp))
+
+        # ---- management pass: breakeven / trailing / partial (TP1) ----
+        # P1-1: skipped entirely when a hard SL/TP is touched this cycle, so
+        # management can never mutate (or partially close) a position the
+        # hard-stop block will close right after. Not-hit cycles are unchanged.
+        # P1-2: also skipped when position_management_mode disables
+        # discretionary management (protective_only / advisory).
+        if mgmt_discretionary and not (hit_sl or hit_tp):
+            try:
+                mgmt = await _manage_position(db, broker, pos, price, s, notifier,
+                                              discretionary_block)
+                if mgmt.get("moved_sl"):
+                    moved += 1
+                    _new = mgmt.get("new_sl")
+                    _old = mgmt.get("old_sl")
+                    # "EURCHF@0.93624>0.94337" — from > to, so the Logs > Guard
+                    # chip answers "ขยับจากเท่าไร" without opening the journal.
+                    if _new is not None and _old is not None:
+                        sl_assets.append(f"{pos.asset}@{_old:g}>{_new:g}")
+                    elif _new is not None:
+                        sl_assets.append(f"{pos.asset}@{_new:g}")
+                    else:
+                        sl_assets.append(str(pos.asset or ""))
+                if mgmt.get("partial_closed"):
+                    partials += 1
+                    closed_assets.append(f"{pos.asset}:tp1")
+            except Exception as exc:
+                log.warning("manage %s failed: %s", pos.ticket, exc)
+
         if hit_sl or hit_tp:
             pass  # handled by the SL/TP close block after smart-exit skip
         elif discretionary_block:
@@ -1013,6 +1031,12 @@ async def guard_once(db, broker, notifier: NotificationService,
             # WHY so the Guard tab can explain an untouched position.
             smart_skipped += 1
             skip_assets.append(f"{pos.asset}:market_closed")
+        elif not mgmt_discretionary:
+            # P1-2: position_management_mode = protective_only / advisory →
+            # Smart Exit (AI score / reversal / news / left-behind) is
+            # discretionary and stays OFF. Hard SL/TP above still protect.
+            smart_skipped += 1
+            skip_assets.append(f"{pos.asset}:mgmt_off")
         elif smart_on:
             # ---- Priorities 5, 6, 8: AI score / reversal / news ---------
             # Only when no hard stop was hit. Blind HOLD when the indicator
@@ -1082,7 +1106,12 @@ async def guard_once(db, broker, notifier: NotificationService,
             # for the reopen exactly like Smart Exit. The position simply
             # ages one more weekend; SL/TP still protect it meanwhile.
             max_hold = int(getattr(s, "max_hold_days", 0) or 0)
-            if max_hold > 0 and discretionary_block:
+            if not mgmt_discretionary:
+                # P1-2: the time stop is discretionary → OFF in protective_only
+                # / advisory. Hard SL/TP still apply.
+                if max_hold > 0:
+                    skip_assets.append(f"{pos.asset}:time_mgmt_off")
+            elif max_hold > 0 and discretionary_block:
                 skip_assets.append(f"{pos.asset}:time_market_closed")
                 log.info("time stop held %s: market closed", pos.ticket)
             elif max_hold > 0:

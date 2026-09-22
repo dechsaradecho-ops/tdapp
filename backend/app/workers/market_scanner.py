@@ -23,6 +23,7 @@ from app.models.schemas import (
     FrequencyEngine,
     TradeLimits,
     effective_min_confidence,
+    effective_min_opportunity,
     is_market_closed,
 )
 from app.services import signal_log
@@ -189,7 +190,11 @@ async def scan_once(db: Database) -> list[dict]:
             "asset": asset,
             "regime": regime_of(ind),
             "sentiment": "bullish" if ind.ema_fast > ind.ema_slow else "bearish",
-            "confidence": opp.score,
+            # P1-3: store the EVIDENCE-confidence (agreement), NOT the
+            # opportunity score. Pre-P1-3 this column duplicated opp.score,
+            # so the dashboard's "Confidence %" and the opportunity score
+            # were the same number. They are now independent axes.
+            "confidence": opp.confidence,
             "explanation": " | ".join(opp.reasons[:3]),
             # Full scoring breakdown — home Opportunity-Score popup shows HOW
             # the score was computed (every component line, not just the 3
@@ -215,10 +220,17 @@ async def scan_once(db: Database) -> list[dict]:
             continue
 
         # Strong setups produce a signal (SEMI-AUTO approval flow)
-        # Signal quality filter: confidence < min_confidence => NO TRADE
-        # (gold uses its own Min Confidence (gold) threshold).
+        # Signal quality filter (P1-3): a setup needs BOTH
+        #   * opportunity >= min_opportunity (setup QUALITY), AND
+        #   * confidence  >= min_confidence  (EVIDENCE agreement)
+        # Pre-P1-3 the gate compared the OPPORTUNITY score against
+        # min_confidence only — min_opportunity was ignored at generation
+        # (enforced solely by the execution RiskOfficer), and the two axes
+        # were the same number. Now they are independent and fail-closed.
+        # Gold uses its own Min Confidence (gold) threshold.
         min_conf = effective_min_confidence(settings, asset)
-        if opp.score >= min_conf:
+        min_opp = effective_min_opportunity(settings, asset)
+        if opp.score >= min_opp and opp.confidence >= min_conf:
             # Strategy D — gold breakout-retest gate. Gold's high ATR makes
             # narrow pullback entries unattractive; XAUUSD only trades an
             # active breakout (close above the prior 20-bar high) or a
@@ -272,7 +284,7 @@ async def scan_once(db: Database) -> list[dict]:
                 min_confidence=min_conf,
                 drawdown_throttle_pct=settings.drawdown_throttle_pct,
             ).evaluate(
-                confidence=opp.score, trades_today=today_count,
+                confidence=opp.confidence, trades_today=today_count,
                 regime=regime_of(ind), volatility_index=ind.volatility_index)
             # LIMITS DO NOT STOP SIGNAL GENERATION — they only stop ORDER
             # EXECUTION (the auto-trader/approve gate enforces them). The

@@ -240,9 +240,15 @@ class StrategyEngine:
                 "(โหมด Gold Breakout Only)")
 
         score = max(0.0, min(100.0, score))
+        # P1-3: attach the INDEPENDENT evidence-confidence (same wanted side)
+        # so callers get both axes in one object — the two are never the same
+        # number (confidence = agreement, score = weighted quality).
+        conf, conf_reasons = self.evidence_confidence(
+            score, ind, direction=("BUY" if want else "SELL"))
         return AssetOpportunity(
             asset=ind.asset, score=round(score, 1),
             band=self.band_of(score), reasons=reasons or ["ข้อมูลไม่เพียงพอ — คะแนนกลาง"],
+            confidence=conf, confidence_reasons=conf_reasons,
         )
 
     @staticmethod
@@ -317,14 +323,25 @@ class StrategyEngine:
                               atr_price * 0.5, ind.price * 0.001)
         stop_loss = ind.price - sign * sl_distance
         take_profit = ind.price + sign * sl_distance * rr_target
-        confidence = self._confidence(opp.score, ind)
+        # P1-3: prefer the EVIDENCE-agreement confidence computed alongside the
+        # opportunity (opp.confidence). Fall back to the shim only for legacy
+        # callers that built an AssetOpportunity without it (confidence==0).
+        if getattr(opp, "confidence", 0.0):
+            confidence = float(opp.confidence)
+            conf_reasons = list(getattr(opp, "confidence_reasons", []) or [])
+        else:
+            confidence, conf_reasons = self.evidence_confidence(
+                opp.score, ind, direction=direction)
 
         reasons = list(ind.reasons) or list(opp.reasons)
         reasons.insert(0, f"Opportunity Score {opp.score:.0f}/100 ({opp.band.value})")
+        # Confidence is a SEPARATE axis (P1-3) — surface it right under the
+        # opportunity so a card never implies "confidence == opportunity".
+        reasons.insert(1, f"Confidence (หลักฐานเห็นด้วย) {confidence:.0f}/100")
         if clamped:
             lo = f"{sl_min_pct:g}%" if sl_min_pct > 0 else "—"
             hi = f"{sl_max_pct:g}%" if sl_max_pct > 0 else "—"
-            reasons.insert(1, (
+            reasons.insert(2, (
                 f"SL ปรับเป็น {sl_distance / ind.price * 100:.2f}% ของราคา "
                 f"(แถบกำหนด {lo}–{hi}) — ให้ทุกสัญลักษณ์เสี่ยงระยะใกล้เคียงกัน"))
 
@@ -338,6 +355,13 @@ class StrategyEngine:
         try:
             sl_pct = sl_distance / ind.price * 100 if ind.price else 0.0
             tp_distance = abs(take_profit - ind.price)
+            # P1-3 explainability: show HOW confidence was built (which
+            # independent sources agreed) — a number without its evidence is
+            # exactly the opacity P1-3 removes.
+            if conf_reasons:
+                calc_notes.append(
+                    "Confidence = การเห็นด้วยของหลักฐานอิสระ (ไม่ใช่ค่าโอกาส): "
+                    + " · ".join(conf_reasons))
             if invalidation_level > 0:
                 calc_notes.append(
                     f"SL โครงสร้าง: อ้างอิงแนว breakout {invalidation_level:g} "
@@ -443,12 +467,151 @@ class StrategyEngine:
         return levels
 
     # ------------------------------------------------------------------
+    # P1-3: confidence = EVIDENCE AGREEMENT (independent of the score)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def evidence_confidence(score: float, ind: IndicatorSnapshot,
+                            direction: Optional[str] = None) -> tuple[float, list[str]]:
+        """Confidence 0-100 measuring how many INDEPENDENT signals AGREE with
+        the wanted side — deliberately separate from ``opportunity_score``.
+
+        Why this exists (P1-3): the old ``_confidence`` was just
+        ``min(score, 90)`` — a monotone transform of the opportunity score.
+        The scanner then wrote ``"confidence": opp.score`` into every row, so
+        "opportunity" and "confidence" were the SAME NUMBER, and the signal
+        gate compared the opportunity score against ``min_confidence``. The
+        owner could not express "I want strong setups that are ALSO confirmed
+        by many independent signals" — the two axes collapsed into one.
+
+        This function scores EVIDENCE RELIABILITY instead:
+          * a small base from the setup score (``min(score, 45)`` — a good
+            setup is *some* evidence, but quality alone can never max out
+            confidence);
+          * + agreement for each independent source that CONFIRMS the wanted
+            side (trend/EMA, ADX strength, Supertrend, MACD, RSI zone,
+            sentiment, no-high-impact-news, breakout-retest);
+          * − for each source that CONTRADICTS it.
+
+        Direction-aware and symmetric (BUY-in-uptrend == SELL-in-downtrend),
+        explainable (returns the per-source reasons), and fail-closed on a
+        high-impact event (hard −30, mirroring the old −10 penalty's intent).
+
+        Returns ``(confidence, reasons)``.
+        """
+        want = StrategyEngine._resolve_direction(ind, direction)
+        reasons: list[str] = []
+
+        # Weak quality anchor — quality alone caps at 45 so confidence can
+        # only reach the high band through AGREEMENT.
+        conf = min(max(float(score), 0.0), 45.0)
+        reasons.append(f"ฐานจากคุณภาพเซ็ตอัป {conf:.0f}/45")
+
+        agree, total = 0.0, 0
+
+        # 1) Trend / EMA — the primary directional filter.
+        if ind.ema_fast and ind.ema_slow:
+            total += 1
+            trend_up = ind.ema_fast > ind.ema_slow
+            if trend_up == want:
+                agree += 1
+                reasons.append("EMA สอดคล้องทิศทาง (+1)")
+            else:
+                reasons.append("EMA สวนทางทิศทาง (−1)")
+                agree -= 1
+        # 2) ADX — independent trend-STRENGTH confirmation.
+        if ind.adx > 0:
+            total += 1
+            if ind.adx >= 25:
+                agree += 1
+                reasons.append(f"ADX {ind.adx:.0f} ≥ 25 ยืนยันเทรนด์ (+1)")
+            else:
+                reasons.append(f"ADX {ind.adx:.0f} < 25 เทรนด์อ่อน (−1)")
+                agree -= 1
+        # 3) Supertrend sign — an independent trend gate.
+        if ind.supertrend_dir != 0:
+            total += 1
+            if (ind.supertrend_dir > 0) == bool(want):
+                agree += 1
+                reasons.append("Supertrend สอดคล้องทิศทาง (+1)")
+            else:
+                agree -= 1
+                reasons.append("Supertrend สวนทางทิศทาง (−1)")
+        # 4) MACD histogram sign — momentum agreement.
+        if ind.macd_hist != 0:
+            total += 1
+            if (ind.macd_hist > 0) == bool(want):
+                agree += 1
+                reasons.append("MACD สอดคล้องทิศทาง (+1)")
+            else:
+                agree -= 1
+                reasons.append("MACD สวนทางทิศทาง (−1)")
+        # 5) RSI zone — 40-70 (BUY) / 30-60 (SELL) supports, extremes warn.
+        if ind.rsi:
+            total += 1
+            if want:
+                good = 40 <= ind.rsi <= 70
+            else:
+                good = 30 <= ind.rsi <= 60
+            if good:
+                agree += 1
+                reasons.append(f"RSI {ind.rsi:.0f} อยู่ในโซนที่สนับสนุน (+1)")
+            else:
+                reasons.append(f"RSI {ind.rsi:.0f} อยู่นอกโซนที่สนับสนุน (−1)")
+                agree -= 1
+        # 6) Sentiment aligned with the wanted side (not the raw sign).
+        if ind.news_sentiment:
+            total += 1
+            signed = ind.news_sentiment * (1.0 if want else -1.0)
+            if signed > 0:
+                agree += 1
+                reasons.append("Sentiment สอดคล้องทิศทาง (+1)")
+            elif signed < 0:
+                agree -= 1
+                reasons.append("Sentiment สวนทางทิศทาง (−1)")
+
+        # Agreement ratio → 0-55 points (the remaining headroom above the 45
+        # quality anchor). With no evidence at all, the anchor stands alone.
+        if total:
+            ratio = max(0.0, min(1.0, (agree + total) / (2.0 * total)))
+            conf += ratio * 55.0
+            n_agree = int(round((agree + total) / 2.0))
+            reasons.append(
+                f"หลักฐานเห็นด้วย {n_agree}/{total} แหล่ง → +{ratio * 55.0:.0f}")
+
+        # 7) Breakout-retest — a STRONG independent confirmation (only in the
+        #    wanted direction; a downside break is not a BUY bonus).
+        if ind.breakout_state == 2 and want:
+            conf += 10
+            reasons.append("Breakout ยืนยันทิศทาง (+10)")
+        elif ind.breakout_state == 1 and want:
+            conf += 5
+            reasons.append("Retest ยืนยันทิศทาง (+5)")
+        elif ind.breakout_state == 2 and not want:
+            conf += 10
+            reasons.append("Breakdown ยืนยันทิศทาง (+10)")
+        elif ind.breakout_state == 1 and not want:
+            conf += 5
+            reasons.append("Retest breakdown ยืนยันทิศทาง (+5)")
+
+        # High-impact news = hard reliability hit (do NOT double-count as a
+        # risk gate — the execution news gate is the hard block; this only
+        # lowers confidence so the two thresholds agree the setup is risky).
+        if ind.high_impact_event:
+            conf -= 30
+            reasons.append("มีข่าว impact สูง → ความน่าเชื่อถือลดลง (−30)")
+
+        return round(max(10.0, min(100.0, conf)), 1), reasons
+
     @staticmethod
     def _confidence(score: float, ind: IndicatorSnapshot) -> float:
-        base = min(score, 90.0)
-        if ind.high_impact_event:
-            base -= 10
-        return round(max(10.0, base), 1)
+        """Legacy 2-arg shim → evidence_confidence (P1-3).
+
+        Kept so existing callers/tests (e.g. test_confidence_reduced_by_event)
+        keep working; delegates to the evidence-agreement model, ignoring the
+        returned reasons.
+        """
+        conf, _ = StrategyEngine.evidence_confidence(score, ind)
+        return conf
 
     @staticmethod
     def _decision(opp_score: float, ind: IndicatorSnapshot) -> FinalDecision:

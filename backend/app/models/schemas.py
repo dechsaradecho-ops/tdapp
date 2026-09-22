@@ -113,7 +113,7 @@ class GoalRealityContext(BaseModel):
     drawdown_pct: float = 0.0         # peak-to-current % from equity_snapshots
     trades_today: int = 0
     trades_week: int = 0
-    order_mode: str = "auto"          # auto / semi_auto / manual
+    order_mode: str = "auto"          # EFFECTIVE entry_mode: auto / confirm / advisory
     allowed_assets: list[str] = Field(default_factory=list)
     risk_per_trade_pct: float = 0.0
     settings_capital: float = 0.0     # trading_settings.capital (single source)
@@ -144,6 +144,17 @@ class AssetOpportunity(BaseModel):
     # column score_reasons) — home Opportunity-Score popup shows HOW the
     # score was computed. Empty when the row predates migration 026.
     score_reasons: list[str] = []
+    # ---- P1-3: confidence is EVIDENCE AGREEMENT, not the score -----------
+    # ``score`` grades the SETUP QUALITY (a weighted sum — one strong
+    # component can lift it). ``confidence`` grades the EVIDENCE RELIABILITY:
+    # how many INDEPENDENT signals (trend / ADX / Supertrend / MACD / RSI /
+    # news / breakout) actually AGREE with the wanted side. Two setups can
+    # share a score yet have very different confidence — that difference is
+    # what stops "confidence = opportunity" (the pre-P1-3 conflation where
+    # market_scanner wrote ``confidence = opp.score``). 0-100, floored at 10.
+    confidence: float = Field(default=0.0, ge=0, le=100)
+    confidence_reasons: list[str] = []
+
 
 
 class MarketSummary(BaseModel):
@@ -513,6 +524,20 @@ def effective_min_confidence(settings: "AppSettings", asset: str) -> float:
         return base
     gold = settings.min_confidence_gold
     return base if gold is None else float(gold)
+
+
+def effective_min_opportunity(settings: "AppSettings", asset: str) -> float:
+    """Per-asset opportunity-score threshold (P1-3).
+
+    Mirrors ``effective_min_confidence``: opportunity and confidence are
+    INDEPENDENT gates (a setup needs BOTH a decent setup-quality score AND
+    reliable evidence agreement). There is no gold override table for it yet,
+    so every asset uses the base ``min_opportunity`` — but routing both the
+    scanner and the execution gate through this helper keeps the two paths
+    from drifting apart when an override is added later.
+    """
+    return float(getattr(settings, "min_opportunity", 60.0) or 0.0)
+
 
 
 def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
@@ -2379,6 +2404,24 @@ class AppSettings(BaseModel):
     # tiers (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR); the stored signal row
     # carries กลาง prices, execute_signal re-derives SL/TP for this tier.
     sl_distance_mode: Literal["short", "medium", "long"] = "medium"
+    # ---- P1-2: split the legacy order_mode into two independent axes ------
+    # The single ``order_mode`` conflated two orthogonal decisions:
+    #   * who OPENS a position (the signal → order pipeline), and
+    #   * who MANAGES it once open (breakeven/trail/partial/smart-exit/…).
+    # Splitting them lets an owner run e.g. entry_mode="confirm" (every fill
+    # needs a human Approve) while position_management_mode="auto" (the guard
+    # still protects the book) — impossible with the 3-value enum.
+    #
+    # Legacy back-compat: both default to "" which means "derive from
+    # ``order_mode``" (auto→auto, semi_auto→confirm/protective_only,
+    # manual→advisory/advisory). See ``effective_entry_mode`` /
+    # ``effective_position_management_mode``. An explicit value on either
+    # axis always wins, so an old row (no columns) behaves byte-identically.
+    #
+    #   entry_mode:      "auto" | "confirm" | "advisory"
+    #   management_mode: "auto" | "protective_only" | "advisory"
+    entry_mode: str = ""
+    position_management_mode: str = ""
     # ---- SL distance clamp (equal risk distance per asset) -----------------
     # Keep the SL inside a % of price band so every asset risks a similar
     # distance. Close-only FX feeds (Frankfurter) have no intraday wicks →
@@ -2459,6 +2502,63 @@ class AppSettings(BaseModel):
                 seen.add(u)
                 out.append(u)
         return out or list(quotes.DEFAULT_ASSETS)
+
+    # ---- P1-2: entry / position-management mode resolution ----------------
+    def effective_entry_mode(self) -> str:
+        """Who may OPEN a position: "auto" | "confirm" | "advisory".
+
+        Explicit ``entry_mode`` wins. When unset ("" — every pre-P1-2 row)
+        derive it from the legacy ``order_mode`` so an old row is unchanged:
+
+            order_mode auto      → entry_mode auto
+            order_mode semi_auto → entry_mode confirm
+            order_mode manual    → entry_mode advisory
+
+        Unknown values fall back to "confirm" — the SAFE middle (never
+        silently auto-open on a typo).
+        """
+        m = str(self.entry_mode or "").strip().lower()
+        if m in ("auto", "confirm", "advisory"):
+            return m
+        legacy = str(self.order_mode or "auto").strip().lower()
+        return {"auto": "auto", "semi_auto": "confirm",
+                "manual": "advisory"}.get(legacy, "confirm")
+
+    def effective_position_management_mode(self) -> str:
+        """Who MANAGES an open position: "auto" | "protective_only" | "advisory".
+
+        Explicit ``position_management_mode`` wins. When unset ("" — every
+        pre-P1-2 row) derive it from the legacy ``order_mode``:
+
+            order_mode auto      → auto
+            order_mode semi_auto → protective_only
+            order_mode manual    → advisory
+
+        NOTE: ``advisory`` still keeps Hard SL/TP + Emergency Exit as a safety
+        INVARIANT (the guard never silently drops hard-stop protection) —
+        only discretionary management (partial/BE/trail/ladder/smart-exit/
+        time-stop) is turned off. See position_guard.
+        """
+        m = str(self.position_management_mode or "").strip().lower()
+        if m in ("auto", "protective_only", "advisory"):
+            return m
+        legacy = str(self.order_mode or "auto").strip().lower()
+        return {"auto": "auto", "semi_auto": "protective_only",
+                "manual": "advisory"}.get(legacy, "protective_only")
+
+    def management_allows_discretionary(self) -> bool:
+        """True when the guard may run partial / BE / trail / ladder / smart
+        exit / time stop. False for ``protective_only`` and ``advisory`` —
+        both keep Hard SL/TP + Emergency only."""
+        return self.effective_position_management_mode() == "auto"
+
+    def entry_is_auto(self) -> bool:
+        """True when the auto-trader may fire orders without a human."""
+        return self.effective_entry_mode() == "auto"
+
+    def entry_accepts_manual_approve(self) -> bool:
+        """True when a human Approve may still open (auto + confirm)."""
+        return self.effective_entry_mode() in ("auto", "confirm")
 
 
 class SettingsSaveResult(BaseModel):

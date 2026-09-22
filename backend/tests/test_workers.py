@@ -508,16 +508,31 @@ class TestMarketScanner:
     @pytest.mark.asyncio
     async def test_gold_min_confidence_gates_signal_generation(self, monkeypatch):
         """Min Confidence (gold) applies to signal generation: with the gold
-        threshold at 90, a strong XAUUSD setup scoring 75 must NOT emit a
-        signal while the same setup on EURUSD (base 70) still does."""
+        threshold at 90, an XAUUSD setup whose EVIDENCE-confidence is 75 must
+        NOT emit a signal while the same setup on EURUSD (base 70) still does.
+
+        NOTE (P1-3): confidence is now an independent axis from opportunity
+        score (agreement across indicators, not a copy of the score). The
+        fixture therefore pins BOTH axes explicitly so the test exercises the
+        documented meaning of Min Confidence (gold) = the evidence-confidence
+        threshold — not the pre-P1-3 coincidence that conf == score."""
         from app.models.schemas import AppSettings
+        from app.engine.strategy_engine import AssetOpportunity, StrategyEngine
+        from app.models.schemas import OpportunityBand
 
         db = FakeDatabase()
 
         async def snap(asset, news_sentiment=0.0):
-            return strong_snapshot(asset, news_sentiment)  # score ~75
+            return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        # score 80 (passes every min_opportunity), confidence 75 (passes base
+        # 70, blocked by gold 90).
+        monkeypatch.setattr(StrategyEngine, "opportunity_score",
+                            lambda self, ind, direction=None: AssetOpportunity(
+                                asset=ind.asset, direction=direction or "BUY",
+                                score=80.0, band=OpportunityBand.high,
+                                confidence=75.0, reasons=["t"]))
         monkeypatch.setattr(market_scanner, "get_app_settings",
                             lambda _db: AppSettings(min_confidence=70.0,
                                                     min_confidence_gold=90.0))
@@ -526,22 +541,31 @@ class TestMarketScanner:
                    if table == "signals" and "created_at" not in row]
         assets = {row["asset"] for row in emitted}
         assert "XAUUSD" not in assets, (
-            "gold setup scoring 75 must be blocked by Min Confidence (gold)=90")
+            "gold setup with confidence 75 must be blocked by Min Confidence "
+            "(gold)=90")
         assert "EURUSD" in assets, (
-            "same-strength EURUSD setup must still pass the base threshold 70")
+            "same-confidence EURUSD setup must still pass the base threshold 70")
 
     @pytest.mark.asyncio
     async def test_gold_min_confidence_lower_emits_gold_signal(self, monkeypatch):
-        """A LOWER gold threshold must let weak gold setups through while the
-        base threshold still blocks the same setup on FX pairs."""
+        """A LOWER gold threshold must let weak-confidence gold setups through
+        while the base threshold still blocks the same setup on FX pairs."""
         from app.models.schemas import AppSettings
+        from app.engine.strategy_engine import AssetOpportunity, StrategyEngine
+        from app.models.schemas import OpportunityBand
 
         db = FakeDatabase()
 
         async def snap(asset, news_sentiment=0.0):
-            return choppy_snapshot(asset, news_sentiment)  # weak setup
+            return choppy_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        # score 60 / confidence 50: passes base 30 (gold) but blocked by base 70.
+        monkeypatch.setattr(StrategyEngine, "opportunity_score",
+                            lambda self, ind, direction=None: AssetOpportunity(
+                                asset=ind.asset, direction=direction or "BUY",
+                                score=60.0, band=OpportunityBand.medium,
+                                confidence=50.0, reasons=["t"]))
         monkeypatch.setattr(market_scanner, "get_app_settings",
                             lambda _db: AppSettings(min_confidence=70.0,
                                                     min_confidence_gold=30.0))
@@ -550,9 +574,9 @@ class TestMarketScanner:
                    if table == "signals" and "created_at" not in row]
         assets = {row["asset"] for row in emitted}
         assert "XAUUSD" in assets, (
-            "weak gold setup must emit when Min Confidence (gold)=30")
+            "confidence-50 gold setup must emit when Min Confidence (gold)=30")
         assert "EURUSD" not in assets, (
-            "same weak setup on EURUSD must stay blocked by base threshold 70")
+            "same setup on EURUSD must stay blocked by base threshold 70")
 
     @pytest.mark.asyncio
     async def test_gold_min_confidence_unset_uses_base(self, monkeypatch):
@@ -698,13 +722,27 @@ class TestMarketScanner:
 
     @pytest.mark.asyncio
     async def test_weak_setup_writes_no_signal(self, monkeypatch):
-        """Choppy market → no signal rows, but market_analysis still written."""
+        """Choppy market (weak OPPORTUNITY) → no signal rows, but
+        market_analysis still written.
+
+        NOTE (P1-3): confidence and opportunity are independent axes. A choppy
+        market often has HIGH evidence-confidence (many indicators agree it is
+        choppy) but LOW opportunity. The generator gate therefore keys on the
+        OPPORTUNITY axis; this test pins score below min_opportunity to prove
+        the weak-setup block."""
         db = FakeDatabase()
 
         async def snap(asset, news_sentiment=0.0):
             return choppy_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        from app.engine.strategy_engine import AssetOpportunity, StrategyEngine
+        from app.models.schemas import OpportunityBand
+        monkeypatch.setattr(StrategyEngine, "opportunity_score",
+                            lambda self, ind, direction=None: AssetOpportunity(
+                                asset=ind.asset, direction=direction or "BUY",
+                                score=40.0, band=OpportunityBand.medium,
+                                confidence=96.2, reasons=["t"]))
         await market_scanner.scan_once(db)
         assert not [row for table, row in db.inserted if table == "signals"]
         assert [row for table, row in db.inserted if table == "market_analysis"]
@@ -1827,6 +1865,118 @@ class TestPositionGuardManagement:
         assert partials == [pytest.approx(0.02)]
         assert s2["partial_closed"] == 1
         assert db.rows["paper_trades"][0]["partial_done"] is True
+
+    # ---- P1-1: HARD SL/TP outranks every discretionary management step ---
+    @pytest.mark.asyncio
+    async def test_hard_sl_hit_skips_partial_and_be(self, monkeypatch):
+        """P1-1: a cycle that touches the HARD SL must NOT partial-close or
+        move the stop first — the position is about to be closed at the SL.
+
+        Before the fix `_manage_position` ran first, so at a big profit a TP1
+        partial could realise a PnL and breakeven could move the stop on the
+        very same cycle that the SL block then closed the remainder — the
+        discretionary steps had already touched a position that a hard stop
+        should have ended outright.
+        """
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        # entry 1.1000 / SL 1.0900 · live 1.2500 ≤ SL 1.3000 → HARD SL hit;
+        # the same live price is +15R so BE/trail/TP1 would otherwise fire.
+        closed: list[str] = []
+        moved: list[float] = []
+        partials: list[float] = []
+        broker = self._broker(sl=1.3000, volume=0.04)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0,
+                                    trailing_ladder=True, partial_close_pct=50,
+                                    partial_trigger_r=1.0))
+        assert closed == ["T1"]                  # hard SL closed it
+        assert summary["closed"] == 1
+        assert moved == []                       # no BE/trail on a going position
+        assert partials == []                    # no TP1 partial
+        assert summary["moved_sl"] == 0
+        assert summary["partial_closed"] == 0
+        assert db.rows["paper_trades"][0]["close_reason"] == "sl"
+
+    @pytest.mark.asyncio
+    async def test_hard_tp_hit_skips_partial_and_be(self, monkeypatch):
+        """P1-1: same rule for the HARD TP."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        # entry 1.1000 / TP 1.2000 · live 1.2500 ≥ TP → HARD TP hit at +15R.
+        closed: list[str] = []
+        moved: list[float] = []
+        partials: list[float] = []
+        broker = self._broker(tp=1.2000, volume=0.04)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0,
+                                    trailing_ladder=True, partial_close_pct=50,
+                                    partial_trigger_r=1.0))
+        assert closed == ["T1"]
+        assert summary["closed"] == 1
+        assert moved == []
+        assert partials == []
+        assert db.rows["paper_trades"][0]["close_reason"] == "tp"
+
+    @pytest.mark.asyncio
+    async def test_no_hard_hit_still_runs_management(self, monkeypatch):
+        """P1-1 must NOT blunt normal management when nothing was touched —
+        the exact same fixture with the SL far away still beats/trails."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        moved: list[float] = []
+        broker = self._broker()  # SL 1.0900, live 1.2500 → not touched
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        summary = await position_guard.guard_once(
+            self._db(), broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0))
+        assert summary["moved_sl"] == 1
+        assert moved  # breakeven/trail still applied
+
+    @pytest.mark.asyncio
+    async def test_hard_sl_and_discretionary_trigger_same_cycle(self, monkeypatch):
+        """P1-1 ordering rule: when BOTH a hard stop and a discretionary
+        trigger fire in the same cycle, the hard stop WINS and the position
+        ends exactly once (no duplicate close, no long history)."""
+        from app.workers import position_guard
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        closed: list[str] = []
+        broker = self._broker(sl=1.3000, volume=0.04)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        # A thin partial_close spy that would fire TP1 if management ran.
+        class _BoomPartial:
+            def __init__(self):
+                self.count = 0
+            def __call__(self, ticket, vol):
+                async def _coro():
+                    self.count += 1
+                    from app.integrations.brokers import OrderResult
+                    return OrderResult(ok=True, message="partial")
+                return _coro()
+        partial_spy = _BoomPartial()
+        broker.partial_close = partial_spy
+        db = self._db(volume=0.04)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0,
+                                    partial_close_pct=50, partial_trigger_r=1.0))
+        assert closed == ["T1"] and summary["closed"] == 1
+        assert partial_spy.count == 0  # discretionary step never ran
+        assert summary["partial_closed"] == 0
 
     @pytest.mark.asyncio
     async def test_rehydrate_carries_opened_at(self):

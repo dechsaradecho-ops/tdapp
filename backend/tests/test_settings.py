@@ -688,7 +688,13 @@ def test_risk_presets_moderate_mirrors_live_prod_profile():
                 # unanswered window widen a limit by itself AT ALL? Its
                 # fail-closed default is False, so a preset must never be able
                 # to turn silent widening back ON behind the owner's back
-                "kill_expand_auto_widen"}
+                "kill_expand_auto_widen",
+                # P1-2 mode split (migration 044): entry_mode / management_mode
+                # are OPERATING-MODE choices (who opens / who manages), not
+                # risk-appetite knobs. They default "" (derive from the legacy
+                # order_mode), and a risk preset must never silently flip the
+                # owner's autonomy level — same rationale as ``order_mode``.
+                "entry_mode", "position_management_mode"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

@@ -372,6 +372,16 @@ async def approve_signal(payload: ApprovalRequest, request: Request):
 
     s = signals[0]
     srow = execution.get_app_settings(db)
+    # P1-2: entry_mode controls whether ANY order may be opened. "advisory"
+    # means signals are informational only — even an explicit Approve must not
+    # open a position. "confirm" still allows this human-driven path.
+    if not srow.entry_accepts_manual_approve():
+        db.update("signals", payload.signal_id, {"approval": "rejected"})
+        return {"status": "blocked", "executed": False,
+                "rejects": [
+                    f"entry_mode={srow.effective_entry_mode()} — โหมดให้คำแนะนำ "
+                    "เท่านั้น (สัญญาณไม่ถูกเปิดออเดอร์)"],
+                "checks": [f"entry_mode={srow.effective_entry_mode()}"]}
     notifier = NotificationService(db, request.app.state.line)
     report = await execution.execute_signal(
         db, broker, notifier, srow,
