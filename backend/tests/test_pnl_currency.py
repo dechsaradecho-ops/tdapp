@@ -128,6 +128,18 @@ class TestPnlConversionRate:
         rates = {"GBPUSD": 1.27, "GBPJPY": 200.0}
         assert pnl_conversion_rate("GBPJPY", rates) == pytest.approx(1.27 / 200.0)
 
+    def test_invert_usd_quoted_counterpart(self):
+        # CHFUSD is daily-only in the feed, but USDCHF is a live spot tick →
+        # CHFUSD = 1 / USDCHF. This is what un-blanks EURCHF/AUDCHF/CADCHF.
+        assert pnl_conversion_rate("EURCHF", {"USDCHF": 0.8195}) == pytest.approx(1 / 0.8195)
+        assert pnl_conversion_rate("AUDCHF", {"USDCHF": 0.8195}) == pytest.approx(1 / 0.8195)
+        assert pnl_conversion_rate("CADCHF", {"USDCHF": 0.8195}) == pytest.approx(1 / 0.8195)
+
+    def test_direct_quote_usd_wins_over_inverse(self):
+        # When the direct <quote>USD leg exists it is preferred (no inversion).
+        rates = {"CHFUSD": 1.2174, "USDCHF": 0.8195}
+        assert pnl_conversion_rate("EURCHF", rates) == pytest.approx(1.2174)
+
     def test_unavailable_returns_none(self):
         assert pnl_conversion_rate("USDJPY", {}) is None
         assert pnl_conversion_rate("GBPJPY", {"EURUSD": 1.1}) is None
@@ -292,3 +304,42 @@ class TestFetchPnlRates:
         monkeypatch.setattr(q, "fetch_spot_prices", dead)
         out = await ex.fetch_pnl_rates(["USDJPY"], seed={"USDJPY": 157.013})
         assert out == {"USDJPY": 157.013}  # seed survives, no crash
+
+    async def test_chf_cross_requests_inverse_and_base_legs(self, monkeypatch):
+        """EURCHF must ask for USDCHF (inverse) and EURUSD (base) so the
+        conversion can be derived even though CHFUSD is daily-only."""
+        from app.services import execution as ex
+        from app.integrations import quotes as q
+
+        calls: list[list[str]] = []
+
+        async def fake_spot(assets):
+            calls.append(list(assets))
+            return ({"USDCHF": 0.8195, "EURUSD": 1.1464}, {})
+
+        monkeypatch.setattr(q, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(q, "spot_source", lambda a: "spot")
+
+        out = await ex.fetch_pnl_rates(["EURCHF"], seed={"EURCHF": 0.9387})
+        assert calls and set(calls[0]) == {"CHFUSD", "USDCHF", "EURUSD"}
+        # the inverse identity resolves the rate end-to-end
+        assert ex.pnl_conversion_rate("EURCHF", out) == pytest.approx(1 / 0.8195)
+
+    async def test_chf_cross_resolves_when_only_usdchf_is_spot(self, monkeypatch):
+        """CHFUSD daily-only + USDCHF spot → EURCHF still gets a rate."""
+        from app.services import execution as ex
+        from app.integrations import quotes as q
+
+        async def fake_spot(assets):
+            return ({"CHFUSD": 1.2174, "USDCHF": 0.8195, "EURUSD": 1.1464}, {})
+
+        def src(a):
+            return "daily" if a == "CHFUSD" else "spot"
+
+        monkeypatch.setattr(q, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(q, "spot_source", src)
+
+        out = await ex.fetch_pnl_rates(["EURCHF"], seed={"EURCHF": 0.9387})
+        assert "CHFUSD" not in out  # daily rate refused
+        assert out["USDCHF"] == pytest.approx(0.8195)
+        assert ex.pnl_conversion_rate("EURCHF", out) == pytest.approx(1 / 0.8195)

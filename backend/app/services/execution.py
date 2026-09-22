@@ -48,6 +48,7 @@ from app.models.schemas import (
     market_closed_days_between,
     market_open_days_between,
     next_market_open,
+    base_currency,
     pnl_conversion_asset,
     quote_currency,
     risk_to_lot,
@@ -456,6 +457,14 @@ def pnl_conversion_rate(asset: str, rates: dict | None) -> float | None:
     r = _finite_positive((rates or {}).get(f"{q}USD"))
     if r is not None:
         return r
+    # (c) invert the USD-quoted counterpart: CHFUSD = 1/USDCHF. Always a
+    #     valid identity, and it rescues quotes whose ``<quote>USD`` leg is
+    #     only published as a DAILY rate (CHFUSD, JPYUSD) while ``USD<quote>``
+    #     is a live spot tick (USDCHF, USDJPY). Without this, CHF-quoted
+    #     crosses (EURCHF/AUDCHF/CADCHF) showed no PnL at all.
+    inv = _finite_positive((rates or {}).get(f"USD{q}"))
+    if inv is not None:
+        return 1.0 / inv
     base = asset_u[:3]
     # (a) invert the asset's OWN price — ONLY valid when the base is USD,
     #     because 1/USDXXX = XXX per USD = <quote>USD exactly. For a cross
@@ -539,6 +548,21 @@ async def fetch_pnl_rates(assets, seed: dict | None = None) -> dict[str, float]:
         leg = pnl_conversion_asset(a)
         if leg and leg not in out:
             need.add(leg)
+        # Also request the legs the cross-through fallbacks in
+        # ``pnl_conversion_rate`` need, so a quote whose ``<quote>USD`` leg is
+        # daily-only (CHFUSD, JPYUSD) can still be derived:
+        #   • USD<quote>  → CHFUSD = 1/USDCHF          (inverse identity)
+        #   • <base>USD   → CHFUSD = EURUSD / EURCHF   (cross through base)
+        q = quote_currency(a)
+        base = base_currency(a)
+        if q and q != "USD":
+            inv = f"USD{q}"
+            if inv not in out:
+                need.add(inv)
+        if base and base != "USD":
+            base_usd = f"{base}USD"
+            if base_usd not in out:
+                need.add(base_usd)
     if not need:
         return out
     try:
