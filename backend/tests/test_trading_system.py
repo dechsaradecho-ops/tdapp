@@ -109,6 +109,37 @@ def OrderStrategyEngine_plan(regime="bull_trend", direction="BUY", atr_pct=0.8):
         equity=10_000, risk_per_trade_pct=1.0)
 
 
+def test_order_plan_gold_uses_gold_contract():
+    """XAUUSD plan legs must use the 100 oz/lot contract, not the FX 100k.
+
+    The old build_plan called risk_to_lot with the default contract 100k, so
+    a gold leg was ~1000× too small — and /extended-open forwards the leg lot
+    as the order volume, so the panel's wrong lot became the REAL order size.
+    """
+    from app.models.schemas import OrderStrategyEngine
+    plan = OrderStrategyEngine().build_plan(
+        asset="XAUUSD", direction="BUY", entry=2400.0, stop_loss=2390.0,
+        take_profit=2420.0, regime="bull_trend", atr_pct=0.8,
+        equity=10_000, risk_per_trade_pct=1.0)
+    # 1% of 10k = $100 risk; 10-pt stop × 100 oz/lot → 0.1 lots total.
+    assert plan.total_lots == pytest.approx(0.1, abs=0.02)
+
+
+def test_order_plan_usdjpy_converts_quote_currency():
+    """USDJPY plan legs must convert the yen product to USD (1/price).
+
+    Without the conversion the leg is ~157× too small (same class as the
+    2026-09-22 SL-cap bug): 1% of 10k = $100 risk; 0.10-yen stop × 100k
+    contract = ¥10,000 per lot → 100 / (0.10 × 100000 × (1/157)) ≈ 1.57 lots.
+    """
+    from app.models.schemas import OrderStrategyEngine
+    plan = OrderStrategyEngine().build_plan(
+        asset="USDJPY", direction="BUY", entry=157.0, stop_loss=156.90,
+        take_profit=157.20, regime="bull_trend", atr_pct=0.8,
+        equity=10_000, risk_per_trade_pct=1.0)
+    assert plan.total_lots == pytest.approx(1.57, abs=0.05)
+
+
 def test_risk_to_lot_math():
     # 1% of 10k = 100 risk; 100-pip stop on EURUSD = 0.0100 → 0.1 lots
     assert risk_to_lot(10_000, 1.0, 0.0100) == pytest.approx(0.1, abs=0.01)

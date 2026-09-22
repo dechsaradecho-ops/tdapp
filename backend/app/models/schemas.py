@@ -1109,10 +1109,25 @@ class OrderStrategyEngine:
         equity: float = 10_000.0,
         risk_per_trade_pct: float = 1.0,
     ) -> OrderPlan:
-        """Multi-entry: limit legs into pullbacks for trends, stop legs on breakouts."""
+        """Multi-entry: limit legs into pullbacks for trends, stop legs on breakouts.
+
+        CURRENCY (2026-09-22): leg lots go through ``risk_to_lot_for`` so the
+        per-asset contract value (gold = 100 oz/lot, FX = 100k units/lot) AND
+        the quote→USD conversion are applied. The old ``risk_to_lot`` default
+        (contract 100k, usd_per_quote 1.0) sized XAUUSD ~1000× too small and
+        USDJPY ~157× too small — and because ``/extended-open`` forwards the
+        leg's lot as the order volume (bypassing risk sizing), the panel's
+        wrong lot became the REAL order size. ``entry`` is the live price the
+        conversion reads through.
+        """
         distance = abs(entry - stop_loss)
         if distance <= 0:
             distance = entry * max(atr_pct, 0.2) / 100.0
+
+        # Per-asset, quote-aware lot for the FULL risk budget; each leg takes
+        # its weight share. One call so every leg uses the same contract/rate.
+        base_lot = risk_to_lot_for(equity, risk_per_trade_pct, distance,
+                                   asset, price=entry)
 
         reasons: list[str] = []
         legs: list[EntryLeg] = []
@@ -1129,13 +1144,13 @@ class OrderStrategyEngine:
             weights = (0.5, 0.3, 0.2)
             legs = [
                 EntryLeg(order_type=OrderType.market, price=round(p1, 5),
-                         lot=round(risk_to_lot(equity, risk_per_trade_pct, distance) * weights[0], 2),
+                         lot=round(base_lot * weights[0], 2),
                          risk_pct=round(risk_per_trade_pct * weights[0], 2), note="ทยอยเข้าทันที"),
                 EntryLeg(order_type=OrderType.buy_limit if direction == "BUY" else OrderType.sell_limit,
-                         price=round(p2, 5), lot=round(risk_to_lot(equity, risk_per_trade_pct, distance) * weights[1], 2),
+                         price=round(p2, 5), lot=round(base_lot * weights[1], 2),
                          risk_pct=round(risk_per_trade_pct * weights[1], 2), note="รอดึงกลับ 0.5 × ระยะ SL"),
                 EntryLeg(order_type=OrderType.buy_limit if direction == "BUY" else OrderType.sell_limit,
-                         price=round(p3, 5), lot=round(risk_to_lot(equity, risk_per_trade_pct, distance) * weights[2], 2),
+                         price=round(p3, 5), lot=round(base_lot * weights[2], 2),
                          risk_pct=round(risk_per_trade_pct * weights[2], 2), note="รอดึงกลับ 1.0 × ระยะ SL"),
             ]
         else:
@@ -1149,13 +1164,13 @@ class OrderStrategyEngine:
             weights = (0.4, 0.35, 0.25)
             legs = [
                 EntryLeg(order_type=OrderType.buy_stop if direction == "BUY" else OrderType.sell_stop,
-                         price=round(p1, 5), lot=round(risk_to_lot(equity, risk_per_trade_pct, distance) * weights[0], 2),
+                         price=round(p1, 5), lot=round(base_lot * weights[0], 2),
                          risk_pct=round(risk_per_trade_pct * weights[0], 2), note="Stop trigger ใกล้สุด"),
                 EntryLeg(order_type=OrderType.buy_stop if direction == "BUY" else OrderType.sell_stop,
-                         price=round(p2, 5), lot=round(risk_to_lot(equity, risk_per_trade_pct, distance) * weights[1], 2),
+                         price=round(p2, 5), lot=round(base_lot * weights[1], 2),
                          risk_pct=round(risk_per_trade_pct * weights[1], 2), note="Stop เพิ่มเมื่อยืนยัน"),
                 EntryLeg(order_type=OrderType.buy_stop if direction == "BUY" else OrderType.sell_stop,
-                         price=round(p3, 5), lot=round(risk_to_lot(equity, risk_per_trade_pct, distance) * weights[2], 2),
+                         price=round(p3, 5), lot=round(base_lot * weights[2], 2),
                          risk_pct=round(risk_per_trade_pct * weights[2], 2), note="Stop สุดท้ายยืนยันเทรนด์"),
             ]
 
