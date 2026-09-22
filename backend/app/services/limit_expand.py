@@ -124,6 +124,20 @@ REASK_AFTER_REJECT_MIN = 120.0
 # (Settings page, migration 039). Kept for the older callers/tests that pin it.
 AUTO_APPLY_ON_EXPIRY = True
 
+# P0-3 fail-closed default (migration 043): a LAPSED window must NOT widen a
+# risk limit. This is the fallback for a caller without settings — the live
+# value is ``AppSettings.kill_expand_auto_widen`` (Settings page). False so an
+# un-migrated row can never widen a limit on a timeout; only an explicit
+# opt-in (the 039 flow) may.
+AUTO_WIDEN_ON_EXPIRY = False
+
+# ``decided_by`` marker for a window the timeout path KEPT (P0-3): the window
+# lapsed with no answer and the fail-closed policy refused to widen, so the
+# original limits stay and the row is closed as ``expired``. Distinct from
+# AUTO_DECIDED_BY/AUTO_ONCE_BY so the LOGS page can tell "ไม่ได้ขยาย — ลิมิตเดิม
+# มีผล" apart from "ขยายให้เอง", and so it never counts as a silent widening.
+AUTO_KEPT_BY = "auto:kept"
+
 # ``decided_by`` written by the timeout path (vs "line:user" / "ui"), and the
 # headline of the report that path pushes. Both are greppable in prod.
 AUTO_DECIDED_BY = "auto:expired"
@@ -240,6 +254,22 @@ def _retired_notice(ttl: float) -> str:
             "• ลิมิตเดิมยังมีผล — ถ้ายังเกินลิมิต ระบบจะส่งคำขอใหม่ให้เอง")
 
 
+def _kept_notice(ttl: float) -> str:
+    """P0-3 fail-closed timeout: nothing was widened, the limits stand.
+
+    Words matter — the limits did NOT move, so the text never claims they did.
+    It says exactly what is true: the window lapsed with no answer, the original
+    limits stay in force, trading remains PAUSED (new orders are blocked), and
+    the two ways forward are an explicit Approve or the Settings page. A re-ask
+    is issued by the monitor on its next cycle, so the owner is never stuck.
+    """
+    return ("⏳ หมดเวลายืนยันคำขอขยายลิมิต — ลิมิตเดิมยังมีผล (ไม่ขยายให้)\n"
+            f"• รอครบ {ttl:.0f} นาที ไม่มีคำตอบ ระบบจึงไม่ขยายลิมิตให้เอง\n"
+            "• ลิมิตเดิมยังใช้อยู่ และเทรดยังหยุดอยู่ (คำสั่งใหม่ถูกบล็อก)\n"
+            "• ไม้ที่เปิดอยู่ยังได้รับการป้องกันตามปกติ (SL/TP + kill switch)\n"
+            "• ต้องการเทรดต่อ: กดอนุมัติในข้อความใหม่ หรือแก้ลิมิตที่หน้า Settings")
+
+
 def build_capped_notice() -> str:
     """The one-time report for "the platform stops asking" (one-shot policy).
 
@@ -271,6 +301,9 @@ class SettleResult:
       skipped    a limit already ≥ the proposal → nothing written, ``report``
       no-breach  no limit is over any more → retired WITHOUT widening
       retired    the row quotes no limit → cannot ever widen, row closed
+      kept       P0-3 fail-closed timeout: policy refuses to widen → limits
+                 UNCHANGED, trading stays paused, row closed as ``expired``,
+                 ``report`` warns the owner (nothing was raised)
       failed     the settings write did not land → row KEPT, retry next cycle
       capped     the one-shot quota is used up (``kill_expand_auto_apply`` is
                  False and the timeout path already widened once) → nothing was
@@ -288,7 +321,8 @@ class SettleResult:
     @property
     def settled(self) -> bool:
         """The window is closed: nothing left to retry, nothing left to hold."""
-        return self.kind in ("applied", "skipped", "no-breach", "retired")
+        return self.kind in ("applied", "skipped", "no-breach", "retired",
+                             "kept")
 
     @property
     def holds(self) -> bool:
@@ -383,10 +417,35 @@ def auto_apply_enabled(s: Optional[AppSettings] = None) -> bool:
 
     A caller without settings (an un-migrated row, an older caller) falls back
     to ``AUTO_APPLY_ON_EXPIRY`` so today's behaviour is kept.
+
+    P0-3: this is only consulted when ``auto_widen_enabled`` is ON. With the
+    fail-closed default the timeout path never widens at all, so the
+    every-time/one-shot distinction is unreachable.
     """
     raw = getattr(s, "kill_expand_auto_apply", None) if s is not None else None
     if raw is None:
         return AUTO_APPLY_ON_EXPIRY
+    return bool(raw)
+
+
+def auto_widen_enabled(s: Optional[AppSettings] = None) -> bool:
+    """P0-3: may a LAPSED (unanswered) window widen a risk limit by itself?
+
+    Settings → ``kill_expand_auto_widen`` (migration 043, default **False**):
+
+      * False (DEFAULT, fail-closed) — the timeout path NEVER widens: the
+        original limits stay in force and trading stays paused. Silence must
+        never raise a risk limit; the owner is warned and the only ways to move
+        are an explicit Approve or Settings.
+      * True (explicit opt-in) — the pre-P0-3 flow runs: ``auto_apply_enabled``
+        decides every-time ("apply") vs one-shot ("once").
+
+    A caller without settings falls back to the fail-closed default, so an
+    un-migrated row can never widen a limit on a timeout.
+    """
+    raw = getattr(s, "kill_expand_auto_widen", None) if s is not None else None
+    if raw is None:
+        return AUTO_WIDEN_ON_EXPIRY
     return bool(raw)
 
 
@@ -428,14 +487,20 @@ def silent_widen_count(db) -> int:
 
 
 def timeout_plan(db, s: Optional[AppSettings] = None) -> str:
-    """What the timeout path may do with the lapsed window: apply/once/capped.
+    """What the timeout path may do with the lapsed window: apply/once/capped/kept.
 
-    * ``apply`` — the policy is ON: every lapsed window is applied
-    * ``once``  — the policy is OFF and the one-shot quota is still available
-    * ``capped``— the policy is OFF and the system already rescued this account
-                  inside ``ONCE_QUOTA_HOURS``, so this window is NOT applied;
-                  the owner is warned and the kill switch may act
+    * ``kept``  — DEFAULT (P0-3, ``kill_expand_auto_widen`` OFF): the window is
+                  NOT applied. The original limits stay in force and trading
+                  stays paused; the owner is warned once and nothing widens.
+    * ``apply`` — auto-widen ON and the policy is ON: every lapsed window is
+                  applied
+    * ``once``  — auto-widen ON, policy OFF, one-shot quota still available
+    * ``capped``— auto-widen ON, policy OFF, the system already rescued this
+                  account inside ``ONCE_QUOTA_HOURS``: NOT applied; the owner is
+                  warned and the kill switch may act
     """
+    if not auto_widen_enabled(s):
+        return "kept"
     if auto_apply_enabled(s):
         return "apply"
     return "capped" if silent_widen_count(db) > 0 else "once"
@@ -797,6 +862,16 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
 
     s = settings or execution.get_app_settings(db)
     plan = timeout_plan(db, s)
+    if plan == "kept":
+        # P0-3 (fail-closed default): a lapsed window must NEVER widen a risk
+        # limit. Keep the original limits, leave trading PAUSED (Gate 1 blocks
+        # new orders), warn the owner once, and close the row (as ``expired``
+        # with a distinct decided_by) so the guard/monitor may act as usual.
+        # The monitor re-asks on its next cycle, so the flow is not a dead end.
+        _mark(db, row, "expired", AUTO_KEPT_BY)
+        log.warning("kill expand timeout: auto-widen is OFF — request %s closed "
+                    "with ORIGINAL limits kept (fail-closed)", row.get("id"))
+        return _res("kept", report=_kept_notice(ttl))
     if plan == "capped":
         # One-shot policy ("ขยายอัตโนมัติ 1 ครั้ง") and the quota is used up: the
         # system already widened once instead of an answer, so a SECOND silence
@@ -950,6 +1025,15 @@ def decide(db, decision: str, decided_by: str = "line",
                     "• โควตาขยายอัตโนมัติ (1 ครั้ง) ถูกใช้ไปแล้ว และนโยบายปิดอยู่\n"
                     "• ลิมิตเดิมยังมีผล — แก้ลิมิตเองที่หน้า Settings ได้\n"
                     "หรือเปิดนโยบายขยายอัตโนมัติที่หน้า Settings")
+        if str(last.get("decided_by") or "") == AUTO_KEPT_BY:
+            # P0-3 fail-closed: the timeout path never widens, so the limits are
+            # unchanged. Point the owner at the two ways forward instead of the
+            # (false) "ระบบจะส่งคำขอใหม่ให้อัตโนมัติ" line below.
+            return ("⏳ คำขอนี้หมดเวลายืนยัน และระบบไม่ขยายลิมิตให้เอง (ลิมิตเดิมมีผล)\n"
+                    "• นโยบายขยายอัตโนมัติเมื่อหมดเวลาปิดอยู่ (ค่าเริ่มต้น)\n"
+                    "• ลิมิตเดิมยังใช้อยู่ และเทรดยังหยุดอยู่\n"
+                    "• ต้องการเทรดต่อ: แก้ลิมิตที่หน้า Settings แล้วใช้ /resume\n"
+                    "หรือเปิด 'ขยายอัตโนมัติเมื่อหมดเวลา' ที่หน้า Settings")
         ttl = _resolve_ttl(db, settings)
         return ("ℹ️ ไม่มีคำขอขยายลิมิตที่รอการยืนยันอยู่\n"
                 "ถ้ายังเกินลิมิต ระบบจะส่งคำขอใหม่ให้อัตโนมัติ "

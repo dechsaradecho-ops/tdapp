@@ -1,7 +1,7 @@
 # tdapp — สรุปฟีเจอร์ทั้งหมด (FEATURES)
 
 > อัปเดตล่าสุด: 2026-09-18 · **Web Push (VAPID)** = ช่องแจ้งเตือนที่ 2 คู่กับ LINE + การ์ด "การแจ้งเตือนมือถือ" ในหน้า Settings (มีปุ่ม **ทดสอบการแจ้งเตือน**) · ก่อนหน้า 2026-09-15 commit `75a222e` (monitor: recent แถวปิดโชว์ `closed_at` + คอลัมน์ Ticket)
-> เอกสารเทคนิคอื่น: `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `MENU-REORG-PLAN.md` (โครงเมนู 5 เมนู), `PUSH-NOTIFICATION-PLAN.md` (แผน Web Push), `database/*.sql` (migration 001–042)
+> เอกสารเทคนิคอื่น: `STRATEGY.md` (หลักการเปิด–ปิดออเดอร์ + เกณฑ์ตัวเลข), `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `MENU-REORG-PLAN.md` (โครงเมนู 5 เมนู), `PUSH-NOTIFICATION-PLAN.md` (แผน Web Push), `database/*.sql` (migration 001–042)
 
 ## 1. ภาพรวมระบบ
 

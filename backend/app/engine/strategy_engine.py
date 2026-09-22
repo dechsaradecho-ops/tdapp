@@ -79,18 +79,49 @@ class StrategyEngine:
     """Deterministic scoring core + explainability. AI layer wraps this for narrative."""
 
     # ------------------------------------------------------------------
-    def opportunity_score(self, ind: IndicatorSnapshot) -> AssetOpportunity:
+    def opportunity_score(self, ind: IndicatorSnapshot,
+                          direction: Optional[str] = None) -> AssetOpportunity:
+        """Score a setup 0-100. ``direction`` makes the score DIRECTION-AWARE.
+
+        P0-1 (2026): the original scorer had NO direction parameter and was
+        structurally long-biased — the EMA bonus was +20 for an uptrend and
+        only −5 for a downtrend, ``macd_hist > 0`` always added +10 with no
+        bearish counterpart, and ``supertrend_dir == 1 and macd_hist > 0`` was
+        a long-only confirmation. The SAME long-biased score then fed both BUY
+        and SELL proposals (direction was picked later in ``build_proposal``),
+        so a bearish setup could never score as high as the mirror-image
+        bullish one and SELL signals were systematically suppressed.
+
+        ``direction``:
+          * ``"BUY"`` / ``"SELL"`` — score THAT side (the trend/EMA/MACD/
+            Supertrend/breakout components are graded relative to it);
+          * ``None`` (default) — legacy auto-detect: derive the side from the
+            trend (EMA, else Supertrend) exactly as before, so every existing
+            caller/test keeps its behaviour AND the score is now graded with
+            the same symmetric math instead of the old long-only bias.
+        """
+        want = self._resolve_direction(ind, direction)
         score = 0.0
         reasons: list[str] = []
 
         # --- Trend component (0-35) ---
+        # Symmetric: the trend-agreement bonus is the same for BUY-in-uptrend
+        # and SELL-in-downtrend; a trend that CONTRADICTS the wanted side is a
+        # penalty, not a free −5 (old code only ever penalised the trend the
+        # long-biased side did NOT want).
+        trend_up: Optional[bool] = None
         if ind.ema_fast and ind.ema_slow:
-            if ind.ema_fast > ind.ema_slow:
+            trend_up = ind.ema_fast > ind.ema_slow
+            if trend_up == want:
                 score += 20
-                reasons.append("EMA50 สูงกว่า EMA200 → แนวโน้มขาขึ้น")
+                reasons.append("EMA50 สูงกว่า EMA200 → แนวโน้มขาขึ้น"
+                               if trend_up else
+                               "EMA50 ต่ำกว่า EMA200 → แนวโน้มขาลง")
             else:
                 score -= 5
-                reasons.append("EMA50 ต่ำกว่า EMA200 → แนวโน้มขาลง")
+                reasons.append("EMA50 สูงกว่า EMA200 → แนวโน้มขาขึ้น สวนทางกับฝั่งที่ต้องการ"
+                               if trend_up else
+                               "EMA50 ต่ำกว่า EMA200 → แนวโน้มขาลง สวนทางกับฝั่งที่ต้องการ")
         if ind.adx >= 25:
             score += 15
             reasons.append(f"ADX = {ind.adx:.0f} (≥25) → มีความแข็งแรงของเทรนด์")
@@ -101,11 +132,8 @@ class StrategyEngine:
         # --- Momentum (0-25): pullback-in-trend beats chase ---
         # สถิติ prod ชี้ว่าการไล่ราคา (chase) ที่ RSI สูงแล้วแพงกว่าการรอจังหวะย่อ
         # → ให้น้ำหนัก "pullback ในเทรนด์" มากกว่า "โมเมนตัมร้อนแรง"
-        bull_trend = (
-            ind.ema_fast > ind.ema_slow
-            if (ind.ema_fast and ind.ema_slow) else ind.supertrend_dir > 0
-        )
-        if bull_trend:
+        # Graded for the WANTED side: BUY wants an up Supertrend, SELL a down one.
+        if want:   # BUY
             if 40 <= ind.rsi <= 55 and ind.supertrend_dir > 0:
                 score += 15
                 reasons.append(
@@ -122,7 +150,7 @@ class StrategyEngine:
                 score += 8
                 reasons.append(
                     f"RSI = {ind.rsi:.0f} ย่อลึก แต่ Supertrend ยังขาขึ้น → รอสัญญาณกลับตัวก่อนเข้า")
-        else:
+        else:       # SELL — mirror of the BUY branch
             if 45 <= ind.rsi <= 60 and ind.supertrend_dir < 0:
                 score += 15
                 reasons.append(
@@ -138,9 +166,19 @@ class StrategyEngine:
             elif ind.rsi < 30:
                 score += 5
                 reasons.append(f"RSI = {ind.rsi:.0f} → oversold เสี่ยง bounce แรง")
-        if ind.macd_hist > 0:
-            score += 10
-            reasons.append("MACD histogram เป็นบวก → โมเมนตัมยืนยันทิศทาง")
+        # MACD now SYMMETRIC: a histogram that agrees with the wanted side
+        # adds +10, one that contradicts it subtracts 10. Old code only ever
+        # rewarded ``macd_hist > 0``, which made the metric long-only.
+        if ind.macd_hist != 0:
+            agrees = (ind.macd_hist > 0) == bool(want)
+            if agrees:
+                score += 10
+                reasons.append("MACD histogram สอดคล้องทิศทาง → โมเมนตัมยืนยันฝั่งที่ต้องการ"
+                               if want else
+                               "MACD histogram เป็นลบ สอดคล้องทิศทาง → โมเมนตัมยืนยันฝั่งขาย")
+            else:
+                score -= 10
+                reasons.append("MACD histogram สวนทางกับฝั่งที่ต้องการ → โมเมนตัมไม่ยืนยัน")
 
         # --- Volatility (0-20): moderate volatility is ideal ---
         if 0.4 <= ind.atr_pct <= 1.5:
@@ -153,7 +191,11 @@ class StrategyEngine:
             score += 5
 
         # --- News & sentiment (0-20) ---
-        score += max(-10.0, min(10.0, ind.news_sentiment * 10))
+        # Sentiment is graded for the WANTED side: bullish news helps a BUY,
+        # but the mirror-image bearish news now helps a SELL (old code applied
+        # the raw sentiment with no direction, so bearish news always hurt).
+        signed_sentiment = ind.news_sentiment * (1.0 if want else -1.0)
+        score += max(-10.0, min(10.0, signed_sentiment * 10))
         if ind.high_impact_event:
             score -= 5
             reasons.append("มีข่าว impact สูงใกล้ตัว → ความเสี่ยง spike, รอให้ตลาดนิ่งก่อน")
@@ -161,21 +203,37 @@ class StrategyEngine:
             score += 5
             reasons.append("ไม่มีข่าว impact สูงระยะสั้น → สภาพแวดล้อมคาดการณ์ได้")
 
-        if ind.supertrend_dir == 1 and ind.macd_hist > 0:
-            score += 5
-            reasons.append("Supertrend + MACD ยืนยันทิศเดียวกัน")
+        # Supertrend + MACD agreement, now symmetric (SELL confirm too).
+        if ind.supertrend_dir != 0 and ind.macd_hist != 0:
+            agrees = ((ind.supertrend_dir > 0) == bool(want)
+                      and (ind.macd_hist > 0) == bool(want))
+            if agrees:
+                score += 5
+                reasons.append("Supertrend + MACD ยืนยันทิศเดียวกัน")
 
         # --- Breakout-retest bonus (strategy D — gold live snapshots) ------
-        if ind.breakout_state == 2:
+        # Only a breakout in the WANTED direction counts: a downside break is
+        # not a BUY bonus (old code always read breakout_state as an up-break).
+        if ind.breakout_state == 2 and want:
             score += 5
             reasons.append(
                 f"Breakout เหนือแนวต้าน 20 แท่ง ({ind.breakout_level:g}) — "
                 "โมเมนตัมทะลุแนวยืนยันแล้ว")
-        elif ind.breakout_state == 1:
+        elif ind.breakout_state == 1 and want:
             score += 3
             reasons.append(
                 f"Retest แนว breakout ({ind.breakout_level:g}) สำเร็จ — "
                 "จุดเข้ายืนยันแล้ว ลดความเสี่ยง false breakout")
+        elif ind.breakout_state == 2 and not want:
+            score += 5
+            reasons.append(
+                f"Breakdown ใต้แนวรับ 20 แท่ง ({ind.breakout_level:g}) — "
+                "โมเมนตัมทะลุลงยืนยันแล้ว")
+        elif ind.breakout_state == 1 and not want:
+            score += 3
+            reasons.append(
+                f"Retest แนว breakdown ({ind.breakout_level:g}) สำเร็จ — "
+                "จุดเข้าขายยืนยันแล้ว")
         elif ind.asset.upper() == "XAUUSD":
             reasons.append(
                 "ทอง: ยังไม่มีจังหวะ breakout/retest — รอการทะลุแนวสูง 20 แท่ง "
@@ -186,6 +244,26 @@ class StrategyEngine:
             asset=ind.asset, score=round(score, 1),
             band=self.band_of(score), reasons=reasons or ["ข้อมูลไม่เพียงพอ — คะแนนกลาง"],
         )
+
+    @staticmethod
+    def _resolve_direction(ind: IndicatorSnapshot,
+                           direction: Optional[str]) -> bool:
+        """True = the wanted side is BUY, False = SELL.
+
+        An explicit ``direction`` wins. ``None`` falls back to the legacy
+        auto-detect (EMA trend, else Supertrend sign) so existing callers keep
+        working; when BOTH are unavailable the side defaults to SELL-neutral
+        (``False``) — matching the old ``bull_trend`` fallback, which was False
+        when ``supertrend_dir <= 0``.
+        """
+        want_str = str(direction or "").strip().upper()
+        if want_str in ("BUY", "LONG"):
+            return True
+        if want_str in ("SELL", "SHORT"):
+            return False
+        if ind.ema_fast and ind.ema_slow:
+            return ind.ema_fast > ind.ema_slow
+        return ind.supertrend_dir > 0
 
     @staticmethod
     def band_of(score: float) -> OpportunityBand:

@@ -50,6 +50,7 @@ from app.models.schemas import (
 )
 
 from app.services import signal_log
+from app.core import config_validation, thesis_validation
 
 log = logging.getLogger(__name__)
 
@@ -1242,6 +1243,13 @@ def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
     its own Min Lot (gold) override, every other asset uses the base min_lot.
     Sizing uses the per-asset contract value (gold = 100 oz/lot, FX = 100k
     units/lot) so the risk budget converts to a realistic volume.
+
+    P0-2: this function is a PURE sizer — it never decides whether the size is
+    ALLOWED. When the risk-based lot is BELOW the min lot, the floor can push
+    the real risk ABOVE the per-trade budget; that case must BLOCK the order,
+    not silently open an over-risk one. Callers use ``min_lot_budget_breach``
+    to detect it (see ``execute_signal``). Kept returning the floored lot so
+    the value still matches what the (blocked) order would have been.
     """
     if not entry or not stop_loss:
         return 0.0
@@ -1249,6 +1257,63 @@ def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
     lots = risk_to_lot_for(s.capital, s.risk_per_trade_pct, stop_distance,
                            asset or "")
     return max(lots, effective_min_lot(s, asset))
+
+
+def min_lot_budget_breach(s: AppSettings, entry: float,
+                          stop_loss: Optional[float],
+                          asset: Optional[str] = None) -> Optional[dict]:
+    """Details when the MIN LOT alone risks more than the per-trade budget.
+
+    P0-2 root cause: ``size_position`` floors at ``effective_min_lot``, so a
+    stop too wide for the risk budget (prod AUDNZD: 0.00676 × 0.02 × 100k =
+    $13.52 = 6.76% vs a 4% budget) silently opened an order risking more than
+    ``risk_per_trade_pct``. Correct behaviour = the smallest order the account
+    MAY place already exceeds the budget ⇒ there is no valid size ⇒ BLOCK with
+    a machine-readable reason instead of forcing a trade.
+
+    Returns None when there is no breach (or the inputs are unusable — the
+    normal sizing/validation paths handle those), else a dict with the numbers
+    a caller needs to explain the block:
+      ``required_lot`` (= the risk-based lot, below the floor),
+      ``min_lot``, ``intended_stop_distance``, ``risk_budget``,
+      ``minimum_lot_risk``, ``minimum_lot_risk_pct``.
+    """
+    try:
+        if not entry or not stop_loss:
+            return None
+        stop_distance = abs(float(entry) - float(stop_loss))
+        if stop_distance <= 0:
+            return None
+        capital = float(getattr(s, "capital", 0) or 0)
+        risk_pct = float(getattr(s, "risk_per_trade_pct", 0) or 0)
+        if capital <= 0 or risk_pct <= 0:
+            return None
+        min_lot = effective_min_lot(s, asset)
+        contract = contract_value_for(str(asset or ""))
+        if min_lot <= 0 or contract <= 0:
+            return None
+        risk_budget = capital * risk_pct / 100.0
+        required_lot = risk_to_lot_for(capital, risk_pct, stop_distance,
+                                       asset or "")
+        min_lot_risk = stop_distance * min_lot * contract
+        # A tiny tolerance keeps a lot that is ALREADY at the floor (or the
+        # risk-based lot equal to the floor) from being flagged by rounding.
+        if required_lot >= min_lot - 1e-9:
+            return None
+        if min_lot_risk <= risk_budget + 1e-9:
+            return None
+        return {
+            "required_lot": round(required_lot, 4),
+            "min_lot": round(min_lot, 4),
+            "intended_stop_distance": round(stop_distance, 5),
+            "risk_budget": round(risk_budget, 2),
+            "minimum_lot_risk": round(min_lot_risk, 2),
+            "minimum_lot_risk_pct": round(min_lot_risk / capital * 100.0, 2),
+        }
+    except Exception:
+        # Never let a sizing probe block on its own bug — the caller's other
+        # gates still protect; a None here means "let the normal path decide".
+        return None
 
 
 def apply_spread(entry: float, direction: str, spread: float) -> float:
@@ -1267,13 +1332,33 @@ def apply_spread(entry: float, direction: str, spread: float) -> float:
 # ---------------------------------------------------------------------------
 # Entry points — used by /approve AND the auto trader
 # ---------------------------------------------------------------------------
+async def _fresh_thesis_snapshot(db, asset: str) -> Optional[dict]:
+    """Best-effort fresh indicator snapshot for P0-5 thesis re-validation.
+
+    Reuses the scanner's own quote pipeline (``fetch_all_snapshots``) so the
+    thesis is judged against the SAME indicators the signal was built from —
+    not a second, divergent feed. Returns None on ANY failure (the caller
+    treats None as FAIL-CLOSED and blocks the order). The 60 s cache inside
+    ``fetch_all_snapshots`` keeps this cheap even when many signals fire.
+    """
+    try:
+        snaps = await quotes.fetch_all_snapshots([asset])
+    except Exception as exc:
+        log.warning("thesis snapshot fetch failed for %s: %s", asset, exc)
+        return None
+    if not snaps:
+        return None
+    return snaps.get(asset) if isinstance(snaps, dict) else None
+
+
 async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          user_id: str, asset: str, direction: str,
                          entry: float, stop_loss: Optional[float],
                          take_profit: Optional[float], confidence: float,
                          opportunity: float, signal_id: Optional[str],
                          source: str,
-                         volume: Optional[float] = None) -> GateReport:
+                         volume: Optional[float] = None,
+                         signal_row: Optional[dict] = None) -> GateReport:
     """Gate → size → place order → journal → notify. The single execution path.
 
     volume: caller-supplied lot that OVERRIDES risk sizing. Used by
@@ -1284,6 +1369,32 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     leg#1's 50% share at a tighter SL). Auto-trader / approve pass nothing
     and keep the risk_to_lot sizing + min_lot floor.
     """
+    # ---- P0-4: configuration validation (fail-closed) ---------------------
+    # The settings row is the single source of truth for every risk limit. A
+    # self-contradictory row (e.g. per-trade risk 3% > daily loss budget 2%)
+    # can blow the daily budget with ONE trade before the circuit breaker
+    # sees it. Validate BEFORE any gate: an INVALID config BLOCKS the order
+    # (never crashes the worker) and surfaces a machine-readable
+    # ``configuration_error``. A settings row that could not be read at all
+    # (UNKNOWN) also blocks — a safety limit must never be guessed (extension
+    # of the 2026-09-22 settings-read fix).
+    _cfg = config_validation.validate_settings(s)
+    if not _cfg.ok:
+        _cfg_reason = _cfg.reason or "settings_unavailable"
+        log.warning("Execution blocked %s %s: %s", direction, asset,
+                    _cfg.summary())
+        signal_log.log_event(
+            db=db, event="order_blocked", signal_id=str(signal_id or ""),
+            asset=asset, direction=direction, confidence=confidence, entry=entry,
+            source=source,
+            reason=f"configuration_error: {_cfg_reason}")
+        return GateReport(
+            allowed=False, size_lots=0.0,
+            rejects=[f"configuration_error: {_cfg_reason}",
+                     _cfg.summary()],
+            pause=get_pause(db), checks=[_cfg.summary()],
+            configuration_error=_cfg_reason)
+
     # ---- Live-price re-anchor (2026-09-08) --------------------------------
     # The stored signal row can be up to SIGNAL_TTL_MIN (30 min) old, so its
     # entry price may no longer be the market price when the order actually
@@ -1366,7 +1477,67 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             asset=asset, direction=direction, confidence=confidence, entry=entry,
             source=source, reason=report.rejects[-1])
         return report
+
+    # ---- P0-2: min-lot risk-budget guard (blocks, never forces a trade) ----
+    # When NO caller volume is supplied the size comes from risk sizing, which
+    # floors at the effective min_lot. If that floor risks MORE than the
+    # per-trade budget (stop too wide), the correct action is to BLOCK — not
+    # to open an over-risk order (old ``max(lots, min_lot)`` behaviour) nor to
+    # shrink the (structural) stop to force a min-lot fill. A caller-supplied
+    # volume is a plan leg the user reviewed and confirmed, so it is exempt.
+    if not (volume and float(volume) > 0):
+        _breach = min_lot_budget_breach(s, entry, stop_loss, asset=asset)
+        if _breach:
+            report.allowed = False
+            report.rejects.append(
+                "minimum_lot_exceeds_risk_budget: "
+                f"ไม้เล็กสุดที่เปิดได้ ({_breach['min_lot']:g} lot) เสี่ยง "
+                f"${_breach['minimum_lot_risk']:,.2f} "
+                f"({_breach['minimum_lot_risk_pct']:.2f}%) เกินงบต่อไม้ "
+                f"${_breach['risk_budget']:,.2f} — ระยะ SL "
+                f"{_breach['intended_stop_distance']:g} กว้างเกินไปสำหรับทุนนี้ "
+                "(ไม่เปิดออเดอร์เสี่ยงเกินงบ)")
+            report.size_lots = 0.0
+            log.warning("Execution blocked %s %s: min-lot risk budget breach %s",
+                        direction, asset, _breach)
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(signal_id or ""),
+                asset=asset, direction=direction, confidence=confidence,
+                entry=entry, source=source,
+                reason=("ไม้เล็กสุดเสี่ยงเกินงบต่อไม้ "
+                        f"({_breach['minimum_lot_risk_pct']:.2f}% > "
+                        f"{float(getattr(s, 'risk_per_trade_pct', 0) or 0):g}%)"))
+            return report
+
     report.size_lots = lots
+
+    # ---- P0-5: final thesis validation (fail-closed) ----------------------
+    # Everything above re-checks the ENTRY PRICE and the RISK budget, but not
+    # the REASON the signal existed. A signal is up to SIGNAL_TTL_MIN (30) min
+    # old by the time it fires; the trend, the Supertrend, the XAU breakout
+    # structure and the news state can all have inverted in between. Fetch a
+    # FRESH indicator snapshot and refuse to fire when the stored thesis no
+    # longer holds. A snapshot that cannot be produced BLOCKS (fail-closed) —
+    # an unverifiable thesis must never be assumed valid. The check only runs
+    # when the caller passes the signal row (manual approve / auto-trader);
+    # extended-open has its own reviewed plan and passes no row.
+    if signal_row:
+        _thesis_snapshot = await _fresh_thesis_snapshot(db, asset)
+        _thesis = thesis_validation.validate_thesis(
+            signal_row, _thesis_snapshot, max_age_min=SIGNAL_TTL_MIN)
+        if not _thesis.ok:
+            _thesis_reason = _thesis.reason or "signal_thesis_invalidated"
+            report.allowed = False
+            report.thesis_error = _thesis_reason
+            report.rejects.append(f"thesis_error: {_thesis.summary()}")
+            log.warning("Execution blocked %s %s: %s", direction, asset,
+                        _thesis.summary())
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(signal_id or ""),
+                asset=asset, direction=direction, confidence=confidence,
+                entry=entry, source=source,
+                reason=f"thesis_error: {_thesis_reason}")
+            return report
 
     # Paper realism: fill at entry ± spread/2. Spread resolves per symbol:
     # user override (spread_overrides) → built-in DEFAULT_SPREADS (realistic

@@ -108,6 +108,7 @@ async def trade_once(db, broker, notifier) -> dict:
             confidence=float(sig.get("confidence") or 0),
             opportunity=float(sig.get("opportunity_score") or sig.get("confidence") or 0),
             signal_id=sig.get("id"), source="auto",
+            signal_row=sig,
         )
         if report.allowed:
             db.update("signals", sig["id"], {"approval": "approved"})

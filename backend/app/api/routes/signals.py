@@ -382,6 +382,7 @@ async def approve_signal(payload: ApprovalRequest, request: Request):
         confidence=float(s.get("confidence") or 0),
         opportunity=float(s.get("opportunity_score") or s.get("confidence") or 0),
         signal_id=payload.signal_id, source="approved",
+        signal_row=s,
     )
     if not report.allowed:
         db.update("signals", payload.signal_id, {"approval": "rejected"})

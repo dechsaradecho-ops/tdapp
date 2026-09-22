@@ -118,6 +118,20 @@ def db_with_client(tables: dict[str, list] | None = None) -> FakeDatabase:
     return db
 
 
+def _neutral_thesis_snapshot(asset: str) -> dict:
+    """P0-5 offline fake: a snapshot with NO trend/Supertrend/regime signal, so
+    ``thesis_validation`` skips those checks and never spuriously blocks the
+    offline approve/auto tests. Matches the field set of
+    ``quotes.snapshot_from_candles``."""
+    return {
+        "asset": asset, "price": 1.0,
+        "ema_fast": 0.0, "ema_slow": 0.0, "adx": 0.0, "supertrend_dir": 0,
+        "rsi": 50.0, "macd_hist": 0.0, "price_change_pct_20": 0.0,
+        "atr_pct": 0.0, "volatility_index": 0.0, "news_sentiment": 0.0,
+        "high_impact_event": False, "breakout_state": 0, "breakout_level": 0.0,
+    }
+
+
 def clean_settings(**over) -> AppSettings:
     """Settings that pass every gate by default."""
     base = dict(
@@ -158,6 +172,13 @@ class TestGatePipeline:
         async def fake_spot(assets, **_kw):
             return {}, {}
         monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+        # P0-5: execute_signal fetches a FRESH snapshot for final thesis
+        # validation; offline the real feed's random-walk values would
+        # spuriously fail the trend/Supertrend checks. Return a NEUTRAL
+        # snapshot (zero trend inputs) so the thesis checks are skipped.
+        async def fake_snaps(assets, **_kw):
+            return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
 
     @pytest.mark.asyncio
     async def test_clean_signal_fires_and_journals(self, broker, notifier):
@@ -526,7 +547,15 @@ class TestGatePipeline:
 
     @pytest.mark.asyncio
     async def test_sl_cap_off_keeps_wide_sl(self, broker, notifier):
-        """sl_cap_enabled=False → SL เดิมผ่าน (เสี่ยงเกินงบได้, พฤติกรรมเดิม)."""
+        """P0-2: sl_cap_enabled=False + wide SL + floor ⇒ BLOCK (was allowed).
+
+        The old behaviour opened a 0.02-lot order risking $13.52 (6.76% of a
+        $200 account) against a 4% budget — silently over-risk. With no cap to
+        tighten the stop, the smallest allowed order already exceeds the
+        per-trade budget, so the ONLY correct action is to block with a
+        machine-readable reason; the SL is left untouched (never widened, never
+        shrunk) and no order reaches the broker.
+        """
         db = FakeDatabase()
         s = clean_settings(capital=200.0, risk_per_trade_pct=4.0, min_lot=0.02,
                            sl_cap_enabled=False, kill_daily_loss_pct=500.0)
@@ -536,10 +565,11 @@ class TestGatePipeline:
             entry=1.10000, stop_loss=1.09324, take_profit=1.11352,
             confidence=85.0, opportunity=80.0, signal_id="sig-nocap", source="auto",
         )
-        assert report.allowed, report.rejects
-        order = broker.orders[0]
-        assert order.stop_loss == pytest.approx(1.09324, abs=1e-9)
-        assert order.take_profit == pytest.approx(1.11352, abs=1e-9)
+        assert not report.allowed
+        assert any("minimum_lot_exceeds_risk_budget" in r
+                   for r in report.rejects), report.rejects
+        assert report.size_lots == 0.0
+        assert broker.orders == []          # nothing reached the broker
 
     @pytest.mark.asyncio
     async def test_sl_cap_never_widens_tight_sl(self, broker, notifier):
@@ -855,6 +885,13 @@ class TestAutoTrader:
         async def fake_spot(assets, **_kw):
             return {}, {}
         monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+        # P0-5: execute_signal also fetches a FRESH snapshot for final thesis
+        # validation; offline the real feed's random-walk values would
+        # spuriously fail the trend/Supertrend checks. Return a NEUTRAL
+        # snapshot (zero trend inputs) so the thesis checks are skipped.
+        async def fake_snaps(assets, **_kw):
+            return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
 
     @pytest.mark.asyncio
     async def test_semi_auto_mode_does_nothing(self, broker, notifier):

@@ -1163,6 +1163,12 @@ class TestPositionGuardManagement:
                              volume=0, entry_price=0)).current_price)
         broker.quote = lambda asset: _AsyncFloat(0.0)
         broker.close_position = lambda ticket: _AsyncClosed()
+        # Default partial_close spy. `partial_close_pct` defaults to 50 (owner
+        # enabled TP1 on 2026-09-21), so Smart Exit can fire a PARTIAL on a
+        # profitable fixture. Real brokers expose partial_close; without it the
+        # SimpleNamespace raised AttributeError and the partial path fell to
+        # `not_applied` (silencing the expected time-stop close).
+        broker.partial_close = lambda ticket, vol: _AsyncPartial([], vol)
         return broker
 
     def _db(self, **overrides):
@@ -1602,8 +1608,11 @@ class TestPositionGuardManagement:
         closed: list[str] = []
         broker = self._broker(sl=1.0500)  # SL far below live 1.2500
         broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
-        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=6)
-        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
+        # Age is measured in TRADING days (2026-09-19): weekends are subtracted
+        # by `market_open_days_between`, so use 10 calendar days to stay ≥ the
+        # 5-day stop even with the worst-case 2-day weekend subtraction.
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=10)).isoformat())
         summary = await position_guard.guard_once(
             db, broker, _SilentNotifier(),
             settings=self._settings(max_hold_days=5, time_stop_min_r=0.0,
@@ -1645,8 +1654,10 @@ class TestPositionGuardManagement:
         closed: list[str] = []
         broker = self._broker(sl=1.0500)
         broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
-        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=6)
-        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
+        # TRADING-day age → 10 calendar days so the ONLY reason it stays open
+        # is the market-closed gate (not an age below max_hold).
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=10)).isoformat())
         summary = await position_guard.guard_once(
             db, broker, _SilentNotifier(),
             settings=self._settings(max_hold_days=5, time_stop_min_r=0.0,
@@ -1767,8 +1778,9 @@ class TestPositionGuardManagement:
         closed: list[str] = []
         broker = self._broker(sl=1.0500)
         broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
-        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=6)
-        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=6)).isoformat())
+        # TRADING-day age (weekends subtracted) → 10 calendar days ≥ 5-day stop.
+        broker._positions["T1"].opened_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db = self._db(created_at=(datetime.now(timezone.utc) - timedelta(days=10)).isoformat())
         settings = self._settings(max_hold_days=5, time_stop_min_r=0.0,
                                   breakeven_trigger_r=0, trail_atr_mult=0)
 

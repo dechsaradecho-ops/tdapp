@@ -76,6 +76,19 @@ def set_state(db: FakeDatabase | None) -> None:
     app.state.broker = FakeBroker()
 
 
+def _neutral_thesis_snapshot(asset: str) -> dict:
+    """P0-5 offline fake: a snapshot with NO trend/Supertrend/regime signal, so
+    ``thesis_validation`` skips those checks and never spuriously blocks the
+    offline approve tests (matches ``quotes.snapshot_from_candles`` fields)."""
+    return {
+        "asset": asset, "price": 1.0,
+        "ema_fast": 0.0, "ema_slow": 0.0, "adx": 0.0, "supertrend_dir": 0,
+        "rsi": 50.0, "macd_hist": 0.0, "price_change_pct_20": 0.0,
+        "atr_pct": 0.0, "volatility_index": 0.0, "news_sentiment": 0.0,
+        "high_impact_event": False, "breakout_state": 0, "breakout_level": 0.0,
+    }
+
+
 async def call(method: str, path: str, json_body: dict | None = None) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -700,6 +713,13 @@ class TestApproveFlow:
         async def fake_spot(assets, **_kw):
             return {}, {}
         monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+        # P0-5: execute_signal also fetches a FRESH snapshot for final thesis
+        # validation. Offline the real feed's random-walk values would
+        # spuriously fail the trend/Supertrend checks; return a NEUTRAL
+        # snapshot (zero trend inputs) so those checks are skipped.
+        async def fake_snaps(assets, **_kw):
+            return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
 
     @pytest.mark.asyncio
     async def test_reject_updates_row_and_returns_status(self):

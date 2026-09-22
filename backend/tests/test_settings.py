@@ -683,7 +683,12 @@ def test_risk_presets_moderate_mirrors_live_prod_profile():
                 # silence vs. once per 24h then let the kill switch close the
                 # book. A safety policy the owner owns — a risk preset must
                 # never flip it behind their back
-                "kill_expand_auto_apply"}
+                "kill_expand_auto_apply",
+                # Fail-Open master switch (migration 043, P0-3): may an
+                # unanswered window widen a limit by itself AT ALL? Its
+                # fail-closed default is False, so a preset must never be able
+                # to turn silent widening back ON behind the owner's back
+                "kill_expand_auto_widen"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

@@ -1910,6 +1910,19 @@ class GateReport(BaseModel):
                      must show these: prod 2026-09-11 the journal row was
                      rejected by a CHECK constraint and the open position
                      silently vanished from /monitor.
+      configuration_error — set (and allowed=False) when the trading_settings
+                     row is INVALID or could not be read at all (P0-4). A
+                     self-contradictory config (e.g. per-trade risk > daily
+                     loss budget) must BLOCK new orders, not open them. Holds
+                     the primary machine-readable reason code.
+      thesis_error — set (and allowed=False) when the stored signal's THESIS
+                     no longer holds on the FRESH market at execution time
+                     (P0-5): trend/Supertrend flipped, XAU breakout structure
+                     gone, hostile regime, news state changed, or the fresh
+                     snapshot could not be produced at all. Holds the primary
+                     machine-readable reason code; the full list is on
+                     ``rejects``. The SAME check runs for manual approve and
+                     the auto-trader (both call execute_signal).
     """
     allowed: bool
     size_lots: float = 0.0
@@ -1917,6 +1930,8 @@ class GateReport(BaseModel):
     pause: "PauseStatus"
     checks: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    configuration_error: Optional[str] = None
+    thesis_error: Optional[str] = None
 
 
 class PauseStatus(BaseModel):
@@ -2315,7 +2330,22 @@ class AppSettings(BaseModel):
     #           /resume, never a fresh prompt.
     # Either way the widening is reported to the owner — a limit never moves
     # silently. Only a FAILED write keeps deferring the emergency exit.
+    #
+    # P0-3: this switch is now REACHABLE only when ``kill_expand_auto_widen`` is
+    # ON. With the fail-closed default (``kill_expand_auto_widen=False``) the
+    # timeout path NEVER widens a limit: it keeps the original limits and stays
+    # paused. Kept for backward compatibility with the 039 flow.
     kill_expand_auto_apply: bool = True
+    # P0-3 (fail-closed timeout, migration 043): may a LAPSED (unanswered)
+    # confirmation window widen a risk limit by itself at all?
+    #   True  → the 039 flow above runs (``kill_expand_auto_apply`` decides
+    #           every-time vs one-shot). Explicit opt-in only.
+    #   False → DEFAULT. The timeout path NEVER widens: the original limits stay
+    #           in force, trading stays PAUSED (new orders blocked — fail-closed),
+    #           the owner is warned once, and the kill switch / position guard
+    #           keep protecting any open book. Silence must never raise a risk
+    #           limit; the way forward is an explicit Approve or Settings.
+    kill_expand_auto_widen: bool = False
 
     # int to match trading_settings integer columns (float JSON like 30.0 fails Postgres int cast)
     news_block_minutes: int = 30

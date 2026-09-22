@@ -907,8 +907,14 @@ export interface AppSettings {
   /** นาทีที่รอการยืนยันขยายลิมิตความเสี่ยง (LINE + popup) ก่อนคำขอหมดอายุ —
    *  default 180; เกินเวลาแล้วระบบตัดสินให้ตามนโยบายด้านล่าง (migration 037) */
   kill_expand_ttl_min: number;
-  /** นโยบายเมื่อคำขอหมดเวลายืนยัน (migration 039) —
-   *  true (default) = ขยายลิมิตให้อัตโนมัติทุกครั้ง,
+  /** สวิตช์ Fail-Open ของการขยายลิมิตอัตโนมัติ (migration 043) —
+   *  false (default / ปลอดภัย) = หมดเวลายืนยันแล้ว “ลิมิตเดิมยังมีผล”
+   *  ไม่ขยายให้เอง (fail-closed) แจ้งเตือนเจ้าของและหยุดเทรดตามเดิม,
+   *  true = อนุญาตให้ระบบขยายให้เองตามนโยบาย kill_expand_auto_apply ด้านล่าง */
+  kill_expand_auto_widen: boolean;
+  /** นโยบายเมื่อคำขอหมดเวลายืนยัน (migration 039) — ทำงานเฉพาะเมื่อ
+   *  kill_expand_auto_widen = true เท่านั้น —
+   *  true = ขยายลิมิตให้อัตโนมัติทุกครั้ง,
    *  false = ขยายให้เองได้ครั้งเดียวใน 24 ชม. หลังจากนั้น “ไม่ขยาย” และ
    *  ปล่อยให้ kill switch ปิดไม้ตามลิมิตเดิม */
   kill_expand_auto_apply: boolean;

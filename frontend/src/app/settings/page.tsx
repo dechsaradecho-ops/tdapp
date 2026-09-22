@@ -61,6 +61,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   kill_monthly_loss_pct: 8,
   drawdown_throttle_pct: 5,
   kill_expand_ttl_min: 180,
+  kill_expand_auto_widen: false,
   kill_expand_auto_apply: true,
   news_block_minutes: 30,
   news_caution_minutes: 120,
@@ -1192,16 +1193,37 @@ export default function SettingsPage() {
                 hint="เกินลิมิต ระบบส่งคำขอยืนยัน (LINE + popup) แล้วรอได้นานเท่านี้ — เกินเวลาระบบตัดสินให้ตามนโยบายด้านล่าง (ต่ำสุด 5 นาที / สูงสุด 7 วัน)" />
               <div className="flex items-center gap-3 py-1">
                 <div className="flex-1">
-                  <p className="text-sm">ขยายลิมิตอัตโนมัติเมื่อหมดเวลายืนยัน</p>
+                  <p className="text-sm">ขยายลิมิตให้เองเมื่อหมดเวลายืนยัน (Fail-Open)</p>
+                  <p className="text-xs text-slate-500">
+                    ปิด (ค่าเริ่มต้น / ปลอดภัย) = หมดเวลาแล้ว <b>ลิมิตเดิมยังมีผล</b>{" "}
+                    ระบบไม่ขยายให้เอง แจ้งเตือนเจ้าของ แล้วหยุดเทรดตามเดิม —
+                    ต้องกดยืนยันเองเท่านั้นจึงจะขยาย · เปิด = อนุญาตให้ระบบ
+                    ขยายให้เองเมื่อหมดเวลาตามนโยบายด้านล่าง (ไม่แนะนำ)
+                  </p>
+                </div>
+                <button role="switch" aria-checked={cfg.kill_expand_auto_widen}
+                  aria-label="ขยายลิมิตให้เองเมื่อหมดเวลายืนยัน"
+                  disabled={lineBusy}
+                  onClick={() => toggleNotify("kill_expand_auto_widen", !cfg.kill_expand_auto_widen)}
+                  className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
+                    cfg.kill_expand_auto_widen ? "bg-profit" : "bg-slate-700"}`}>
+                  <span className={`absolute top-[3px] w-[22px] h-[22px] rounded-full bg-white shadow transition-all ${
+                    cfg.kill_expand_auto_widen ? "left-[21px]" : "left-[3px]"}`} />
+                </button>
+              </div>
+              <div className={`flex items-center gap-3 py-1 ${cfg.kill_expand_auto_widen ? "" : "opacity-50"}`}>
+                <div className="flex-1">
+                  <p className="text-sm">นโยบายการขยายอัตโนมัติ (เมื่อเปิด Fail-Open ด้านบน)</p>
                   <p className="text-xs text-slate-500">
                     เปิด = หมดเวลาแล้วขยายลิมิตให้เองทุกครั้ง — ปิด = ขยายให้เองได้
                     “ครั้งเดียวใน 24 ชม.” ต่อคำขอ ถ้าหมดโควตาและไม่ตอบ ระบบจะไม่ขยาย
                     อีก และปล่อยให้ kill switch ปิดไม้เพื่อความปลอดภัย
+                    {!cfg.kill_expand_auto_widen && " (ไม่ทำงาน เพราะปิด Fail-Open)"}
                   </p>
                 </div>
                 <button role="switch" aria-checked={cfg.kill_expand_auto_apply}
-                  aria-label="ขยายลิมิตอัตโนมัติเมื่อหมดเวลายืนยัน"
-                  disabled={lineBusy}
+                  aria-label="นโยบายการขยายอัตโนมัติ"
+                  disabled={lineBusy || !cfg.kill_expand_auto_widen}
                   onClick={() => toggleNotify("kill_expand_auto_apply", !cfg.kill_expand_auto_apply)}
                   className={`relative w-[46px] h-[28px] rounded-full transition-colors shrink-0 disabled:opacity-40 ${
                     cfg.kill_expand_auto_apply ? "bg-profit" : "bg-slate-700"}`}>

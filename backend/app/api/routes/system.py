@@ -20,6 +20,9 @@ database/003_db_probe.sql once. If the table is missing the endpoint reports
 that instead of failing.
 
 Also: GET /api/system/counts → live row counts for the 5 worker tables.
+Also: GET /api/system/config-check → validate the trading_settings row (P0-4),
+exposing the effective risk numbers + a machine-readable VALID/INVALID/UNKNOWN
+status. When INVALID, new orders are BLOCKED with a ``configuration_error``.
 """
 from __future__ import annotations
 
@@ -122,6 +125,23 @@ async def db_check(request: Request) -> dict:
 
     result["verdict"] = "pass" if (ok_probe and data and audit.get("insert") == "ok") else "partial"
     return result
+
+
+@router.get("/config-check")
+async def config_check(request: Request) -> dict:
+    """Validate the trading_settings row (P0-4).
+
+    Returns the effective risk numbers + a machine-readable validation status
+    (VALID / INVALID / UNKNOWN) and, when INVALID, the reason code that would
+    BLOCK new orders (``configuration_error``). Read-only; never raises.
+    """
+    from app.core import config_validation
+    db: Database = request.app.state.db
+    settings, source = execution.settings_or_none(db), "db"
+    if settings is None:
+        source = "unknown"
+    result = config_validation.validate_settings(settings, source=source)
+    return result.as_dict()
 
 
 @router.get("/counts")

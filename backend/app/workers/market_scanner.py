@@ -178,7 +178,13 @@ async def scan_once(db: Database) -> list[dict]:
             live_used += 1
         else:
             demo_used += 1
-        opp = engine.opportunity_score(ind)
+        # P0-1: score the SIDE this setup would trade, so a bearish setup is
+        # graded with the same symmetric math as a bullish one (the old
+        # call left direction implicit and the scorer was long-biased).
+        _dir = "BUY" if (ind.ema_fast > ind.ema_slow
+                         if (ind.ema_fast and ind.ema_slow)
+                         else ind.supertrend_dir > 0) else "SELL"
+        opp = engine.opportunity_score(ind, direction=_dir)
         row = {
             "asset": asset,
             "regime": regime_of(ind),
