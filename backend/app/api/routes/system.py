@@ -686,12 +686,20 @@ async def pnl_rate_debug(request: Request) -> dict:
     seed = {str(r["asset"]).upper(): float(r.get("current_price") or 0)
             for r in rows if r.get("asset")}
     rates = await fetch_pnl_rates(assets, seed=seed)
+    # Also run the REAL monitor snapshot to see what it reports.
+    try:
+        snap = await execution.monitor_snapshot(
+            db, request.app.state.broker, request.app.state.settings)
+        monitor = {p.asset: p.unrealized_pnl for p in snap.open_positions}
+    except Exception as exc:
+        monitor = {"error": f"{exc.__class__.__name__}: {exc}"}
     return {
         "assets": assets,
         "seed": seed,
         "rates": {k: round(v, 6) for k, v in sorted(rates.items())},
         "spot_source": {a: quotes.spot_source(a) for a in sorted(rates)},
         "resolved": {a: pnl_conversion_rate(a, rates) for a in assets},
+        "monitor_unrealized": monitor,
     }
 
 
