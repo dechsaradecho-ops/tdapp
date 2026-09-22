@@ -131,7 +131,7 @@ export default function PositionChartModal({ position, onClose }: {
 
   if (!position) return null;
   const p = position;
-  const win = p.unrealized_pnl >= 0;
+  const win = (p.unrealized_pnl ?? 0) >= 0;
 
   return (
     // กรอบ liquid glass เดียวกับกล่อง AI chat (class panel ล้วน —
@@ -160,7 +160,9 @@ export default function PositionChartModal({ position, onClose }: {
         {/* ---------- PnL headline ---------- */}
         <div className={`rounded-lg p-3 text-center ${win ? "bg-profit/10" : "bg-loss/10"}`}>
           <p className={`text-2xl font-bold ${win ? "text-profit" : "text-loss"}`}>
-            {win ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
+            {p.unrealized_pnl == null
+              ? "—"
+              : `${win ? "+" : ""}$${fmtNum(p.unrealized_pnl, 2)}`}
           </p>
           <p className="text-xs text-slate-500 mt-0.5">
             PnL (ยังไม่ปิด) · R {fmtNum(p.r_multiple ?? 0, 2)} · เสี่ยงถ้าโดน SL ${fmtNum(p.risk_amount ?? 0, 2)}

@@ -697,8 +697,12 @@ export default function MonitorPage() {
 
   const st = snap?.stats;
   // ยอดรวม PnL ทั้งหมด = realized (ไม้ที่ปิดแล้ว) + unrealized (ไม้ที่เปิดค้าง)
+  // ไม้ที่แปลงเป็น USD ไม่ได้ (ยังไม่มีอัตราแลกเปลี่ยน) คืน null — ข้ามไป ไม่เดาค่า
   const unrealizedTotal = snap
-    ? snap.open_positions.reduce((sum, p) => sum + p.unrealized_pnl, 0)
+    ? snap.open_positions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0)
+    : 0;
+  const unconvertedCount = snap
+    ? snap.open_positions.filter((p) => p.unrealized_pnl == null).length
     : 0;
   const totalPnl = (st?.pnl_total ?? 0) + unrealizedTotal;
 
@@ -790,12 +794,17 @@ export default function MonitorPage() {
           <div className="panel">
             <p className="text-xs text-slate-500">PnL ไม้ค้าง (ยังไม่ปิด)</p>
             <PnlText v={snap ? unrealizedTotal : undefined} />
+            {unconvertedCount > 0 && (
+              <p className="text-xs text-amber-400" title="ไม่มีอัตราแลกเปลี่ยน → ยังไม่แปลงเป็น USD">
+                {unconvertedCount} ไม้ยังแปลงเป็น USD ไม่ได้
+              </p>
+            )}
           </div>
           <div className={`panel ${snap ? (totalPnl >= 0 ? "border-profit/50" : "border-loss/50") : ""}`}>
             <p className="text-xs text-slate-500">ยอดรวม PnL สุทธิ</p>
             <PnlText v={snap ? totalPnl : undefined} />
             <p className="text-xs text-slate-500">
-              ปิดแล้ว {st ? `${st.pnl_total >= 0 ? "+" : ""}$${fmtNum(st.pnl_total, 2)}` : "-"} + ค้าง {snap ? `${unrealizedTotal >= 0 ? "+" : ""}$${fmtNum(unrealizedTotal, 2)}` : "-"}
+              ปิดแล้ว {st ? `${st.pnl_total >= 0 ? "+" : ""}$${fmtNum(st.pnl_total, 2)}` : "-"} + ค้าง {snap ? `${unrealizedTotal >= 0 ? "+" : ""}$${fmtNum(unrealizedTotal, 2)}` : "-"}{unconvertedCount > 0 ? " (บางไม้ยังไม่แปลง)" : ""}
             </p>
           </div>
           <div className="panel">
@@ -916,9 +925,13 @@ export default function MonitorPage() {
                     <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.stop_loss} className="font-bold text-loss" /></td>
                     <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}><CopyNum value={p.take_profit} className="font-bold text-profit" /></td>
                     <td className="py-2 pr-4 font-bold">
-                      <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
-                        {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
-                      </span>
+                      {p.unrealized_pnl == null ? (
+                        <span className="text-slate-500" title="ไม่มีอัตราแลกเปลี่ยน → ยังไม่แปลงเป็น USD">—</span>
+                      ) : (
+                        <span className={p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}>
+                          {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
+                        </span>
+                      )}
                     </td>
                     <td className="py-2 pr-4" onClick={(e) => e.stopPropagation()}>
                       <RPriceBadge asset={p.asset} direction={p.direction} rMult={rMult} riskUsd={riskUsd} entry={p.entry_price} current={p.current_price} priceSource={p.price_source ?? null} notes={notes} />

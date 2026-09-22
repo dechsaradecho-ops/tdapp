@@ -98,7 +98,16 @@ def _equity(db, capital: float, broker=None) -> float:
                     positions = _asyncio.run(positions)
             for pos in positions or []:
                 try:
-                    unrealized += float(PaperBrokerPnl.compute(pos))
+                    # Quote→USD rates: prefer the map the guard cached on the
+                    # broker this cycle; empty means PaperBrokerPnl.compute
+                    # returns None (fail-closed) and the position is skipped
+                    # rather than contributing a wrong-currency figure.
+                    _rates = getattr(broker, "_rates", None) or {}
+                    v = PaperBrokerPnl.compute(
+                        pos, asset=str(getattr(pos, "asset", "") or ""),
+                        rates=_rates)
+                    if v is not None:
+                        unrealized += float(v)
                 except Exception:
                     continue
         except Exception:

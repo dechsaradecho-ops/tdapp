@@ -223,8 +223,14 @@ async def _reality_from_db(db, broker=None) -> GoalRealityContext:
                             pass
             except Exception:
                 pass
-            from app.services.execution import PaperBrokerPnl
+            from app.services.execution import PaperBrokerPnl, fetch_pnl_rates
             from types import SimpleNamespace
+            # Quote→USD conversion map — raw PnL is in the QUOTE currency.
+            _seed = {a.upper(): float(p) for a, p in (marks or {}).items()
+                     if str(a).startswith("asset:") and p}
+            pnl_rates = await fetch_pnl_rates(
+                [str(r.get("asset") or "") for r in open_rows if r.get("asset")],
+                seed={k.split(":", 1)[1]: v for k, v in _seed.items()})
             total = 0.0
             for r in open_rows:
                 try:
@@ -233,12 +239,14 @@ async def _reality_from_db(db, broker=None) -> GoalRealityContext:
                     mark = marks.get("asset:" + asset_u, 0) \
                         or marks.get(ticket, 0) \
                         or float(r.get("entry_price") or 0)
-                    total += float(PaperBrokerPnl.compute(SimpleNamespace(
+                    _u = PaperBrokerPnl.compute(SimpleNamespace(
                         direction=str(r.get("direction") or "").upper(),
                         current_price=float(mark),
                         entry_price=float(r.get("entry_price") or 0),
                         volume=float(r.get("volume") or 0),
-                        asset=str(r.get("asset") or ""))))
+                        asset=str(r.get("asset") or "")), rates=pnl_rates)
+                    if _u is not None:
+                        total += float(_u)
                 except Exception:
                     continue
             unreal = round(total, 2)

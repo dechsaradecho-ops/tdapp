@@ -109,6 +109,7 @@ class GoalRealityContext(BaseModel):
     pause_reason: str = ""
     # ---- enriched live state (monitor parity) ---------------------------
     unrealized_pnl: float = 0.0       # open positions at live marks (USD)
+    conversion_unavailable: bool = False  # True when FX quote→USD rate missing
     equity: float = 0.0               # settings capital + realized + unrealized
     drawdown_pct: float = 0.0         # peak-to-current % from equity_snapshots
     trades_today: int = 0
@@ -555,6 +556,39 @@ def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
     return base if gold is None else float(gold)
 
 
+# A stop (or TP) that sits INSIDE the bid-ask spread is not a stop — the very
+# next tick fills it. Every effective SL distance must therefore clear a floor
+# of SPREAD_SL_FLOOR_MULT × the symbol's effective spread.
+#
+# WHY 3x: the paper fill already pays half the spread on entry, so a stop at
+# exactly 1x spread leaves ~0.5x of real adverse room — a coin flip, not a
+# trade. 3x leaves 2.5x of genuine room after the entry half-spread, which is
+# the smallest multiple that survives normal tick noise on the wide-spread
+# pairs (USDJPY 0.015, GBPJPY 0.03 on a ~157 price) without turning the stop
+# into a material risk change for the narrow-spread majors.
+#
+# Prod 2026-09-22 (PAPER-000083, USDJPY SELL): sl_cap_distance collapsed the
+# stop to 0.005 price units (~0.5 pip) — well inside the ~1.5 pip real spread
+# — so TP filled 43 seconds after entry and the journal booked a fake +$22.
+SPREAD_SL_FLOOR_MULT: float = 3.0
+
+
+def spread_sl_floor(settings: "AppSettings", asset: Optional[str]) -> float:
+    """Minimum sane SL distance (price units) = k × the symbol's spread.
+
+    Returns 0.0 when the spread resolves to 0 (a symbol the user deliberately
+    zeroed) or the settings are unusable — callers treat 0.0 as "no floor",
+    exactly like ``sl_cap_distance`` treats 0.0 as "no cap".
+    """
+    try:
+        spread = effective_spread(settings, asset)
+        if spread <= 0:
+            return 0.0
+        return SPREAD_SL_FLOOR_MULT * float(spread)
+    except Exception:
+        return 0.0
+
+
 def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
     """Max SL distance (price units) that fits the risk budget at min lot.
 
@@ -564,6 +598,12 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
     0.00676 × 0.02 × 100k = $13.52 = 6.76% vs a 4% budget). Returns 0.0
     when the cap feature is off or the budget is invalid (callers treat
     0.0 as "no cap").
+
+    The cap is itself floored by ``spread_sl_floor`` so a tight account can
+    never let the risk cap squeeze the stop INSIDE the spread: when the raw
+    budget only buys a sub-spread stop the cap is raised to k × spread and
+    the caller blocks the order (see ``sl_cap_below_spread``) — the cap is
+    never allowed to manufacture a stop the market fills instantly.
     """
     try:
         if not bool(getattr(settings, "sl_cap_enabled", False)):
@@ -574,9 +614,36 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
         contract = contract_value_for(str(asset or ""))
         if budget <= 0 or floor <= 0 or contract <= 0:
             return 0.0
-        return budget / (floor * contract)
+        cap = budget / (floor * contract)
+        spread_floor = spread_sl_floor(settings, asset)
+        return max(cap, spread_floor) if spread_floor > 0 else cap
     except Exception:
         return 0.0
+
+
+def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str]) -> bool:
+    """True when the risk budget cannot fund a stop wider than the spread.
+
+    This is the fail-closed condition behind ``sl_narrower_than_spread``: the
+    smallest order the account may place (``effective_min_lot``) would have to
+    risk MORE than ``risk_per_trade_pct`` just to clear the bid-ask spread, so
+    there is no valid size — the only honest options are a bigger capital /
+    risk budget or a symbol with a smaller minimum lot. Blocking is correct;
+    opening the trade is not.
+    """
+    try:
+        spread_floor = spread_sl_floor(settings, asset)
+        if spread_floor <= 0:
+            return False
+        budget = float(getattr(settings, "capital", 0) or 0) \
+            * float(getattr(settings, "risk_per_trade_pct", 0) or 0) / 100.0
+        floor = effective_min_lot(settings, asset)
+        contract = contract_value_for(str(asset or ""))
+        if budget <= 0 or floor <= 0 or contract <= 0:
+            return False
+        return (budget / (floor * contract)) < spread_floor
+    except Exception:
+        return False
 
 
 def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
@@ -588,6 +655,13 @@ def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
     narrowed when sl_cap_enabled AND the distance exceeds sl_cap_distance.
     TP is re-derived at the same RR so the reward:risk promise holds.
     (0.0, 0.0, False) when there is nothing to cap.
+
+    TWIST (2026-09-22): a NARROW SL is never widened toward the cap either.
+    The cap is tighten-only, BUT a stop narrower than the spread is not a
+    stop (the next tick fills it — prod PAPER-000083 USDJPY SELL closed in
+    43s). Callers detect that case with ``sl_cap_below_spread`` and BLOCK;
+    this function keeps its tighten-only contract so a preview can never
+    silently move a card's SL.
     """
     try:
         if not entry or not stop_loss:
@@ -618,7 +692,15 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
     order, the SAME steps execute_signal uses:
       1. tier re-derive from sl_distance_mode (short ×1.0 / long ×2.0,
          TP keeps the row's RR),
-      2. SL risk cap (tighten-only, TP re-derived at the tier RR).
+      2. SL risk cap (tighten-only, TP re-derived at the tier RR),
+      3. spread sanity floor — the final SL distance is raised to at least
+         ``spread_sl_floor`` (k × the symbol's spread) so a stop can never sit
+         INSIDE the bid-ask spread and fill on the next tick (prod
+         2026-09-22 PAPER-000083: USDJPY SELL, SL 0.005 units ≈ 0.5 pip vs a
+         ~1.5 pip spread, TP filled in 43 seconds). Widening here is
+         deliberate and opposite to the tighten-only cap: a sub-spread stop
+         is a bug, not a constraint, so this step is the ONE place a stop may
+         grow. TP follows the widened distance at the held RR.
     Returns (sl, tp, dist, tier_applied, capped). Fail-safe: any bad input
     passes the originals through so a preview never blocks a card.
     apply_cap=False skips step 2 (extended-open: explicit plan-leg volume
@@ -660,6 +742,15 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
                 dist = cap_dist
                 if tp and rr_keep > 0:
                     tp = round(float(entry) + sign * cap_dist * rr_keep, 5)
+        # ---- step 3: spread sanity floor (the ONE sanctioned widening) ----
+        floor = spread_sl_floor(settings, asset)
+        if floor > 0 and dist < floor - 1e-12:
+            rr_keep = (abs(tp - float(entry)) / dist
+                       if tp and dist > 0 else 0.0)
+            dist = floor
+            sl = round(float(entry) - sign * dist, 5)
+            if tp and rr_keep > 0:
+                tp = round(float(entry) + sign * dist * rr_keep, 5)
         return sl, tp, dist, tier_applied, capped
     except Exception:
         try:
@@ -716,6 +807,130 @@ def effective_spread(settings: "AppSettings", asset: Optional[str]) -> float:
     if a in DEFAULT_SPREADS:
         return float(DEFAULT_SPREADS[a])
     return float(getattr(settings, "paper_spread", 0.0) or 0.0)
+
+
+# ---------- PnL currency conversion (quote currency → account currency) ----
+# THE BUG THIS FIXES (prod 2026-09-22, PAPER-000083):
+#
+#     gross = sign × (exit − entry) × lots × contract
+#
+# carries the QUOTE currency, not USD. For USDJPY the numbers are yen:
+# 0.02 lots × (157.024 − 157.013) × 100,000 = ¥22, which the journal stored
+# as "$22" — a 157× overstatement (real value ¥22 ÷ 157.013 ≈ $0.14). The
+# bug is invisible on XXXUSD pairs (EURUSD/GBPUSD quote USD → the raw number
+# IS USD) and on XAUUSD (quoted USD), which is why only the JPY/cross trades
+# looked absurd. Every "$" the UI prints for a PnL must therefore be the
+# CONVERTED number, and an unavailable rate must fail CLOSED (None) rather
+# than silently guessing 1.0.
+ACCOUNT_CURRENCY = "USD"
+
+# Currencies whose USD value is 1.0 by definition.
+_USD_EQUIVALENT = {"USD"}
+
+# Metals: the pair code is not <base><quote> (XAUUSD = gold priced in USD).
+_ASSET_CCY: dict[str, tuple[str, str]] = {
+    "XAUUSD": ("XAU", "USD"),
+    "XAGUSD": ("XAG", "USD"),
+}
+
+
+def asset_currencies(asset: Optional[str]) -> Optional[tuple[str, str]]:
+    """Asset → (base, quote) currency codes; None when unparseable.
+
+    Metals use the explicit table (XAUUSD is not XAU×USD as two 3-char
+    codes on a rate API); a 6-char alphabetic FX symbol splits in half.
+    """
+    a = str(asset or "").upper()
+    if a in _ASSET_CCY:
+        return _ASSET_CCY[a]
+    if len(a) == 6 and a.isalpha():
+        return a[:3], a[3:]
+    return None
+
+
+def quote_currency(asset: Optional[str]) -> Optional[str]:
+    """Currency the raw ``price_diff × lots × contract`` number is in."""
+    parts = asset_currencies(asset)
+    return parts[1] if parts else None
+
+
+def base_currency(asset: Optional[str]) -> Optional[str]:
+    """Currency the traded SIZE (notional) is denominated in."""
+    parts = asset_currencies(asset)
+    return parts[0] if parts else None
+
+
+def pnl_conversion_asset(asset: Optional[str]) -> Optional[str]:
+    """Symbol to price in order to turn this asset's raw PnL into USD.
+
+      • quote is USD (EURUSD, GBPUSD, XAUUSD) → nothing to do (None).
+      • quote is NOT USD (USDJPY, GBPJPY, EURJPY, …) → need ``<quote>USD``
+        (the number of USD per 1 quote unit, e.g. JPYUSD ≈ 0.00637).
+        Priced from the SAME trusted spot feed as everything else; when
+        ``<quote>USD`` is not directly quoted the rate fetcher crosses it
+        through USD (see execution.pnl_conversion_rate).
+    """
+    q = quote_currency(asset)
+    if q is None or q in _USD_EQUIVALENT:
+        return None
+    return f"{q}USD"
+
+
+def convert_pnl_to_account(amount: Optional[float], asset: Optional[str],
+                           rate: Optional[float]) -> Optional[float]:
+    """Convert a raw quote-currency PnL into USD — fail CLOSED.
+
+    ``rate`` = USD per 1 unit of the asset's quote currency.
+
+      • amount is None → None (nothing to convert).
+      • quote currency IS USD → the amount is already USD (rate ignored).
+      • otherwise a finite, strictly positive rate is REQUIRED; anything
+        else returns None so the caller stores/displays "no PnL" instead
+        of a fabricated USD figure (requirement 6: ห้ามเดา).
+    """
+    if amount is None:
+        return None
+    q = quote_currency(asset)
+    if q is None:
+        # Unknown asset: only trust it when the caller already supplied a
+        # usable rate; otherwise fail closed.
+        if rate is None:
+            return None
+        try:
+            r = float(rate)
+        except (TypeError, ValueError):
+            return None
+        if not (r > 0) or r != r or r in (float("inf"), float("-inf")):
+            return None
+        return float(amount) * r
+    if q in _USD_EQUIVALENT:
+        return float(amount)
+    if rate is None:
+        return None
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return None
+    if not (r > 0) or r != r or r in (float("inf"), float("-inf")):
+        return None
+    return float(amount) * r
+
+
+class PnlBreakdownAmounts(BaseModel):
+    """Gross / cost / net PnL of one trade, ALL in the account currency (USD).
+
+    ``gross`` is the converted price move; ``spread`` and ``commission`` are
+    the converted paper costs; ``net = gross − spread − commission``. When
+    the conversion rate is unavailable every field is None (fail-closed) so
+    no UI can print a guessed "$" figure.
+    """
+    gross: Optional[float] = None
+    spread: Optional[float] = None
+    commission: Optional[float] = None
+    net: Optional[float] = None
+    quote_currency: Optional[str] = None
+    conversion_rate: Optional[float] = None
+    conversion_unavailable: bool = False
 
 
 class FrequencyEngine:
@@ -2043,7 +2258,10 @@ class MonitorOpenPosition(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     current_price: float
-    unrealized_pnl: float
+    # Unrealized PnL in the ACCOUNT currency (USD). None when the quote→USD
+    # conversion rate was unavailable — the UI must render "—", never a
+    # guessed dollar figure (the old ¥-as-$ bug).
+    unrealized_pnl: Optional[float] = None
     source: str = "auto"
     created_at: Optional[datetime] = None
     # SL/TP move tracking (migration 021) — the monitor page badges cells

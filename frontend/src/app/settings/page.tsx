@@ -1046,7 +1046,7 @@ export default function SettingsPage() {
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Spread รายสัญลักษณ์</p>
                 <p className="text-xs text-slate-500 mt-0.5">
                   ทุกสัญลักษณ์มีสเปรดจริงต่างกัน (ทอง ~0.30, EURUSD ~0.0001) — ระบบใช้ค่าเริ่มต้นที่เหมาะสมอัตโนมัติ
-                  ใส่ค่าทับเพื่อกำหนดเอง เว้นว่างเพื่อใช้ค่าเริ่มต้น
+                  ใส่ค่าทับเพื่อกำหนดเอง เว้นว่าง (หรือใส่ 0) เพื่อใช้ค่าเริ่มต้น
                 </p>
                 <div className="mt-2 space-y-1.5">
                   {(cfg.allowed_assets?.length ? cfg.allowed_assets : DEFAULT_ASSETS).map((a) => {
@@ -1060,8 +1060,11 @@ export default function SettingsPage() {
                           placeholder={def != null ? `ค่าเริ่มต้น ${fmtSpread(def)}` : `ใช้ค่าเดิม ${cfg.paper_spread}`}
                           onChange={(e) => {
                             const next = { ...(cfg.spread_overrides ?? {}) };
-                            if (e.target.value === "") delete next[a];
-                            else next[a] = Number(e.target.value);
+                            const raw = e.target.value;
+                            // 0 = ปล่อยว่าง (ลบคีย์) เพื่อไม่ให้ทับค่าเริ่มต้นที่สมจริง
+                            // — ถ้าทับด้วย 0 เสี่ยง SL แคบกว่าสเปรดจริงมาก (ระบบจะบล็อกอยู่ดี)
+                            if (raw === "" || Number(raw) === 0) delete next[a];
+                            else next[a] = Number(raw);
                             set("spread_overrides", next);
                           }}
                           className="w-full bg-surface border border-slate-700 rounded px-3 py-2" />
@@ -1082,6 +1085,9 @@ export default function SettingsPage() {
                 </div>
                 <p className="text-xs text-slate-500 mt-1.5">
                   หน่วยเป็นราคา (bid-ask เต็ม) — BUY เข้าแพงขึ้น spread/2, SELL เข้าถูกลง spread/2
+                </p>
+                <p className="text-xs text-amber-400/80 mt-1">
+                  ระบบกัน SL แคบกว่าสเปรดจริง: ถ้า SL ใกล้กว่า 3× สเปรด จะถูกดันออก และถ้าแคบกว่า 1× สเปรด ระบบจะไม่เปิดไม้ (sl_narrower_than_spread)
                 </p>
               </div>
             </div>

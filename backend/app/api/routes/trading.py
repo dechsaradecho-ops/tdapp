@@ -968,10 +968,15 @@ async def close_position(payload: ClosePositionRequest,
         volume=float(row.get("volume") or 0),
         asset=str(row.get("asset") or ""),
     )
-    pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
+    # Raw PnL is in the QUOTE currency — convert to USD with a trusted rate
+    # (None when unavailable → stored as null, never a guessed dollar value).
+    _rates = await execution.fetch_pnl_rates([str(row.get("asset") or "")],
+                                             seed={str(row.get("asset") or "").upper(): exit_price})
+    pnl = execution.PaperBrokerPnl.compute(pos, s, rates=_rates)
+    pnl = round(pnl, 2) if pnl is not None else None
     entry = float(row.get("entry_price") or 0)
     capital = max(s.capital, 1.0)
-    pnl_pct = round(pnl / capital * 100, 2)
+    pnl_pct = round((pnl or 0.0) / capital * 100, 2)
 
     # ---- holding time -----------------------------------------------------
     holding_min: float | None = None
@@ -1005,7 +1010,7 @@ async def close_position(payload: ClosePositionRequest,
             f"{emoji} Manual Close\n"
             f"Asset: {row.get('asset')}\nDirection: {pos.direction}\n"
             f"Entry: {entry:g} → Exit: {exit_price:g}\n"
-            f"PnL: {pnl:+,.2f} ({pnl_pct:+.2f}%)",
+            f"PnL: {('%+,.2f' % pnl) if pnl is not None else 'n/a'} ({pnl_pct:+.2f}%)",
         )
     except Exception as exc:
         warnings.append(f"notify failed: {exc}")
@@ -1305,6 +1310,9 @@ async def close_all_positions(payload: CloseAllRequest,
     except Exception as exc:
         log.warning("close-all: live marks unavailable: %s", exc)
 
+    # Quote→USD conversion map — raw PnL is in the QUOTE currency.
+    pnl_rates = await execution.fetch_pnl_rates(assets, seed=marks)
+
     results: list[dict] = []
     closed = failed = 0
     total_pnl = 0.0
@@ -1337,7 +1345,8 @@ async def close_all_positions(payload: CloseAllRequest,
             direction=str(row.get("direction") or "BUY").upper(),
             current_price=exit_price, entry_price=entry,
             volume=float(row.get("volume") or 0), asset=asset)
-        pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
+        pnl = execution.PaperBrokerPnl.compute(pos, s, rates=pnl_rates)
+        pnl = round(pnl, 2) if pnl is not None else None
         execution.close_trade_rows(db, ticket, exit_price, pnl,
                                    payload.close_reason,
                                    asset=asset,
@@ -1347,7 +1356,7 @@ async def close_all_positions(payload: CloseAllRequest,
             direction=str(row.get("direction") or ""), entry=entry,
             exit_price=exit_price, pnl=pnl, ticket=ticket, source="user",
             reason=f"ปิดทั้งหมด ({payload.close_reason}) @ {exit_price:g}")
-        total_pnl += pnl
+        total_pnl += pnl or 0.0
         closed += 1
         results.append({"ticket": ticket, "asset": asset, "ok": True,
                         "pnl": pnl, "exit_price": exit_price})
@@ -1427,6 +1436,9 @@ async def close_group_positions(payload: CloseGroupRequest,
     except Exception as exc:
         log.warning("close-group: live marks unavailable: %s", exc)
 
+    # Quote→USD conversion map — raw PnL is in the QUOTE currency.
+    pnl_rates = await execution.fetch_pnl_rates(assets, seed=marks)
+
     def _mark_for(row: dict) -> float:
         asset = str(row.get("asset") or "").upper()
         px = float(marks.get(asset) or 0)
@@ -1487,7 +1499,8 @@ async def close_group_positions(payload: CloseGroupRequest,
             direction=str(row.get("direction") or "BUY").upper(),
             current_price=exit_price, entry_price=entry,
             volume=float(row.get("volume") or 0), asset=asset)
-        pnl = round(execution.PaperBrokerPnl.compute(pos, s), 2)
+        pnl = execution.PaperBrokerPnl.compute(pos, s, rates=pnl_rates)
+        pnl = round(pnl, 2) if pnl is not None else None
         execution.close_trade_rows(db, ticket, exit_price, pnl,
                                    payload.close_reason,
                                    asset=asset,
@@ -1497,7 +1510,7 @@ async def close_group_positions(payload: CloseGroupRequest,
             direction=str(row.get("direction") or ""), entry=entry,
             exit_price=exit_price, pnl=pnl, ticket=ticket, source="user",
             reason=f"ปิด{'กำไร' if payload.group == 'profit' else 'ขาดทุน'} ({payload.close_reason}) @ {exit_price:g}")
-        total_pnl += pnl
+        total_pnl += pnl or 0.0
         closed += 1
         results.append({"ticket": ticket, "asset": asset, "ok": True,
                         "pnl": pnl, "exit_price": exit_price})

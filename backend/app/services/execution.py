@@ -32,11 +32,14 @@ from app.models.schemas import (
     MonitorSnapshot,
     NewsRiskStatus,
     PauseStatus,
+    PnlBreakdownAmounts,
     RiskOfficer,
     RiskProfile,
+    SPREAD_SL_FLOOR_MULT,
     SessionEngine,
     TradeLimits,
     contract_value_for,
+    convert_pnl_to_account,
     effective_min_confidence,
     effective_min_lot,
     effective_sl_tp,
@@ -45,8 +48,12 @@ from app.models.schemas import (
     market_closed_days_between,
     market_open_days_between,
     next_market_open,
+    pnl_conversion_asset,
+    quote_currency,
     risk_to_lot,
     risk_to_lot_for,
+    sl_cap_below_spread,
+    spread_sl_floor,
 )
 
 from app.services import signal_log
@@ -349,6 +356,41 @@ def close_trade_rows(db, ticket: str, exit_price: float, pnl: float,
         log.error("close_trade_rows failed: %s", exc)
 
 
+def paper_cost_components(settings, asset: str, volume: float) -> tuple[float, float]:
+    """(spread_cost, commission_cost) in the asset's QUOTE currency, >= 0.
+
+    Split out of ``paper_exit_cost`` so the caller can show the gross move,
+    the spread and the commission separately (requirement 7) and convert
+    each into USD with the same rate. The spread term is a price quantity
+    (quote currency per unit); the commission term is configured in USD per
+    lot and is therefore already USD — the caller converts only the spread.
+    Unknown settings / broken values → (0.0, 0.0). Never raises.
+    """
+    if settings is None:
+        return 0.0, 0.0
+    try:
+        vol = abs(float(volume or 0.0))
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+    if vol <= 0:
+        return 0.0, 0.0
+    asset_u = str(asset or "").upper()
+    try:
+        exit_mult = float(getattr(settings, "paper_exit_spread_mult", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        exit_mult = 0.0
+    try:
+        commission = float(getattr(settings, "paper_commission_per_lot", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        commission = 0.0
+    spread_cost = 0.0
+    if exit_mult > 0:
+        contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset_u, 100_000.0)
+        spread_cost = exit_mult * effective_spread(settings, asset_u) * vol * contract
+    commission_cost = 2.0 * commission * vol if commission > 0 else 0.0
+    return spread_cost, commission_cost
+
+
 def paper_exit_cost(settings, asset: str, volume: float) -> float:
     """USD cost a real account pays on top of the paper gross PnL (>= 0).
 
@@ -367,31 +409,152 @@ def paper_exit_cost(settings, asset: str, volume: float) -> float:
     Deducted from the REALIZED number without touching the recorded exit
     price, so the journal stays comparable with the chart the user sees.
     Unknown settings / broken values -> 0.0. Never raises.
+
+    NOTE (2026-09-22): this returns the sum in the asset's QUOTE currency —
+    for USDJPY that is yen, not dollars. Prefer ``pnl_breakdown`` below,
+    which converts everything into the account currency (USD).
     """
-    if settings is None:
-        return 0.0
+    spread_cost, commission_cost = paper_cost_components(settings, asset, volume)
+    return spread_cost + commission_cost
+
+
+def _finite_positive(value) -> float | None:
+    """value → float when finite and > 0, else None (fail-closed helper)."""
+    if value is None:
+        return None
     try:
-        vol = abs(float(volume or 0.0))
+        v = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    if vol <= 0:
-        return 0.0
+        return None
+    if not (v > 0) or v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def pnl_conversion_rate(asset: str, rates: dict | None) -> float | None:
+    """USD per 1 unit of ``asset``'s QUOTE currency, from a spot-rate map.
+
+    ``rates`` is the trusted spot map ({SYMBOL: price}). For an XXXUSD pair
+    (incl. XAUUSD) the answer is 1.0 — no lookup needed. For USDXXX / crosses
+    the function needs ``<quote>USD`` and crosses it through USD when the
+    direct symbol is absent:
+
+        USDJPY → needs JPYUSD (= 1/USDJPY)
+        GBPJPY → needs JPYUSD; if only GBPUSD and GBPJPY are known then
+                 JPYUSD = GBPUSD / GBPJPY (GBP cancels)
+
+    Returns None when no trustworthy rate can be derived (requirement 6:
+    fail closed — never guess).
+    """
+    q = quote_currency(asset)
+    if q is None:
+        return None
+    if q == "USD":
+        return 1.0
+    asset_u = str(asset or "").upper()
+    r = _finite_positive((rates or {}).get(f"{q}USD"))
+    if r is not None:
+        return r
+    base = asset_u[:3]
+    # (a) invert the asset's OWN price — ONLY valid when the base is USD,
+    #     because 1/USDXXX = XXX per USD = <quote>USD exactly. For a cross
+    #     (e.g. GBPJPY) 1/GBPJPY is GBP-per-JPY, NOT a USD rate — never use it.
+    if base == "USD":
+        self_rate = _finite_positive((rates or {}).get(asset_u))
+        if self_rate is not None:
+            return 1.0 / self_rate
+    # (b) cross through the base: JPYUSD = GBPUSD / GBPJPY (GBP cancels)
+    if base and base != "USD":
+        base_usd = _finite_positive((rates or {}).get(f"{base}USD"))
+        self_rate = _finite_positive((rates or {}).get(asset_u))
+        if base_usd is not None and self_rate is not None:
+            return base_usd / self_rate
+    return None
+
+
+def pnl_breakdown(asset: str, direction: str, entry: float, mark: float,
+                  volume: float, settings=None,
+                  rates: dict | None = None) -> PnlBreakdownAmounts:
+    """Gross / spread / commission / net PnL of one trade, ALL in USD.
+
+    ``rates`` = trusted spot map used for the quote→USD conversion. When the
+    rate cannot be established every field is None and
+    ``conversion_unavailable`` is True, so the caller shows "—" instead of a
+    fabricated dollar figure (fail-closed, requirement 6).
+    """
     asset_u = str(asset or "").upper()
     try:
-        exit_mult = float(getattr(settings, "paper_exit_spread_mult", 0.0) or 0.0)
+        vol = float(volume or 0.0)
     except (TypeError, ValueError):
-        exit_mult = 0.0
+        vol = 0.0
+    contract = contract_value_for(asset_u)
+    sign = 1.0 if str(direction or "").upper() == "BUY" else -1.0
+    raw_gross = sign * (float(mark or 0.0) - float(entry or 0.0)) * vol * contract
+    rate = pnl_conversion_rate(asset_u, rates)
+    gross = convert_pnl_to_account(raw_gross, asset_u, rate)
+    if gross is None:
+        return PnlBreakdownAmounts(
+            quote_currency=quote_currency(asset_u),
+            conversion_rate=rate,
+            conversion_unavailable=True)
+    spread_raw, commission_raw = paper_cost_components(settings, asset_u, vol)
+    # commission is configured USD/lot → already the account currency
+    spread_usd = convert_pnl_to_account(abs(spread_raw), asset_u, rate) or 0.0
+    commission_usd = abs(float(commission_raw or 0.0))
+    return PnlBreakdownAmounts(
+        gross=round(gross, 4),
+        spread=round(spread_usd, 4),
+        commission=round(commission_usd, 4),
+        net=round(gross - spread_usd - commission_usd, 4),
+        quote_currency=quote_currency(asset_u),
+        conversion_rate=rate,
+    )
+
+
+async def fetch_pnl_rates(assets, seed: dict | None = None) -> dict[str, float]:
+    """Trusted spot map (asset + its ``<quote>USD`` leg) for PnL conversion.
+
+    Centralises the one-shot fetch every caller would otherwise duplicate:
+    ``sign × price_diff × lots × contract`` is in the QUOTE currency, so
+    USDJPY closes need JPYUSD, GBPJPY needs GBPUSD (or the inverse of the
+    asset itself for USD-quote legs). ``seed`` supplies prices already in
+    hand (e.g. the monitor's marks) so only the missing legs are fetched.
+    DAILY fallback rates are refused — they must never price a journal entry.
+    Fail-soft: returns whatever is known, missing legs simply stay absent
+    (the caller then computes None rather than a guessed dollar figure).
+    """
+    from app.integrations import quotes as _quotes
+    out: dict[str, float] = {}
+    for a, p in (seed or {}).items():
+        try:
+            pv = float(p or 0)
+        except (TypeError, ValueError):
+            continue
+        if pv > 0:
+            out[str(a).upper()] = pv
+    assets_u = sorted({str(a or "").upper() for a in (assets or []) if a})
+    need = {a for a in assets_u if a not in out}
+    for a in assets_u:
+        leg = pnl_conversion_asset(a)
+        if leg and leg not in out:
+            need.add(leg)
+    if not need:
+        return out
     try:
-        commission = float(getattr(settings, "paper_commission_per_lot", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        commission = 0.0
-    cost = 0.0
-    if exit_mult > 0:
-        contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset_u, 100_000.0)
-        cost += exit_mult * effective_spread(settings, asset_u) * vol * contract
-    if commission > 0:
-        cost += 2.0 * commission * vol  # open + close
-    return cost
+        prices, _fails = await _quotes.fetch_spot_prices(sorted(need))
+    except Exception as exc:
+        log.warning("fetch_pnl_rates: spot feed unavailable: %s", exc)
+        return out
+    for a, p in (prices or {}).items():
+        if _quotes.spot_source(a) == "daily":
+            continue  # a daily rate must never price a journal PnL
+        try:
+            pv = float(p or 0)
+        except (TypeError, ValueError):
+            continue
+        if pv > 0:
+            out[str(a).upper()] = pv
+    return out
 
 
 class PaperBrokerPnl:
@@ -402,6 +565,15 @@ class PaperBrokerPnl:
     report PnL 0.10 instead of 100.00 — the monitor page showed PnL stuck
     at 0.00 because of this.
 
+    CURRENCY (2026-09-22): ``sign × price_diff × lots × contract`` yields the
+    QUOTE currency, NOT dollars. USDJPY 0.02 lots over 157.024→157.013 is ¥22
+    and was stored as "$22". ``compute`` therefore converts to the account
+    currency (USD) using ``rates`` (a trusted spot map) and returns **None**
+    when no trustworthy rate exists — callers must show "no PnL" rather than
+    a guessed number. Pass ``rates`` on every path that can price the
+    position; legacy callers that omit it keep the old (unconverted) number
+    only for XXXUSD assets, which need no conversion.
+
     `settings` (optional) deducts the paper execution costs described in
     `paper_exit_cost` above. Callers that only need a rough display number
     (unrealized equity, goal projection) may omit it; every REALIZED number
@@ -411,12 +583,37 @@ class PaperBrokerPnl:
     CONTRACT_SIZES = {"XAUUSD": 100.0}  # everything else defaults to FX 100k
 
     @staticmethod
-    def compute(pos, settings=None, asset: str | None = None) -> float:
+    def gross_compute(pos, asset: str | None = None) -> float:
+        """Raw gross PnL in the asset's QUOTE currency (no conversion)."""
         sign = 1 if pos.direction == "BUY" else -1
         asset_u = str(asset or getattr(pos, "asset", "") or "").upper()
         contract = PaperBrokerPnl.CONTRACT_SIZES.get(asset_u, 100_000.0)
-        gross = sign * (pos.current_price - pos.entry_price) * pos.volume * contract
-        return gross - paper_exit_cost(settings, asset_u, pos.volume)
+        return sign * (pos.current_price - pos.entry_price) * pos.volume * contract
+
+    @staticmethod
+    def compute(pos, settings=None, asset: str | None = None,
+                rates: dict | None = None) -> float | None:
+        """Net PnL in the ACCOUNT currency (USD); None when unconvertible.
+
+        ``rates`` (trusted spot map) drives the quote→USD conversion. When it
+        is omitted the legacy behaviour is kept for XXXUSD assets (which need
+        no conversion) but a non-USD-quote asset returns None rather than a
+        wrong dollar figure — the caller must handle None.
+        """
+        return PaperBrokerPnl.breakdown(pos, settings=settings, asset=asset,
+                                       rates=rates).net
+
+    @staticmethod
+    def breakdown(pos, settings=None, asset: str | None = None,
+                  rates: dict | None = None) -> PnlBreakdownAmounts:
+        """Gross / spread / commission / net, ALL in USD (None if unconvertible)."""
+        asset_u = str(asset or getattr(pos, "asset", "") or "").upper()
+        return pnl_breakdown(
+            asset_u, str(getattr(pos, "direction", "") or ""),
+            float(getattr(pos, "entry_price", 0.0) or 0.0),
+            float(getattr(pos, "current_price", 0.0) or 0.0),
+            float(getattr(pos, "volume", 0.0) or 0.0),
+            settings=settings, rates=rates)
 
 
 # ---------------------------------------------------------------------------
@@ -1545,6 +1742,45 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
 
     report.size_lots = lots
 
+    # ---- P0-6: stop-inside-the-spread guard (blocks, never opens) ---------
+    # The risk-budget cap (sl_cap_distance) is derived from min_lot × contract,
+    # so on a tight account it can squeeze the stop to a few price units. On a
+    # wide-spread symbol that stop lands INSIDE the bid-ask spread and the very
+    # next tick takes it out (prod 2026-09-22 PAPER-000083: USDJPY SELL, SL
+    # 0.005 units ≈ 0.5 pip vs a ~1.5 pip real spread → TP filled 43s after
+    # entry and booked a fake +$22). effective_sl_tp already raises the SL to
+    # k × spread; if the risk BUDGET cannot even fund that k × spread stop at
+    # the min lot there is no valid size, so BLOCK with a machine-readable
+    # reason instead of opening a trade the market kills instantly. A
+    # caller-supplied volume is a reviewed plan leg and is exempt.
+    if not (volume and float(volume) > 0) and stop_loss and entry:
+        _spread_floor = spread_sl_floor(s, asset)
+        _dist_now = abs(float(entry) - float(stop_loss))
+        if sl_cap_below_spread(s, asset) or (
+                _spread_floor > 0 and _dist_now < _spread_floor - 1e-12):
+            _spread = effective_spread(s, asset)
+            report.allowed = False
+            report.rejects.append(
+                "sl_narrower_than_spread: "
+                f"ระยะ SL {_dist_now:g} แคบกว่าพื้นกันสเปรด "
+                f"({SPREAD_SL_FLOOR_MULT:g}× spread = {_spread_floor:g}, "
+                f"spread {asset} = {_spread:g}) — ทุน "
+                f"${float(getattr(s, 'capital', 0) or 0):,.0f} × ความเสี่ยง "
+                f"{float(getattr(s, 'risk_per_trade_pct', 0) or 0):g}% กับ "
+                f"lot เล็กสุด {effective_min_lot(s, asset):g} จ่ายค่า stop "
+                "ที่กว้างกว่าสเปรดจริงไม่ไหว (ไม่เปิดออเดอร์ที่ตลาดกินทันที)")
+            report.size_lots = 0.0
+            log.warning("Execution blocked %s %s: SL inside spread "
+                        "(dist=%s floor=%s spread=%s)", direction, asset,
+                        _dist_now, _spread_floor, _spread)
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(signal_id or ""),
+                asset=asset, direction=direction, confidence=confidence,
+                entry=entry, source=source,
+                reason=(f"ระยะ SL {_dist_now:g} แคบกว่าสเปรดจริง "
+                        f"({_spread:g}) — SL อยู่ในสเปรด ปิดไม้อัตโนมัติทันที"))
+            return report
+
     # ---- P0-5: final thesis validation (fail-closed) ----------------------
     # Everything above re-checks the ENTRY PRICE and the RISK budget, but not
     # the REASON the signal existed. A signal is up to SIGNAL_TTL_MIN (30) min
@@ -1877,18 +2113,30 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         except Exception:
             return None
 
+    # Quote→USD rate map for unrealized PnL below. Seed with the marks in
+    # hand; the helper fetches only the missing conversion legs (e.g. JPYUSD
+    # for USDJPY). Missing rate → None (fail-closed); never a wrong-currency
+    # dollar figure.
+    _seed = {str(r["asset"]).upper(): float(marks.get("asset:" + str(r["asset"]).upper()) or 0)
+             for r in open_rows if r.get("asset")
+             and float(marks.get("asset:" + str(r["asset"]).upper()) or 0) > 0}
+    pnl_rates = await fetch_pnl_rates(
+        [str(r["asset"]) for r in open_rows if r.get("asset")], seed=_seed)
+
     open_positions = []
     for r in open_rows:
         mark, price_source = mark_for(r)
         entry = float(r.get("entry_price") or 0)
         # asset ต้องส่งเข้าไปด้วย — ไม่งั้น PaperBrokerPnl ใช้ FX contract
         # 100,000 กับ XAUUSD (ควรเป็น 100 oz) → uPnL ผิด 1,000 เท่า
-        unrealized = round(PaperBrokerPnl.compute(SimpleNamespace(
+        # และต้องแปลง quote→USD ไม่งั้น USDJPY คืนค่าเป็นเยน (ไม่ใช่ USD)
+        _u = PaperBrokerPnl.compute(SimpleNamespace(
             direction=str(r["direction"]).upper(),
             current_price=mark,
             entry_price=entry,
             volume=float(r.get("volume") or 0),
-            asset=str(r.get("asset") or ""))), 2)
+            asset=str(r.get("asset") or "")), rates=pnl_rates)
+        unrealized = round(_u, 2) if _u is not None else None
         # --- Explainability: R / $risk / source / step-by-step notes ---
         # Every number on the monitor table gets its derivation so the UI
         # shows math instead of bare values. Fail-safe: any error → zeros.
@@ -2043,7 +2291,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # ---- live portfolio value (home page Current Equity / Current PnL) ----
     # PnL = realized (closed rows) + unrealized (live marks) — computed from
     # the DB so every page shares one truth and stats-reset zeroes it.
-    unrealized_total = round(sum(p.unrealized_pnl for p in open_positions), 2)
+    unrealized_total = round(sum(p.unrealized_pnl or 0.0 for p in open_positions), 2)
     live_pnl = round(stats.pnl_total + unrealized_total, 2)
     live_equity = round(s.capital + live_pnl, 2)
 

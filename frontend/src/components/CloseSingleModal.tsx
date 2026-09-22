@@ -21,7 +21,7 @@ export default function CloseSingleModal({
   onClose: () => void;
 }) {
   if (!position) return null;
-  const win = position.unrealized_pnl >= 0;
+  const win = (position.unrealized_pnl ?? 0) >= 0;
 
   return (
     <div
@@ -54,7 +54,9 @@ export default function CloseSingleModal({
             {position.asset} · {position.direction === "BUY" ? "▲ BUY" : "▼ SELL"} · {fmtNum(position.volume, 2)} lots
           </p>
           <p className={`text-3xl font-bold ${win ? "text-profit" : "text-loss"}`}>
-            {win ? "+" : ""}${fmtNum(position.unrealized_pnl, 2)}
+            {position.unrealized_pnl == null
+              ? "—"
+              : `${win ? "+" : ""}$${fmtNum(position.unrealized_pnl, 2)}`}
           </p>
           <p className="text-xs text-slate-500 mt-1">PnL (ยังไม่ปิด) — ปิดที่ราคาปัจจุบัน · ทำแล้วย้อนกลับไม่ได้</p>
         </div>

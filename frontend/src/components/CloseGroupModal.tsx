@@ -36,11 +36,11 @@ export default function CloseGroupModal({
   const meta = MODE_META[mode];
   // เลือกไม้ที่จะถูกปิดตามโหมด — คำนวณจาก unrealized_pnl ที่หน้าจอเห็นอยู่
   const targets = mode === "profit"
-    ? positions.filter((p) => p.unrealized_pnl > 0)
+    ? positions.filter((p) => (p.unrealized_pnl ?? 0) > 0)
     : mode === "loss"
-      ? positions.filter((p) => p.unrealized_pnl < 0)
+      ? positions.filter((p) => (p.unrealized_pnl ?? 0) < 0)
       : positions;
-  const groupPnl = targets.reduce((s, p) => s + p.unrealized_pnl, 0);
+  const groupPnl = targets.reduce((s, p) => s + (p.unrealized_pnl ?? 0), 0);
   const win = groupPnl >= 0;
   // ไม่มีไม้ในกลุ่ม (เช่น กดปิดกำไรตอนทุกไม้ยังขาดทุน) — บล็อกปุ่มยืนยัน
   const empty = targets.length === 0;
@@ -91,8 +91,10 @@ export default function CloseGroupModal({
                   </span>
                   <span className="text-xs text-slate-500 truncate">{p.ticket}</span>
                 </span>
-                <span className={`font-bold ${p.unrealized_pnl >= 0 ? "text-profit" : "text-loss"}`}>
-                  {p.unrealized_pnl >= 0 ? "+" : ""}${fmtNum(p.unrealized_pnl, 2)}
+                <span className={`font-bold ${(p.unrealized_pnl ?? 0) >= 0 ? "text-profit" : "text-loss"}`}>
+                  {p.unrealized_pnl == null
+                    ? "—"
+                    : `${p.unrealized_pnl >= 0 ? "+" : ""}$${fmtNum(p.unrealized_pnl, 2)}`}
                 </span>
               </div>
             ))}

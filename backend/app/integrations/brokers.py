@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
 
 
@@ -99,6 +100,7 @@ class PaperBroker(Broker):
         self._positions: dict[str, Position] = {}
         self.closed_trades: list[dict] = []  # journal for paper-trading analytics
         self._seq = 0
+        self._rates: dict[str, float] = {}   # trusted spot map for quote→USD PnL
         self._prices: dict[str, float] = {
             "EURUSD": 1.08500, "GBPUSD": 1.26500, "USDJPY": 149.500,
             "AUDUSD": 0.65200, "XAUUSD": 2400.00,
@@ -150,9 +152,11 @@ class PaperBroker(Broker):
         self.closed_trades.append({
             "ticket": ticket, "asset": pos.asset, "direction": pos.direction,
             "volume": pos.volume, "entry_price": pos.entry_price,
-            "exit_price": pos.current_price, "pnl": round(pnl, 2),
+            "exit_price": pos.current_price,
+            "pnl": round(pnl, 2) if pnl is not None else None,
         })
-        return OrderResult(ok=True, message=f"closed {ticket} pnl={pnl:.2f}")
+        shown = f"{pnl:.2f}" if pnl is not None else "n/a"
+        return OrderResult(ok=True, message=f"closed {ticket} pnl={shown}")
 
     async def positions(self, user_id: str) -> list[Position]:
         return [p for p in self._positions.values() if p.user_id == user_id]
@@ -201,16 +205,27 @@ class PaperBroker(Broker):
                                        f"(position {pos.volume:g})")
         closed_vol = volume
         pos.volume = round(pos.volume - closed_vol, 2)
-        # PnL of the closed slice only: sign × (price − entry) × slice × contract
+        # PnL of the closed slice only, in the ACCOUNT currency (USD): the
+        # raw product is in the quote currency, so it goes through the same
+        # conversion as `_approx_pnl` (a missing rate yields None, never a
+        # guessed dollar value).
         sign = 1 if pos.direction == "BUY" else -1
         asset = str(getattr(pos, "asset", "") or "").upper()
         contract = PaperBroker.CONTRACT_SIZES.get(asset, 100_000.0)
-        pnl = sign * (pos.current_price - pos.entry_price) * closed_vol * contract
+        raw = sign * (pos.current_price - pos.entry_price) * closed_vol * contract
+        from app.services.execution import PaperBrokerPnl  # lazy: avoid cycle
+        pnl = PaperBrokerPnl.compute(
+            SimpleNamespace(direction=pos.direction, asset=pos.asset,
+                            entry_price=pos.entry_price,
+                            current_price=pos.current_price,
+                            volume=closed_vol),
+            asset=asset, rates=getattr(self, "_rates", None))
         self.closed_trades.append({
             "ticket": f"{ticket}#partial", "asset": pos.asset,
             "direction": pos.direction, "volume": closed_vol,
             "entry_price": pos.entry_price, "exit_price": pos.current_price,
-            "pnl": round(pnl, 2),
+            "pnl": round(pnl, 2) if pnl is not None else None,
+            "gross_quote": round(raw, 2),
         })
         return OrderResult(ok=True, broker_order_id=ticket,
                            message=f"closed {closed_vol:g} lots, "
@@ -235,16 +250,28 @@ class PaperBroker(Broker):
                     pos.current_price = self._prices[asset]
 
     # Contract multiplier per asset: XAUUSD trades 100 oz per standard lot;
-    # FX pairs default to 100,000 units. PnL is reported in dollars — without
-    # this, a 0.01-lot FX position with a 100-pip move showed 0.10 instead
-    # of 100.00 (monitor page PnL stuck near 0.00).
+    # FX pairs default to 100,000 units. The raw product is in the asset's
+    # QUOTE currency, so `_approx_pnl` converts it to the account currency
+    # (USD) with the trusted rates fed in via `set_rates` — without both
+    # fixes a 0.01-lot USDJPY move booked ¥ as "$" (prod PAPER-000083: ¥22
+    # stored as $22, ~157x too large).
     CONTRACT_SIZES = {"XAUUSD": 100.0}
 
-    @staticmethod
-    def _approx_pnl(pos: Position) -> float:
+    def set_rates(self, rates: dict[str, float] | None) -> None:
+        """Feed trusted spot rates for quote→USD PnL conversion.
+
+        Keys are symbols as the quote feed returns them (USDJPY, GBPUSD,
+        JPYUSD, …); a missing rate makes `_approx_pnl` return None so the
+        caller shows "no PnL" instead of a guessed dollar value.
+        """
+        self._rates = dict(rates or {})
+
+    def _approx_pnl(self, pos: Position, rates: dict[str, float] | None = None):
         if pos.current_price == 0:
-            return 0.0
-        sign = 1 if pos.direction == "BUY" else -1
-        asset = str(getattr(pos, "asset", "") or "").upper()
-        contract = PaperBroker.CONTRACT_SIZES.get(asset, 100_000.0)
-        return sign * (pos.current_price - pos.entry_price) * pos.volume * contract
+            return None
+        # Lazy import: execution.py imports this module (OrderRequest), so a
+        # module-level import here would be circular.
+        from app.services.execution import PaperBrokerPnl
+        use_rates = rates if rates is not None else getattr(self, "_rates", None)
+        return PaperBrokerPnl.compute(
+            pos, asset=str(getattr(pos, "asset", "") or ""), rates=use_rates)

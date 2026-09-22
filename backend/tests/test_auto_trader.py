@@ -235,10 +235,11 @@ class TestGatePipeline:
         # kill budget raised: the 0.05 floor risks ~$250 on $100 capital —
         # Gate 6 (heat) would block it under the default 2% budget, which
         # would hide the floor behaviour this test isolates.
-        # Gate 3b/4b disabled too: the tiny $100 capital makes the SL cap
-        # tighten the stop to 0.02, so the gold spread (0.30) would look like
-        # 1500% of the SL and the spread guard would mask the floor.
-        s = clean_settings(capital=100.0, risk_per_trade_pct=0.1,
+        # Gate 3b/4b disabled too: the spread guard would otherwise mask the
+        # floor when the P0-6 spread SL-floor widens the gold stop.
+        # capital=1000 so the widened 0.9-unit stop × 0.05 lots ($4.50) fits
+        # inside the 2% (= $20) budget and P0-2 does not pre-empt the floor.
+        s = clean_settings(capital=1000.0, risk_per_trade_pct=2.0,
                            min_lot=0.01, min_lot_gold=0.05,
                            kill_daily_loss_pct=500.0,
                            max_currency_exposure_pct=0.0,
@@ -253,12 +254,14 @@ class TestGatePipeline:
         assert len(broker.orders) == 1
         # risk_to_lot gives ~0.0002 lots → floored to the gold override 0.05
         assert broker.orders[0].volume == pytest.approx(0.05, abs=1e-9)
-        # FX order under the same settings keeps the base floor 0.01
+        # FX order under the same settings keeps the base floor 0.01 — a very
+        # wide stop drives the raw risk_to_lot far below 0.01 so the base
+        # min_lot (not the gold override) is what shows through.
         db2 = FakeDatabase()
         report2 = await execution.execute_signal(
             db2, broker, notifier, s,
             user_id="demo", asset="EURUSD", direction="BUY",
-            entry=1.0850, stop_loss=1.0800, take_profit=1.0950,
+            entry=1.0850, stop_loss=0.9850, take_profit=1.2850,
             confidence=85.0, opportunity=80.0, signal_id="sig-fxlot", source="auto",
         )
         assert report2.allowed, report2.rejects
@@ -683,6 +686,91 @@ class TestGatePipeline:
         sl, tp, dist, tiered, capped = effective_sl_tp(
             s, 0.0, 0.0, 0.0, "EURUSD", "BUY")
         assert (sl, tp, dist, tiered, capped) == (0.0, 0.0, 0.0, False, False)
+
+    # ---- P0-6: a stop inside the spread must never open -------------------
+    @pytest.mark.asyncio
+    async def test_blocks_stop_narrower_than_spread(self, broker, notifier):
+        """P0-6 (prod PAPER-000083): USDJPY SELL at capital $500 @ 2% with a
+        0.02 min lot. effective_sl_tp widens the stop to 3 × 0.015 = 0.045 so
+        it clears the real ~1.5 pip spread — but 0.045 × 0.02 × 100k = $90 of
+        min-lot risk against a $10 budget, so the order CANNOT open.
+
+        Both the P0-2 min-lot guard and P0-6 fire on this shape (they are two
+        views of the same "no valid size" condition); the point of the test is
+        that NO order reaches the broker and the block is machine-readable.
+        P0-6 is asserted separately below via ``sl_cap_below_spread``.
+        """
+        db = FakeDatabase()
+        s = clean_settings(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.02,
+                           sl_distance_mode="short", sl_cap_enabled=True,
+                           spread_guard_max_pct=500.0,
+                           kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="USDJPY", direction="SELL",
+            entry=157.024, stop_loss=157.069, take_profit=156.9565,
+            confidence=85.0, opportunity=80.0, signal_id="sig-spread",
+            source="auto",
+        )
+        assert not report.allowed, report.rejects
+        assert any("sl_narrower_than_spread" in r
+                   or "minimum_lot_exceeds_risk_budget" in r
+                   for r in report.rejects), report.rejects
+        assert report.size_lots == 0.0
+        assert broker.orders == []          # nothing reached the broker
+
+    @pytest.mark.asyncio
+    async def test_no_spread_block_when_the_budget_clears_it(self, broker, notifier):
+        """A bigger account CAN fund a spread-clearing stop → no P0-6 block."""
+        db = FakeDatabase()
+        s = clean_settings(capital=50_000.0, risk_per_trade_pct=1.0,
+                           min_lot=0.02, kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="USDJPY", direction="BUY",
+            entry=157.024, stop_loss=156.700, take_profit=157.500,
+            confidence=85.0, opportunity=80.0, signal_id="sig-big",
+            source="auto",
+        )
+        assert not any("sl_narrower_than_spread" in r for r in report.rejects), \
+            report.rejects
+
+    @pytest.mark.asyncio
+    async def test_spread_block_exempt_for_caller_volume(self, broker, notifier):
+        """extended-open passes an explicit reviewed volume → exempt from P0-6,
+        same as the P0-2 min-lot guard."""
+        db = FakeDatabase()
+        s = clean_settings(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.02,
+                           spread_guard_max_pct=500.0,
+                           kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="USDJPY", direction="SELL",
+            entry=157.024, stop_loss=157.029, take_profit=157.0165,
+            confidence=85.0, opportunity=80.0, signal_id="sig-plan",
+            source="extended", volume=0.02,
+        )
+        assert not any("sl_narrower_than_spread" in r for r in report.rejects), \
+            report.rejects
+
+    @pytest.mark.asyncio
+    async def test_spread_block_skipped_when_symbol_spread_is_zero(self, broker, notifier):
+        """A symbol the user deliberately zeroed keeps the old behaviour — the
+        guard must not invent a spread that is configured as 0."""
+        db = FakeDatabase()
+        s = clean_settings(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.02,
+                           spread_overrides={"USDJPY": 0.0},
+                           spread_guard_max_pct=500.0,
+                           kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="USDJPY", direction="SELL",
+            entry=157.024, stop_loss=157.029, take_profit=157.0165,
+            confidence=85.0, opportunity=80.0, signal_id="sig-zerospread",
+            source="auto",
+        )
+        assert not any("sl_narrower_than_spread" in r for r in report.rejects), \
+            report.rejects
 
     @pytest.mark.asyncio
     async def test_pause_blocks_execution(self, broker, notifier):

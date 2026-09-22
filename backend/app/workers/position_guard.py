@@ -119,6 +119,34 @@ async def _live_marks(assets: list[str]) -> dict[str, float]:
         return {}
 
 
+async def _conversion_rates(positions: list[Position],
+                            marks: dict[str, float]) -> dict[str, float]:
+    """Spot map used to convert each position's raw PnL into USD.
+
+    Delegates to ``execution.fetch_pnl_rates`` which seeds from the marks
+    already in hand and fetches only the missing ``<quote>USD`` legs. Missing
+    rates are simply absent — `PaperBrokerPnl.compute` then returns None and
+    the journal shows no PnL instead of a guessed dollar figure (fail-closed).
+    """
+    assets = [str(getattr(pos, "asset", "") or "") for pos in positions]
+    return await execution.fetch_pnl_rates(assets, seed=marks)
+
+
+def _pnl_text(pnl) -> str:
+    """Format a PnL figure; None (no conversion rate) reads 'n/a'.
+
+    ``sign × price_diff × lots × contract`` is in the QUOTE currency and must
+    be converted to USD. When no trusted rate exists the journal stores None
+    and the LINE line says n/a — never a guessed dollar amount.
+    """
+    if pnl is None:
+        return "n/a"
+    try:
+        return f"{float(pnl):+,.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 def _atr_for(pos: Position, fallback_distance: float, db=None) -> float:
     """ATR estimate for trailing: 20% of the ORIGINAL SL distance.
 
@@ -311,7 +339,8 @@ def _avg_hold_days(db) -> float:
 
 async def _apply_smart_exit(db, broker, pos: Position, price: float,
                             decision, s,
-                            notifier: NotificationService) -> dict:
+                            notifier: NotificationService,
+                            rates: dict[str, float] | None = None) -> dict:
     """Execute a Smart Exit recommendation. Returns {"closed", "partial_closed"}.
 
     MOVE_SL is handled by the legacy breakeven/trailing pass (it owns SL
@@ -382,7 +411,7 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
                     getattr(result, "message", ""))
         return out
     out["closed"] = True
-    pnl = execution.PaperBrokerPnl.compute(pos, s, asset=asset)
+    pnl = execution.PaperBrokerPnl.compute(pos, s, asset=asset, rates=rates)
     execution.close_trade_rows(db, ticket, price, pnl, reason_prefix,
                                asset=asset, direction=direction)
     signal_log.log_event(
@@ -396,7 +425,7 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
             f"🧠 Smart Exit (CLOSE)\nAsset: {asset}\nDirection: {direction}\n"
             f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
             f"Score: {getattr(decision, 'exit_score', '?')} "
-            f"({getattr(decision, 'quality', '?')})\nPnL: {pnl:+,.2f}\n{why}")
+            f"({getattr(decision, 'quality', '?')})\nPnL: {_pnl_text(pnl)}\n{why}")
     except Exception as exc:
         log.error("smart-exit close notify failed: %s", exc)
     return out
@@ -404,7 +433,8 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
 
 async def _manage_position(db, broker, pos: Position, price: float,
                            s, notifier: NotificationService,
-                           discretionary_block: str = "") -> dict:
+                           discretionary_block: str = "",
+                           rates: dict[str, float] | None = None) -> dict:
     """Breakeven / trailing / partial-close pass for ONE position.
 
     Returns {"moved_sl": bool, "partial_closed": bool, "new_sl": float,
@@ -899,6 +929,18 @@ async def guard_once(db, broker, notifier: NotificationService,
         snaps = snaps_c or {}
         if news_c:
             news_status, news_event = news_c
+    # Quote→USD conversion map for every journaled PnL this cycle. Built from
+    # the marks in hand plus a one-shot fetch of the missing <quote>USD legs.
+    pnl_rates: dict[str, float] = (
+        await _bounded(_conversion_rates(positions, live), _GUARD_MARKS_BUDGET)
+        if positions else {}
+    ) or {}
+    # Publish the map on the broker so sibling workers (portfolio_monitor's
+    # equity snapshot) convert with the SAME rates instead of re-fetching.
+    try:
+        broker.set_rates(pnl_rates)
+    except Exception as exc:
+        log.debug("broker.set_rates failed: %s", exc)
     if smart_on and positions:
         try:
             avg_hold = _avg_hold_days(db)
@@ -959,7 +1001,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                             getattr(result, "message", ""))
                 continue
             pnl = execution.PaperBrokerPnl.compute(
-                pos, s, asset=str(pos.asset or ""))
+                pos, s, asset=str(pos.asset or ""), rates=pnl_rates)
             execution.close_trade_rows(db, pos.ticket, price, pnl, "emergency",
                                        asset=str(pos.asset or ""),
                                        direction=str(pos.direction or ""))
@@ -978,7 +1020,7 @@ async def guard_once(db, broker, notifier: NotificationService,
             emergency_user = emergency_user or str(getattr(pos, "user_id", "") or "")
             emergency_lines.append(
                 f"• {pos.asset} {pos.direction} "
-                f"{pos.entry_price:g}→{price:g} PnL {pnl:+,.2f}")
+                f"{pos.entry_price:g}→{price:g} PnL {_pnl_text(pnl)}")
             continue
 
         # ---- Priorities 2-3: compute HARD SL/TP BEFORE any discretionary
@@ -1004,7 +1046,8 @@ async def guard_once(db, broker, notifier: NotificationService,
         if mgmt_discretionary and not (hit_sl or hit_tp):
             try:
                 mgmt = await _manage_position(db, broker, pos, price, s, notifier,
-                                              discretionary_block)
+                                              discretionary_block,
+                                              rates=pnl_rates)
                 if mgmt.get("moved_sl"):
                     moved += 1
                     _new = mgmt.get("new_sl")
@@ -1061,7 +1104,8 @@ async def guard_once(db, broker, notifier: NotificationService,
                               or "HOLD")
                     if rec in ("PARTIAL_25", "PARTIAL_50", "CLOSE"):
                         applied = await _apply_smart_exit(
-                            db, broker, pos, price, decision, s, notifier)
+                            db, broker, pos, price, decision, s, notifier,
+                            rates=pnl_rates)
                         if applied.get("closed"):
                             closed += 1
                             smart_closed += 1
@@ -1133,7 +1177,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                                     pos.ticket, result.message)
                         continue
                     pnl = execution.PaperBrokerPnl.compute(
-                        pos, s, asset=str(pos.asset or ""))
+                        pos, s, asset=str(pos.asset or ""), rates=pnl_rates)
                     execution.close_trade_rows(db, pos.ticket, price, pnl, "time",
                                                asset=str(pos.asset or ""),
                                                direction=str(pos.direction or ""))
@@ -1155,7 +1199,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                             f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
                             f"Held: {age_days:.1f} days (limit {max_hold})\n"
                             f"R: {r_now:+.2f} (need ≥ {ts_min_r:g} to survive)\n"
-                            f"PnL: {pnl:+,.2f}",
+                            f"PnL: {_pnl_text(pnl)}",
                         )
                     except Exception as exc:
                         log.error("time-stop notify failed: %s", exc)
@@ -1178,7 +1222,8 @@ async def guard_once(db, broker, notifier: NotificationService,
             log.warning("close %s failed: %s", pos.ticket, result.message)
             continue
 
-        pnl = execution.PaperBrokerPnl.compute(pos, s, asset=str(pos.asset or ""))
+        pnl = execution.PaperBrokerPnl.compute(
+            pos, s, asset=str(pos.asset or ""), rates=pnl_rates)
         execution.close_trade_rows(db, pos.ticket, price, pnl, reason,
                                    asset=str(pos.asset or ""),
                                    direction=str(pos.direction or ""))
@@ -1215,7 +1260,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                 f"{emoji} Position Closed ({'STOP LOSS' if hit_sl else 'TAKE PROFIT'})\n"
                 f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
                 f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
-                f"PnL: {pnl:+,.2f}",
+                f"PnL: {_pnl_text(pnl)}",
             )
         except Exception as exc:
             log.error("close notify failed: %s", exc)
