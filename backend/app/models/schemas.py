@@ -512,6 +512,63 @@ def contract_value_for(asset: str) -> float:
     return CONTRACT_VALUE.get(str(asset or "").upper(), DEFAULT_CONTRACT_VALUE)
 
 
+def usd_per_quote_unit(asset: Optional[str], price: Optional[float]) -> Optional[float]:
+    """USD value of ONE unit of ``asset``'s QUOTE currency, from its own price.
+
+    ``price_diff × lots × contract`` is denominated in the pair's QUOTE
+    currency — NOT USD (this is the same trap as the PnL-conversion bug fixed
+    in commit 229d855). Turning that raw number into USD needs the quote's
+    USD rate:
+
+      • quote IS USD (EURUSD, GBPUSD, XAUUSD) → 1.0, nothing to do.
+      • base IS USD (USDJPY, USDCHF, USDCAD) → the pair price IS the quote's
+        worth, so one quote unit = ``1 / price`` USD (USDJPY 157.0 → ¥1 =
+        $0.00637).
+      • a cross (GBPJPY, AUDNZD) → this helper CANNOT derive it from the pair
+        price alone (it needs the pair's own USD leg); returns None so the
+        caller falls back to the non-converted math rather than guessing
+        (fail-closed — requirement 6, ห้ามเดา).
+
+    Returns None when the asset is unparseable / the price is unusable.
+    """
+    parts = asset_currencies(asset)
+    if parts is None:
+        return None
+    base, quote = parts
+    if quote in _USD_EQUIVALENT:
+        return 1.0
+    if base in _USD_EQUIVALENT:
+        try:
+            p = float(price or 0)
+        except (TypeError, ValueError):
+            return None
+        if p <= 0:
+            return None
+        return 1.0 / p
+    return None
+
+
+def risk_usd_of_distance(stop_distance: float, lots: float, asset: Optional[str],
+                         price: Optional[float]) -> Optional[float]:
+    """USD risk of a stop ``stop_distance`` wide at ``lots`` for ``asset``.
+
+    ``raw = dist × lots × contract`` is in the QUOTE currency; convert to USD
+    with ``usd_per_quote_unit``. Returns None when the conversion is not
+    derivable (a cross without its USD leg) so a caller can choose its own
+    fallback instead of silently booking a 157×-wrong number.
+
+    NOTE for USD-quoted assets (and the None case) the raw product IS the USD
+    figure, so callers that must not fail open can use ``raw`` when this
+    returns None — that is exactly what the pre-fix sizing math assumed.
+    """
+    contract = contract_value_for(str(asset or ""))
+    raw = float(stop_distance or 0) * float(lots or 0) * contract
+    rate = usd_per_quote_unit(asset, price)
+    if rate is None:
+        return None
+    return raw * rate
+
+
 def effective_min_confidence(settings: "AppSettings", asset: str) -> float:
     """Per-asset signal-quality threshold.
 
@@ -589,7 +646,8 @@ def spread_sl_floor(settings: "AppSettings", asset: Optional[str]) -> float:
         return 0.0
 
 
-def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
+def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
+                    price: Optional[float] = None) -> float:
     """Max SL distance (price units) that fits the risk budget at min lot.
 
     Even the SMALLEST allowed order (effective_min_lot) risks
@@ -599,11 +657,19 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
     when the cap feature is off or the budget is invalid (callers treat
     0.0 as "no cap").
 
-    The cap is itself floored by ``spread_sl_floor`` so a tight account can
-    never let the risk cap squeeze the stop INSIDE the spread: when the raw
-    budget only buys a sub-spread stop the cap is raised to k × spread and
-    the caller blocks the order (see ``sl_cap_below_spread``) — the cap is
-    never allowed to manufacture a stop the market fills instantly.
+    QUOTE-CURRENCY CONVERSION (prod 2026-09-22, second root cause): the raw
+    product ``dist × min_lot × contract`` is in the pair's QUOTE currency, not
+    USD. For USDJPY the naive solve ``budget / (min_lot × contract)`` divided
+    a $10 budget by 2000 and got 0.005 **price units** — which on a 157.00
+    price is 0.0032%, i.e. it treated ¥10 as $10 and produced a stop 157×
+    too tight. Every normal tick (0.005–0.015) then read as 1R–3R, so TP1
+    partial-close AND breakeven/trailing fired within seconds of entry.
+    ``price`` (the live entry) lets this convert the budget into the quote
+    currency first: ``dist = budget / (min_lot × contract × usd_per_quote)``.
+
+    When ``price`` is None or the quote's USD rate is not derivable (a cross
+    like GBPJPY), the conversion factor is 1.0 — the historical behaviour —
+    so every existing caller keeps working; pass ``price`` to get the fix.
     """
     try:
         if not bool(getattr(settings, "sl_cap_enabled", False)):
@@ -614,14 +680,18 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str]) -> float:
         contract = contract_value_for(str(asset or ""))
         if budget <= 0 or floor <= 0 or contract <= 0:
             return 0.0
-        cap = budget / (floor * contract)
+        # USD per 1 quote unit — 1.0 for USD-quoted assets and for the
+        # un-derivable (cross / no price) case (fail-soft to legacy math).
+        rate = usd_per_quote_unit(asset, price) or 1.0
+        cap = budget / (floor * contract * rate)
         spread_floor = spread_sl_floor(settings, asset)
         return max(cap, spread_floor) if spread_floor > 0 else cap
     except Exception:
         return 0.0
 
 
-def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str]) -> bool:
+def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
+                        price: Optional[float] = None) -> bool:
     """True when the risk budget cannot fund a stop wider than the spread.
 
     This is the fail-closed condition behind ``sl_narrower_than_spread``: the
@@ -630,6 +700,9 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str]) -> bool:
     there is no valid size — the only honest options are a bigger capital /
     risk budget or a symbol with a smaller minimum lot. Blocking is correct;
     opening the trade is not.
+
+    ``price`` feeds the same quote→USD conversion as ``sl_cap_distance`` so
+    both agree on what the budget can actually buy (USDJPY: ¥10 ≠ $10).
     """
     try:
         spread_floor = spread_sl_floor(settings, asset)
@@ -641,7 +714,8 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str]) -> bool:
         contract = contract_value_for(str(asset or ""))
         if budget <= 0 or floor <= 0 or contract <= 0:
             return False
-        return (budget / (floor * contract)) < spread_floor
+        rate = usd_per_quote_unit(asset, price) or 1.0
+        return (budget / (floor * contract * rate)) < spread_floor
     except Exception:
         return False
 
@@ -666,7 +740,8 @@ def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
     try:
         if not entry or not stop_loss:
             return stop_loss, 0.0, False
-        cap = sl_cap_distance(settings, asset)
+        # ``entry`` is the price the cap converts through (USDJPY budget ¥10≠$10).
+        cap = sl_cap_distance(settings, asset, price=entry)
         dist = abs(float(entry) - float(stop_loss))
         if cap <= 0 or dist <= cap:
             return stop_loss, dist, False
@@ -1100,28 +1175,49 @@ def direction_sign(direction: str) -> float:
 
 
 def risk_to_lot(equity: float, risk_pct: float, stop_distance: float,
-                contract_value: float = 100_000.0) -> float:
-    """Risk% → lots. risk = lots × dist × contract_value.
+                contract_value: float = 100_000.0,
+                usd_per_quote: float = 1.0) -> float:
+    """Risk% → lots. risk = lots × dist × contract_value × usd_per_quote.
 
     contract_value defaults to the FX standard lot (100k units). Callers
     sizing gold (XAUUSD) pass 100.0 (100 oz per lot) — see contract_value_for.
+
+    ``usd_per_quote`` converts the raw ``dist × lots × contract`` product —
+    which is in the pair's QUOTE currency — into USD (see
+    ``usd_per_quote_unit``). It defaults to 1.0 so USD-quoted assets and
+    legacy callers are unchanged; USDJPY must pass the yen's USD rate or the
+    size comes out ~157× too small.
+
+    NOTE: callers should prefer ``risk_to_lot_for`` which derives both the
+    contract value AND the conversion factor from the asset.
     """
     if stop_distance <= 0 or equity <= 0:
         return 0.0
     risk_amount = equity * risk_pct / 100.0
-    return max(0.0, round(risk_amount / (stop_distance * contract_value), 2))
+    denom = stop_distance * contract_value * float(usd_per_quote or 1.0)
+    if denom <= 0:
+        return 0.0
+    return max(0.0, round(risk_amount / denom, 2))
 
 
 def risk_to_lot_for(equity: float, risk_pct: float, stop_distance: float,
-                    asset: str) -> float:
+                    asset: str, price: Optional[float] = None) -> float:
     """risk_to_lot with the per-asset contract value (gold = 100 oz/lot).
 
     XAUUSD SL 50 pts, $100 risk → 100 / (50 × 100) = 0.02 lots (correct);
     the FX-contract version returned 0.00002 → rounded to 0.0 and silently
     hidden by the min_lot floor.
+
+    ``price`` is the live entry, used to convert the raw quote-currency risk
+    into USD (``usd_per_quote_unit``). Omitting it falls back to the legacy
+    factor 1.0 for un-derivable crosses, but USD-quoted pairs and USD-base
+    pairs (USDJPY/…H) get the correct factor even without it only when a
+    price is available — so pass ``price`` whenever you have it.
     """
+    usd_per_quote = usd_per_quote_unit(asset, price)
     return risk_to_lot(equity, risk_pct, stop_distance,
-                       contract_value=contract_value_for(asset))
+                       contract_value=contract_value_for(asset),
+                       usd_per_quote=(1.0 if usd_per_quote is None else usd_per_quote))
 
 
 # ---------- Correlation & Exposure ----------
@@ -1405,7 +1501,14 @@ class ExposureEngine:
                     vol = float(p.get("volume") or 0)
                     if not asset or entry <= 0 or sl <= 0 or vol <= 0:
                         continue
-                    risk = abs(entry - sl) * vol * contract_value_for(asset)
+                    # Risk-at-stop in USD — the nominal product is in the
+                    # pair's QUOTE currency (USDJPY → yen), so convert before
+                    # bucketing or a JPY leg shows ~157× its real risk and
+                    # trips the currency cap on a trade that is actually fine.
+                    risk = risk_usd_of_distance(abs(entry - sl), vol, asset,
+                                                entry)
+                    if risk is None:
+                        risk = abs(entry - sl) * vol * contract_value_for(asset)
                     if risk <= 0:
                         continue
                     long_side = str(p.get("direction") or "").upper() == "BUY"

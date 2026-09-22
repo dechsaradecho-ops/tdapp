@@ -123,6 +123,25 @@ class TestSlCapDistanceSpreadFloor:
         s = cfg(spread_overrides={"USDJPY": 0.0})
         assert sl_cap_distance(s, "USDJPY") == pytest.approx(0.005, rel=1e-9)
 
+    def test_usdjpy_cap_is_converted_from_yen_to_usd(self):
+        """USDJPY's quote is JPY, so dist × lots × 100k is in YEN.
+
+        Feeding the raw product as if it were USD made the cap 0.005 units
+        (0.0032% of price) instead of 0.785 (0.5%) — a ~157× over-tightening
+        that turned every normal tick into 1–3R and fired the TP1 partial and
+        the trailing stop within seconds. With ``price`` the cap solves the
+        budget in USD and lands at 0.5% of price, risking the full $10.
+        """
+        s = cfg(spread_overrides={})
+        price = 156.996
+        cap = sl_cap_distance(s, "USDJPY", price=price)
+        # budget 10 / (0.02 × 100k × (1/156.996)) = 0.78498
+        assert cap == pytest.approx(10.0 / (0.02 * 100_000.0 / price),
+                                    rel=1e-6)
+        # ≈ 0.5% of price — a tradeable stop, not 0.0032%
+        assert cap == pytest.approx(price * 0.005, rel=1e-3)
+        assert cap > 0.7
+
     def test_disabled_cap_is_still_zero(self):
         s = cfg(sl_cap_enabled=False)
         assert sl_cap_distance(s, "XAUUSD") == 0.0
@@ -142,9 +161,24 @@ class TestSlCapDistanceSpreadFloor:
 # ---------------------------------------------------------------------------
 class TestSlCapBelowSpread:
     def test_true_when_the_budget_cannot_fund_a_k_spread_stop(self):
-        """budget 10 / (0.02 × 100k) = 0.005 < 3 × 0.015 (USDJPY) → True."""
+        """With no price the yen product is read as USD → cap 0.005.
+
+        Legacy/no-price callers keep the old (conservative) behaviour: the
+        naive cap 0.005 sits below the floor → True. Real callers pass the
+        entry price and get the USD-correct cap instead (next test).
+        """
         s = cfg()
         assert sl_cap_below_spread(s, "USDJPY") is True
+
+    def test_false_for_usdjpy_when_the_price_is_supplied(self):
+        """The real execution path: cap 0.785 ≫ floor 0.045 → no block.
+
+        execute_signal calls sl_cap_below_spread(s, asset, price=entry); the
+        FX-correct cap clears the spread floor, so a normal USDJPY trade is
+        NOT blocked. The naive no-price call would have wrongly blocked it.
+        """
+        s = cfg(spread_overrides={})
+        assert sl_cap_below_spread(s, "USDJPY", price=156.996) is False
 
     def test_false_when_the_budget_clears_the_floor(self):
         """EURUSD floor 0.0003 < cap 0.005 → False (normal majors unaffected)."""
@@ -162,7 +196,7 @@ class TestSlCapBelowSpread:
     def test_false_for_a_big_account(self):
         """$50k × 2% = $1000 budget → USDJPY cap 0.5 ≫ floor 0.045 → False."""
         s = cfg(capital=50_000.0)
-        assert sl_cap_below_spread(s, "USDJPY") is False
+        assert sl_cap_below_spread(s, "USDJPY", price=156.996) is False
 
     def test_false_when_the_symbol_has_no_spread(self):
         s = cfg(spread_overrides={"USDJPY": 0.0})
@@ -251,3 +285,58 @@ class TestEffectiveSlTpSpreadFloor:
         lot = effective_min_lot(s, "USDJPY")
         risk = spread_sl_floor(s, "USDJPY") * lot * contract
         assert risk == pytest.approx(0.045 * 0.02 * 100_000.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 5. FX currency conversion — dist × lots × contract is in the QUOTE currency
+# ---------------------------------------------------------------------------
+class TestRiskCurrencyConversion:
+    def test_usd_per_quote_unit(self):
+        from app.models.schemas import usd_per_quote_unit
+        # USD-quoted → the product already IS dollars
+        assert usd_per_quote_unit("EURUSD", 1.08) == pytest.approx(1.0)
+        assert usd_per_quote_unit("XAUUSD", 2400.0) == pytest.approx(1.0)
+        # USD-base (USDJPY): one quote unit (¥1) is 1/price dollars
+        assert usd_per_quote_unit("USDJPY", 156.996) == pytest.approx(
+            1.0 / 156.996, rel=1e-9)
+        # cross with no derivable rate → fail-closed (None)
+        assert usd_per_quote_unit("GBPJPY", 189.5) is None
+        assert usd_per_quote_unit("AUDNZD", 1.09) is None
+        # no price → None (can't convert)
+        assert usd_per_quote_unit("USDJPY", None) is None
+
+    def test_risk_usd_of_distance_usdjpy(self):
+        from app.models.schemas import risk_usd_of_distance
+        # 0.785 × 0.02 × 100k = ¥1570 nominal → ÷156.996 ≈ $10
+        risk = risk_usd_of_distance(0.785, 0.02, "USDJPY", 156.996)
+        assert risk == pytest.approx(0.785 * 0.02 * 100_000.0 / 156.996,
+                                     rel=1e-6)
+        assert risk == pytest.approx(10.0, rel=1e-2)
+
+    def test_risk_usd_of_distance_usd_quoted_is_unchanged(self):
+        from app.models.schemas import risk_usd_of_distance
+        assert risk_usd_of_distance(0.002, 0.05, "EURUSD", 1.08) == \
+            pytest.approx(0.002 * 0.05 * 100_000.0, rel=1e-9)
+        # cross → None (caller falls back)
+        assert risk_usd_of_distance(1.0, 0.02, "GBPJPY", 189.5) is None
+
+    def test_risk_to_lot_for_usdjpy_uses_the_yen_rate(self):
+        from app.models.schemas import risk_to_lot_for
+        # capital 500 @ 2% = $10 budget; dist 0.785, price 156.996
+        # 10 / (0.785 × 100k × (1/156.996)) ≈ 0.02 lots
+        lots = risk_to_lot_for(500.0, 2.0, 0.785, "USDJPY", price=156.996)
+        assert lots == pytest.approx(0.02, abs=0.005)
+        # without the price the yen product is treated as USD → ~0.0
+        assert risk_to_lot_for(500.0, 2.0, 0.785, "USDJPY") == 0.0
+
+    def test_risk_to_lot_for_regression_gold_and_eurusd(self):
+        from app.models.schemas import risk_to_lot_for
+        # gold: 100 oz/lot; $10 / (5.0 × 100) = 0.02
+        assert risk_to_lot_for(500.0, 2.0, 5.0, "XAUUSD", price=2400.0) == \
+            pytest.approx(0.02, abs=0.005)
+        # EURUSD unchanged by the conversion (quote == USD)
+        assert risk_to_lot_for(500.0, 2.0, 0.002, "EURUSD", price=1.08) == \
+            pytest.approx(0.05, abs=0.005)
+        assert risk_to_lot_for(500.0, 2.0, 0.002, "EURUSD") == \
+            pytest.approx(0.05, abs=0.005)
+

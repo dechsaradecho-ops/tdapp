@@ -52,6 +52,7 @@ from app.models.schemas import (
     quote_currency,
     risk_to_lot,
     risk_to_lot_for,
+    risk_usd_of_distance,
     sl_cap_below_spread,
     spread_sl_floor,
 )
@@ -1429,10 +1430,21 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
         _open_risk = 0.0
         for _t in _open or []:
             try:
-                if _t.get("stop_loss") and _t.get("entry_price"):
-                    _open_risk += abs(float(_t["entry_price"]) - float(_t["stop_loss"])) \
-                        * float(_t.get("volume") or 0) \
-                        * contract_value_for(str(_t.get("asset") or ""))
+                _t_asset = str(_t.get("asset") or "")
+                _t_entry = float(_t.get("entry_price") or 0)
+                if _t.get("stop_loss") and _t_entry:
+                    _t_dist = abs(_t_entry - float(_t["stop_loss"]))
+                    _t_lots = float(_t.get("volume") or 0)
+                    # Convert the quote-currency product to USD (USDJPY: the
+                    # nominal figure is in yen, so without this an open USDJPY
+                    # leg reads as ~157× its real dollar risk and wrongly blows
+                    # the heat budget — the same class as the 2026-09-22 cap).
+                    _t_risk = risk_usd_of_distance(_t_dist, _t_lots, _t_asset,
+                                                   _t_entry)
+                    if _t_risk is None:
+                        _t_risk = (_t_dist * _t_lots
+                                   * contract_value_for(_t_asset))
+                    _open_risk += _t_risk
             except Exception:
                 continue
         _cap = float(getattr(s, "capital", 0) or 0)
@@ -1443,8 +1455,12 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                     _lots = size_position(s, float(entry), float(stop_loss),
                                           asset=asset)
                     _dist = abs(float(entry) - float(stop_loss))
-                    heat_new_pct = (_dist * _lots
-                                    * contract_value_for(asset) / _cap * 100.0)
+                    _new_risk = risk_usd_of_distance(_dist, _lots, asset,
+                                                     float(entry))
+                    if _new_risk is None:
+                        _new_risk = (_dist * _lots
+                                     * contract_value_for(asset))
+                    heat_new_pct = _new_risk / _cap * 100.0
                 except Exception:
                     heat_new_pct = 0.0
             _limit = float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0)
@@ -1485,8 +1501,11 @@ def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
     if not entry or not stop_loss:
         return 0.0
     stop_distance = abs(entry - stop_loss)
+    # ``price=entry`` converts the raw quote-currency risk into USD (USDJPY:
+    # the product is in yen, so without this the size is ~157× too small and
+    # the min-lot floor silently opens an over-risk trade).
     lots = risk_to_lot_for(s.capital, s.risk_per_trade_pct, stop_distance,
-                           asset or "")
+                           asset or "", price=entry)
     return max(lots, effective_min_lot(s, asset))
 
 
@@ -1525,8 +1544,14 @@ def min_lot_budget_breach(s: AppSettings, entry: float,
             return None
         risk_budget = capital * risk_pct / 100.0
         required_lot = risk_to_lot_for(capital, risk_pct, stop_distance,
-                                       asset or "")
-        min_lot_risk = stop_distance * min_lot * contract
+                                       asset or "", price=entry)
+        # Risk of the min-lot order in USD — the raw product is in the pair's
+        # QUOTE currency, so convert through the asset's own price (USDJPY:
+        # ¥13.52 is NOT $13.52; the breach test must see the converted figure).
+        min_lot_risk = risk_usd_of_distance(stop_distance, min_lot,
+                                            asset or "", entry)
+        if min_lot_risk is None:
+            min_lot_risk = stop_distance * min_lot * contract
         # A tiny tolerance keeps a lot that is ALREADY at the floor (or the
         # risk-based lot equal to the floor) from being flagged by rounding.
         if required_lot >= min_lot - 1e-9:
@@ -1675,7 +1700,15 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             if _tiered:
                 log.info("sl_distance_mode=%s → %s %s SL %.5f",
                          s.sl_distance_mode, direction, asset, _eff_sl)
-            if _tiered or _capped:
+            # Commit the effective SL whenever the helper actually CHANGED it —
+            # not just when the tier/cap flags fired. The spread floor (step 3)
+            # can raise the distance with BOTH flags False (prod 2026-09-22:
+            # USDJPY SELL stored at the 0.005 price cap while the floor wanted
+            # 0.045); testing only ``_tiered or _capped`` threw that widening
+            # away, so the order opened with the sub-spread stop and TP filled
+            # in 43s. ``_eff_dist`` is the authority on the final distance.
+            _old_dist = abs(float(entry) - float(stop_loss))
+            if _tiered or _capped or abs(_eff_dist - _old_dist) > 1e-12:
                 stop_loss = _eff_sl
                 if take_profit:
                     take_profit = _eff_tp
@@ -1756,7 +1789,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     if not (volume and float(volume) > 0) and stop_loss and entry:
         _spread_floor = spread_sl_floor(s, asset)
         _dist_now = abs(float(entry) - float(stop_loss))
-        if sl_cap_below_spread(s, asset) or (
+        if sl_cap_below_spread(s, asset, price=entry) or (
                 _spread_floor > 0 and _dist_now < _spread_floor - 1e-12):
             _spread = effective_spread(s, asset)
             report.allowed = False

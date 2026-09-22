@@ -690,18 +690,24 @@ class TestGatePipeline:
     # ---- P0-6: a stop inside the spread must never open -------------------
     @pytest.mark.asyncio
     async def test_blocks_stop_narrower_than_spread(self, broker, notifier):
-        """P0-6 (prod PAPER-000083): USDJPY SELL at capital $500 @ 2% with a
-        0.02 min lot. effective_sl_tp widens the stop to 3 × 0.015 = 0.045 so
-        it clears the real ~1.5 pip spread — but 0.045 × 0.02 × 100k = $90 of
-        min-lot risk against a $10 budget, so the order CANNOT open.
+        """P0-6: a stop that risks more than the budget even at the spread
+        floor is BLOCKED (machine-readable), and nothing reaches the broker.
+
+        USDJPY min lot 0.02, capital $500 @ 2% = $10 budget. With the FX-aware
+        cap a 0.045 (3×spread) stop risks 0.045×0.02×100k ÷ 157.024 ≈ $0.57 —
+        easily funded, so the P0-6 block would NOT fire (that is the 2026-09-22
+        fix working). To exercise the block we force a symbol whose min-lot
+        risk at the floor still exceeds the budget by shrinking the account:
+        capital $10 @ 2% = $0.002 budget, while the min-lot risk of the 0.045
+        (3×spread) stop is 0.045×0.02×100k ÷ 157.024 ≈ $0.57 USD ≫ $0.002 →
+        no valid size → BLOCK (``sl_cap_below_spread`` True).
 
         Both the P0-2 min-lot guard and P0-6 fire on this shape (they are two
         views of the same "no valid size" condition); the point of the test is
         that NO order reaches the broker and the block is machine-readable.
-        P0-6 is asserted separately below via ``sl_cap_below_spread``.
         """
         db = FakeDatabase()
-        s = clean_settings(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.02,
+        s = clean_settings(capital=10.0, risk_per_trade_pct=2.0, min_lot=0.02,
                            sl_distance_mode="short", sl_cap_enabled=True,
                            spread_guard_max_pct=500.0,
                            kill_daily_loss_pct=500.0)
@@ -718,6 +724,36 @@ class TestGatePipeline:
                    for r in report.rejects), report.rejects
         assert report.size_lots == 0.0
         assert broker.orders == []          # nothing reached the broker
+
+    @pytest.mark.asyncio
+    async def test_usdjpy_spread_clearing_stop_is_allowed_after_fx_fix(
+            self, broker, notifier):
+        """The 2026-09-22 fix: capital $500 @ 2% on USDJPY is NOT blocked.
+
+        Pre-fix the cap solved the budget in yen-as-dollars and squeezed the
+        stop to 0.005 (inside the spread); the P0-6 guard then had to block.
+        With the FX-correct cap the stop sits at ~0.047 (clears the 0.045
+        floor), the USD min-lot risk is ~$0.60 — inside the $10 budget — so a
+        normal USDJPY trade now opens with a stop the market cannot instantly
+        take out.
+        """
+        db = FakeDatabase()
+        s = clean_settings(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.02,
+                           sl_distance_mode="short", sl_cap_enabled=True,
+                           spread_guard_max_pct=500.0,
+                           kill_daily_loss_pct=500.0)
+        report = await execution.execute_signal(
+            db, broker, notifier, s,
+            user_id="demo", asset="USDJPY", direction="SELL",
+            entry=157.024, stop_loss=157.069, take_profit=156.9565,
+            confidence=85.0, opportunity=80.0, signal_id="sig-yen",
+            source="auto",
+        )
+        assert report.allowed, report.rejects
+        assert broker.orders, "expected an order to reach the broker"
+        order = broker.orders[0]
+        _dist = abs(order.stop_loss - 157.024)
+        assert _dist >= 0.045 - 1e-9, (order.stop_loss, _dist)
 
     @pytest.mark.asyncio
     async def test_no_spread_block_when_the_budget_clears_it(self, broker, notifier):

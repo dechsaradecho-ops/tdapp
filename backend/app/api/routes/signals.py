@@ -11,7 +11,7 @@ from app.integrations import quotes
 from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal,
                                 contract_value_for, effective_min_lot,
                                 effective_sl_tp, effective_spread,
-                                risk_to_lot_for)
+                                risk_to_lot_for, risk_usd_of_distance)
 from app.services import execution
 from app.services import signal_log
 from app.services.execution import (
@@ -117,9 +117,19 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         try:
             for _t in open_rows:
                 if _t.get("stop_loss") and _t.get("entry_price"):
-                    heat_open_usd += abs(float(_t["entry_price"]) - float(_t["stop_loss"])) \
-                        * float(_t.get("volume") or 0) \
-                        * contract_value_for(str(_t.get("asset") or ""))
+                    _t_asset = str(_t.get("asset") or "")
+                    _t_entry = float(_t["entry_price"])
+                    _t_dist = abs(_t_entry - float(_t["stop_loss"]))
+                    _t_lots = float(_t.get("volume") or 0)
+                    # FX-aware: the nominal product is in the pair's QUOTE
+                    # currency (USDJPY → yen) — convert to USD or an open yen
+                    # leg shows ~157× its real risk and the heat bar lies.
+                    _t_risk = risk_usd_of_distance(_t_dist, _t_lots,
+                                                   _t_asset, _t_entry)
+                    if _t_risk is None:
+                        _t_risk = (_t_dist * _t_lots
+                                   * contract_value_for(_t_asset))
+                    heat_open_usd += _t_risk
         except Exception:
             heat_open_usd = 0.0
         heat_cap = float(getattr(s, "capital", 0) or 0)
@@ -151,7 +161,13 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             _raw_dist = sl_distance
             _eff_sl, _eff_tp, _eff_dist, _tiered, _capped = effective_sl_tp(
                 s, entry, stop_loss, take_profit, _eff_asset, _eff_dir)
-            if entry > 0 and sl_distance > 0 and (_tiered or _capped):
+            # Commit whenever the helper CHANGED the distance, not only when the
+            # tier/cap flags fired — the spread floor can widen with both False
+            # (prod 2026-09-22 USDJPY SELL: sub-spread 0.005 stop slipped past
+            # this guard and the card previewed a trade the guard then killed).
+            if entry > 0 and sl_distance > 0 and (
+                    _tiered or _capped
+                    or abs(_eff_dist - sl_distance) > 1e-12):
                 stop_loss, take_profit, sl_distance = _eff_sl, _eff_tp, _eff_dist
             ladder = (
                 StrategyEngine.limit_ladder(r["direction"].upper(), entry, sl_distance)
@@ -191,11 +207,16 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                         f"(TP {take_profit:g})")
                     lots = risk_to_lot_for(
                         float(s.capital or 0), float(s.risk_per_trade_pct or 0),
-                        sl_distance, asset_u)
+                        sl_distance, asset_u, price=entry)
                     floor = effective_min_lot(s, asset_u)
                     lots_used = max(lots, floor)
                     contract = contract_value_for(asset_u)
-                    risk_usd = sl_distance * lots_used * contract
+                    # FX-aware: the raw product is in the pair's QUOTE currency
+                    # (USDJPY → yen), so convert to USD for the risk/cost lines.
+                    _risk_usd = risk_usd_of_distance(sl_distance, lots_used,
+                                                     asset_u, entry)
+                    risk_usd = (_risk_usd if _risk_usd is not None
+                                else sl_distance * lots_used * contract)
                     # Card lots = what the order will actually open (same
                     # math, effective distance already applied above).
                     _lots_card = round(lots_used, 2)
@@ -210,12 +231,18 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                         f"({risk_usd / float(s.capital or 1) * 100:.2f}% ของทุน)")
                     spread = effective_spread(s, asset_u)
                     if spread > 0:
-                        cost = spread * lots_used * contract
+                        _cost_usd = risk_usd_of_distance(spread, lots_used,
+                                                         asset_u, entry)
+                        cost = (_cost_usd if _cost_usd is not None
+                                else spread * lots_used * contract)
                         calc_notes.append(
                             f"สเปรด {spread:g} → ต้นทุนเปิดไม้ "
                             f"${cost:,.2f} (fill ±สเปรด/2)")
                     if heat_cap > 0:
-                        _h_usd = sl_distance * lots_used * contract
+                        _h_usd = risk_usd_of_distance(sl_distance, lots_used,
+                                                      asset_u, entry)
+                        if _h_usd is None:
+                            _h_usd = sl_distance * lots_used * contract
                         _h_pct = _h_usd / heat_cap * 100.0
                         calc_notes.append(
                             f"Heat พอร์ต ${heat_open_usd:,.2f} ({heat_open_pct:.2f}%) "
@@ -231,9 +258,12 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             if (r.get("approval") or "pending") == "pending":
                 asset = str(r.get("asset") or "").upper()
                 try:
-                    _hl = risk_to_lot_for(float(s.capital or 0), float(s.risk_per_trade_pct or 0), sl_distance, asset)
+                    _hl = risk_to_lot_for(float(s.capital or 0), float(s.risk_per_trade_pct or 0), sl_distance, asset, price=entry)
                     _hl = max(_hl, effective_min_lot(s, asset))
-                    _new_pct = (sl_distance * _hl * contract_value_for(asset) / heat_cap * 100.0) if (heat_cap > 0 and sl_distance > 0) else 0.0
+                    _hl_usd = risk_usd_of_distance(sl_distance, _hl, asset, entry)
+                    if _hl_usd is None:
+                        _hl_usd = sl_distance * _hl * contract_value_for(asset)
+                    _new_pct = (_hl_usd / heat_cap * 100.0) if (heat_cap > 0 and sl_distance > 0) else 0.0
                 except Exception:
                     _new_pct = 0.0
                 if asset in open_assets:
