@@ -675,6 +675,26 @@ async def quote_test(request: Request) -> dict:
     }
 
 
+@router.get("/pnl-rate-debug")
+async def pnl_rate_debug(request: Request) -> dict:
+    """TEMP diagnostic: show the quote→USD rate resolution for open positions."""
+    from app.integrations import quotes
+    from app.services.execution import fetch_pnl_rates, pnl_conversion_rate
+    db: Database = request.app.state.db
+    rows = db.select("paper_trades", filters={"status": "open"}, limit=50)
+    assets = [str(r.get("asset") or "") for r in rows if r.get("asset")]
+    seed = {str(r["asset"]).upper(): float(r.get("current_price") or 0)
+            for r in rows if r.get("asset")}
+    rates = await fetch_pnl_rates(assets, seed=seed)
+    return {
+        "assets": assets,
+        "seed": seed,
+        "rates": {k: round(v, 6) for k, v in sorted(rates.items())},
+        "spot_source": {a: quotes.spot_source(a) for a in sorted(rates)},
+        "resolved": {a: pnl_conversion_rate(a, rates) for a in assets},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Scheduler run log — one row per APScheduler job tick (7-day auto-expiry)
 # ---------------------------------------------------------------------------
