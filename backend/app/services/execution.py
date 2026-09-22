@@ -2188,7 +2188,13 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             sl_dist = abs(entry - sl_v) if (sl_v is not None and entry) else 0.0
             if sl_dist > 0:
                 r_multiple = round(sign * (mark - entry) / sl_dist, 2)
-                risk_amount = round(sl_dist * vol * contract, 2)
+                # $ at risk if stopped = (dist × lots × contract) converted
+                # from the QUOTE currency to USD (USDJPY → yen → USD; the
+                # nominal figure would read ~157× too large).
+                _r_usd = risk_usd_of_distance(sl_dist, vol, asset_u, entry)
+                risk_amount = round(
+                    _r_usd if _r_usd is not None
+                    else sl_dist * vol * contract, 2)
             src_label = {"spot": "spot สด (Yahoo intraday)",
                          "daily": "daily close (สำรองตอน spot ล่ม)",
                          "broker": "broker book (สำรอง)",
@@ -2335,8 +2341,11 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # Same inputs the portfolio_monitor worker uses: open risk in account
     # currency (|entry-SL| x lots x contract), live equity, realized PnL
     # windows and snapshot peak — so the monitor card can never disagree
-    # with the worker's pause verdict again. Fail-safe: any error degrades
-    # to None (the card shows "no data", never a fake "low").
+    # with the worker's pause verdict again. The raw product is in the QUOTE
+    # currency, so convert it to USD (a USDJPY leg would otherwise read as
+    # ~157× its real risk and fabricate a pause — same class as the heat
+    # gate). Fail-safe: any error degrades to None (the card shows "no data",
+    # never a fake "low").
     risk_status = None
     try:
         from app.engine.risk_engine import (
@@ -2347,12 +2356,17 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         for _t in open_rows:
             if _t.get("stop_loss") and _t.get("entry_price"):
                 try:
-                    _contract = PaperBrokerPnl.CONTRACT_SIZES.get(
-                        str(_t.get("asset") or "").upper(), 100_000.0)
+                    _t_asset = str(_t.get("asset") or "")
+                    _t_entry = float(_t["entry_price"])
+                    _t_dist = abs(_t_entry - float(_t["stop_loss"]))
+                    _t_lots = float(_t.get("volume") or 1)
+                    _t_r = risk_usd_of_distance(_t_dist, _t_lots, _t_asset,
+                                                _t_entry)
+                    if _t_r is None:
+                        _t_r = _t_dist * _t_lots * contract_value_for(_t_asset)
+                    _open_risk += _t_r
                 except Exception:
-                    _contract = 100_000.0
-                _open_risk += abs(float(_t["entry_price"]) - float(_t["stop_loss"])) \
-                    * float(_t.get("volume") or 1) * _contract
+                    continue
         _daily, _weekly, _monthly = _loss_pcts(db, float(s.capital or 0))
         _risk_snap = _RiskSnap(
             starting_capital=float(s.capital or 0),

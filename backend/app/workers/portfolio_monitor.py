@@ -28,6 +28,7 @@ from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
 from app.integrations.line_client import (DRAWDOWN_APPROACH_COOLDOWN_MIN,
                                           build_drawdown_approach_alert,
                                           build_risk_alert)
+from app.models.schemas import contract_value_for, risk_usd_of_distance
 from app.services import execution, limit_expand
 from app.services.database import Database
 from app.services.notification_service import NotificationService
@@ -275,19 +276,28 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
 
     realized_month = sum(float(t.get("pnl") or 0) for t in closed)
     # Open risk in ACCOUNT CURRENCY (contract × lots × SL distance) — same
-    # math as chat context; the old lots-only sum understated gold risk 100×
-    # (XAUUSD contract 100 oz vs FX 100k units).
+    # math as the heat gate / chat context; the old lots-only sum understated
+    # gold risk 100× (XAUUSD contract 100 oz vs FX 100k units).
+    #
+    # The product (dist × lots × contract) is in the QUOTE currency, so it
+    # must be converted to USD: a USDJPY leg's nominal figure is in yen and
+    # without the conversion it reads as ~157× its real dollar risk, blowing
+    # open_risk_pct past the daily limit and raising a FALSE "TRADING PAUSED"
+    # / drawdown-approach alert (same class as the 2026-09-22 SL-cap fix).
     open_risk = 0.0
     for t in open_rows:
         if t.get("stop_loss") and t.get("entry_price"):
             try:
-                from app.services.execution import PaperBrokerPnl as _Pnl
-                _contract = _Pnl.CONTRACT_SIZES.get(
-                    str(t.get("asset") or "").upper(), 100_000.0)
+                _asset = str(t.get("asset") or "")
+                _entry = float(t["entry_price"])
+                _dist = abs(_entry - float(t["stop_loss"]))
+                _lots = float(t.get("volume") or 1)
+                _r = risk_usd_of_distance(_dist, _lots, _asset, _entry)
+                if _r is None:
+                    _r = _dist * _lots * contract_value_for(_asset)
+                open_risk += _r
             except Exception:
-                _contract = 100_000.0
-            open_risk += abs(float(t["entry_price"]) - float(t["stop_loss"])) \
-                * float(t.get("volume") or 1) * _contract
+                continue
 
     now = datetime.now(timezone.utc)
     snap = PortfolioSnapshot(

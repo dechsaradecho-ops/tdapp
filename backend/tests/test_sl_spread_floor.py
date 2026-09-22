@@ -38,6 +38,7 @@ from app.models.schemas import (
     sl_cap_distance,
     spread_sl_floor,
 )
+from app.workers import portfolio_monitor
 
 
 def cfg(**over) -> AppSettings:
@@ -339,4 +340,109 @@ class TestRiskCurrencyConversion:
             pytest.approx(0.05, abs=0.005)
         assert risk_to_lot_for(500.0, 2.0, 0.002, "EURUSD") == \
             pytest.approx(0.05, abs=0.005)
+
+    # -- open-risk / pause-gate sites (portfolio_monitor, chat, monitor card) --
+    def test_open_risk_sum_for_a_usdjpy_leg_is_converted_to_usd(self):
+        """The monitor's open-risk sum feeds RiskEngine.check(); a USDJPY
+        leg's nominal ¥ product must NOT be read as dollars, or open_risk_pct
+        blows past the daily limit and raises a FAKE trading pause."""
+        from app.models.schemas import contract_value_for, risk_usd_of_distance
+        # 0.785 × 0.02 × 100k = ¥1570 nominal; naive USD read ≈ $1570,
+        # converted ≈ $10 — a 157× overstatement of a single 2% leg.
+        dist, lots, entry = 0.785, 0.02, 156.996
+        naive = dist * lots * contract_value_for("USDJPY")
+        fixed = risk_usd_of_distance(dist, lots, "USDJPY", entry)
+        assert naive == pytest.approx(1_570.0, rel=1e-6)
+        assert fixed == pytest.approx(10.0, rel=1e-2)
+        # On a $500 account the naive figure (314%) dwarfs a 2% budget; the
+        # converted figure (~2%) is on the same order as a single trade.
+        cap = 500.0
+        assert naive / cap * 100.0 > 100.0
+        assert fixed / cap * 100.0 == pytest.approx(2.0, abs=0.05)
+
+    def test_open_risk_sum_falls_back_naively_for_a_cross(self):
+        """Crosses can't derive a rate → the caller keeps the naive product
+        (fail-safe), so the change never silently zeroes real risk."""
+        from app.models.schemas import contract_value_for, risk_usd_of_distance
+        assert risk_usd_of_distance(1.0, 0.02, "GBPJPY", 189.5) is None
+        # caller fallback (same shape as the three fixed loops)
+        fallback = 1.0 * 0.02 * contract_value_for("GBPJPY")
+        assert fallback == pytest.approx(2_000.0, rel=1e-6)
+
+    def test_usd_quoted_open_risk_is_unchanged(self):
+        from app.models.schemas import contract_value_for, risk_usd_of_distance
+        # EURUSD/XAUUSD legs already in USD — identical before/after.
+        for asset, dist, lots, entry in (
+                ("EURUSD", 0.002, 0.05, 1.08),
+                ("XAUUSD", 5.0, 0.02, 2400.0)):
+            assert risk_usd_of_distance(dist, lots, asset, entry) == \
+                pytest.approx(dist * lots * contract_value_for(asset), rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 6. End-to-end: the monitor's pause verdict must not be fabricated by a
+#    non-USD-quote leg (2026-09-22 — same class as the SL-cap / heat fix).
+# ---------------------------------------------------------------------------
+def _monitor_db(rows: list[dict], capital: float = 500.0,
+                risk_pct: float = 2.0, daily_limit: float = 2.0):
+    from app.api.routes.settings import persist_settings
+    from tests.test_auto_trader import db_with_client
+
+    db = db_with_client({
+        "equity_snapshots": [
+            {"id": "eq-1", "snapshot_date": "2026-09-01", "equity": capital},
+        ],
+    })
+    assert persist_settings(db, AppSettings(
+        capital=capital, risk_per_trade_pct=risk_pct,
+        kill_daily_loss_pct=daily_limit))
+    db.rows["paper_trades"] = rows
+    return db
+
+
+def _flat_broker(equity: float = 500.0):
+    from types import SimpleNamespace
+
+    class _Broker:
+        def all_positions(self):
+            return []
+
+        def account_summary(self):
+            return SimpleNamespace(equity=equity)
+
+    return _Broker()
+
+
+def test_monitor_open_risk_does_not_fake_a_pause_for_a_usdjpy_leg():
+    """A small USDJPY leg (~$0.37 real risk = 0.07% of $500) must NOT read as
+    $58 (11.6%, over a 5% ceiling) and fabricate a trading pause."""
+    from tests.test_limit_expand import RecordingNotifier
+
+    # 5% ceiling so the real 0.07% leg + the 2% new-trade headroom (2.07%)
+    # stays well under; only the naive $58 read (11.6%) could breach it.
+    db = _monitor_db([{
+        "id": "j1", "status": "open", "asset": "USDJPY", "direction": "buy",
+        "volume": 0.02, "entry_price": 156.996, "stop_loss": 156.996 - 0.029,
+        "created_at": "2026-09-22T00:00:00+00:00",
+    }], daily_limit=5.0)
+
+    out = portfolio_monitor.monitor_once(db, _flat_broker(), RecordingNotifier())
+    assert out["breach"] is False
+    assert db._client.store.get("trading_pause") is None
+
+
+def test_monitor_open_risk_still_counts_a_genuinely_oversized_leg():
+    """Sanity: the FX-aware sum must still trip when risk is REALLY over the
+    budget (a $500 account with a $30 EURUSD leg at a 2% limit)."""
+    from tests.test_limit_expand import RecordingNotifier
+
+    db = _monitor_db([{
+        "id": "j2", "status": "open", "asset": "EURUSD", "direction": "buy",
+        "volume": 0.15, "entry_price": 1.0800, "stop_loss": 1.0780,
+        "created_at": "2026-09-22T00:00:00+00:00",
+    }])
+
+    out = portfolio_monitor.monitor_once(db, _flat_broker(), RecordingNotifier())
+    # 0.0020 × 0.15 × 100k = $30 = 6% of $500 > the 2% daily budget.
+    assert out["breach"] is True
 

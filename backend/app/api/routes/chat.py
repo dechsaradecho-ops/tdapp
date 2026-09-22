@@ -166,16 +166,24 @@ async def _build_context(db, broker=None) -> str:
     except Exception:
         _peak = max(cap, equity)
     # Open risk from REAL SL distances (same math as portfolio_monitor) —
-    # the old cap*0.005 flat estimate never moved with the actual book.
+    # the old cap*0.005 flat estimate never moved with the actual book. The
+    # raw product is in the QUOTE currency, so convert to USD: a USDJPY leg
+    # would otherwise read as ~157× its real dollar risk (same class as the
+    # 2026-09-22 SL-cap fix) and the AI would report a phantom pause.
     _open_risk = 0.0
     try:
+        from app.models.schemas import (contract_value_for as _cvf,
+                                        risk_usd_of_distance as _rusd)
         for _p in open_pos:
             if _p.stop_loss is not None and _p.entry_price:
-                from app.services.execution import PaperBrokerPnl as _Pnl
-                _contract = _Pnl.CONTRACT_SIZES.get(
-                    str(_p.asset or "").upper(), 100_000.0)
-                _open_risk += (abs(float(_p.entry_price) - float(_p.stop_loss))
-                               * float(_p.volume or 0) * _contract)
+                _asset = str(_p.asset or "")
+                _entry = float(_p.entry_price)
+                _dist = abs(_entry - float(_p.stop_loss))
+                _lots = float(_p.volume or 0)
+                _r = _rusd(_dist, _lots, _asset, _entry)
+                if _r is None:
+                    _r = _dist * _lots * _cvf(_asset)
+                _open_risk += _r
     except Exception:
         _open_risk = 0.0
     risk = risk_engine_for_settings(s).check(PortfolioSnapshot(
