@@ -295,21 +295,50 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     # defaults and kept alerting 2% after the user set daily loss to 5%.
     status = risk_engine_for_settings(s).check(snap)
 
-    if status.trading_paused:
+    # ---- Shared-definition bridge (prod 2026-09-22) -----------------------
+    # ``status`` uses PortfolioSnapshot (this worker's own live broker book),
+    # but the position guard's Emergency Exit uses ``execution.evaluate_kill``
+    # (equity_snapshots). On 2026-09-22 those two definitions disagreed: the
+    # monitor reported "no breach" while the guard was "engaged", so no prompt
+    # was ever created and the guard closed 6 positions unprompted. Ask the
+    # SAME evaluation the guard uses; if it is engaged, treat it as a breach
+    # here too so the prompt is raised by the monitor as well (the guard now
+    # also raises one itself — either path guarantees the owner is asked
+    # first, and the request is deduped so the owner never sees two).
+    kill_breach = False
+    kill_triggers: list[str] = []
+    try:
+        ks = execution.evaluate_kill(db, s)
+        kill_breach = bool(getattr(ks, "engaged", False))
+        kill_triggers = list(getattr(ks, "triggers", []) or [])
+    except Exception as exc:
+        log.debug("monitor kill bridge failed: %s", exc)
+
+    if status.trading_paused or kill_breach:
+        # The message the pause + audit quote: when the breach came ONLY from
+        # the shared kill-switch evaluation (this worker's own snapshot was
+        # under the limit) say so, instead of quoting a drawdown that does not
+        # look like a breach in the monitor banner.
+        if status.trading_paused:
+            pause_reason = f"risk engine: {status.message[:180]}"
+            alert_text = ("TRADING PAUSED — MANUAL REVIEW REQUIRED. "
+                          "ลดขนาดโพซิชัน/ปิดบางส่วน.")
+        else:
+            pause_reason = ("kill switch: "
+                            + ("; ".join(kill_triggers)[:180] or "engaged"))
+            alert_text = ("TRADING PAUSED — KILL-SWITCH LIMIT BREACHED. "
+                          "รอยืนยันการขยายลิมิตจากเจ้าของ.")
         # audit row ผ่าน limit_expand.write_audit (ไม่กลืน error — เดิม
         # db.insert ลด error เหลือ debug log ทำให้ audit หายเงียบ ๆ)
         limit_expand.write_audit(db, "limit_breach", status.model_dump(),
                                  user_id)
         # 1) engage the SAME pause switch the execution gate reads — without
         # this the breach was cosmetic and orders kept firing.
-        pause = execution.set_pause(
-            db, True,
-            f"risk engine: {status.message[:180]}")
+        pause = execution.set_pause(db, True, pause_reason)
         # 2) critical alert → NotificationService pushes to LINE immediately
         # (risk_warning ∈ CRITICAL_TYPES) and queues a row for the log.
         alert = build_risk_alert(
-            status.current_drawdown_pct, status.max_drawdown_pct,
-            "TRADING PAUSED — MANUAL REVIEW REQUIRED. ลดขนาดโพซิชัน/ปิดบางส่วน.",
+            status.current_drawdown_pct, status.max_drawdown_pct, alert_text,
         )
         _dispatch_notify(notifier, user_id, "risk_warning", alert)
         # 3) NEVER widen a risk limit silently. A breach only creates a PENDING
@@ -324,9 +353,9 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         except Exception as exc:
             log.error("limit expand request failed: %s", exc)
         log.warning("portfolio monitor: limit breach → trading PAUSED (%s)",
-                    status.message[:200])
+                    pause_reason[:200])
         return {"checked": 1, "breach": True, "paused": pause.paused,
-                "equity": round(equity, 2)}
+                "equity": round(equity, 2), "kill_bridge": kill_breach}
 
     # No breach → the account is still trading. Warn EARLY when the drawdown
     # has eaten most of the kill-switch budget ("ถ้ากำลังจะเกิน Max Drawdown

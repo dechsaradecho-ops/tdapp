@@ -613,14 +613,23 @@ async def guard_once(db, broker, notifier: NotificationService,
                 "sl_assets": "", "closed_assets": "", "skip_assets": ""}
 
     # Settings once per cycle (breakeven/trailing/partial knobs). Falls back
-    # to schema defaults when the DB is unavailable.
+    # to schema defaults when the DB is unavailable — EXCEPT that safety
+    # decisions need to KNOW whether the read really succeeded. ``settings_ok``
+    # records that, and the emergency evaluation refuses to quote a breach
+    # against a guessed limit when it is False (prod 2026-09-22: a swallowed
+    # settings read gave the kill switch the default 10% instead of 15% and
+    # closed 6 positions at 13.25% drawdown — see execution.evaluate_kill).
     s = settings
+    settings_ok = settings is not None
     if s is None:
-        try:
-            s = execution.get_app_settings(db)
-        except Exception:
+        loaded = execution.settings_or_none(db)
+        if loaded is not None:
+            s = loaded
+            settings_ok = True
+        else:
             from app.models.schemas import AppSettings
             s = AppSettings()
+            settings_ok = False
 
     assets = sorted({str(p.asset or "").upper() for p in positions})
 
@@ -653,7 +662,7 @@ async def guard_once(db, broker, notifier: NotificationService,
     # monitor banner, can never drift apart.
     if positions:
         try:
-            ks = execution.evaluate_kill(db, s)
+            ks = execution.evaluate_kill(db, s, settings_confirmed=settings_ok)
             kill_engaged = bool(getattr(ks, "engaged", False))
             kill_triggers = list(getattr(ks, "triggers", []) or [])
         except Exception as exc:
@@ -681,9 +690,16 @@ async def guard_once(db, broker, notifier: NotificationService,
     # closes as usual ("ขยายแล้วยังไม่พอ = ปิดไม้ทันที").
     hold_row = None
     hold_note = ""
+    # Did a request already exist this cycle (held, or lapsed-and-settled)? If
+    # so the owner HAS been asked and their silence has been answered by the
+    # timeout policy — the guard must not re-arm a fresh prompt, it closes as
+    # the owner decided ("ขยายแล้วยังไม่พอ = ปิดไม้ทันที"). A fresh prompt is
+    # only raised when NO request was ever on the table (the 2026-09-22 gap).
+    request_known = False
     if kill_engaged:
         hold_row = limit_expand.emergency_hold(db, s)
         if hold_row is not None:
+            request_known = True
             kill_engaged = False
             emergency_held = len(positions)
             log.warning(
@@ -707,18 +723,23 @@ async def guard_once(db, broker, notifier: NotificationService,
                 stale = None
             settle = None
             if stale is not None:
+                request_known = True
                 try:
                     settle, _pushed = limit_expand.settle_lapsed_window(
                         db, s, notifier)
                 except Exception as exc:
                     log.error("auto-expand of the lapsed window failed: %s", exc)
                 if settle is not None and settle.settled:
+                    reloaded = execution.settings_or_none(db)
+                    if reloaded is not None:
+                        s = reloaded
+                        settings_ok = True
+                    else:
+                        log.debug("settings reload after auto-expand failed — "
+                                  "keeping prior limits")
                     try:
-                        s = execution.get_app_settings(db)
-                    except Exception as exc:
-                        log.debug("settings reload after auto-expand: %s", exc)
-                    try:
-                        ks = execution.evaluate_kill(db, s)
+                        ks = execution.evaluate_kill(
+                            db, s, settings_confirmed=settings_ok)
                         kill_engaged = bool(getattr(ks, "engaged", False))
                         kill_triggers = list(getattr(ks, "triggers", []) or [])
                     except Exception as exc:
@@ -788,6 +809,70 @@ async def guard_once(db, broker, notifier: NotificationService,
                     log.warning(
                         "emergency exit resumed: request %s unanswered for "
                         "%.0f min (settle=%s)", stale.get("id"), age, kind)
+
+    # ---- Confirmation gate: NEVER close without first asking ---------------
+    # Owner rule (2026-09-22): "ต้องแจ้งเตือนแล้วรอ user confirm ก่อนตามระบบ
+    # ก่อนหน้านี้". The prompt used to be created ONLY by the monitor's breach
+    # branch, which uses a DIFFERENT drawdown definition (PortfolioSnapshot /
+    # RiskEngine) than this guard (evaluate_kill / equity_snapshots). On
+    # 2026-09-22 those two disagreed — the monitor saw 13.25% < 15% ("no
+    # breach") while the guard saw 13.25% > 10% (a swallowed settings read had
+    # left it with the DEFAULT limit) — so no request ever existed,
+    # ``emergency_hold`` returned None, and the guard closed 6 positions with
+    # no prompt. The guard is now its OWN entry point into the prompt flow: if
+    # it is engaged and nothing is awaiting an answer, it ASKS FIRST (creates
+    # the request + pushes Approve/Reject) and DEFERS this cycle. It closes
+    # only after the owner's confirmation window resolves (approve/reject or
+    # the timeout policy above) — same as when the monitor raised the request.
+    # When a request ALREADY existed this cycle (``request_known``) the owner
+    # has been asked: the timeout policy owns the outcome, so no fresh prompt
+    # is raised and the guard closes exactly as before.
+    if kill_engaged and not request_known:
+        if not settings_ok:
+            # Limits could not be read, so we cannot QUOTE a breach at all —
+            # raise no prompt (it would quote the default 10%) and defer: the
+            # next cycle retries the settings read. This is the fail-safe
+            # response to 2026-09-22, where a swallowed read made the guard
+            # close against the default 10% instead of the configured 15%.
+            kill_engaged = False
+            emergency_held = len(positions)
+            log.error(
+                "emergency exit HELD for %d position(s): kill switch could "
+                "not read the owner's settings — refusing to act on guessed "
+                "limits (triggers: %s)",
+                emergency_held, "; ".join(kill_triggers)[:120] or "engaged")
+        else:
+            try:
+                created = limit_expand.request_and_notify(
+                    db, s, notifier, source="guard")
+            except Exception as exc:
+                created = {"notified": False, "reason": "error"}
+                log.error("guard could not raise the limit-expand prompt: %s",
+                          exc)
+            # Only defer when a request is genuinely on the table AND it can be
+            # dated: just created (fresh), or already pending with a readable
+            # window. An UNDATEABLE row must not read as "brand new" (owner
+            # decision: an age we cannot measure must not stall the exit —
+            # see test_an_undateable_request_means_close_not_hold). Everything
+            # else means the owner's silence was already answered and the close
+            # proceeds: ``cooldown``/``auto_applied``/``auto_capped``/
+            # ``no_breach`` from the timeout policy, and ``insert_failed`` when
+            # the request table itself is broken (fail-safe is CLOSE there).
+            reason = (created or {}).get("reason")
+            row = (created or {}).get("request")
+            datable = row is not None and (
+                row.get("requested_at") or row.get("created_at"))
+            still_pending = (bool((created or {}).get("requested")) and datable) \
+                or (reason == "already_pending" and datable)
+            if still_pending:
+                kill_engaged = False
+                emergency_held = len(positions)
+                log.warning(
+                    "emergency exit HELD for %d position(s): kill switch is "
+                    "engaged (%s) but no confirmation was outstanding — raised "
+                    "a fresh request (%s) and will wait for the owner",
+                    emergency_held, "; ".join(kill_triggers)[:120] or "engaged",
+                    reason)
 
     # ---- Feed phase: live marks + snapshots + news IN PARALLEL -----------
     # These are independent fetches — running them one after another cost

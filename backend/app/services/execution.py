@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
-from app.api.routes.settings import get_app_settings
+from app.api.routes.settings import get_app_settings, try_load_settings
 from app.integrations.brokers import OrderRequest
 from app.integrations import quotes
 from app.models.schemas import (
@@ -55,6 +55,19 @@ log = logging.getLogger(__name__)
 
 # Fixed demo user until multi-user auth lands (same id /approve already used).
 DEFAULT_USER = "demo"
+
+
+def settings_or_none(db) -> Optional[AppSettings]:
+    """Strict settings read for SAFETY paths: None when the read FAILED.
+
+    Safety callers (the kill switch) must be able to tell "the owner's row
+    says 15%" apart from "I could not read the row at all". ``get_app_settings``
+    collapses both into schema defaults (drawdown 10%), which is how the guard
+    emergency-closed 6 positions at 13.25% against a 10% default on
+    2026-09-22. Returns the AppSettings when a row was read (or legitimately
+    absent → schema defaults), and None only on a genuine read failure.
+    """
+    return try_load_settings(db)
 
 # Pending signals older than this leave the queue (marked 'expired') no matter
 # which order_mode the platform is in — otherwise the signals page shows
@@ -652,7 +665,8 @@ def evaluate_kill(db, s: AppSettings,
                   broker_connected: bool = True,
                   market_data_ok: bool = True,
                   ai_provider_ok: bool = True,
-                  execution_ok: bool = True) -> KillSwitchStatus:
+                  execution_ok: bool = True,
+                  settings_confirmed: bool = True) -> KillSwitchStatus:
     """One kill-switch path for the whole platform (fail-safe engaged).
 
     Wraps _loss_pcts + equity_drawdown_pct + KillSwitchEngine.evaluate so the
@@ -663,8 +677,23 @@ def evaluate_kill(db, s: AppSettings,
 
     Infra flags default True (gate/guard/monitor have no live health probe);
     the /kill-switch endpoint passes the real broker_connected state.
+
+    ``settings_confirmed`` (prod 2026-09-22): pass False when the caller could
+    NOT actually read the owner's settings row and is therefore holding a
+    schema-defaults object. Comparing a real drawdown against the *default*
+    10% limit (instead of the owner's configured 15%) is exactly how the
+    Emergency Exit closed 6 positions with no prompt. When False we refuse to
+    QUOTE a breach — the result is not engaged-by-numbers but a fail-safe
+    error status so the guard DEFERS instead of closing on a guessed limit.
     """
     try:
+        if not settings_confirmed:
+            return KillSwitchStatus(
+                engaged=True,
+                triggers=["kill-switch settings unreadable — cannot confirm "
+                          "the configured limits"],
+                message="kill switch cannot confirm limits (settings "
+                        "unreadable) — deferring, not closing")
         capital = float(getattr(s, "capital", 0) or 0)
         daily, weekly, monthly, dd = kill_metrics(db, capital)
         return KillSwitchEngine(

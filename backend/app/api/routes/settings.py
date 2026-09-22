@@ -60,17 +60,41 @@ def _row_to_settings(row: Optional[dict[str, Any]]) -> AppSettings:
     return AppSettings(**clean)
 
 
-def _load_settings(db) -> AppSettings:
+def try_load_settings(db) -> Optional[AppSettings]:
+    """Strict settings loader that DISTINGUISHES 'no row' from 'read FAILED'.
+
+    Returns:
+      * ``AppSettings()`` (schema defaults) when the DB is reachable but the
+        single settings row simply does not exist yet — that is a legitimate
+        first-run state.
+      * ``None`` when the read itself FAILED (client missing / query raised) —
+        the caller must NOT substitute defaults for safety-critical limits.
+
+    WHY (prod 2026-09-22 02:12 UTC): ``_load_settings`` used to fall back to
+    ``AppSettings()`` on ANY error, and ``AppSettings.max_drawdown_pct``
+    defaults to 10.0. A silently-swallowed settings read therefore fed the
+    position guard a kill-switch drawdown limit of 10 instead of the owner's
+    configured 15, and the Emergency Exit closed 6 positions at 13.25%
+    drawdown ("Drawdown 13.25% > 10%") with no confirmation prompt. A safety
+    gate must never guess a limit it could not actually read.
+    """
     if not db or not db.available:
-        return AppSettings()
+        return None
     try:
         client = db._client  # single row by primary key — bypass order-by requirement
         resp = client.table(SETTINGS_TABLE).select("*").eq("id", 1).limit(1).execute()
         rows = list(resp.data or [])
         return _row_to_settings(rows[0] if rows else None)
     except Exception as exc:
-        log.error("load app_settings failed: %s", exc)
-        return AppSettings()
+        log.error("load app_settings failed (strict): %s", exc)
+        return None
+
+
+def _load_settings(db) -> AppSettings:
+    loaded = try_load_settings(db)
+    # Non-safety callers (settings page render, AI overrides) keep the lenient
+    # defaults fallback so the UI still renders when the DB hiccups.
+    return loaded if loaded is not None else AppSettings()
 
 
 def get_app_settings(db) -> AppSettings:
