@@ -16,7 +16,7 @@
 // installs a new service worker when this file's BYTES change; if the version
 // string is unchanged the old SW keeps controlling the page forever and the
 // phone serves a stale bundle (symptom: "มือถือยังไม่เปลี่ยน").
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const SHELL_CACHE = `tdapp-shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `tdapp-assets-${CACHE_VERSION}`;
 

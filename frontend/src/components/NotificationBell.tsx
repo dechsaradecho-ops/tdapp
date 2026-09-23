@@ -184,7 +184,14 @@ export default function NotificationBell() {
     };
     document.addEventListener("mousedown", close);
     document.addEventListener("touchstart", close, { passive: true });
-    const onScrollOrResize = () => setOpen(false);
+    // ปิดเมื่อ "หน้าเว็บ" เลื่อน/ย่อ — แต่ต้องไม่ปิดเมื่อเลื่อน "ในลิสต์เอง"
+    // (capture-phase scroll ยิงทุก scroll ในเอกสาร รวมถึงในลิสต์ → มือถือ
+    // แตะลากในลิสต์แล้ว popover ปิดทันที = "scroll ไม่ได้")
+    const onScrollOrResize = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && popRef.current?.contains(t)) return; // เลื่อนในลิสต์ → ปล่อยผ่าน
+      setOpen(false);
+    };
     window.addEventListener("scroll", onScrollOrResize, true);
     window.addEventListener("resize", onScrollOrResize);
     return () => {
@@ -252,11 +259,11 @@ export default function NotificationBell() {
           style={{
             position: "fixed", top: pos.top, left: pos.left,
             width: "min(380px, calc(100vw - 16px))",
-            background: "rgba(10,10,12,.72)",
-            backdropFilter: "blur(22px) saturate(150%)",
-            WebkitBackdropFilter: "blur(22px) saturate(150%)",
-            border: "1px solid rgba(255,255,255,.12)",
-            boxShadow: "0 18px 48px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.10)",
+            background: "rgba(12,12,16,.42)",
+            backdropFilter: "blur(30px) saturate(180%)",
+            WebkitBackdropFilter: "blur(30px) saturate(180%)",
+            border: "1px solid rgba(255,255,255,.14)",
+            boxShadow: "0 18px 48px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.12)",
           }}
           className="z-50 animate-pop rounded-2xl overflow-hidden"
         >
@@ -285,6 +292,7 @@ export default function NotificationBell() {
             ref={listRef}
             onScroll={onListScroll}
             data-testid="notification-list"
+            style={{ touchAction: "pan-y", WebkitOverflowScrolling: "touch" }}
             className="max-h-[min(60vh,420px)] overflow-y-auto overscroll-contain"
           >
             {err && items.length === 0 && (
