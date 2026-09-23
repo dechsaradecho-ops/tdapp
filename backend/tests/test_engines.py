@@ -582,10 +582,17 @@ class TestRiskEngine:
         assert status.trading_paused is True
 
     def test_open_risk_guard(self):
-        # open risk 1.6% + 0.5% new trade > 2% daily limit
+        # open risk 1.6% + 0.5% new trade > 2% daily limit → new trade does
+        # NOT fit, but trading is NOT paused (2026-09-23: fitting is an
+        # order-blocking question enforced by execution Gate 6, not an
+        # emergency — a booked state must never need MANUAL REVIEW).
         status = self.engine.check(make_snap(open_risk=1_600))
-        assert status.trading_paused is True
-        assert "Open risk" in status.message
+        assert status.trading_paused is False
+        fits, reason = self.engine.new_trade_fits(make_snap(open_risk=1_600))
+        assert fits is False
+        assert "Open risk" in reason
+        fits_ok, _ = self.engine.new_trade_fits(make_snap())
+        assert fits_ok is True
 
     def test_pause_resume_lifecycle(self):
         assert self.engine.is_paused is False

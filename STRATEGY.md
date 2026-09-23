@@ -252,7 +252,7 @@ Default (% ของ equity): `risk_per_trade` **0.5** · `max_daily_loss` **2.0
 - `weekly_loss_pct >= max_weekly_loss_pct` (หารด้วย `starting_capital`)
 - `monthly_loss_pct >= max_monthly_loss_pct` (หารด้วย `starting_capital`)
 - `drawdown_pct >= max_drawdown_pct` (หารด้วย `peak_equity`)
-- **open-risk guard**: `open_risk_pct + risk_per_trade_pct > max_daily_loss_pct` (`open_risk` หารด้วย `current_equity`)
+- **open-risk fit** (`new_trade_fits`, บล็อกไม้ใหม่อย่างเดียว **ไม่ pause**): `open_risk_pct + risk_per_trade_pct > max_daily_loss_pct` → ไม้ใหม่ถูกบล็อกที่ execution Gate 6 (heat) — สถานะมีไม้เปิดอยู่เป็นเรื่องปกติ ไม่ใช่ emergency (แก้ 2026-09-23: เดิม pause ทั้งระบบจนต้อง resume มือ)
 
 ละเมิด → `pause()` + `"TRADING PAUSED — MANUAL REVIEW REQUIRED"`
 

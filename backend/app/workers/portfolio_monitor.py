@@ -324,7 +324,17 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     )
     # Limits follow the user's Settings row — RiskEngine() alone reads ENV
     # defaults and kept alerting 2% after the user set daily loss to 5%.
-    status = risk_engine_for_settings(s).check(snap)
+    _engine = risk_engine_for_settings(s)
+    status = _engine.check(snap)
+    # Order-blocking visibility (NOT a pause): when the booked open risk
+    # leaves no room for one more full-risk trade, new orders are refused
+    # at execution Gate 6 — the monitor reports it so the card can explain
+    # WHY no new orders fire without claiming an emergency.
+    _fits_fn = getattr(_engine, "new_trade_fits", None)
+    if callable(_fits_fn):
+        _fits, _fits_reason = _fits_fn(snap)
+    else:
+        _fits, _fits_reason = True, "New trade fits inside the daily budget."
 
     # ---- Shared-definition bridge (prod 2026-09-22) -----------------------
     # ``status`` uses PortfolioSnapshot (this worker's own live broker book),
@@ -386,7 +396,9 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         log.warning("portfolio monitor: limit breach → trading PAUSED (%s)",
                     pause_reason[:200])
         return {"checked": 1, "breach": True, "paused": pause.paused,
-                "equity": round(equity, 2), "kill_bridge": kill_breach}
+                "equity": round(equity, 2), "kill_bridge": kill_breach,
+                "new_trade_blocked": not _fits,
+                "new_trade_block_reason": _fits_reason}
 
     # No breach → the account is still trading. Warn EARLY when the drawdown
     # has eaten most of the kill-switch budget ("ถ้ากำลังจะเกิน Max Drawdown
@@ -400,4 +412,5 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
         open_risk_pct=status.open_risk_pct, s=s)
 
     return {"checked": 1, "breach": False, "equity": round(equity, 2),
-            "drawdown_warning": warned}
+            "drawdown_warning": warned, "new_trade_blocked": not _fits,
+            "new_trade_block_reason": _fits_reason}

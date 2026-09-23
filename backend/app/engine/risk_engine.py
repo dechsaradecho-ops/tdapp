@@ -144,12 +144,16 @@ class RiskEngine:
         if snap.drawdown_pct >= self.config.max_drawdown_pct:
             breaches.append(f"Drawdown {snap.drawdown_pct:.2f}% ≥ limit {self.config.max_drawdown_pct:.2f}%")
 
-        # Guard: a new trade's risk must fit inside the remaining daily budget.
-        if snap.open_risk_pct + self.config.risk_per_trade_pct > self.config.max_daily_loss_pct:
-            breaches.append(
-                f"Open risk {snap.open_risk_pct:.2f}% + new trade risk {self.config.risk_per_trade_pct:.2f}% "
-                f"would exceed daily loss limit {self.config.max_daily_loss_pct:.2f}%"
-            )
+        # NOTE (2026-09-23): the open-risk fit check used to be a 5th pause
+        # breach here. That was wrong: with risk_per_trade_pct == kill_daily
+        # (2.0 == 2.0, the moderate default) ANY open risk > 0 paused ALL
+        # trading with "MANUAL REVIEW REQUIRED" — a normal booked state
+        # (holding positions) became an emergency needing a human resume.
+        # Fitting a new trade is an ORDER-BLOCKING question, not a pause
+        # question: execution Gate 6 (heat) already refuses the new order
+        # while open positions stay managed. See new_trade_fits() below.
+        # check() therefore pauses ONLY on realized damage (daily / weekly /
+        # monthly loss, drawdown).
 
         paused = bool(breaches)
         if paused:
@@ -198,6 +202,20 @@ class RiskEngine:
     def pause(self, until: Optional[datetime] = None) -> None:
         self._paused_until = until or datetime.max.replace(tzinfo=timezone.utc)
 
+    def new_trade_fits(self, snap: PortfolioSnapshot) -> tuple[bool, str]:
+        """Would one more full-risk trade fit inside the daily budget?
+
+        Same math the old pause breach used — but ORDER-BLOCKING only, never
+        pausing. Execution Gate 6 (heat) enforces this per order; the monitor
+        surfaces the reason on the card. Returns (fits, reason).
+        """
+        if snap.open_risk_pct + self.config.risk_per_trade_pct > self.config.max_daily_loss_pct:
+            return (False,
+                    f"Open risk {snap.open_risk_pct:.2f}% + new trade risk "
+                    f"{self.config.risk_per_trade_pct:.2f}% would exceed daily "
+                    f"loss limit {self.config.max_daily_loss_pct:.2f}% — "
+                    f"ไม้ใหม่ถูกบล็อกจนกว่าจะปิดบางส่วน (ไม่ pause)")
+        return (True, "New trade fits inside the daily budget.")
     def resume(self) -> None:
         self._paused_until = None
 

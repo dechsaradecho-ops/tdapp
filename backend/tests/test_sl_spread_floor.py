@@ -432,8 +432,10 @@ def test_monitor_open_risk_does_not_fake_a_pause_for_a_usdjpy_leg():
 
 
 def test_monitor_open_risk_still_counts_a_genuinely_oversized_leg():
-    """Sanity: the FX-aware sum must still trip when risk is REALLY over the
-    budget (a $500 account with a $30 EURUSD leg at a 2% limit)."""
+    """Sanity: the FX-aware sum must still FLAG when risk is REALLY over the
+    budget (a $500 account with a $30 EURUSD leg at a 2% limit) — but as an
+    order block, NOT a pause (2026-09-23: fitting blocks new orders at
+    execution Gate 6; only realized damage pauses)."""
     from tests.test_limit_expand import RecordingNotifier
 
     db = _monitor_db([{
@@ -444,7 +446,10 @@ def test_monitor_open_risk_still_counts_a_genuinely_oversized_leg():
 
     out = portfolio_monitor.monitor_once(db, _flat_broker(), RecordingNotifier())
     # 0.0020 × 0.15 × 100k = $30 = 6% of $500 > the 2% daily budget.
-    assert out["breach"] is True
+    assert out["breach"] is False
+    assert out["new_trade_blocked"] is True
+    assert "Open risk" in out["new_trade_block_reason"]
+    assert db._client.store.get("trading_pause") is None
 
 
 def test_monitor_open_risk_ignores_a_zero_volume_row():
@@ -488,6 +493,8 @@ def test_monitor_open_risk_zero_volume_does_not_break_a_real_breach():
     ])
 
     out = portfolio_monitor.monitor_once(db, _flat_broker(), RecordingNotifier())
-    # 0.0020 × 0.15 × 100k = $30 = 6% of $500 > the 2% daily budget.
-    assert out["breach"] is True
+    # 0.0020 × 0.15 × 100k = $30 = 6% of $500 > the 2% daily budget → new
+    # orders blocked, no pause (2026-09-23).
+    assert out["breach"] is False
+    assert out["new_trade_blocked"] is True
 
