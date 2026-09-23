@@ -2441,7 +2441,12 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                     _t_asset = str(_t.get("asset") or "")
                     _t_entry = float(_t["entry_price"])
                     _t_dist = abs(_t_entry - float(_t["stop_loss"]))
-                    _t_lots = float(_t.get("volume") or 1)
+                    # Zero volume = zero risk. `volume or 1` booked a phantom
+                    # FULL lot on a fully-closed row that still read as open
+                    # (prod 2026-09-23: +437 USD phantom risk → false pause).
+                    _t_lots = float(_t.get("volume") or 0)
+                    if _t_lots <= 0:
+                        continue
                     _t_r = risk_usd_of_distance(_t_dist, _t_lots, _t_asset,
                                                 _t_entry)
                     if _t_r is None:

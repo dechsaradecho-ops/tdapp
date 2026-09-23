@@ -446,3 +446,48 @@ def test_monitor_open_risk_still_counts_a_genuinely_oversized_leg():
     # 0.0020 × 0.15 × 100k = $30 = 6% of $500 > the 2% daily budget.
     assert out["breach"] is True
 
+
+def test_monitor_open_risk_ignores_a_zero_volume_row():
+    """A fully-closed row can linger as status=open with volume=0 (the guard
+    zeroes the size before flipping the status). `volume or 1` booked a
+    phantom FULL lot on it — prod 2026-09-23: a dead AUDNZD leg (vol 0.0,
+    dist 0.00437) added 0.00437 × 1 × 100k = $437 of phantom risk, pushing
+    open_risk to 507.16 (111.32% of equity) and raising a FALSE pause."""
+    from tests.test_limit_expand import RecordingNotifier
+
+    db = _monitor_db([
+        # the dead leg: volume 0 but still status=open
+        {"id": "z1", "status": "open", "asset": "AUDNZD", "direction": "buy",
+         "volume": 0.0, "entry_price": 1.23968, "stop_loss": 1.24405,
+         "created_at": "2026-09-22T00:00:00+00:00"},
+        # a normal small leg so the book is not empty
+        {"id": "z2", "status": "open", "asset": "EURUSD", "direction": "buy",
+         "volume": 0.02, "entry_price": 1.14365, "stop_loss": 1.13891,
+         "created_at": "2026-09-22T00:00:00+00:00"},
+    ], daily_limit=5.0)
+
+    out = portfolio_monitor.monitor_once(db, _flat_broker(), RecordingNotifier())
+    # Real risk ≈ $9.48 (1.9%) + 2% headroom = 3.9% < 5% → no pause.
+    # The phantom $437 (87%) would have breached it.
+    assert out["breach"] is False
+    assert db._client.store.get("trading_pause") is None
+
+
+def test_monitor_open_risk_zero_volume_does_not_break_a_real_breach():
+    """The zero-volume skip must not mask a genuine breach: a real oversized
+    leg still trips even when a dead row sits beside it."""
+    from tests.test_limit_expand import RecordingNotifier
+
+    db = _monitor_db([
+        {"id": "z3", "status": "open", "asset": "AUDNZD", "direction": "buy",
+         "volume": 0.0, "entry_price": 1.23968, "stop_loss": 1.24405,
+         "created_at": "2026-09-22T00:00:00+00:00"},
+        {"id": "z4", "status": "open", "asset": "EURUSD", "direction": "buy",
+         "volume": 0.15, "entry_price": 1.0800, "stop_loss": 1.0780,
+         "created_at": "2026-09-22T00:00:00+00:00"},
+    ])
+
+    out = portfolio_monitor.monitor_once(db, _flat_broker(), RecordingNotifier())
+    # 0.0020 × 0.15 × 100k = $30 = 6% of $500 > the 2% daily budget.
+    assert out["breach"] is True
+

@@ -291,7 +291,15 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
                 _asset = str(t.get("asset") or "")
                 _entry = float(t["entry_price"])
                 _dist = abs(_entry - float(t["stop_loss"]))
-                _lots = float(t.get("volume") or 1)
+                # A fully-closed row can linger as status=open with volume=0
+                # (the position guard zeroes it before flipping the status).
+                # `volume or 1` turned that 0 into a FULL 1.0 lot, booking
+                # ~437 USD of phantom risk on a dead AUDNZD leg and raising a
+                # FALSE "TRADING PAUSED" (prod 2026-09-23: open_risk 507.16
+                # = 70.16 real + 437.00 phantom). Zero volume = zero risk.
+                _lots = float(t.get("volume") or 0)
+                if _lots <= 0:
+                    continue
                 _r = risk_usd_of_distance(_dist, _lots, _asset, _entry)
                 if _r is None:
                     _r = _dist * _lots * contract_value_for(_asset)
