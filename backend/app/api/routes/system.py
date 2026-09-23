@@ -644,6 +644,80 @@ async def news_logs(request: Request, limit: int = 100, offset: int = 0,
     return out
 
 
+# ---------------------------------------------------------------------------
+# Notification feed — the bell in the top-right corner of the dashboard
+# ---------------------------------------------------------------------------
+# Reads the SAME `notifications` table the LINE/Web-Push transports write to
+# (migration 001 + 020 + 046). One row = one alert that was queued/sent.
+# The bell shows a compact list; tapping a row expands the full message.
+# Read-only, never raises — a missing table just yields an empty feed.
+@router.get("/notifications")
+async def notifications_feed(request: Request, limit: int = 50,
+                             offset: int = 0, type: str = "all") -> dict:
+    """Recent notification rows for the bell popover.
+
+    `limit` capped at 200 per request; `offset` pages older rows. `type`
+    filters server-side (a notification_type value, or "all"). `unread`
+    counts rows created in the last 24h — the table has no read flag, so
+    "unread" is a recency proxy the UI clears when the popover is opened.
+    """
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        out["items"] = []
+        out["total"] = 0
+        out["unread"] = 0
+        return out
+
+    page_size = max(1, min(limit, 200))
+    page_offset = max(0, offset)
+    filters: dict[str, Any] = {}
+    if type and type != "all":
+        filters["type"] = type
+    rows = db.select("notifications", filters=filters or None,
+                     order="created_at", desc=True, limit=page_size,
+                     offset=page_offset)
+    items = [
+        {
+            "id": r.get("id"),
+            "type": r.get("type"),
+            "message": r.get("message"),
+            "status": r.get("status"),
+            "channel": r.get("channel"),
+            "created_at": r.get("created_at"),
+            "sent_at": r.get("sent_at"),
+            "error": r.get("error"),
+        }
+        for r in rows
+    ]
+    try:
+        total = db.count("notifications", filters=filters or None)
+        total_n = total if total is not None else len(rows)
+    except Exception:
+        total_n = len(rows)
+    # unread = created within the last 24h (no read flag in the schema)
+    unread = 0
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=24)).isoformat()
+        n = db.count("notifications", filters=filters or None,
+                     created_after=cutoff)
+        unread = n if n is not None else 0
+    except Exception:
+        unread = 0
+    out["items"] = items
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    out["total"] = total_n
+    out["unread"] = unread
+    out["has_more"] = (page_offset + len(rows)) < (total_n or 0)
+    out["verdict"] = "ok"
+    return out
+
+
 @router.post("/quote-test")
 async def quote_test(request: Request) -> dict:
     """Force-fetch live prices for ALL assets (bypasses the 30s cache).

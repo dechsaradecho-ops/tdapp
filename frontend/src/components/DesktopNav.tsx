@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import NotificationBell from "./NotificationBell";
+
 /** Desktop navigation (md+) — floating "Liquid Glass" pill navbar.
  * อ้างอิงสไตล์ codefronts "Tailwind Liquid Glass Navbar":
  * backdrop-blur 20px + bg-white/10 + ring white/20 + rounded-full
@@ -86,6 +88,8 @@ export default function DesktopNav() {
             );
           })}
         </div>
+        {/* กระดิ่งแจ้งเตือน — ชิดขวาสุดของ pill */}
+        <NotificationBell />
         {/* ชิดขวา — ไม่ต้องมี spacer สมดุลซ้าย */}
       </nav>
     </header>

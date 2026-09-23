@@ -1415,6 +1415,35 @@ export interface PushVerifyResult {
   message: string;
 }
 
+// ---------- Notification feed — the bell in the top-right corner ----------
+// ดู backend/app/api/routes/system.py (GET /api/system/notifications)
+// อ่านจากตาราง `notifications` เดียวกับที่ LINE/Web-Push เขียน (migration 001/020/046)
+
+/** One row of GET /api/system/notifications. */
+export interface NotificationItem {
+  id: string;
+  type: string;              // notification_type enum (trade_opened, sl_moved, ...)
+  message: string;           // ข้อความเต็ม (มี emoji นำหน้าได้)
+  status: string;            // pending | sent | failed | skipped
+  channel: string;           // line | web_push | both | in_app | email
+  created_at: string;
+  sent_at?: string | null;
+  error?: string | null;
+}
+
+/** Response of GET /api/system/notifications. */
+export interface NotificationsResponse {
+  client: string;
+  verdict: string;           // "ok" | "fail"
+  items: NotificationItem[];
+  total: number;
+  unread: number;            // สร้างภายใน 24 ชม. (ตารางไม่มี read flag)
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  error?: string;
+}
+
 /** One pipeline step of POST /api/line/simulate. */
 export interface SimStep {
   step: string;

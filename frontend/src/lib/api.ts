@@ -25,6 +25,7 @@ import {
   PnlBreakdown,
   NewsLogsResponse,
   NewsRisk,
+  NotificationsResponse,
   OrderPlan,
   PaperTrading,
   PauseStatus,
@@ -354,6 +355,12 @@ export const api = {
   pushTest: () => post<PushTestResult>("/api/push/test", {}),
   pushVerify: (endpoint: string) =>
     post<PushVerifyResult>("/api/push/verify", { endpoint }),
+
+  // ---------- Notification feed — กระดิ่งมุมขวาบน ----------
+  // อ่านตาราง `notifications` (LINE/Web-Push เขียนไว้) — limit สูงสุด 200
+  notifications: (limit = 50, type = "all") =>
+    get<NotificationsResponse>(
+      `/api/system/notifications?limit=${limit}&type=${encodeURIComponent(type)}`),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

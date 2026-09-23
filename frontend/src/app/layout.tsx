@@ -7,6 +7,7 @@ import DesktopNav from "@/components/DesktopNav";
 import AppHero from "@/components/AppHero";
 import LimitExpandPopup from "@/components/LimitExpandPopup";
 import MobileNav from "@/components/MobileNav";
+import NotificationBell from "@/components/NotificationBell";
 import PwaRegister from "@/components/PwaRegister";
 import "./globals.css";
 
@@ -66,6 +67,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             blur 20px + bg-white/10 + ring white/20 + rounded-full) — sticky ลอยเหนือเนื้อหา
             มือถือ (< md) ไม่แสดง — ใช้ MobileNav dock ล่างแทน */}
         <DesktopNav />
+        {/* มือถือ (< md): กระดิ่งลอยมุมขวาบน — DesktopNav ไม่แสดงบนจอเล็ก
+            จึงต้องมีตัวยิงแจ้งเตือนแยก (z-40 ใต้ popover z-50 ของกระดิ่งเอง) */}
+        <div
+          className="md:hidden fixed right-3 z-40"
+          style={{ top: "calc(env(safe-area-inset-top, 0px) + 0.6rem)" }}
+        >
+          <NotificationBell />
+        </div>
         {/* pb-24 clears the fixed mobile tab bar (57px) + iOS safe area (≤34px).
             Do NOT add safe-bottom here — .safe-bottom (env(safe-area-inset-bottom))
             appears after Tailwind utilities in globals.css and overrides pb-* to 0,
