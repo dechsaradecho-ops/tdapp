@@ -813,13 +813,38 @@ def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
     return _AVG_HOLD_FALLBACK_DAYS
 
 
+def partial_realized_pnl(db, ticket: str) -> float | None:
+    """Sum the realized PnL of a ticket's PARTIAL closes (signal-logs).
+
+    WHY (2026-09-23): a position that was scaled out and then closed by the
+    guard (or force-closed) can end up with `paper_trades.pnl = NULL` — the
+    realized money lives only in the `closed` signal-log rows of each slice.
+    The monitor's closed-trades table then showed "-" for a trade that really
+    made money (prod AUDNZD PAPER-000080: 4 slices, one logged +2.98).
+
+    Returns the summed slice PnL, or None when there is nothing to sum (no
+    logs, or no slice carried a pnl). Never raises.
+    """
+    try:
+        if not ticket:
+            return None
+        logs = db.select("signal_logs",
+                         filters={"ticket": str(ticket), "event": "closed"},
+                         order="created_at", limit=100)
+        vals = [float(l["pnl"]) for l in (logs or [])
+                if l.get("pnl") is not None]
+        return round(sum(vals), 2) if vals else None
+    except Exception as exc:
+        log.debug("partial_realized_pnl(%s) failed: %s", ticket, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Realized stats — SINGLE shared definition (monitor + stats-reset share this)
 # ---------------------------------------------------------------------------
 def realized_stats(rows: list[dict],
                    closed_rows: list[dict] | None = None) -> dict:
     """MonitorStats fields describing REALIZED performance, in one place.
-
     WHY (2026-09-11): these used to be computed from `created_at` — the day a
     trade was OPENED — in two hand-kept copies (execution.monitor_snapshot and
     trading._fresh_stats). A position closed today but opened last week landed
@@ -1965,8 +1990,33 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     except Exception:
         rows = []
     open_rows = [r for r in rows if r.get("status") == "open"]
-    closed_rows = [r for r in rows
-                   if r.get("status") == "closed" and r.get("pnl") is not None]
+
+    def _realized_pnl(r: dict) -> float | None:
+        """Realized PnL of a journal row, falling back to the sum of its
+        partial-close slices when the row itself carries none.
+
+        A scaled-out position closed by the guard can have `pnl = NULL` while
+        its `closed` signal-logs hold the real money (prod AUDNZD
+        PAPER-000080). Without this the history row showed "-" for a trade
+        that actually realized a profit.
+        """
+        if r.get("pnl") is not None:
+            return float(r["pnl"])
+        if r.get("status") != "closed":
+            return None
+        return partial_realized_pnl(db, str(r.get("ticket") or ""))
+
+    # A closed row counts as realized when EITHER it carries a pnl OR its
+    # partial slices do — otherwise a scaled-out trade vanished from the
+    # stats (and from the closed-trades table's PnL column).
+    closed_rows = []
+    for r in rows:
+        if r.get("status") != "closed":
+            continue
+        pnl = _realized_pnl(r)
+        if pnl is None:
+            continue
+        closed_rows.append({**r, "pnl": pnl})
 
     # ---- live marks ------------------------------------------------------
     # 1) broker-native marks for open tickets (fail-safe)
@@ -2318,7 +2368,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                         if r.get("initial_volume") is not None else None),
         entry_price=float(r.get("entry_price") or 0),
         exit_price=float(r["exit_price"]) if r.get("exit_price") is not None else None,
-        pnl=float(r["pnl"]) if r.get("pnl") is not None else None,
+        pnl=_realized_pnl(r),
         status=r.get("status", "open"), source=r.get("source", "auto"),
         ticket=r.get("ticket"), close_reason=r.get("close_reason"),
         closed_at=_parse_dt(r.get("closed_at")),

@@ -1102,7 +1102,10 @@ export default function MonitorPage() {
                     <td className="py-2 pr-4 font-bold">{t.exit_price != null ? fmtNum(t.exit_price, 5) : "-"}</td>
                     <td className="py-2 pr-4 font-bold">
                       {t.pnl != null ? (
-                        <span className={`font-bold ${t.pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                        <span className={`font-bold ${t.pnl >= 0 ? "text-profit" : "text-loss"}`}
+                          title={t.initial_volume != null && t.initial_volume > t.volume
+                            ? `PnL ที่ปิดจริงของ ${fmtNum(t.initial_volume - t.volume, 2)} lots (จากทั้งหมด ${fmtNum(t.initial_volume, 2)})`
+                            : undefined}>
                           {t.pnl >= 0 ? "+" : ""}${fmtNum(t.pnl, 2)}
                         </span>
                       ) : "-"}

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.services.execution import realized_stats
+from app.services.execution import realized_stats, partial_realized_pnl
 
 
 def _row(*, opened_days_ago: float, closed_days_ago: float | None,
@@ -98,3 +98,51 @@ def test_closed_rows_arg_is_respected_and_never_raises():
     st = realized_stats([{"status": "closed", "pnl": "not-a-number",
                           "closed_at": "not-a-date"}])
     assert st["pnl_total"] == 0.0 and st["pnl_today"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# partial_realized_pnl — a scaled-out row's money lives in its slices
+# ---------------------------------------------------------------------------
+class _LogDB:
+    """Minimal db stub: only `select` on signal_logs is exercised."""
+
+    def __init__(self, logs: list[dict]):
+        self._logs = logs
+
+    def select(self, table, filters=None, order="created_at", desc=True,
+               limit=50, offset=0, columns="*"):
+        if table != "signal_logs":
+            return []
+        out = [r for r in self._logs
+               if all(r.get(c) == v for c, v in (filters or {}).items())]
+        return out[:limit]
+
+
+def test_partial_realized_pnl_sums_closed_slices():
+    """Prod AUDNZD PAPER-000080: 4 slices, only one carried a pnl."""
+    db = _LogDB([
+        {"ticket": "T1", "event": "closed", "pnl": 2.98},
+        {"ticket": "T1", "event": "closed", "pnl": None},
+        {"ticket": "T1", "event": "closed", "pnl": 1.02},
+        {"ticket": "T1", "event": "sl_moved", "pnl": None},
+    ])
+    assert partial_realized_pnl(db, "T1") == 4.0
+
+
+def test_partial_realized_pnl_none_when_no_slice_has_pnl():
+    db = _LogDB([{"ticket": "T1", "event": "closed", "pnl": None}])
+    assert partial_realized_pnl(db, "T1") is None
+
+
+def test_partial_realized_pnl_none_for_unknown_or_empty_ticket():
+    db = _LogDB([])
+    assert partial_realized_pnl(db, "NOPE") is None
+    assert partial_realized_pnl(db, "") is None
+
+
+def test_partial_realized_pnl_never_raises_on_broken_db():
+    class _Boom:
+        def select(self, *a, **k):
+            raise RuntimeError("db down")
+
+    assert partial_realized_pnl(_Boom(), "T1") is None
