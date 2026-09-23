@@ -386,7 +386,11 @@ async def scan_once(db: Database) -> list[dict]:
                 "take_profit": proposal.take_profit, "expected_rr": proposal.expected_rr,
                 # เก็บเหตุผลครบทุกข้อ (build_proposal ให้สูงสุด 6) — หน้า
                 # signals แตกกลับเป็นรายข้อเพื่อจัดหมวด (เดิมตัด [:4])
-                "approval": "pending", "explanation": " | ".join(proposal.reason),
+                # + frequency note: ลิมิตไม่หยุดการสร้างการ์ด แต่ต้องเห็นเหตุผล
+                # ที่ execution จะบล็อก (เดิม blocked_reason คำนวณแล้วทิ้ง)
+                "approval": "pending", "explanation": " | ".join(
+                    [*proposal.reason,
+                     *(["⏸ " + blocked_reason] if blocked_reason else [])]),
                 # P0-5 baseline: ค่าอินดิเคเตอร์ ณ ตอนสร้างสัญญาณ ใช้ให้
                 # thesis gate แยกได้ว่า Supertrend "สวนมาตั้งแต่ต้น"
                 # (supertrend_conflict) หรือ "เดิมเห็นด้วยแล้วค่อยพลิก"

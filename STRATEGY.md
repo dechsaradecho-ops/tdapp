@@ -1,9 +1,10 @@
 # tdapp — หลักการ กลยุทธ์ การเปิด–ปิดออเดอร์ (STRATEGY)
 
-> อัปเดตล่าสุด: 2026-09-22 · เอกสารนี้รวบรวม **หลักการ + กลยุทธ์ + เกณฑ์ตัวเลขจริง** ของการเปิดออเดอร์ (entry) และปิดออเดอร์ (exit) รวมถึงการบริหารความเสี่ยงของระบบ
-> เอกสารเทคนิคอื่น: `FEATURES.md` (สรุปฟีเจอร์), `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `database/*.sql` (migration 001–042)
+> อัปเดตล่าสุด: 2026-09-23 · เอกสารนี้รวบรวม **หลักการ + กลยุทธ์ + เกณฑ์ตัวเลขจริง** ของการเปิดออเดอร์ (entry) และปิดออเดอร์ (exit) รวมถึงการบริหารความเสี่ยงของระบบ
+> เอกสารเทคนิคอื่น: `FEATURES.md` (สรุปฟีเจอร์), `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `database/*.sql` (migration 001–050)
 >
-> ⚠️ **ค่าที่ใช้จริงใน production มาจากแถว `trading_settings` ใน DB** (ไม่ใช่ ENV/default ในโค้ด) — ตัวเลขในเอกสารนี้คือ **default ในโค้ด** และ **preset** ตรวจค่าจริงด้วย `backend/scripts/check_config.py`
+> ⚠️ **ค่าที่ใช้จริงใน production มาจากแถว `trading_settings` ใน DB** (ไม่ใช่ ENV/default ในโค้ด) — ตัวเลขในเอกสารนี้คือ **default ในโค้ด (`AppSettings`)** และ **preset** ตรวจค่าจริงด้วย `backend/scripts/check_config.py`
+> ⚠️ **Entry mode ปัจจุบัน**: `entry_mode` (`auto`/`confirm`/`advisory`) + `position_management_mode` (`auto`/`protective_only`/`advisory`) แยกอิสระ — `order_mode` เก่า (`auto`/`semi_auto`/`manual`) เป็น fallback เท่านั้นผ่าน `effective_entry_mode()`
 
 ---
 
@@ -47,41 +48,42 @@ flowchart LR
 | `daily_digest` | 60 นาที | สรุปประจำวัน |
 | `log_maintenance` | 10 นาที | purge log เกิน TTL |
 
-**โหมดเทรด 3 แบบ** (`order_mode`): `auto` (AI เปิด/ปิดเอง) · `semi_auto` (AI เสนอ → คนกดอนุมัติ) · `manual` (AI วิเคราะห์อย่างเดียว ไม่ยิง order)
+**โหมดเทรดปัจจุบัน** (`entry_mode` / `position_management_mode`, P1-2): entry `auto` (AI เปิดเอง) · `confirm` (AI เสนอ → คนกดอนุมัติ) · `advisory` (วิเคราะห์อย่างเดียว) — legacy `order_mode` (`auto`/`semi_auto`/`manual`) map เป็น `auto→auto`, `semi_auto→confirm/protective_only`, `manual→advisory/advisory` เฉพาะแถวเก่าที่ `entry_mode=""`
 
 ---
 
 ## 3. 🟢 หลักการเปิดออเดอร์ (ENTRY)
 
-### 3.1 การให้คะแนนโอกาส — `strategy_engine.opportunity_score()`
+### 3.1 การให้คะแนนโอกาส — `strategy_engine.opportunity_score(ind, direction=None)`
 
-คะแนน 0–100 (clamp `max(0, min(100, score))`) จาก 8 องค์ประกอบ:
+คะแนน 0–100 (clamp `max(0, min(100, score))`) จาก 8 องค์ประกอบ — **symmetric BUY/SELL** (`_resolve_direction()`: auto-detect จาก EMA ไม่งั้น Supertrend; `want=True` = BUY, `False` = SELL):
 
 | องค์ประกอบ | เงื่อนไข | คะแนน |
 |---|---|---|
-| **Trend** | `ema_fast > ema_slow` | **+20** (ไม่ผ่าน **−5**) |
+| **Trend** | EMA สอดคล้องฝั่งที่ต้องการ (`trend_up == want`) | **+20** (สวนทาง **−5**) |
 | | `adx ≥ 25` / `adx > 0` (คือ < 25) | +15 / +5 |
-| **Momentum (bull)** | `40 ≤ rsi ≤ 55` **และ** `supertrend_dir > 0` (pullback) | **+15** |
+| **Momentum (bull/BUY)** | `40 ≤ rsi ≤ 55` **และ** `supertrend_dir > 0` (pullback) | **+15** |
 | | `55 < rsi ≤ 70` (chase) | +5 |
 | | `rsi > 70` (overbought) | +5 |
 | | `rsi < 40` + ST up | +8 |
-| **Momentum (bear)** | `45 ≤ rsi ≤ 60` + ST down | **+15** |
+| **Momentum (bear/SELL, mirror)** | `45 ≤ rsi ≤ 60` + ST down | **+15** |
 | | `30 ≤ rsi < 45` | +5 |
 | | `rsi > 60` + ST down | +8 |
 | | `rsi < 30` | +5 |
-| **MACD** | `macd_hist > 0` | **+10** |
+| **MACD (symmetric)** | histogram สอดคล้องฝั่ง (`(macd>0)==want`) | **+10** / สวนทาง **−10** (SELL ให้ bonus เมื่อ `macd<0`) |
 | **Volatility** | `0.4 ≤ atr_pct ≤ 1.5` | **+15** |
 | | `atr_pct > 2.5` | **−10** |
 | | อื่น ๆ | +5 |
-| **News** | `news_sentiment × 10` (clamp ±10) | ±10 |
+| **News (signed)** | `signed_sentiment × 10` (clamp ±10) โดย `signed = sentiment × (+1 BUY / −1 SELL)` — ข่าว bearish ช่วย SELL | ±10 |
 | | `high_impact_event` / ปกติ | **−5** / +5 |
-| **Confirm** | `supertrend_dir == 1 and macd_hist > 0` | +5 |
-| **Strategy D** | `breakout_state == 2` (breakout) | **+5** |
-| | `breakout_state == 1` (retest) | +3 |
+| **Confirm (symmetric)** | `(ST>0)==want and (macd>0)==want` | +5 |
+| **Strategy D (symmetric)** | `breakout_state == 2` สอดคล้องฝั่ง (breakout สำหรับ BUY / breakdown สำหรับ SELL) | **+5** |
+| | `breakout_state == 1` สอดคล้องฝั่ง (retest / retest-breakdown) | +3 |
+| | breakout ผิดทิศ | +0 (ไม่นับ bonus) |
 
 **Bands** (`BANDS`): very_high 81–100 · high 61–81 · medium 31–61 · low 0–31
 
-**Confidence** (`_confidence`): `base = min(score, 90.0)` · `high_impact_event` → **−10** · floor **10.0**
+**Confidence** (`evidence_confidence()`, P1-3 — แยกจาก opportunity โดยตั้งใจ): `base = min(max(score,0), 45.0)` + `ratio × 55.0` โดย `ratio = (agree+total)/(2×total)` จาก 6 แหล่งอิสระ (EMA / ADX≥25 / Supertrend / MACD / RSI-zone 40–70 BUY หรือ 30–60 SELL / sentiment-signed) + breakout สอดคล้องฝั่ง `+10` / retest `+5` · `high_impact_event` → **−30** · clamp `max(10, min(100))` พร้อม `confidence_reasons[]` อธิบายรายแหล่ง — legacy `_confidence(score, ind)` เป็น shim เรียกฟังก์ชันนี้
 
 **Decision** (`_decision`): `high_impact_event` → `WAIT` · `≥70` → `TRADE` · `≥50` → `WAIT` · `<50` → `REDUCE RISK`
 
@@ -90,10 +92,10 @@ flowchart LR
 ### 3.2 การสร้าง SL / TP — `strategy_engine.build_proposal()`
 
 - `sl_distance = max(price × atr_pct/100 × atr_multiple_sl, price × 0.001)` — default `atr_multiple_sl = 1.5`
-- **SL clamp** (`sl_distance_min_pct` / `sl_distance_max_pct`, migration 025): ใช้เฉพาะเมื่อ `invalidation_level <= 0` — default **0.0 / 0.0 = ปิด**
-- **Strategy D structural stop** (`invalidation_level > 0`, ทองเท่านั้น): `invalidation_sl = breakout_level ∓ 0.5 × ATR` → `sl_distance = max(|price − invalidation_sl|, 0.5×ATR, price×0.001)` — **ยกเว้น clamp**
+- **SL clamp** (`sl_min_pct` / `sl_max_pct` ในโค้ด, migration 025): ใช้เฉพาะเมื่อ `invalidation_level <= 0` — default **0.0 / 0.0 = ปิด**
+- **Strategy D structural stop** (`invalidation_level > 0`, โค้ดไม่ล็อกทอง — ใช้ได้ทุก asset): `invalidation_sl = breakout_level ∓ 0.5 × ATR` → `sl_distance = max(|price − invalidation_sl|, 0.5×ATR, price×0.001)` — **ยกเว้น clamp**
 - `stop_loss = price − sign × sl_distance` · `take_profit = price + sign × sl_distance × rr_target`
-- **RR target** (`rr_target`) default **2.0** (clamp `max(0.5, …)`)
+- **RR target** (`rr_target`) default **1.5** (aligned moderate 2026-09-23) — โค้ดใช้ค่าดิบ ไม่ clamp (ไม่มี `max(0.5, …)` ใน `build_proposal` ปัจจุบัน)
 - **Limit ladder** (`limit_ladder`): 3 ขั้นที่ `−0.25 / −0.50 / −0.75 × sl_distance` (BUY ต่ำกว่าตลาด, SELL กลับด้าน) แบ่งความเสี่ยง **40 / 35 / 25 %** — แต่ละขั้นคง SL distance และ RR เดิม
 - **SL/TP tier preview** (`sltp_preview`): สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR — แถว signal เก็บราคา **กลาง (×1.5)** เสมอ
 
@@ -103,11 +105,11 @@ flowchart LR
 
 1. `ind.source == "live"` — snapshot demo/random-walk **ห้ามออก signal**
 2. `asset ∈ allowed_assets` — `settings.effective_assets()` (default `quotes.DEFAULT_ASSETS = ["EURUSD","GBPUSD","USDJPY","AUDUSD","XAUUSD"]`)
-3. `score ≥ effective_min_confidence(settings, asset)` — base `min_confidence` **70.0**, override ทอง `min_confidence_gold` (None → base)
+3. **สองแกน P1-3**: `opp.score ≥ effective_min_opportunity` (base **60.0**) **และ** `opp.confidence ≥ effective_min_confidence` — base `min_confidence` **70.0**, override ทอง `min_confidence_gold` (None → base)
 4. **Strategy D gold gate**: `asset == "XAUUSD" and gold_breakout_only and ind.breakout_state <= 0` → ข้าม — `gold_breakout_only` default **True** (migration 024) · breakout = ปิดเหนือ high 20 แท่งก่อนหน้า, retest = ย่อกลับแล้วปิดเหนือ
 5. `not _market_is_closed` — ปิด weekend
 6. `asset not in pending_assets` — pending-dedup (ไม้ **OPEN** อยู่ **ไม่** บล็อก signal ใหม่)
-7. `FrequencyEngine.evaluate(...)` — ลิมิต **ไม่** หยุด signal แค่หยุด execution (การ์ดที่ถูกบล็อกมี `order_blocked`)
+7. `FrequencyEngine.evaluate(...)` — ลิมิต **ไม่** หยุด signal แค่หยุด execution (การ์ดที่ถูกบล็อกมี `⏸ …` ต่อท้าย `explanation` จาก `blocked_reason` ของ scanner + `order_blocked` จาก execution gate §3.4 ที่ API derive live)
 8. Re-anchor entry/SL/TP กับราคา live ผ่าน `fetch_trusted_spot` (ปฏิเสธ fallback rate รายวัน)
 
 ### 3.4 Gate Pipeline ก่อนเปิดจริง — `execution._gate_blocked()`
@@ -116,11 +118,15 @@ flowchart LR
 
 | # | Gate | เงื่อนไข | Default |
 |---|---|---|---|
+| **P0-4** | Config validation | settings อ่านไม่ได้ / ไม่ครบ → block (fail-closed รอบ `execute_signal`) | — |
 | **0b** | ตลาดปิด | `market_closed_block()` — hard rule, ไม่ใช่ setting, fail-CLOSED | — |
 | **0** | Pause | `get_pause(db).paused` (แถว `trading_pause`) | — |
-| **1** | Kill switch | `evaluate_kill(db, s)` | ดู §5.2 |
-| **2** | Frequency | `confidence < min_confidence` · `trades_today ≥ max_trades_daily` · `trades_week ≥ max_trades_weekly` · `open_positions ≥ max_open_positions` · regime sideway/high_vol/news → throttle `max(1, daily//2)` · `drawdown > drawdown_throttle_pct` | 6/30/4 · throttle 5.0 |
+| **1** | Kill switch | `evaluate_kill(db, s)` (default `settings_confirmed=True`; fail-safe defer เฉพาะ caller ที่ส่ง `False` มาอย่างชัดแจ้ง) | ดู §5.2 |
+| **2** | Frequency | `confidence < min_confidence` · `opportunity < min_opportunity` (**60.0**) · `trades_today ≥ max_trades_daily` · `trades_week ≥ max_trades_weekly` · `open_positions ≥ max_open_positions` · `drawdown > drawdown_throttle_pct` (หมายเหตุ: execution ส่ง `regime="bull_trend"` คงที่ — throttle sideway/high_vol/news อยู่ที่ scanner/FrequencyEngine ไม่ใช่ gate นี้) | 10/30/12 · throttle 5.0 |
 | **2b** | **Re-entry cooldown** | นาทีจาก `paper_trades.closed_at` ล่าสุดของ asset เดียวกัน | **30 นาที** (migration 040) |
+| **P0-2** | Min-lot budget | `risk_to_lot < min_lot` แม้หลัง SL-cap → block (กันฝืนเปิดไม้ที่เสี่ยงเกินงบ) | — |
+| **P0-6** | Spread vs SL | `sl_distance < spread × SPREAD_SL_FLOOR_MULT (3.0)` → block | — |
+| **P0-5** | Thesis validation | thesis ขัดกับทิศ/indicator → block | — |
 | **3** | News | `_news_risk` → `DANGER` บล็อก | `news_block_minutes` **30** |
 | **3b** | Pre-open | (1) spread guard `spread / SL_dist × 100 > spread_guard_max_pct` · (2) pre-news flatten: high-impact ของสกุลคู่ภายใน `pre_news_flatten_min` · (3) session filter: session สภาพคล่องต่ำเท่านั้น | **25 %** · **30 นาที** · `session_filter_enabled=True` |
 | **4** | Correlation | `CorrelationEngine().portfolio_correlation(assets) > correlation_cap` | **80.0** |
@@ -128,7 +134,7 @@ flowchart LR
 | **5** | Risk officer | `RiskOfficer.review_trade` — `confidence < min_confidence` · `opportunity < min_opportunity` (**60.0**) · frequency · news DANGER · kill engaged · correlation > cap | — |
 | **6** | Portfolio heat | `open_risk% + new_trade_risk% > kill_daily_loss_pct` | **2.0 %** |
 
-> เหตุผล 2 ข้อแรกถูก log เป็น `order_blocked` และโชว์บนการ์ด signal ช่อง `⏸ order_blocked`
+> `order_blocked` บนการ์ด = `rejects[:2]` ทุกกรณีที่ execution บล็อก (ไม่ใช่แค่ 2 เหตุผลแรกของ pipeline)
 
 ### 3.5 Sizing & Fill — `execution.size_position` / `execute_signal`
 
@@ -144,7 +150,7 @@ flowchart LR
 
 ### 3.6 Auto Trader — `auto_trader.trade_once()`
 
-- ทำงานเฉพาะ `order_mode == "auto"` (semi_auto/manual → ไม่เปิด แต่ยัง expire signal เก่า)
+- ทำงานเฉพาะ `entry_is_auto()` (`effective_entry_mode() == "auto"`; legacy `order_mode == "auto"` เท่านั้นที่ map มา — `semi_auto/manual` เดิม = `confirm/advisory` → ไม่เปิด แต่ยัง expire signal เก่า)
 - หยิบสูงสุด **10** `signals` ที่ `approval="pending"`
 - **Fail-closed duplicate guard**: อ่านไม้เปิด `paper_trades` ผ่าน `select_ex` — อ่าน error = **abort ทั้งรอบ** · merge book ของ broker เป็นแหล่งที่สอง · ข้าม asset ที่เปิดอยู่แล้ว
 - ปฏิเสธ `entry <= 0`
@@ -154,18 +160,18 @@ flowchart LR
 
 ## 4. 🔴 หลักการปิดออเดอร์ (EXIT)
 
-### 4.1 ลำดับความสำคัญ — `smart_exit.py` + `position_guard.py`
+### 4.1 ลำดับความสำคัญ — `position_guard.guard_once()` + `smart_exit.py`
 
 ```
-1. Emergency Exit (kill switch)
-2. Stop Loss
-3. Take Profit
-4. Trailing Stop (R-ladder + ATR)
-5. AI Exit Score
-6. Trend Reversal
-7. Time Stop
-8. News Exit
+1. Emergency Exit (kill switch, defer ขณะ kill_expand pending — เฉพาะ settings-write "failed")
+2. คำนวณ SL/TP mark ก่อน แต่ปิดทีหลัง (hard-stop-wins: ถ้าโดน SL/TP ข้าม discretionary ทั้งหมด)
+3. Partial close (TP1) → Breakeven → Trailing + R-ladder floor
+4. Smart Exit เดี่ยว (รวม AI Exit Score + Trend Reversal + News Exit ใน evaluate_exit เดียว)
+5. Time Stop (R-exemption ช่วยไม้กำไร)
+6. Market-closed gate บล็อกทุกเส้นทางปิด (fail-CLOSED)
 ```
+
+> §นี้เดิมแยก Reversal/News เป็นข้อเอง — โค้ดจริงรวมทั้งสามไว้ใน Smart Exit (§4.2) แล้ว guard เรียกครั้งเดียวหลัง BE/trail
 
 ### 4.2 Smart Exit — `smart_exit.evaluate_exit()` (pure, fail-safe HOLD)
 
@@ -174,12 +180,12 @@ flowchart LR
 | ปัจจัย | น้ำหนัก | เกณฑ์เด่น |
 |---|---|---|
 | trend_strength | **0.20** | aligned + ST + `adx≥25` → 90 · aligned + `adx≥20` → 70 · aligned → 55 · `adx<20` → 35 · else 20 |
-| momentum | **0.15** | BUY: `rsi≥55 & macd>0` → 80 · `rsi≥45 & macd≥0` → 65 · `rsi<40 or macd<0` → 30 · `rsi>75` → 45 |
-| market_regime | **0.15** | aligned trend → 85 · sideway → 35 · high_vol/news → 25 · counter-trend → 30 |
+| momentum | **0.15** | BUY: `rsi≥55 & macd>0` → 80 · `rsi≥45 & macd≥0` → 65 · `rsi<40 or macd<0` → 30 · `rsi>75` → 45 (dead-branch: ถูก `≥55/≥45` ดักก่อน) · SELL mirror: `rsi≤45 & macd<0` → 80 · `rsi≤55 & macd≤0` → 65 · `rsi>60 or macd>0` → 30 · `rsi<25` → 45 |
+| market_regime | **0.15** | aligned trend → 85 · sideway → 35 · high_vol/news → 25 · counter-trend → 30 (ว่าง → derive จาก `adx<20`/`atr>2.5`/EMA; unknown → 60) |
 | opportunity_score | **0.10** | `clamp(opp, 0, 100)` |
-| news_risk | **0.10** | SAFE 85 / CAUTION 55 / DANGER 20 |
-| holding_time | **0.10** | `frac = age/max_hold`: <0.4 → 85 · <0.7 → 65 · <1.0 → 40 · else 15 |
-| volatility | **0.10** | `0.4 ≤ atr_pct ≤ 1.5` → 80 · ≤2.5 → 55 · else 25 |
+| news_risk | **0.10** | SAFE 85 / CAUTION 55 / DANGER 20 / unknown 60 |
+| holding_time | **0.10** | `frac = age/max_hold`: <0.4 → 85 · <0.7 → 65 · <1.0 → 40 · else 15 (`max_hold≤0` → `age<10`=70 / `<20`=50 / else 30) |
+| volatility | **0.10** | `0.4 ≤ atr_pct ≤ 1.5` → 80 · ≤2.5 → 55 · else 25 (`atr≤0` → 50) |
 | volume_proxy | **0.05** | `3 ≤ vol_idx ≤ 12` → 75 · <3 → 45 · ≤20 → 40 · else 25 |
 | risk_exposure | **0.05** | dd ≤0 → 85 · <2 → 65 · <5 → 40 · else 20 |
 
@@ -241,11 +247,11 @@ Default (% ของ equity): `risk_per_trade` **0.5** · `max_daily_loss` **2.0
 
 `RiskEngine.check(snap)` ละเมิดเมื่อ:
 
-- `daily_loss_pct >= max_daily_loss_pct`
-- `weekly_loss_pct >= max_weekly_loss_pct`
-- `monthly_loss_pct >= max_monthly_loss_pct`
-- `drawdown_pct >= max_drawdown_pct`
-- **open-risk guard**: `open_risk_pct + risk_per_trade_pct > max_daily_loss_pct`
+- `daily_loss_pct >= max_daily_loss_pct` (หารด้วย `starting_capital`)
+- `weekly_loss_pct >= max_weekly_loss_pct` (หารด้วย `starting_capital`)
+- `monthly_loss_pct >= max_monthly_loss_pct` (หารด้วย `starting_capital`)
+- `drawdown_pct >= max_drawdown_pct` (หารด้วย `peak_equity`)
+- **open-risk guard**: `open_risk_pct + risk_per_trade_pct > max_daily_loss_pct` (`open_risk` หารด้วย `current_equity`)
 
 ละเมิด → `pause()` + `"TRADING PAUSED — MANUAL REVIEW REQUIRED"`
 
@@ -259,7 +265,7 @@ Default (% ของ equity): `risk_per_trade` **0.5** · `max_daily_loss` **2.0
 
 Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekly > kill_weekly_loss_pct` (**5.0**) · `monthly > kill_monthly_loss_pct` (**8.0**) · `drawdown > max_drawdown_pct` (**10.0**) + สุขภาพระบบ (`broker_connected`, `market_data_ok`, `ai_provider_ok`, `execution_ok`)
 
-`evaluate_kill(..., settings_confirmed=False)` → **engaged** พร้อม "settings unreadable" (fail-safe defer — **ไม่ปิดจากลิมิตที่เดา** บทเรียน incident 2026-09-22)
+`evaluate_kill(..., settings_confirmed=True)` → **engaged** พร้อม "settings unreadable" เฉพาะ caller ที่ส่ง `settings_confirmed=False` อย่างชัดแจ้ง (fail-safe defer — **ไม่ปิดจากลิมิตที่เดา** บทเรียน incident 2026-09-22) — default `True` หมายถึง monitor path ปกติจะไม่ fail-safe ถ้าอ่าน settings ไม่ได้ ต้องอาศัย guard ที่ส่ง flag ชัดเจน
 
 `kill_metrics(db, capital)` = `_loss_pcts` (daily 1d / weekly 7d / monthly 30d จาก `paper_trades.closed_at`) + `equity_drawdown_pct` (peak-to-current จาก `equity_snapshots`, peak เก่ากว่า 3× capital ปัจจุบันถูกเมิน)
 
@@ -269,20 +275,21 @@ Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekl
 - `PENDING_TTL_MIN = 180.0` (Settings `kill_expand_ttl_min`, migration 037) · clamp `[5, 10080]` นาที
 - `REASK_COOLDOWN_MIN = 30.0` · `REASK_AFTER_REJECT_MIN = 120.0`
 - `kill_expand_auto_apply` (migration 039, default **True**): True → apply ทุกครั้งที่หมดเวลา · False → apply **ครั้งเดียว** ต่อ `ONCE_QUOTA_HOURS = 24.0` ชม. แล้ว `capped` (guard ปิด)
+- `kill_expand_auto_widen` (migration 043, default **False**, P0-3 fail-closed): **False (default ปัจจุบัน) → หน้าต่างหมดเวลา = `kept` — ไม่ widen เลย คงลิมิตเดิม + คง pause + warn ครั้งเดียว** · True ถึงจะเข้า flow `apply/once/capped` ของ 039 ข้างบน — §นี้ทั้ง section อธิบายกรณี `True` เท่านั้น
 - `TRIGGERS` ลำดับ: **drawdown → daily → weekly → monthly**
 - `HOLD_KINDS = ("failed",)` — เฉพาะ settings write ที่ล้มเหลวเท่านั้นที่ยัง defer emergency exit
 - คำอนุมัติ: `approve/approved/dd_ok/yes/ok/อนุมัติ` · ปฏิเสธ: `reject/rejected/dd_no/no/ไม่อนุมัติ`
 
-**Flow:** ละเมิด → pending row ใน `kill_expand_requests` → LINE prompt (Approve/Reject + `/dd_ok` `/dd_no`) + Web popup + Web Push → อนุมัติ = เขียนลิมิต (+5pp) + `set_pause(False)` · ปฏิเสธ = คงลิมิต + pause · ไม่ตอบ = auto-apply หลัง `kill_expand_ttl_min` (180) · Guard **defer** emergency exit ตลอดหน้าต่าง
+**Flow:** ละเมิด → pending row ใน `kill_expand_requests` → LINE prompt (Approve/Reject + `/dd_ok` `/dd_no`) + Web popup + Web Push → อนุมัติ = เขียนลิมิต (+5pp) + `set_pause(False)` แล้ว re-evaluate — ถ้ายัง engaged จะ pause ซ้ำ · ปฏิเสธ = คงลิมิต + pause · ไม่ตอบ = `timeout_plan()`: default (`auto_widen=False`) = `kept` ไม่ widen; เฉพาะ `auto_widen=True` ถึง auto-apply หลัง `kill_expand_ttl_min` (180) · Guard **defer** emergency exit ตลอดหน้าต่าง
 
 ### 5.4 Portfolio Monitor — `portfolio_monitor.monitor_once()`
 
 - Settle expand window ที่หมดอายุ **ก่อน** ตัดสินบัญชี
-- เขียน `equity_snapshots` แถวต่อรอบ
-- `open_risk = Σ |entry − SL| × volume × contract`
+- เขียน `equity_snapshots` แบบ dedup รายวัน UTC (แถวเดียวต่อวัน — วันเดียวกัน update ทับ)
+- `open_risk = Σ |entry − SL| × volume × contract` (แปลง USD + ข้ามไม้ volume 0)
 - `risk_engine_for_settings(s).check(snap)` **+** bridge ไป `execution.evaluate_kill` (แก้ divergence 2026-09-22)
 - ละเมิด → `write_audit("limit_breach")` → `set_pause(True, reason)` → LINE `risk_warning` → `limit_expand.request_and_notify`
-- **Early warning**: `DRAWDOWN_APPROACH_RATIO = 0.8` — dd ≥ 80 % ของลิมิต → `drawdown_warning` (throttle ด้วย `DRAWDOWN_APPROACH_COOLDOWN_MIN`)
+- **Early warning**: `DRAWDOWN_APPROACH_RATIO = 0.8` — dd ≥ 80 % ของลิมิต → `drawdown_warning` (throttle ด้วย `DRAWDOWN_APPROACH_COOLDOWN_MIN = 360.0` นาที)
 
 ### 5.5 Risk Presets — `schemas.RISK_PRESETS` (42 ฟิลด์, `apply_risk_preset`)
 
@@ -335,7 +342,7 @@ Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekl
 | Scoring / Proposal / SL-TP / Ladder | `backend/app/engine/strategy_engine.py` |
 | Smart Exit (9 ปัจจัย, left-behind, ladder) | `backend/app/engine/smart_exit.py` |
 | Risk Engine (ลิมิต, pause, sizing) | `backend/app/engine/risk_engine.py` |
-| Goal / Portfolio engines | `backend/app/engine/goal_engine.py`, `portfolio_engine.py` |
+| Goal / Portfolio engines | `backend/app/engine/goal_engine.py`, `backend/app/engine/portfolio_engine.py` |
 | Gate pipeline, sizing, kill eval, cooldown, exposure, market clock, journal | `backend/app/services/execution.py` |
 | Limit expansion (+5pp, TTL, auto-apply) | `backend/app/services/limit_expand.py` |
 | Signal generation + Strategy D gate | `backend/app/workers/market_scanner.py` |
@@ -344,21 +351,31 @@ Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekl
 | Portfolio monitor (drawdown, pause, early warning) | `backend/app/workers/portfolio_monitor.py` |
 | Settings model, defaults, presets, engines | `backend/app/models/schemas.py` |
 | Manual close schema | `backend/app/models/close_position.py` |
-| Settings defaults ใน DB | `database/006_trading_settings.sql`, `012`, `014`–`018`, `023`–`029`, `032`–`041` |
+| Settings defaults ใน DB | `database/006_trading_settings.sql`, `012`, `014`–`018`, `023`–`029`, `032`–`041`, `043` (`kill_expand_auto_widen=False`), `051` (`no_behind` default 1.75), `052` (frequency 10/30/12/2.0 + RR 1.5) |
 | เอกสาร | `FEATURES.md` (§3 pipeline, §5 engines, §6 position mgmt, §7 costs) |
 
 ---
 
 ## 7. ⚠️ ข้อสังเกตสำคัญ (default ไม่ตรงกัน)
 
-ค่าต่อไปนี้ **ไม่ตรงกัน** ระหว่าง default ในโค้ด (`AppSettings`) กับ preset — ต้องตรวจค่าจริงใน DB ก่อนสรุป:
+ค่า `AppSettings` (โค้ด/DB) vs preset `moderate` **ไม่ตรงกันโดยตั้งใจ** (preset มีผลเฉพาะเมื่อเรียก `apply_risk_preset`; fallback frequency ใช้ `TRADE_LIMITS_TABLE` ไม่ใช่ preset) — ต้องตรวจค่าจริงใน DB ก่อนสรุป:
 
-| ฟิลด์ | `AppSettings` (โค้ด) | preset moderate |
+| ฟิลด์ | `AppSettings` (โค้ด/DB) | preset moderate |
 |---|---|---|
 | `partial_close_pct` | **0.0** (ปิด) | **50.0** |
-| `no_behind_hold_mult` | **1.75** (migration 029 เขียน 5.0 → 032/`AppSettings` ทับ) | **1.75** |
 | `min_confidence` | **70.0** | **65.0** |
 | `trail_atr_mult` | **2.0** | **1.5** |
+| `rr_target` | **1.5** (aligned 2026-09-23) | **1.5** |
+| `sl_min/max_pct` | **0.0 / 0.0 = ปิด** | **0.3 / 0.8** |
+| `sl_distance_mode` | **`medium`** | **`short`** |
+| `exit_score_close` | **45.0** | **56.0** |
+| `profit_protect_r` | **2.0** | **1.5** |
+| `volatility_exit_atr` | **2.5** | **2.0** |
+| `max_drawdown_pct` | **10.0** | **15.0** |
+| `kill_daily/weekly/monthly` | **2.0 / 5.0 / 8.0** | **1.5 / 4.0 / 6.0** |
+| `drawdown_throttle_pct` | **5.0** | **8.5** |
+| `no_behind_hold_mult` | **1.75** (โค้ด + migration 032 อัปแถว id=1 + 051 แก้ column default) | **1.75** |
+| `max_trades_daily/weekly/open/risk_per_trade` | **10 / 30 / 12 / 2.0** (aligned 2026-09-23 — `AppSettings` + `TRADE_LIMITS_TABLE` + preset ตรงกัน) | **10 / 30 / 12 / 2.0** |
 
 > ค่าที่ใช้จริงใน production ขึ้นกับ **แถว `trading_settings` ใน DB** — ตรวจด้วย `backend/scripts/check_config.py`
 

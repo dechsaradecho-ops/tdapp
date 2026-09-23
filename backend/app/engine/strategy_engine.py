@@ -286,7 +286,7 @@ class StrategyEngine:
         risk_per_trade_pct: float,
         regime_bullish: bool,
         atr_multiple_sl: float = 1.5,
-        rr_target: float = 2.0,
+        rr_target: float = 1.5,
         risk_profile: RiskProfile = RiskProfile.moderate,
         sl_min_pct: float = 0.0,
         sl_max_pct: float = 0.0,
@@ -413,7 +413,7 @@ class StrategyEngine:
     # ------------------------------------------------------------------
     @staticmethod
     def sltp_preview(direction: str, entry: float, sl_distance: float,
-                     rr_target: float = 2.0) -> list[SLTPLevel]:
+                     rr_target: float = 1.5) -> list[SLTPLevel]:
         """Preview SL/TP at 3 stop distances (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR).
 
         The card always shows all 3 tiers; the user's sl_distance_mode setting
@@ -439,7 +439,7 @@ class StrategyEngine:
         direction: str,
         entry: float,
         sl_distance: float,
-        rr_target: float = 2.0,
+        rr_target: float = 1.5,
         atr_multiple_sl: float = 1.5,
     ) -> list[LimitLevel]:
         """Laddered limit entries (แนวรับหลายระดับ) spaced by fractions of the SL distance.

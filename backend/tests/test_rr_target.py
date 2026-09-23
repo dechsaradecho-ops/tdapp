@@ -7,7 +7,7 @@ from tests.test_settings import SettingsDatabase, call, set_state
 
 def test_rr_target_default_is_two():
     s = AppSettings()
-    assert s.rr_target == 2.0
+    assert s.rr_target == 1.5
 
 
 @pytest.mark.asyncio

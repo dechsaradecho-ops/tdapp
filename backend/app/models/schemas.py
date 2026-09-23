@@ -350,8 +350,8 @@ class TradeLimits(BaseModel):
 TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
     RiskProfile.conservative: {"max_trades_daily": 3, "max_trades_weekly": 15,
                                "max_open_positions": 2, "risk_per_trade_pct": 0.5},
-    RiskProfile.moderate: {"max_trades_daily": 6, "max_trades_weekly": 30,
-                           "max_open_positions": 4, "risk_per_trade_pct": 1.0},
+    RiskProfile.moderate: {"max_trades_daily": 10, "max_trades_weekly": 30,
+                           "max_open_positions": 12, "risk_per_trade_pct": 2.0},
     RiskProfile.aggressive: {"max_trades_daily": 10, "max_trades_weekly": 50,
                              "max_open_positions": 8, "risk_per_trade_pct": 2.0},
 }
@@ -373,8 +373,10 @@ TRADE_LIMITS_TABLE: dict[RiskProfile, dict[str, float]] = {
 #
 # "moderate" is the live production configuration (capital $500, XAUUSD 0.01 /
 # forex 0.02, sl_distance_mode="short" 0.3–0.8%) captured after the
-# 2026-09 account tuning — it is deliberately NOT equal to the AppSettings
-# field defaults any more. conservative/aggressive are scaled around it
+# 2026-09 account tuning — frequency (10/30/12/2.0) and rr_target (1.5) now
+# match the AppSettings field defaults (aligned 2026-09-23); remaining
+# knobs (signal gates, kill, smart-exit) stay preset-only.
+# conservative/aggressive are scaled around it
 # (~0.5× / ~1.5× risk appetite).
 # Kill-switch levels were normalized to sane values on purpose: prod carried
 # kill_daily/weekly/monthly = 60/70/70% (test leftovers) which effectively
@@ -2551,10 +2553,10 @@ class AppSettings(BaseModel):
     min_confidence_gold: Optional[float] = None
     min_opportunity: float = 60.0
 
-    max_trades_daily: int = 6
+    max_trades_daily: int = 10
     max_trades_weekly: int = 30
-    max_open_positions: int = 4
-    risk_per_trade_pct: float = 1.0
+    max_open_positions: int = 12
+    risk_per_trade_pct: float = 2.0
     # Re-entry cooldown: minutes after a position on the SAME asset closes
     # before a new order on that asset may open. 0 disables. Default 30 —
     # stops the 1-minute close→reopen loop (guard closes on SL/TP/time-stop,
@@ -2588,10 +2590,10 @@ class AppSettings(BaseModel):
     # disables the feature.
     max_hold_days: int = 5
     # Reward:Risk target for every new signal — TP = SL distance × rr_target
-    # (1:2 default). Flows into build_proposal → TP, limit ladder and the
+    # (1:1.5 default, moderate preset). Flows into build_proposal → TP, limit ladder and the
     # 3-tier SL/TP preview on the card. Clamped ≥ 0.5 so a typo can't create
     # a TP inside the SL.
-    rr_target: float = 2.0
+    rr_target: float = 1.5
 
     # ---- Smart Exit Engine (continuous exit evaluation, worker #6) --------
     # Every open position passes evaluate_exit() each guard cycle. All fields

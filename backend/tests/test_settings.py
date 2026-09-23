@@ -128,9 +128,9 @@ def test_app_settings_defaults_match_engine_defaults():
     # moderate profile limits unchanged
     mod = FrequencyEngine(RiskProfile.moderate).limits()
     assert (mod.max_trades_daily, mod.max_trades_weekly,
-            mod.max_open_positions, mod.risk_per_trade_pct) == (6, 30, 4, 1.0)
-    # settings defaults mirror moderate
-    assert s.max_trades_daily == 6 and s.risk_per_trade_pct == 1.0
+            mod.max_open_positions, mod.risk_per_trade_pct) == (10, 30, 12, 2.0)
+    # settings defaults mirror moderate (aligned 2026-09-23)
+    assert s.max_trades_daily == 10 and s.risk_per_trade_pct == 2.0
 
 
 def test_settings_fields_accepted_by_put_endpoint():
