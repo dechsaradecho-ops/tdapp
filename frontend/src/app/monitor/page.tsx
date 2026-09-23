@@ -474,8 +474,9 @@ function MoveTimelineBadge({ pos, timeline }: {
                     <> — {fmtNum(l.volume, 2)} lots</>
                   )}
                   {l.pnl != null && (
-                    <span className={l.pnl >= 0 ? "text-profit" : "text-loss"}>
-                      {" "}({l.pnl >= 0 ? "+" : ""}${fmtNum(l.pnl, 2)})
+                    <span className={`ml-1 font-bold ${l.pnl >= 0 ? "text-profit" : "text-loss"}`}
+                      title={`PnL ที่ปิดจริงของ ${l.volume != null ? fmtNum(l.volume, 2) : "?"} lots`}>
+                      {l.pnl >= 0 ? "+" : ""}${fmtNum(l.pnl, 2)}
                     </span>
                   )}
                   {l.stop_loss != null && l.stop_loss > 0 && (
@@ -921,7 +922,15 @@ export default function MonitorPage() {
                         {p.direction === "BUY" ? "▲ BUY" : "▼ SELL"}
                       </span>
                     </td>
-                    <td className="py-2 pr-4 font-bold">{fmtNum(p.volume, 2)}</td>
+                    <td className="py-2 pr-4 font-bold">
+                      {fmtNum(p.volume, 2)}
+                      {p.initial_volume != null && p.initial_volume > p.volume && (
+                        <span className="ml-1 text-[10px] font-semibold text-slate-500"
+                          title={`เปิด ${fmtNum(p.initial_volume, 2)} lots · ปิดบางส่วนไปแล้ว ${fmtNum(p.initial_volume - p.volume, 2)} · เหลือ ${fmtNum(p.volume, 2)}`}>
+                          /{fmtNum(p.initial_volume, 2)}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-2 pr-4 font-bold" onClick={(e) => e.stopPropagation()}><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">
                       {fmtNum(p.current_price, 5)}
@@ -1079,7 +1088,16 @@ export default function MonitorPage() {
                         {t.direction === "BUY" ? "▲" : "▼"} {t.direction}
                       </span>
                     </td>
-                    <td className="py-2 pr-4 font-bold">{fmtNum(t.volume, 2)}</td>
+                    <td className="py-2 pr-4 font-bold">
+                      {t.initial_volume != null && t.initial_volume > t.volume ? (
+                        <span title={`เปิด ${fmtNum(t.initial_volume, 2)} lots · ปิดบางส่วน ${fmtNum(t.initial_volume - t.volume, 2)} · เหลือ ${fmtNum(t.volume, 2)}`}>
+                          {fmtNum(t.initial_volume - t.volume, 2)}
+                          <span className="text-slate-500">/{fmtNum(t.initial_volume, 2)}</span>
+                        </span>
+                      ) : (
+                        fmtNum(t.volume, 2)
+                      )}
+                    </td>
                     <td className="py-2 pr-4 font-bold">{fmtNum(t.entry_price, 5)}</td>
                     <td className="py-2 pr-4 font-bold">{t.exit_price != null ? fmtNum(t.exit_price, 5) : "-"}</td>
                     <td className="py-2 pr-4 font-bold">

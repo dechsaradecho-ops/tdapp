@@ -148,6 +148,41 @@ def _pnl_text(pnl) -> str:
         return "n/a"
 
 
+def _resolve_initial_volume(db, pos, row: dict | None = None) -> float | None:
+    """Original size of a position, for the "closed / original" display.
+
+    `paper_trades.volume` is the REMAINING size once a partial close fires
+    (migration 047), so the monitor needs the ORIGINAL size to show
+    "0.01/0.02". Resolution order (first hit wins):
+      1. the row's `initial_volume` (migration 048, written at insert),
+      2. the `order_opened` signal-log volume for this ticket (legacy rows),
+      3. the row's current `volume` (never partial-closed → it IS the original).
+    Returns None when nothing is known — the UI then shows the bare volume.
+    Never raises.
+    """
+    try:
+        if row is None:
+            rows = db.select("paper_trades",
+                             filters={"ticket": str(getattr(pos, "ticket", "") or "")},
+                             limit=1)
+            row = rows[0] if rows else {}
+        iv = (row or {}).get("initial_volume")
+        if iv is not None:
+            return float(iv)
+        ticket = str(getattr(pos, "ticket", "") or "")
+        if ticket:
+            logs = db.select("signal_logs",
+                             filters={"ticket": ticket, "event": "order_opened"},
+                             order="created_at", limit=1)
+            if logs and logs[0].get("volume") is not None:
+                return float(logs[0]["volume"])
+        vol = (row or {}).get("volume")
+        return float(vol) if vol is not None else None
+    except Exception as exc:
+        log.debug("initial_volume resolve failed: %s", exc)
+        return None
+
+
 def _atr_for(pos: Position, fallback_distance: float, db=None) -> float:
     """ATR estimate for trailing: 20% of the ORIGINAL SL distance.
 
@@ -383,9 +418,11 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
                 rows = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
                 row_id = str(rows[0].get("id") or "") if rows else ""
             if row_id:
-                db.update("paper_trades", row_id,
-                          {"partial_done": True,
-                           "volume": remaining_vol})
+                patch = {"partial_done": True, "volume": remaining_vol}
+                init_vol = _resolve_initial_volume(db, pos)
+                if init_vol is not None:
+                    patch["initial_volume"] = init_vol
+                db.update("paper_trades", row_id, patch)
         except Exception as exc:
             log.debug("smart-exit partial_done persist failed: %s", exc)
         # Realized PnL of the CLOSED SLICE only (USD) — see the TP1 path.
@@ -534,6 +571,8 @@ async def _manage_position(db, broker, pos: Position, price: float,
                     # Persist the flag AND the reduced volume — otherwise a
                     # restart re-fires TP1 (partial_done lost) and the monitor
                     # keeps showing the original size (volume never updated).
+                    # `initial_volume` (migration 048) is backfilled here for
+                    # legacy rows so the UI can show "closed / original".
                     try:
                         row_id = str(getattr(pos, "row_id", "") or "")
                         if not row_id:
@@ -542,9 +581,12 @@ async def _manage_position(db, broker, pos: Position, price: float,
                                              limit=1)
                             row_id = str(rows[0].get("id") or "") if rows else ""
                         if row_id:
-                            db.update("paper_trades", row_id,
-                                      {"partial_done": True,
-                                       "volume": remaining_vol})
+                            patch = {"partial_done": True,
+                                     "volume": remaining_vol}
+                            init_vol = _resolve_initial_volume(db, pos)
+                            if init_vol is not None:
+                                patch["initial_volume"] = init_vol
+                            db.update("paper_trades", row_id, patch)
                     except Exception as exc:
                         log.debug("partial_done persist failed: %s", exc)
                     # Realized PnL of the CLOSED SLICE only (in USD) — the
@@ -1433,6 +1475,10 @@ async def rehydrate_book(db, broker) -> int:
             # TP1 already fired for this position before the restart — carry
             # the flag into the book or the guard would partial-close again.
             book[ticket].partial_done = bool(row.get("partial_done"))  # type: ignore[attr-defined]
+            # Original size (migration 048) — carried so a later partial can
+            # persist it for legacy rows and the UI can show closed/original.
+            if row.get("initial_volume") is not None:
+                book[ticket].initial_volume = float(row["initial_volume"])  # type: ignore[attr-defined]
             # Time-stop age must survive restarts — restore opened_at from the
             # journal row's created_at (Position's default is "now", which
             # would silently reset the clock on every deploy).

@@ -244,6 +244,10 @@ def record_trade(db, trade: dict[str, Any]) -> Optional[str]:
     # 021). Missing keys (legacy callers/tests) just stay None.
     trade.setdefault("initial_stop_loss", trade.get("stop_loss"))
     trade.setdefault("initial_take_profit", trade.get("take_profit"))
+    # Snapshot the ORIGINAL size (migration 048). `volume` becomes the
+    # REMAINING size after a partial close, so without this the monitor
+    # cannot show "closed / original" (0.01/0.02) on a scaled-out position.
+    trade.setdefault("initial_volume", trade.get("volume"))
 
     raw = getattr(db, "insert_raw", None)
     if not callable(raw):  # very old fakes: no raw-error surface
@@ -2267,6 +2271,8 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             id=str(r.get("id")), ticket=str(r.get("ticket") or ""),
             asset=r["asset"], direction=str(r["direction"]).upper(),
             volume=float(r.get("volume") or 0),
+            initial_volume=(float(r["initial_volume"])
+                            if r.get("initial_volume") is not None else None),
             entry_price=entry,
             stop_loss=float(r["stop_loss"]) if r.get("stop_loss") is not None else None,
             take_profit=float(r["take_profit"]) if r.get("take_profit") is not None else None,
@@ -2308,6 +2314,8 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         id=str(r.get("id")), asset=r["asset"],
         direction=str(r["direction"]).upper(),
         volume=float(r.get("volume") or 0),
+        initial_volume=(float(r["initial_volume"])
+                        if r.get("initial_volume") is not None else None),
         entry_price=float(r.get("entry_price") or 0),
         exit_price=float(r["exit_price"]) if r.get("exit_price") is not None else None,
         pnl=float(r["pnl"]) if r.get("pnl") is not None else None,

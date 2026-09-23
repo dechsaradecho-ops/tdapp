@@ -43,6 +43,9 @@ class Position:
     take_profit: Optional[float]
     opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     current_price: float = 0.0
+    # Original size at open (migration 048). `volume` shrinks on a partial
+    # close; this stays put so the UI can show "closed / original" (0.01/0.02).
+    initial_volume: Optional[float] = None
 
 
 class Broker(ABC):

@@ -1281,6 +1281,9 @@ class TestPositionGuardManagement:
         # remaining volume persisted too — otherwise the monitor keeps showing
         # the ORIGINAL size and the remaining (unrealized) PnL is overstated.
         assert db.rows["paper_trades"][0]["volume"] == pytest.approx(0.02)
+        # original size snapshotted (migration 048) so the UI can show
+        # "closed / original" (0.01/0.02) instead of a bare remaining size.
+        assert db.rows["paper_trades"][0]["initial_volume"] == pytest.approx(0.04)
         # audit list: บอกชื่อคู่เงิน + เหตุผล (หน้า Guard ใช้โชว์ chip)
         assert summary["closed_assets"] == "EURUSD:tp1"
 
@@ -1361,6 +1364,44 @@ class TestPositionGuardManagement:
         assert summary["moved_sl"] == 0
         assert summary["partial_closed"] == 0
         assert db.rows["paper_trades"][0]["status"] == "closed"
+
+    @pytest.mark.asyncio
+    async def test_resolve_initial_volume_prefers_row_column(self):
+        """`initial_volume` บนแถว paper_trades มาก่อน (migration 048)."""
+        from app.workers import position_guard
+        from app.integrations.brokers import Position
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "volume": 0.01, "initial_volume": 0.02}]})
+        pos = Position(ticket="T1", user_id="u1", asset="EURUSD",
+                       direction="BUY", volume=0.01, entry_price=1.1,
+                       stop_loss=1.09, take_profit=None)
+        assert position_guard._resolve_initial_volume(db, pos) == pytest.approx(0.02)
+
+    @pytest.mark.asyncio
+    async def test_resolve_initial_volume_falls_back_to_order_opened_log(self):
+        """แถวเก่า (ไม่มี initial_volume) → อ่าน volume จาก log order_opened."""
+        from app.workers import position_guard
+        from app.integrations.brokers import Position
+        db = FakeDatabase(rows={
+            "paper_trades": [{"id": "p1", "ticket": "T1", "volume": 0.01}],
+            "signal_logs": [{"ticket": "T1", "event": "order_opened",
+                             "volume": 0.02, "created_at": "2026-01-01"}]})
+        pos = Position(ticket="T1", user_id="u1", asset="EURUSD",
+                       direction="BUY", volume=0.01, entry_price=1.1,
+                       stop_loss=1.09, take_profit=None)
+        assert position_guard._resolve_initial_volume(db, pos) == pytest.approx(0.02)
+
+    @pytest.mark.asyncio
+    async def test_resolve_initial_volume_last_resort_is_current_volume(self):
+        """ไม่มีทั้งคอลัมน์และ log → ใช้ volume ปัจจุบัน (ไม้ที่ไม่เคยปิดบางส่วน)."""
+        from app.workers import position_guard
+        from app.integrations.brokers import Position
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "p1", "ticket": "T1", "volume": 0.03}]})
+        pos = Position(ticket="T1", user_id="u1", asset="EURUSD",
+                       direction="BUY", volume=0.03, entry_price=1.1,
+                       stop_loss=1.09, take_profit=None)
+        assert position_guard._resolve_initial_volume(db, pos) == pytest.approx(0.03)
 
     @pytest.mark.asyncio
     async def test_partial_close_suppressed_when_market_closed(self, monkeypatch):

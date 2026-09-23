@@ -1072,6 +1072,9 @@ export interface MonitorOpenPosition {
   asset: string;
   direction: string;
   volume: number;
+  /** Original size at open (migration 048). `volume` is the REMAINING size
+   *  after partial closes, so the UI shows "remaining / original" (0.01/0.02). */
+  initial_volume?: number | null;
   entry_price: number;
   stop_loss: number | null;
   take_profit: number | null;
@@ -1101,6 +1104,9 @@ export interface MonitorTrade {
   asset: string;
   direction: string;
   volume: number;
+  /** Original size at open (migration 048). For a scaled-out CLOSED row,
+   *  `volume` is what remained and this is the full size → "closed/original". */
+  initial_volume?: number | null;
   entry_price: number;
   exit_price: number | null;
   pnl: number | null;

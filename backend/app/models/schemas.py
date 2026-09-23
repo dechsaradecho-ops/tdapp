@@ -2372,6 +2372,10 @@ class MonitorOpenPosition(BaseModel):
     asset: str
     direction: str
     volume: float
+    # Original size at open (migration 048). `volume` is the REMAINING size
+    # after partial closes, so the UI shows "remaining / original" (0.01/0.02)
+    # and can tell a scaled-out position from a full one. None on legacy rows.
+    initial_volume: Optional[float] = None
     entry_price: float
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
@@ -2409,6 +2413,10 @@ class MonitorTrade(BaseModel):
     asset: str
     direction: str
     volume: float
+    # Original size at open (migration 048). For a CLOSED row that was scaled
+    # out, `volume` is what remained and `initial_volume` is the full size, so
+    # the UI can show "closed / original" (0.01/0.02). None on legacy rows.
+    initial_volume: Optional[float] = None
     entry_price: float
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
