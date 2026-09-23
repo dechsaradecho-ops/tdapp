@@ -465,6 +465,26 @@ async def _manage_position(db, broker, pos: Position, price: float,
     """
     out = {"moved_sl": False, "partial_closed": False,
            "new_sl": None, "old_sl": None, "partial_volume": None}
+    # A position whose whole size was closed by partials (volume 0) has
+    # nothing left to manage. Before migration 047 the reduced volume was
+    # never persisted, so a re-fired TP1 could drive the stored size to 0
+    # while the row stayed `open` — the guard then kept moving a stop on a
+    # zero-size position forever. Close it out and stop.
+    if float(getattr(pos, "volume", 0) or 0) <= 0:
+        try:
+            row_id = str(getattr(pos, "row_id", "") or "")
+            if not row_id:
+                rows = db.select("paper_trades",
+                                 filters={"ticket": str(pos.ticket or "")},
+                                 limit=1)
+                row_id = str(rows[0].get("id") or "") if rows else ""
+            if row_id:
+                db.update("paper_trades", row_id, {"status": "closed"})
+                log.info("position %s had zero volume — marked closed",
+                         pos.ticket)
+        except Exception as exc:
+            log.debug("zero-volume close persist failed: %s", exc)
+        return out
     if pos.stop_loss is None or pos.entry_price <= 0:
         return out
 

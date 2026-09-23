@@ -1344,6 +1344,25 @@ class TestPositionGuardManagement:
         assert row["pnl"] == pytest.approx(300.0, abs=1.0)
 
     @pytest.mark.asyncio
+    async def test_zero_volume_position_is_closed_out(self, monkeypatch):
+        """ไม้ที่ volume เหลือ 0 (ปิดบางส่วนจนหมด) ต้องถูก mark closed.
+
+        Prod 2026-09-23: PAPER-000080 ถูก TP1 ยิงซ้ำหลายรอบจน volume ใน DB
+        เหลือ 0.0 แต่ status ยัง open → guard ยังวนจัดการไม้ขนาดศูนย์ไม่จบ.
+        เทสนี้ล็อกสัญญา: volume <= 0 → update status=closed + ไม่ขยับ SL.
+        """
+        from app.workers import position_guard
+        broker = self._broker(volume=0.0)
+        db = self._db(volume=0.0)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=1.0, trail_atr_mult=2.0))
+        assert summary["moved_sl"] == 0
+        assert summary["partial_closed"] == 0
+        assert db.rows["paper_trades"][0]["status"] == "closed"
+
+    @pytest.mark.asyncio
     async def test_partial_close_suppressed_when_market_closed(self, monkeypatch):
         """discretionary_block (ตลาดปิด) → ห้าม partial close + ห้ามแจ้งเตือน."""
         from app.workers import position_guard
