@@ -1,14 +1,15 @@
 """One-off: back-fix the AUDNZD PAPER-000080 partial-close state on prod.
 
 Why: before migration 047 the guard's `partial_done` write was silently
-rejected (unknown column), so the row still reads partial_done=None and its
-`volume` was never reduced. The position partial-closed 3x across worker
-restarts, but each restart rehydrated volume back to 0.02, so the true
-remaining size is 0.02 - 0.01 = 0.01.
+rejected (unknown column), so the row still read partial_done=None and its
+`volume` was never reduced. The position partial-closed 4x across worker
+restarts (01:05 / 03:00 / 03:15 / 03:30), each restart rehydrating volume
+back to 0.02, so the stored size drifted to 0.0 while the row stayed `open`.
 
-This script:
+The true state: the whole 0.02 was scaled out, so the position is CLOSED
+with volume 0.0. This script:
   1. prints the current row (audit trail),
-  2. sets partial_done=True and volume=0.01,
+  2. sets status=closed, partial_done=True, volume=0.0,
   3. re-reads and prints the result.
 
 Run AFTER migration 047 is applied in the Supabase SQL Editor.
@@ -28,7 +29,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from app.services.database import Database  # noqa: E402
 
 TICKET = "PAPER-000080"
-REMAINING_VOLUME = 0.01
+REMAINING_VOLUME = 0.0
 
 
 def main() -> int:
@@ -48,12 +49,15 @@ def main() -> int:
               "partial_done", "entry_price", "stop_loss", "take_profit"):
         print(f"  {k} = {row.get(k)!r}")
 
-    if row.get("partial_done") is True and float(row.get("volume") or 0) == REMAINING_VOLUME:
+    if (row.get("status") == "closed"
+            and row.get("partial_done") is True
+            and float(row.get("volume") or 0) == REMAINING_VOLUME):
         print("already fixed — nothing to do")
         return 0
 
     db.update("paper_trades", str(row["id"]),
-              {"partial_done": True, "volume": REMAINING_VOLUME})
+              {"status": "closed", "partial_done": True,
+               "volume": REMAINING_VOLUME})
 
     after = db.select("paper_trades", filters={"ticket": TICKET}, limit=1)
     print("AFTER:")
