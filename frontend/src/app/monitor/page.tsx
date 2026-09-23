@@ -332,6 +332,18 @@ function describeMoveReason(reason: string): { label: string; why: string } {
   return { label: reason, why: "" };
 }
 
+/** เหตุผลปิดสำรองจาก signal_logs (event=closed) — ใช้เมื่อแถว journal
+ *  ไม่มี close_reason (ไม้ที่ถูกปิดด้วยสคริปต์ หรือปิดบางส่วนจนหมดก่อนที่
+ *  close_trade_rows จะเขียนเหตุผลลงแถว — prod 2026-09-23 AUDNZD).
+ *  เลือก log "closed" ตัวสุดท้าย (ตัวที่ปิดจริง) แล้วตัด suffix "@ ราคา" ออก. */
+function closedReasonOf(timeline: SignalLog[] | undefined): string | null {
+  if (!timeline || timeline.length === 0) return null;
+  const closed = timeline.filter((l) => l.event === "closed" && l.reason);
+  if (closed.length === 0) return null;
+  const last = closed[closed.length - 1];
+  return String(last.reason || "").replace(/\s*@\s*[\d.]+$/, "").trim() || null;
+}
+
 /** ฟิลด์ที่ป้ายไทม์ไลน์ใช้จริง — รับได้ทั้งไม้เปิดค้าง (MonitorOpenPosition)
  *  และแถว journal ที่ปิดแล้ว (MonitorTrade) เพื่อโชว์ในตารางประวัติยิง order */
 type MoveTimelinePos = {
@@ -1114,7 +1126,11 @@ export default function MonitorPage() {
                       <StatusBadge status={t.status} />
                     </td>
                     <td className="py-2 pr-4 text-xs">
-                      <CloseReasonBadge trade={t} rules={snap.exit_rules} />
+                      <CloseReasonBadge
+                        trade={t}
+                        rules={snap.exit_rules}
+                        fallbackReason={closedReasonOf(moveLogs[t.ticket ?? ""])}
+                      />
                       {t.ticket && (
                         <MoveTimelineBadge
                           pos={t}

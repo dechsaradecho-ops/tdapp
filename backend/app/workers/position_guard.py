@@ -398,7 +398,17 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
             return out  # TP1 already fired — never scale out twice
         pct = 25.0 if rec == "PARTIAL_25" else 50.0
         slice_vol = round(float(pos.volume or 0) * pct / 100.0, 2)
-        if slice_vol <= 0 or slice_vol >= float(pos.volume or 0):
+        # A slice that would consume the whole remaining size is a full exit,
+        # not a scale-out — close it properly so the journal keeps a reason
+        # (same rule as the TP1 path).
+        if slice_vol >= float(pos.volume or 0):
+            await _close_whole_position(
+                db, broker, pos, price, s, notifier, rates=rates,
+                reason=reason_prefix,
+                reason_text=f"{reason_prefix} แบ่งปิดครบขนาด — ปิดทั้งไม้")
+            out["closed"] = True
+            return out
+        if slice_vol <= 0:
             return out
         try:
             result = await broker.partial_close(ticket, slice_vol)
@@ -480,6 +490,52 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
     return out
 
 
+async def _close_whole_position(db, broker, pos: Position, price: float, s,
+                                notifier: NotificationService,
+                                rates: dict[str, float] | None = None,
+                                reason: str = "manual",
+                                reason_text: str = "") -> bool:
+    """Close the ENTIRE position and journal it with a real close_reason.
+
+    Used when a partial-close slice would consume the whole remaining size
+    (partial_pct=100, or a 1-lot position whose 50% rounds up to the full
+    size). Without this the row was left at volume 0 / status open with
+    ``close_reason=None`` — the monitor's "เหตุผลปิด" column then showed
+    nothing for a trade that really did close (prod 2026-09-23 AUDNZD).
+
+    Returns True when the broker accepted the close. Never raises.
+    """
+    ticket = str(getattr(pos, "ticket", "") or "")
+    asset = str(getattr(pos, "asset", "") or "")
+    direction = str(getattr(pos, "direction", "") or "")
+    try:
+        result = await broker.close_position(ticket)
+    except Exception as exc:
+        log.warning("close-whole %s failed: %s", ticket, exc)
+        return False
+    if not getattr(result, "ok", False):
+        log.warning("close-whole %s rejected: %s", ticket,
+                    getattr(result, "message", ""))
+        return False
+    pnl = execution.PaperBrokerPnl.compute(pos, s, asset=asset, rates=rates)
+    execution.close_trade_rows(db, ticket, price, pnl, reason,
+                               asset=asset, direction=direction)
+    signal_log.log_event(
+        db=db, event="closed", asset=asset, direction=direction,
+        entry=pos.entry_price, exit_price=price, pnl=pnl, ticket=ticket,
+        source="auto",
+        reason=f"{reason_text or reason} @ {price:g}")
+    try:
+        await notifier.notify(
+            pos.user_id, "trade_closed",
+            f"✅ ปิดทั้งไม้\nAsset: {asset}\nDirection: {direction}\n"
+            f"Entry: {pos.entry_price:g} → Exit: {price:g}\n"
+            f"PnL: {_pnl_text(pnl)}\n{reason_text or reason}")
+    except Exception as exc:
+        log.debug("close-whole notify failed: %s", exc)
+    return True
+
+
 async def _manage_position(db, broker, pos: Position, price: float,
                            s, notifier: NotificationService,
                            discretionary_block: str = "",
@@ -556,7 +612,19 @@ async def _manage_position(db, broker, pos: Position, price: float,
             and not getattr(pos, "partial_done", False) \
             and not discretionary_block:
         slice_vol = round(pos.volume * partial_pct / 100.0, 2)
-        if slice_vol > 0 and slice_vol < pos.volume:
+        # A slice that would close the WHOLE remaining size (partial_pct=100,
+        # or a 1-lot position where 50% rounds up to the full size) is not a
+        # scale-out — it is a full exit. Close the position properly so the
+        # journal carries a close_reason + PnL instead of leaving a zero-volume
+        # row that only the next cycle's zero-volume guard would sweep up
+        # (prod 2026-09-23: PAPER-000080 closed in slices until volume hit 0
+        # with close_reason=None, so the monitor showed no reason at all).
+        if slice_vol >= pos.volume:
+            await _close_whole_position(
+                db, broker, pos, price, s, notifier, rates=rates,
+                reason="tp", reason_text="ปิดบางส่วนครบขนาด (TP1) — ปิดทั้งไม้")
+            return out
+        if slice_vol > 0:
             try:
                 result = await broker.partial_close(pos.ticket, slice_vol)
                 if result.ok:

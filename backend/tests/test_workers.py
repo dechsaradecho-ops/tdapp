@@ -1366,6 +1366,65 @@ class TestPositionGuardManagement:
         assert db.rows["paper_trades"][0]["status"] == "closed"
 
     @pytest.mark.asyncio
+    async def test_partial_close_that_consumes_all_closes_the_position(
+            self, monkeypatch):
+        """partial_pct=100 → slice == volume → ปิดทั้งไม้ (ไม่ใช่ scale-out).
+
+        Prod 2026-09-23: PAPER-000080 (AUDNZD) ถูกปิดทีละส่วนจน volume เหลือ 0
+        แต่แถว journal ยัง status=open + close_reason=None → หน้า monitor
+        คอลัมน์ "เหตุผลปิด" ว่างเปล่า. เทสนี้ล็อกสัญญา: เมื่อ slice ที่จะปิด
+        ครบขนาด (>= volume) ต้องเรียก broker.close_position + เขียน
+        close_reason ลงแถว paper_trades (ไม่ใช่ปล่อยให้ zero-volume guard
+        กวาดทีหลังโดยไม่มีเหตุผล).
+        """
+        from app.workers import position_guard
+        closed: list[str] = []
+        broker = self._broker(volume=0.02)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        db = self._db(volume=0.02)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=100, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        # ปิดทั้งไม้ ไม่ใช่ partial
+        assert closed == ["T1"]
+        assert summary["partial_closed"] == 0
+        row = db.rows["paper_trades"][0]
+        assert row["status"] == "closed"
+        assert row["close_reason"] == "tp"
+        assert row["exit_price"] == pytest.approx(1.2500)
+        # PnL ของทั้งไม้: 0.02 × (1.2500−1.1000) × 100,000 = $300
+        assert row["pnl"] == pytest.approx(300.0, abs=1.0)
+        # signal_log เก็บเหตุผลปิดไว้ด้วย
+        closed_logs = [r for _, r in db.inserted
+                       if r.get("event") == "closed" and r.get("ticket") == "T1"]
+        assert closed_logs and "ปิดทั้งไม้" in closed_logs[-1]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_partial_close_slice_equal_to_volume_closes_position(
+            self, monkeypatch):
+        """ไม้ 1 lot + partial_pct=50 → slice 0.5 < 1.0 → ยังเป็น scale-out ปกติ.
+
+        ตรวจว่า guard `slice_vol >= volume` ไม่ยิงมั่วกับไม้ขนาดใหญ่.
+        """
+        from app.workers import position_guard
+        partials: list[float] = []
+        closed: list[str] = []
+        broker = self._broker(volume=1.0)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        db = self._db(volume=1.0)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert partials == [pytest.approx(0.5)]
+        assert closed == []                      # ไม่ปิดทั้งไม้
+        assert summary["partial_closed"] == 1
+        assert db.rows["paper_trades"][0]["status"] == "open"
+        assert db.rows["paper_trades"][0]["volume"] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
     async def test_resolve_initial_volume_prefers_row_column(self):
         """`initial_volume` บนแถว paper_trades มาก่อน (migration 048)."""
         from app.workers import position_guard

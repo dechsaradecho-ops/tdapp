@@ -65,8 +65,9 @@ function toneOf(reason: string, pnl: number | null): string {
 }
 
 /** ประโยคอธิบายว่าทำไมกฎถึงยิง — คืน [] เมื่อไม่มีอะไรจะอธิบาย. */
-function explain(t: MonitorTrade, rules?: MonitorExitRules | null): string[] {
-  const reason = String(t.close_reason || "");
+function explain(t: MonitorTrade, rules?: MonitorExitRules | null,
+                 reasonOverride?: string): string[] {
+  const reason = String(reasonOverride ?? t.close_reason ?? "");
   const held = t.holding_days ?? null;
   const heldTxt = held === null ? null : `${fmtNum(held, 1)} วันซื้อขาย`;
 
@@ -199,10 +200,14 @@ function explain(t: MonitorTrade, rules?: MonitorExitRules | null): string[] {
 }
 
 export default function CloseReasonBadge({
-  trade, rules,
+  trade, rules, fallbackReason,
 }: {
   trade: MonitorTrade;
   rules?: MonitorExitRules | null;
+  /** เหตุผลสำรองจาก signal_logs (event=closed) — ใช้เมื่อแถว journal
+   *  ไม่มี close_reason (ไม้ที่ถูกปิดด้วยสคริปต์/ปิดบางส่วนจนหมดก่อนที่
+   *  close_trade_rows จะเขียนเหตุผลลงแถว — prod 2026-09-23 AUDNZD). */
+  fallbackReason?: string | null;
 }) {
   const [pop, setPop] = useState(false);
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -244,9 +249,12 @@ export default function CloseReasonBadge({
   }, [pop, place]);
 
   const closed = trade.status === "closed";
-  const reason = String(trade.close_reason || "");
-  const label = closed ? closeReasonLabel(trade.close_reason) : "ยังเปิดอยู่";
-  const lines = closed ? explain(trade, rules) : [];
+  // แถว journal อาจไม่มี close_reason (ปิดด้วยสคริปต์/ปิดบางส่วนจนหมด) —
+  // ถอยไปใช้เหตุผลจาก signal_logs (event=closed) แทน เพื่อไม่ให้คอลัมน์
+  // "เหตุผลปิด" ว่างเปล่าทั้งที่ไม้ปิดไปแล้วจริง ๆ
+  const reason = String(trade.close_reason || fallbackReason || "");
+  const label = closed ? closeReasonLabel(reason) : "ยังเปิดอยู่";
+  const lines = closed ? explain(trade, rules, reason) : [];
   // ไม้ที่ปิดก่อนเริ่มเก็บข้อมูลปิด — ไม่กู้ประวัติย้อนหลัง (จะกลายเป็นแต่งข้อมูล)
   // แสดงเฉพาะกฎที่คำอธิบายต้องพึ่งข้อมูลเวลา (smart_exit:* / time)
   const needsTiming = reason.startsWith("smart_exit") || reason === "time";
@@ -297,6 +305,11 @@ export default function CloseReasonBadge({
               ? ` · ถือ ${fmtNum(trade.holding_days, 1)} วันซื้อขาย` : ""}
             {trade.closed_at ? ` · ปิด ${new Date(trade.closed_at).toLocaleString("th-TH")}` : ""}
           </div>
+          {/* เหตุผล prose จาก signal_logs — แสดงเมื่อแถว journal ไม่มีรหัส
+              (ไม้ที่ปิดด้วยสคริปต์/ปิดบางส่วนจนหมด) */}
+          {!trade.close_reason && fallbackReason && (
+            <div className="mb-1 text-slate-300">{fallbackReason}</div>
+          )}
           {trade.pnl !== null && (
             <div className="mb-1">
               PnL{" "}
