@@ -38,6 +38,60 @@ from tests.test_workers import FakeDatabase, strong_snapshot, choppy_snapshot
 ENGINE = StrategyEngine()
 
 
+class _SummaryDb:
+    """Minimal db for market_summary: returns canned market_analysis rows."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def select(self, table, filters=None, order="created_at", desc=True,
+               limit=50, offset=0, columns="*"):
+        return list(self._rows)
+
+
+def _summary_row(**overrides) -> dict:
+    row = {
+        "asset": "EURUSD", "regime": "bull_trend", "sentiment": "bullish",
+        "confidence": 71.0, "explanation": "x",
+        "score_reasons": "a\nb", "confidence_reasons": "c\nd",
+    }
+    row.update(overrides)
+    return row
+
+
+class TestMarketSummaryReadsBothAxes:
+    """The reader must NOT collapse the two axes back into one number."""
+
+    @pytest.mark.asyncio
+    async def test_post_050_row_keeps_both_axes_distinct(self):
+        from app.api.routes import market
+
+        db = _SummaryDb([_summary_row(confidence=71.0,
+                                      opportunity_score=64.0)])
+        summary = await market.market_summary(_req(db))
+        opp = next(o for o in summary.opportunities if o.asset == "EURUSD")
+        assert opp.score == 64.0
+        assert opp.confidence == 71.0
+
+    @pytest.mark.asyncio
+    async def test_pre_050_row_falls_back_to_confidence(self):
+        """A row written before migration 050 has no opportunity_score key —
+        the reader must fall back to confidence instead of crashing."""
+        from app.api.routes import market
+
+        db = _SummaryDb([_summary_row(confidence=71.0)])
+        summary = await market.market_summary(_req(db))
+        opp = next(o for o in summary.opportunities if o.asset == "EURUSD")
+        assert opp.score == 71.0
+        assert opp.confidence == 71.0
+
+
+def _req(db):
+    """A Request stand-in exposing app.state.db (market_summary's only need)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=db)))
+
+
 def _ind(**overrides) -> IndicatorSnapshot:
     """A clean, fully-agreeing BUY snapshot; override fields to break agreement.
 
@@ -343,3 +397,82 @@ class TestScannerGateRequiresBoth:
         assert row["confidence"] == opp.confidence
         # ... and it must NOT be the raw score (the pre-P1-3 bug).
         assert row["confidence"] != opp.score
+
+    @pytest.mark.asyncio
+    async def test_market_analysis_writes_opportunity_score_column(
+            self, monkeypatch):
+        """Migration 050: the OTHER axis must land in its OWN column.
+
+        Pre-050 the DB had only ``confidence``, so readers rebuilt BOTH
+        numbers from that one column and the two scores were always equal.
+        """
+        h = _GateHarness(monkeypatch, lambda a: strong_snapshot(a))
+        s = AppSettings(allowed_assets=["EURUSD"], min_confidence=50.0,
+                        min_opportunity=50.0)
+        await h.run(monkeypatch, s)
+        row = next(r for table, r in h.db.inserted
+                   if table == "market_analysis" and r["asset"] == "EURUSD")
+        opp = ENGINE.opportunity_score(strong_snapshot("EURUSD"),
+                                       direction="BUY")
+        assert row["opportunity_score"] == opp.score
+        # The two columns must be genuinely different numbers.
+        assert row["opportunity_score"] != row["confidence"]
+
+
+class TestResilientAnalysisInsert:
+    """Migration 050 may not be applied yet — the row must survive anyway."""
+
+    def test_drops_opportunity_score_on_pgrst204_and_retries(self):
+        """PostgREST rejects the WHOLE insert when the column is unknown
+        (PGRST204). The helper must drop it and retry so confidence + reasons
+        are still persisted instead of the entire row being lost."""
+        class _Db:
+            def __init__(self):
+                self.calls: list[dict] = []
+
+            def insert_raw(self, table, row):
+                self.calls.append(dict(row))
+                if "opportunity_score" in row:
+                    return None, ("PGRST204: Could not find the "
+                                  "'opportunity_score' column")
+                return {"id": "1", **row}, None
+
+        db = _Db()
+        market_scanner._insert_analysis_row(
+            db, {"asset": "EURUSD", "confidence": 71.0,
+                 "opportunity_score": 64.0})
+        assert len(db.calls) == 2, "must retry once without the new column"
+        assert "opportunity_score" in db.calls[0]
+        assert "opportunity_score" not in db.calls[1]
+        assert db.calls[1]["confidence"] == 71.0
+
+    def test_keeps_opportunity_score_when_insert_succeeds(self):
+        class _Db:
+            def __init__(self):
+                self.calls: list[dict] = []
+
+            def insert_raw(self, table, row):
+                self.calls.append(dict(row))
+                return {"id": "1", **row}, None
+
+        db = _Db()
+        market_scanner._insert_analysis_row(
+            db, {"asset": "EURUSD", "confidence": 71.0,
+                 "opportunity_score": 64.0})
+        assert len(db.calls) == 1
+        assert db.calls[0]["opportunity_score"] == 64.0
+
+    def test_falls_back_to_plain_insert_without_insert_raw(self):
+        """Very old fakes have no insert_raw — must not raise."""
+        class _Db:
+            def __init__(self):
+                self.inserted: list[dict] = []
+
+            def insert(self, table, row):
+                self.inserted.append(dict(row))
+                return row
+
+        db = _Db()
+        market_scanner._insert_analysis_row(
+            db, {"asset": "EURUSD", "confidence": 71.0})
+        assert db.inserted and db.inserted[0]["asset"] == "EURUSD"

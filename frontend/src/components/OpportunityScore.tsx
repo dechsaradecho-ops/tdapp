@@ -182,6 +182,13 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
           className={`h-full rounded ${o.score >= 81 ? "bg-emerald-500" : o.score >= 61 ? "bg-accent" : o.score >= 31 ? "bg-amber-500" : "bg-slate-600"}`}
           style={{ width: `${o.score}%` }}
         />
+        {conf != null && (
+          <div
+            className="absolute top-0 h-2 w-[3px] -translate-x-1/2 bg-white/90 rounded"
+            style={{ left: `${Math.min(100, Math.max(0, conf))}%` }}
+            title={`Confidence Score ${conf.toFixed(0)}%`}
+          />
+        )}
         {gate != null && (
           <div
             className="absolute top-0 h-2 w-0.5 bg-rose-400/80"
@@ -192,7 +199,7 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
       </div>
       <div className="flex justify-between text-xs text-slate-500 mt-1">
         <span>
-          Confidence {o.score.toFixed(0)}%
+          Opportunity {o.score.toFixed(0)}%
           {gate != null && (
             <span className={passes ? "text-emerald-400 ml-1.5" : "text-rose-400 ml-1.5"}>
               ({gate}% {passes ? "ผ่านเกณฑ์" : "ต่ำกว่าเกณฑ์"})
@@ -201,6 +208,20 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
         </span>
         <span>{o.reasons[0]?.slice(0, 60) ?? ""}</span>
       </div>
+      {/* คำอธิบายหลอดเดียว 2 ค่า — สีแถบ = Opportunity, เส้นขาว = Confidence
+          (แสดงเฉพาะแถวที่มี confidence; แถวเก่าก่อน P1-3 ไม่มีเส้นขาว) */}
+      {conf != null && (
+        <div className="flex items-center gap-3 text-[10px] text-slate-600 mt-0.5">
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2 w-3 rounded-sm bg-accent" />
+            สีแถบ = Opportunity
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2 w-[3px] rounded-sm bg-white/90" />
+            เส้นขาว = Confidence
+          </span>
+        </div>
+      )}
       {/* P1-3: แกนที่สอง — evidence agreement. แสดงเฉพาะแถวที่มีค่า (แถวเก่า
           ก่อน P1-3 ไม่มี confidence → ไม่มีบรรทัดนี้) */}
       {conf != null && (

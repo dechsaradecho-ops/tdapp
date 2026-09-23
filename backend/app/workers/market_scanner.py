@@ -64,6 +64,32 @@ def _tradable_assets(settings) -> set[str]:
         return set()
 
 
+def _insert_analysis_row(db: Database, row: dict) -> None:
+    """Persist one market_analysis row, resilient to migration 050 missing.
+
+    PostgREST rejects the whole INSERT when `opportunity_score` is unknown
+    (PGRST204) — and Database.insert swallows the error into None, so without
+    this the entire row (confidence + reasons included) would be lost on a
+    DB where 050 has not been run yet. Prefer insert_raw (surfaces the raw
+    error), drop the new column on PGRST204, and retry once. Very old fakes
+    without insert_raw fall back to plain insert.
+    """
+    raw = getattr(db, "insert_raw", None)
+    if not callable(raw):
+        db.insert("market_analysis", row)
+        return
+    _data, err = raw("market_analysis", row)
+    if err and "PGRST204" in err and "opportunity_score" in err:
+        log.warning("market_analysis: dropping opportunity_score "
+                    "(migration 050 not applied) — confidence row still written")
+        slim = {k: v for k, v in row.items() if k != "opportunity_score"}
+        _data2, err2 = raw("market_analysis", slim)
+        if err2:
+            log.error("insert market_analysis failed (slim retry): %s", err2)
+    elif err:
+        log.error("insert market_analysis failed: %s", err)
+
+
 # ---------------------------------------------------------------------------
 # Retention — market_analysis had NO TTL and grew forever.
 # One cycle writes one row per symbol (~28) every 5 min ≈ 8k rows/day ≈ 240k
@@ -195,6 +221,12 @@ async def scan_once(db: Database) -> list[dict]:
             # so the dashboard's "Confidence %" and the opportunity score
             # were the same number. They are now independent axes.
             "confidence": opp.confidence,
+            # Migration 050: the OTHER axis — setup QUALITY — lives in its
+            # own column now. Pre-050 the DB had only `confidence`, so the
+            # readers rebuilt BOTH numbers from that one column and the two
+            # scores were always equal. Nullable: pre-050 rows simply lack
+            # the key and readers fall back to `confidence`.
+            "opportunity_score": opp.score,
             "explanation": " | ".join(opp.reasons[:3]),
             # Full scoring breakdown — home Opportunity-Score popup shows HOW
             # the score was computed (every component line, not just the 3
@@ -205,7 +237,7 @@ async def scan_once(db: Database) -> list[dict]:
             # explain the opportunity score but not the confidence score.
             "confidence_reasons": "\n".join(opp.confidence_reasons),
         }
-        db.insert("market_analysis", row)
+        _insert_analysis_row(db, row)
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})
 
         # No mockup signals: snapshots from the random-walk demo feed (live

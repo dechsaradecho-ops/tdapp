@@ -42,13 +42,25 @@ async def recommend(payload: PortfolioInput, request: Request) -> PortfolioRecom
             # Migration 049: confidence breakdown lives in its own column.
             raw_conf = str(r.get("confidence_reasons") or "")
             conf_reasons = [s for s in raw_conf.split("\n") if s.strip()]
+            # Migration 050: opportunity_score lives in its own column.
+            # Pre-050 rows only have `confidence` → fall back to it.
+            try:
+                _opp = float(r.get("opportunity_score")
+                             if r.get("opportunity_score") is not None
+                             else r["confidence"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            try:
+                _conf = float(r["confidence"])
+            except (KeyError, TypeError, ValueError):
+                _conf = _opp
             opportunities.append(AssetOpportunity(
                 asset=asset,
-                score=score,
-                band=StrategyEngine.band_of(score),
+                score=_opp,
+                band=StrategyEngine.band_of(_opp),
                 reasons=reasons[:3] or ["คะแนนจาก Market Scanner"],
                 score_reasons=reasons,
-                confidence=score,
+                confidence=_conf,
                 confidence_reasons=conf_reasons,
             ))
 
@@ -67,7 +79,9 @@ async def recommend(payload: PortfolioInput, request: Request) -> PortfolioRecom
                 opportunities.append(AssetOpportunity(
                     asset=asset, score=opp.score, band=opp.band,
                     reasons=opp.reasons[:3],
-                    score_reasons=list(opp.reasons)))
+                    score_reasons=list(opp.reasons),
+                    confidence=opp.confidence,
+                    confidence_reasons=list(opp.confidence_reasons)))
         except Exception:
             pass
 

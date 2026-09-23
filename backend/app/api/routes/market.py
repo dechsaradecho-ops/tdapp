@@ -96,12 +96,25 @@ async def market_summary(request: Request) -> MarketSummary:
             # to the score breakdown so it is never empty.
             raw_conf = str(row.get("confidence_reasons") or "")
             conf_reasons = [s for s in raw_conf.split("\n") if s.strip()]
+            # Migration 050: opportunity_score lives in its own column.
+            # Pre-050 rows only have `confidence`, so fall back to it —
+            # without this both axes collapse to the same number.
+            try:
+                _opp = float(row.get("opportunity_score")
+                             if row.get("opportunity_score") is not None
+                             else row["confidence"])
+            except (KeyError, TypeError, ValueError):
+                _opp = float(row["confidence"])
+            try:
+                _conf = float(row["confidence"])
+            except (KeyError, TypeError, ValueError):
+                _conf = _opp
             opportunities.append(AssetOpportunity(
-                asset=row["asset"], score=float(row["confidence"]),
-                band=StrategyEngine.band_of(float(row["confidence"])),
+                asset=row["asset"], score=_opp,
+                band=StrategyEngine.band_of(_opp),
                 reasons=reasons[:3],
                 score_reasons=reasons,
-                confidence=float(row["confidence"]),
+                confidence=_conf,
                 confidence_reasons=conf_reasons,
             ))
             regime_by_asset[row["asset"]] = str(row.get("regime") or "")
@@ -125,6 +138,8 @@ async def market_summary(request: Request) -> MarketSummary:
                         asset=asset, score=opp.score, band=opp.band,
                         reasons=opp.reasons[:3],
                         score_reasons=list(opp.reasons),
+                        confidence=opp.confidence,
+                        confidence_reasons=list(opp.confidence_reasons),
                     ))
         except Exception:
             pass  # network/quote failure → final fallback below
