@@ -873,12 +873,10 @@ export default function MonitorPage() {
             </button>
             <button onClick={load} disabled={loading}
               aria-busy={loading} aria-live="polite"
+              aria-label="รีเฟรช"
               title={loading ? "กำลังโหลดข้อมูล..." : "รีเฟรชข้อมูลตอนนี้"}
-              className="border border-slate-700 rounded px-3 py-2 text-sm min-h-[40px] text-slate-300 active:bg-slate-800 disabled:opacity-50">
-              <span className="inline-flex items-center gap-1.5">
-                <Icon n={loading ? "spinner" : "refresh"} size={15} className={loading ? "animate-spin" : ""} />
-                รีเฟรช
-              </span>
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center border border-slate-700 rounded text-slate-300 active:bg-slate-800 disabled:opacity-50">
+              <Icon n={loading ? "spinner" : "refresh"} size={16} className={loading ? "animate-spin" : ""} />
             </button>
           </div>
         </div>
