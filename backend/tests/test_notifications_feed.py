@@ -3,8 +3,9 @@
 The bell reads the SAME `notifications` table the LINE/Web-Push transports
 write to. These tests pin the response shape the frontend depends on:
 items[] (id/type/message/status/channel/created_at/sent_at/error), total,
-unread (created within 24h — the schema has no read flag), has_more, and
-server-side paging + type filter.
+unread (created after the client's last-seen `since`, or the 7-day window
+when absent — the schema has no read flag), has_more, server-side paging +
+type filter, and the 7-day retention window.
 
 Run from backend/: d:\\tdapp\\.venv\\Scripts\\python.exe -m pytest tests/test_notifications_feed.py -v
 """
@@ -41,7 +42,7 @@ class TestNotificationsFeedEndpoint:
         db = FakeDatabase(rows={"notifications": [
             _row(0.5, "trade_opened"),
             _row(2, "sl_moved", channel="both"),
-            _row(30, "stop_loss"),          # older than 24h → not unread
+            _row(30, "stop_loss"),
         ]})
         set_state(db)
         res = await call("GET", "/api/system/notifications")
@@ -50,11 +51,44 @@ class TestNotificationsFeedEndpoint:
         assert body["verdict"] == "ok"
         assert len(body["items"]) == 3
         assert body["total"] == 3
-        assert body["unread"] == 2, "only rows < 24h count as unread"
+        # No `since` → unread falls back to the whole 7-day window.
+        assert body["unread"] == 3
         assert body["has_more"] is False
         first = body["items"][0]
         assert set(first) == {"id", "type", "message", "status", "channel",
                               "created_at", "sent_at", "error"}
+
+    @pytest.mark.asyncio
+    async def test_unread_uses_since_timestamp(self):
+        """`since` = the client's last-seen time → only newer rows are unread."""
+        from tests.test_api_routes import call, set_state
+
+        db = FakeDatabase(rows={"notifications": [
+            _row(0.5, "trade_opened"),
+            _row(2, "sl_moved"),
+            _row(30, "stop_loss"),
+        ]})
+        set_state(db)
+        since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        body = (await call(
+            "GET", f"/api/system/notifications?since={since}")).json()
+        assert body["unread"] == 1, "only the 0.5h row is newer than `since`"
+        assert body["total"] == 3, "`since` must not filter the feed itself"
+
+    @pytest.mark.asyncio
+    async def test_rows_older_than_7_days_are_hidden(self):
+        """Retention: the feed never returns rows past the 7-day window."""
+        from tests.test_api_routes import call, set_state
+
+        db = FakeDatabase(rows={"notifications": [
+            _row(1, "trade_opened"),
+            _row(24 * 8, "stop_loss"),      # 8 days old → hidden
+        ]})
+        set_state(db)
+        body = (await call("GET", "/api/system/notifications")).json()
+        assert body["total"] == 1
+        assert len(body["items"]) == 1
+        assert body["items"][0]["type"] == "trade_opened"
 
     @pytest.mark.asyncio
     async def test_server_paging_does_not_repeat_rows(self):
@@ -125,3 +159,61 @@ class TestNotificationsFeedEndpoint:
         assert body["verdict"] == "fail"
         assert body["items"] == []
         assert body["unread"] == 0
+
+
+class TestNotificationRetention:
+    """purge_old_notifications — the 7-day TTL for the bell feed."""
+
+    def test_purges_rows_older_than_7_days(self):
+        from app.services import notification_service as ns
+
+        db = FakeDatabase(rows={"notifications": [
+            _row(1, "trade_opened"),
+            _row(24 * 8, "stop_loss"),
+            _row(24 * 30, "risk_warning"),
+        ]})
+        deleted = ns.purge_old_notifications(db, force=True)
+        assert deleted == 2
+        remaining = db.rows["notifications"]
+        assert len(remaining) == 1
+        assert remaining[0]["type"] == "trade_opened"
+
+    def test_keeps_rows_inside_the_window(self):
+        from app.services import notification_service as ns
+
+        db = FakeDatabase(rows={"notifications": [
+            _row(1, "trade_opened"),
+            _row(24 * 6, "sl_moved"),
+        ]})
+        assert ns.purge_old_notifications(db, force=True) == 0
+        assert len(db.rows["notifications"]) == 2
+
+    def test_throttled_without_force(self):
+        from app.services import notification_service as ns
+
+        db = FakeDatabase(rows={"notifications": [_row(24 * 30)]})
+        ns._last_purge = 0.0
+        assert ns.purge_old_notifications(db) == 1, "first call runs"
+        # Second call within the interval is skipped (row already gone).
+        db.rows["notifications"] = [_row(24 * 30)]
+        assert ns.purge_old_notifications(db) == 0, "throttled"
+        assert len(db.rows["notifications"]) == 1
+
+    def test_unavailable_db_is_safe(self):
+        from app.services import notification_service as ns
+
+        class Dead:
+            available = False
+        assert ns.purge_old_notifications(Dead(), force=True) == 0
+
+    @pytest.mark.asyncio
+    async def test_log_maintenance_purges_notifications(self):
+        from app.workers import log_maintenance
+
+        db = FakeDatabase(rows={"notifications": [
+            _row(1, "trade_opened"),
+            _row(24 * 9, "stop_loss"),
+        ]})
+        out = await log_maintenance.run_once(db)
+        assert out["purged"]["notifications"] == 1
+        assert len(db.rows["notifications"]) == 1

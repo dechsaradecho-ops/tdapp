@@ -358,9 +358,13 @@ export const api = {
 
   // ---------- Notification feed — กระดิ่งมุมขวาบน ----------
   // อ่านตาราง `notifications` (LINE/Web-Push เขียนไว้) — limit สูงสุด 200
-  notifications: (limit = 50, type = "all") =>
+  // `offset` = lazy-load หน้าถัดไป; `since` = เวลาที่เปิดดูกระดิ่งครั้งล่าสุด
+  // (ISO) → backend นับ `unread` เฉพาะแถวที่ใหม่กว่านั้น (ตารางไม่มี read flag)
+  notifications: (limit = 50, type = "all", offset = 0, since = "") =>
     get<NotificationsResponse>(
-      `/api/system/notifications?limit=${limit}&type=${encodeURIComponent(type)}`),
+      `/api/system/notifications?limit=${limit}&type=${encodeURIComponent(type)}`
+      + `&offset=${offset}`
+      + (since ? `&since=${encodeURIComponent(since)}` : "")),
 
   // ---------- Auth: 6-digit PIN gate ----------
   authStatus: () => get<PinStatus>("/api/auth/status"),

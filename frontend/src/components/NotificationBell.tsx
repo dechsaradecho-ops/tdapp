@@ -5,7 +5,14 @@
  *
  * อ่านจาก GET /api/system/notifications (ตาราง `notifications` เดียวกับที่
  * LINE/Web-Push เขียนไว้). กดกระดิ่ง → popover แบบย่อ (ไอคอน + หัวข้อ + เวลา);
- * กดแถว → expand ดูข้อความเต็ม + ช่องทาง + สถานะ + เวลา.
+ * กดแถว → expand ดูข้อความเต็ม + สถานะ + เวลา.
+ *
+ * - Lazy load: โหลด 30 แถวแรก แล้วโหลดเพิ่มเมื่อเลื่อนใกล้ก้น (offset paging)
+ * - Liquid glass: ใช้โทเคนเดียวกับ .panel (rgba + backdrop-filter blur)
+ * - Badge แดง: เก็บ "เวลาที่เปิดดูล่าสุด" ใน localStorage แล้วส่งเป็น `since`
+ *   → backend นับ unread เฉพาะแถวใหม่กว่านั้น (ตารางไม่มี read flag)
+ * - เก็บ 7 วัน: backend กรอง created_at >= now-7d (log_maintenance purge ด้วย)
+ * - ไม่แยกช่องทาง (LINE/Web Push) ในเมนูกระดิ่ง — แสดงแค่สถานะ
  *
  * ทำไมต้อง portal: `.panel`/`.lg-refract` มี backdrop-filter ซึ่งสร้าง
  * containing block ให้ position:fixed → popover ต้อง portal ไป document.body
@@ -22,6 +29,9 @@ import { api } from "@/lib/api";
 import type { NotificationItem } from "@/lib/types";
 
 const POLL_MS = 60_000;
+const PAGE_SIZE = 30;
+/** localStorage key — เวลาที่ผู้ใช้เปิดดูกระดิ่งครั้งล่าสุด (ISO). */
+const SEEN_KEY = "tdapp.notif.seenAt";
 
 /** notification_type → ไอคอน + สี (ตาม UI design system: monotone, ไม่มี emoji). */
 const TYPE_META: Record<string, { icon: IconName; tone: string; label: string }> = {
@@ -66,14 +76,6 @@ function relTime(iso?: string | null): string {
   return new Date(iso).toLocaleDateString("th-TH", { day: "numeric", month: "short" });
 }
 
-const CHANNEL_LABEL: Record<string, string> = {
-  line: "LINE",
-  web_push: "Web Push",
-  both: "LINE + Push",
-  in_app: "ในแอป",
-  email: "อีเมล",
-};
-
 const STATUS_LABEL: Record<string, string> = {
   sent: "ส่งแล้ว",
   pending: "รอส่ง",
@@ -81,24 +83,49 @@ const STATUS_LABEL: Record<string, string> = {
   skipped: "ข้าม",
 };
 
+/** อ่านเวลาที่เปิดดูกระดิ่งครั้งล่าสุด (ISO) — "" เมื่อยังไม่เคยเปิด. */
+function readSeenAt(): string {
+  try {
+    return window.localStorage.getItem(SEEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+/** บันทึกเวลาที่เปิดดูกระดิ่งครั้งล่าสุด (ISO) — เงียบเมื่อ storage ถูกบล็อก. */
+function writeSeenAt(iso: string): void {
+  try {
+    window.localStorage.setItem(SEEN_KEY, iso);
+  } catch {
+    /* private mode / storage disabled — badge แค่ไม่จำสถานะ */
+  }
+}
+
 export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [err, setErr] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pos, setPos] = useState({ top: 0, left: 0 });
 
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // กันยิงซ้ำตอน scroll เร็ว ๆ (state update ไม่ทันในเฟรมเดียว)
+  const loadingMoreRef = useRef(false);
 
+  /** โหลดหน้าแรก (offset 0) — ใช้ตอนเปิด/รีเฟรช/poll. */
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.notifications(50);
+      const res = await api.notifications(PAGE_SIZE, "all", 0, readSeenAt());
       setItems(res.items ?? []);
       setUnread(res.unread ?? 0);
+      setHasMore(Boolean(res.has_more));
       setErr(res.verdict !== "ok");
     } catch {
       setErr(true);
@@ -106,6 +133,27 @@ export default function NotificationBell() {
       setLoading(false);
     }
   }, []);
+
+  /** โหลดหน้าถัดไปต่อท้าย (lazy load ตอนเลื่อนใกล้ก้น). */
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const res = await api.notifications(PAGE_SIZE, "all", items.length, readSeenAt());
+      const next = res.items ?? [];
+      setItems((prev) => {
+        const seen = new Set(prev.map((r) => r.id));
+        return [...prev, ...next.filter((r) => !seen.has(r.id))];
+      });
+      setHasMore(Boolean(res.has_more));
+    } catch {
+      /* เงียบ — คงรายการเดิมไว้ */
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [items.length]);
 
   // poll ทุก 60 วิ — เงียบ ๆ ไม่แตะ UI ตอน error (แค่คงค่าเดิมไว้)
   useEffect(() => {
@@ -152,10 +200,22 @@ export default function NotificationBell() {
       const next = !v;
       if (next) {
         setExpanded(null);
-        void load(); // รีเฟรชทันทีตอนเปิด
+        // เปิดดูแล้ว → จำเวลาไว้ + เคลียร์ badge แดงทันที (ไม่ต้องรอ poll)
+        writeSeenAt(new Date().toISOString());
+        setUnread(0);
+        void load();
       }
       return next;
     });
+  };
+
+  /** เลื่อนใกล้ก้น (เหลือ < 120px) → โหลดหน้าถัดไป. */
+  const onListScroll = () => {
+    const el = listRef.current;
+    if (!el || !hasMore || loadingMoreRef.current) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
+      void loadMore();
+    }
   };
 
   const badge = unread > 99 ? "99+" : String(unread);
@@ -192,10 +252,15 @@ export default function NotificationBell() {
           style={{
             position: "fixed", top: pos.top, left: pos.left,
             width: "min(380px, calc(100vw - 16px))",
+            background: "rgba(10,10,12,.72)",
+            backdropFilter: "blur(22px) saturate(150%)",
+            WebkitBackdropFilter: "blur(22px) saturate(150%)",
+            border: "1px solid rgba(255,255,255,.12)",
+            boxShadow: "0 18px 48px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.10)",
           }}
-          className="z-50 animate-pop rounded-xl border border-slate-700 bg-slate-900/95 backdrop-blur shadow-xl overflow-hidden"
+          className="z-50 animate-pop rounded-2xl overflow-hidden"
         >
-          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-200">
               <Icon n="bell" size={13} />
               การแจ้งเตือน
@@ -216,7 +281,12 @@ export default function NotificationBell() {
             </button>
           </div>
 
-          <div className="max-h-[min(60vh,420px)] overflow-y-auto">
+          <div
+            ref={listRef}
+            onScroll={onListScroll}
+            data-testid="notification-list"
+            className="max-h-[min(60vh,420px)] overflow-y-auto overscroll-contain"
+          >
             {err && items.length === 0 && (
               <div className="px-3 py-6 text-center text-xs text-slate-500">
                 โหลดการแจ้งเตือนไม่สำเร็จ
@@ -239,7 +309,7 @@ export default function NotificationBell() {
                   onClick={() => setExpanded(isOpen ? null : it.id)}
                   aria-expanded={isOpen}
                   data-testid="notification-row"
-                  className="w-full text-left px-3 py-2 border-b border-slate-800/60 last:border-b-0 hover:bg-white/5 transition-colors"
+                  className="w-full text-left px-3 py-2 border-b border-white/5 last:border-b-0 hover:bg-white/5 transition-colors"
                 >
                   <div className="flex items-start gap-2">
                     <span className={`mt-0.5 shrink-0 ${m.tone}`}>
@@ -259,9 +329,6 @@ export default function NotificationBell() {
                       </div>
                       {isOpen && (
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-500">
-                          <span className="rounded bg-white/5 px-1.5 py-px">
-                            {CHANNEL_LABEL[it.channel] ?? it.channel}
-                          </span>
                           <span className={
                             it.status === "failed" ? "text-loss"
                               : it.status === "sent" ? "text-profit" : "text-slate-400"
@@ -281,6 +348,16 @@ export default function NotificationBell() {
                 </button>
               );
             })}
+            {loadingMore && (
+              <div className="px-3 py-2 text-center text-[10px] text-slate-500">
+                กำลังโหลดเพิ่ม...
+              </div>
+            )}
+            {!hasMore && items.length > 0 && (
+              <div className="px-3 py-2 text-center text-[10px] text-slate-600">
+                แสดงครบแล้ว (เก็บย้อนหลัง 7 วัน)
+              </div>
+            )}
           </div>
         </div>,
         document.body

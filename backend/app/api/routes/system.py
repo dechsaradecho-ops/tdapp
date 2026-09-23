@@ -28,13 +28,14 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
 from app.services.database import Database
 from app.services import execution, limit_expand
+from app.services.notification_service import NOTIFICATION_TTL_DAYS
 
 router = APIRouter()
 
@@ -653,13 +654,16 @@ async def news_logs(request: Request, limit: int = 100, offset: int = 0,
 # Read-only, never raises — a missing table just yields an empty feed.
 @router.get("/notifications")
 async def notifications_feed(request: Request, limit: int = 50,
-                             offset: int = 0, type: str = "all") -> dict:
+                             offset: int = 0, type: str = "all",
+                             since: str = "") -> dict:
     """Recent notification rows for the bell popover.
 
     `limit` capped at 200 per request; `offset` pages older rows. `type`
-    filters server-side (a notification_type value, or "all"). `unread`
-    counts rows created in the last 24h — the table has no read flag, so
-    "unread" is a recency proxy the UI clears when the popover is opened.
+    filters server-side (a notification_type value, or "all"). `since` is an
+    ISO timestamp of the last time the user opened the bell — `unread` counts
+    rows created after it (the table has no read flag, so the client stores
+    the last-seen time locally and passes it back). Rows older than the 7-day
+    retention window are never returned.
     """
     db: Database = request.app.state.db
     out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
@@ -676,9 +680,15 @@ async def notifications_feed(request: Request, limit: int = 50,
     filters: dict[str, Any] = {}
     if type and type != "all":
         filters["type"] = type
+    # 7-day retention window — the feed never shows older rows even if a
+    # purge has not run yet (log_maintenance trims the table hourly).
+    retention_cutoff = (datetime.now(timezone.utc)
+                        - timedelta(days=NOTIFICATION_TTL_DAYS)).isoformat()
     rows = db.select("notifications", filters=filters or None,
                      order="created_at", desc=True, limit=page_size,
                      offset=page_offset)
+    rows = [r for r in rows
+            if str(r.get("created_at") or "") >= retention_cutoff]
     items = [
         {
             "id": r.get("id"),
@@ -693,16 +703,16 @@ async def notifications_feed(request: Request, limit: int = 50,
         for r in rows
     ]
     try:
-        total = db.count("notifications", filters=filters or None)
+        total = db.count("notifications", filters=filters or None,
+                         created_after=retention_cutoff)
         total_n = total if total is not None else len(rows)
     except Exception:
         total_n = len(rows)
-    # unread = created within the last 24h (no read flag in the schema)
+    # unread = created after the client's last-seen time (falls back to the
+    # 7-day window when the client has never opened the bell).
     unread = 0
     try:
-        from datetime import timedelta
-        cutoff = (datetime.now(timezone.utc)
-                  - timedelta(hours=24)).isoformat()
+        cutoff = since.strip() or retention_cutoff
         n = db.count("notifications", filters=filters or None,
                      created_after=cutoff)
         unread = n if n is not None else 0

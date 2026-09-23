@@ -15,14 +15,69 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from app.integrations import web_push
 from app.integrations.line_client import LineClient
 from app.services.database import Database, queue_notification
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Retention — the bell feed keeps 7 days, same window as the other log tables
+# ---------------------------------------------------------------------------
+# The `notifications` table had NO TTL: every alert ever queued stayed forever
+# (prod 2026-09-23: 240 rows and growing). The bell only ever shows the recent
+# feed, so older rows are dead weight. 7 days matches quote_api_logs /
+# signal_logs / scheduler_runs (log_maintenance purges them all together).
+NOTIFICATION_TTL_DAYS = 7
+NOTIFICATION_TABLE = "notifications"
+PURGE_INTERVAL_S = 3600.0
+_last_purge = 0.0
+
+
+def purge_old_notifications(db: Any, force: bool = False) -> int:
+    """Delete notification rows older than 7 days. Throttled unless force=True.
+
+    Returns the number of rows deleted (0 when skipped/unavailable). Prefers
+    one bulk delete_before (lt created_at cutoff); falls back to per-row
+    deletes when the client lacks delete_before (FakeDatabase). Never raises.
+    """
+    global _last_purge
+    now = time.monotonic()
+    if not force and now - _last_purge < PURGE_INTERVAL_S:
+        return 0
+    _last_purge = now
+    try:
+        if db is None or not getattr(db, "available", False):
+            return 0
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=NOTIFICATION_TTL_DAYS)).isoformat()
+        bulk = getattr(db, "delete_before", None)
+        if bulk is not None:
+            deleted = int(bulk(NOTIFICATION_TABLE, "created_at", cutoff) or 0)
+            if deleted:
+                log.info("notifications: purged %d rows older than %d days",
+                         deleted, NOTIFICATION_TTL_DAYS)
+            return deleted
+        rows = db.select(NOTIFICATION_TABLE, filters={}, order="created_at",
+                         desc=True, limit=1000)
+        stale = [r for r in rows if str(r.get("created_at") or "") < cutoff]
+        deleted = 0
+        for r in stale:
+            if not r.get("id"):
+                continue
+            if db.delete(NOTIFICATION_TABLE, {"id": r["id"]}):
+                deleted += 1
+        if deleted:
+            log.info("notifications: purged %d rows older than %d days",
+                     deleted, NOTIFICATION_TTL_DAYS)
+        return deleted
+    except Exception as exc:
+        log.debug("notification purge failed: %s", exc)
+        return 0
 
 CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news",
                   "trade_opened", "trade_closed",

@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.services import quote_log, scheduler_log, signal_log
+from app.services import notification_service
 from app.workers import market_scanner
 
 log = logging.getLogger(__name__)
@@ -106,6 +107,8 @@ async def run_once(db: Any, notifier: Any = None) -> dict[str, Any]:
                          db, force=True)),
                      ("scheduler_runs", lambda: scheduler_log.purge_old_logs(
                          db, force=True)),
+                     ("notifications", lambda: notification_service
+                         .purge_old_notifications(db, force=True)),
                      ("market_analysis", lambda: market_scanner
                          .purge_old_market_analysis(db, force=True))):
         try:
