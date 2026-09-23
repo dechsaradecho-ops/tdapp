@@ -404,6 +404,9 @@ function MoveTimelineBadge({ pos, timeline }: {
   const tpInfo = describeMoveReason(pos.tp_move_reason ?? "");
   const fmtWhen = (iso: string | null) =>
     iso ? new Date(iso).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" }) : "-";
+  const partialCount = timeline.filter((l) =>
+    l.event === "closed" &&
+    /ปิดบางส่วน|Partial Close|TP1|แบ่งปิด|smart_exit/i.test(l.reason ?? "")).length;
   const title = `ประวัติ SL/TP (${timeline.length}) — กดดูรายละเอียด`;
   return (
     <>
@@ -418,6 +421,12 @@ function MoveTimelineBadge({ pos, timeline }: {
       >
         <Icon n="clock" size={12} className="text-slate-400" />
         {timeline.length > 0 && <span className="tabular-nums">({timeline.length})</span>}
+        {partialCount > 0 && (
+          <span className="ml-0.5 rounded-full bg-profit/20 px-1 text-[10px] font-bold text-profit"
+            title={`ปิดบางส่วน ${partialCount} ครั้ง`}>
+            ½{partialCount > 1 ? partialCount : ""}
+          </span>
+        )}
       </button>
       {pop && createPortal(
         <div
@@ -455,9 +464,20 @@ function MoveTimelineBadge({ pos, timeline }: {
                   </span>
                   {" · "}
                   <span className="font-semibold">
-                    {l.event === "closed" ? "ปิดไม้"
+                    {l.event === "closed"
+                      ? (/ปิดบางส่วน|Partial Close|TP1|แบ่งปิด|smart_exit/i.test(l.reason ?? "")
+                          ? "ปิดบางส่วน"
+                          : "ปิดไม้")
                       : l.event === "sl_moved" ? "ย้าย SL" : "SL/TP ขยับ"}
                   </span>
+                  {l.volume != null && l.volume > 0 && (
+                    <> — {fmtNum(l.volume, 2)} lots</>
+                  )}
+                  {l.pnl != null && (
+                    <span className={l.pnl >= 0 ? "text-profit" : "text-loss"}>
+                      {" "}({l.pnl >= 0 ? "+" : ""}${fmtNum(l.pnl, 2)})
+                    </span>
+                  )}
                   {l.stop_loss != null && l.stop_loss > 0 && (
                     <> — SL {fmtNum(l.stop_loss, 5)}</>
                   )}

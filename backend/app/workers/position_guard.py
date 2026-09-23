@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from app.engine import smart_exit
 from app.integrations import quotes
@@ -375,25 +376,36 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
             return out
         out["partial_closed"] = True
         pos.partial_done = True  # type: ignore[attr-defined]
+        remaining_vol = round(max(0.0, float(pos.volume or 0) - slice_vol), 2)
         try:
             row_id = str(getattr(pos, "row_id", "") or "")
             if not row_id:
                 rows = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
                 row_id = str(rows[0].get("id") or "") if rows else ""
             if row_id:
-                db.update("paper_trades", row_id, {"partial_done": True})
+                db.update("paper_trades", row_id,
+                          {"partial_done": True,
+                           "volume": remaining_vol})
         except Exception as exc:
             log.debug("smart-exit partial_done persist failed: %s", exc)
+        # Realized PnL of the CLOSED SLICE only (USD) — see the TP1 path.
+        slice_pnl = execution.PaperBrokerPnl.compute(
+            SimpleNamespace(
+                direction=pos.direction, asset=pos.asset,
+                entry_price=pos.entry_price,
+                current_price=price, volume=slice_vol),
+            s, asset=asset, rates=rates)
         signal_log.log_event(
             db=db, event="closed", asset=asset, direction=direction,
             entry=pos.entry_price, exit_price=price, ticket=ticket,
-            volume=slice_vol, source="auto",
+            volume=slice_vol, pnl=slice_pnl, source="auto",
             reason=f"{reason_prefix} แบ่งปิด {slice_vol:g} lots @ {price:g} — {why}")
         try:
             await notifier.notify(
                 pos.user_id, "trade_closed",
                 f"🧠 Smart Exit ({rec})\nAsset: {asset}\nDirection: {direction}\n"
                 f"Closed: {slice_vol:g} lots @ {price:g}\n"
+                f"PnL: {_pnl_text(slice_pnl)}\n"
                 f"Score: {getattr(decision, 'exit_score', '?')} "
                 f"({getattr(decision, 'quality', '?')})\n{why}")
         except Exception as exc:
@@ -494,7 +506,14 @@ async def _manage_position(db, broker, pos: Position, price: float,
                     out["partial_closed"] = True
                     out["partial_volume"] = slice_vol
                     pos.partial_done = True  # type: ignore[attr-defined]
-                    # persist the flag — otherwise a restart re-fires TP1
+                    # Remaining size after the scale-out. The real broker
+                    # already reduced pos.volume; compute it explicitly so a
+                    # broker that does NOT mutate the book still persists the
+                    # right number (and never a negative one).
+                    remaining_vol = round(max(0.0, float(pos.volume or 0) - slice_vol), 2)
+                    # Persist the flag AND the reduced volume — otherwise a
+                    # restart re-fires TP1 (partial_done lost) and the monitor
+                    # keeps showing the original size (volume never updated).
                     try:
                         row_id = str(getattr(pos, "row_id", "") or "")
                         if not row_id:
@@ -504,15 +523,26 @@ async def _manage_position(db, broker, pos: Position, price: float,
                             row_id = str(rows[0].get("id") or "") if rows else ""
                         if row_id:
                             db.update("paper_trades", row_id,
-                                      {"partial_done": True})
+                                      {"partial_done": True,
+                                       "volume": remaining_vol})
                     except Exception as exc:
                         log.debug("partial_done persist failed: %s", exc)
+                    # Realized PnL of the CLOSED SLICE only (in USD) — the
+                    # remaining lots keep their own unrealized PnL. Computed
+                    # on a slice-volume view so the journal/timeline shows the
+                    # money actually banked by this scale-out.
+                    slice_pnl = execution.PaperBrokerPnl.compute(
+                        SimpleNamespace(
+                            direction=pos.direction, asset=pos.asset,
+                            entry_price=pos.entry_price,
+                            current_price=price, volume=slice_vol),
+                        s, asset=str(pos.asset or ""), rates=rates)
                     signal_log.log_event(
                         db=db, event="closed", asset=str(pos.asset or ""),
                         direction=str(pos.direction or ""),
                         entry=pos.entry_price, exit_price=price,
                         ticket=str(pos.ticket or ""), volume=slice_vol,
-                        source="auto",
+                        pnl=slice_pnl, source="auto",
                         reason=f"ปิดบางส่วน (TP1) {slice_vol:g} lots "
                                f"ที่ {price:g} — ที่เหลือ trailing")
                     try:
@@ -521,6 +551,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
                             f"💰 Partial Close (TP1)\n"
                             f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
                             f"Closed: {slice_vol:g} lots @ {price:g}\n"
+                            f"PnL: {_pnl_text(slice_pnl)}\n"
                             f"Remaining: {pos.volume:g} lots (trailing)")
                     except Exception as exc:
                         log.debug("partial notify failed: %s", exc)

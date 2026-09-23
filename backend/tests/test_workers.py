@@ -1278,6 +1278,9 @@ class TestPositionGuardManagement:
         assert partials == [pytest.approx(0.02)]  # 50% of 0.04
         # journal row marked so it never fires twice
         assert db.rows["paper_trades"][0]["partial_done"] is True
+        # remaining volume persisted too — otherwise the monitor keeps showing
+        # the ORIGINAL size and the remaining (unrealized) PnL is overstated.
+        assert db.rows["paper_trades"][0]["volume"] == pytest.approx(0.02)
         # audit list: บอกชื่อคู่เงิน + เหตุผล (หน้า Guard ใช้โชว์ chip)
         assert summary["closed_assets"] == "EURUSD:tp1"
 
@@ -1312,6 +1315,33 @@ class TestPositionGuardManagement:
         notif_rows = [r for _, r in db.inserted if r.get("type") == "trade_closed"]
         assert len(notif_rows) == 1
         assert "Partial Close (TP1)" in notif_rows[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_partial_close_logs_realized_slice_pnl(self, monkeypatch):
+        """signal_log ของ partial close ต้องมี PnL ของ "ส่วนที่ปิด" (ไม่ใช่ทั้งไม้).
+
+        Prod 2026-09-23: AUDNZD ปิดบางส่วน 3 รอบ แต่ log ไม่มี pnl → หน้า
+        monitor แสดงไทม์ไลน์โดยไม่รู้ว่าปิดไปได้กำไรเท่าไร. เทสนี้ล็อกสัญญา:
+        log_event(event="closed") ของ partial ต้องพก pnl ของ slice เท่านั้น
+        (entry 1.1000 → mark 1.2500, 0.02 lots, EURUSD = XXXUSD → USD ตรง).
+        """
+        from app.workers import position_guard
+        partials: list[float] = []
+        broker = self._broker(volume=0.04)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        db = self._db(volume=0.04)
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(),
+            settings=self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                    breakeven_trigger_r=0, trail_atr_mult=0))
+        assert summary["partial_closed"] == 1
+        closed_logs = [r for _, r in db.inserted
+                       if r.get("event") == "closed" and r.get("ticket") == "T1"]
+        assert len(closed_logs) == 1
+        row = closed_logs[0]
+        assert row["volume"] == pytest.approx(0.02)   # slice, not the whole 0.04
+        # 0.02 lots × (1.2500−1.1000) × 100,000 = $300 (XXXUSD, no conversion)
+        assert row["pnl"] == pytest.approx(300.0, abs=1.0)
 
     @pytest.mark.asyncio
     async def test_partial_close_suppressed_when_market_closed(self, monkeypatch):
