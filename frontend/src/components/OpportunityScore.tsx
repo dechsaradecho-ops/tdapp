@@ -127,7 +127,6 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
   // ค่า → ไม่แสดงบรรทัดนี้เลย (ไม่เดาเป็น 0).
   const conf = typeof o.confidence === "number" ? o.confidence : null;
   const confDetails = (o.confidence_reasons?.length ? o.confidence_reasons : []).filter(Boolean);
-  const confPasses = conf != null && gate != null && conf >= gate;
   // เช็คความเสี่ยงของ "คู่นี้" ก่อน แล้วโชว์ทุกอย่างเฉพาะเมื่อเสี่ยงจริง
   const risky = isRisky(risk);
   const chip = riskChip(risk);
@@ -220,21 +219,6 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
             <span className="inline-block h-2 w-[3px] rounded-sm bg-white/90" />
             เส้นขาว = Confidence
           </span>
-        </div>
-      )}
-      {/* P1-3: แกนที่สอง — evidence agreement. แสดงเฉพาะแถวที่มีค่า (แถวเก่า
-          ก่อน P1-3 ไม่มี confidence → ไม่มีบรรทัดนี้) */}
-      {conf != null && (
-        <div className="flex justify-between text-xs text-slate-500 mt-0.5">
-          <span>
-            Confidence Score {conf.toFixed(0)}%
-            {gate != null && (
-              <span className={confPasses ? "text-emerald-400 ml-1.5" : "text-rose-400 ml-1.5"}>
-                ({gate}% {confPasses ? "ผ่านเกณฑ์" : "ต่ำกว่าเกณฑ์"})
-              </span>
-            )}
-          </span>
-          <span className="text-slate-600">ความสอดคล้องของหลักฐาน</span>
         </div>
       )}
       {/* ความเสี่ยงเป็นรายคู่เงิน — โผล่เฉพาะคู่ที่ทับไม้เปิดจริง ไม่เสี่ยง = ไม่มีบรรทัดนี้ */}
