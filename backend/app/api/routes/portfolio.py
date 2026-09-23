@@ -39,12 +39,17 @@ async def recommend(payload: PortfolioInput, request: Request) -> PortfolioRecom
                        if raw_reasons
                        else [str(r.get("explanation") or "")])
             reasons = [s for s in reasons if s]
+            # Migration 049: confidence breakdown lives in its own column.
+            raw_conf = str(r.get("confidence_reasons") or "")
+            conf_reasons = [s for s in raw_conf.split("\n") if s.strip()]
             opportunities.append(AssetOpportunity(
                 asset=asset,
                 score=score,
                 band=StrategyEngine.band_of(score),
                 reasons=reasons[:3] or ["คะแนนจาก Market Scanner"],
                 score_reasons=reasons,
+                confidence=score,
+                confidence_reasons=conf_reasons,
             ))
 
     if not opportunities:

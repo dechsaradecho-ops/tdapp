@@ -63,6 +63,13 @@ export interface AssetOpportunity {
   reasons: string[];
   /** Full scoring breakdown (ทุก component) — ใช้ใน popup รายละเอียดคะแนน */
   score_reasons?: string[];
+  /** P1-3: EVIDENCE AGREEMENT (0-100) — คนละแกนกับ score (setup quality).
+   *  มาจาก StrategyEngine.evidence_confidence: นับว่ามีสัญญาณอิสระกี่แหล่ง
+   *  (trend/ADX/Supertrend/MACD/RSI/news/breakout) ที่ "เห็นด้วย" กับฝั่งที่
+   *  จะเทรด. ไม่มีค่า (undefined) = แถวเก่าก่อน P1-3 → ไม่แสดงบรรทัดนี้. */
+  confidence?: number;
+  /** ที่มาของ confidence (migration 049) — แสดงใน popup แยกจาก score_reasons */
+  confidence_reasons?: string[];
 }
 
 export interface MarketSummary {

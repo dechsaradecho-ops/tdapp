@@ -200,6 +200,10 @@ async def scan_once(db: Database) -> list[dict]:
             # the score was computed (every component line, not just the 3
             # folded into explanation). Empty reasons never written ("" column).
             "score_reasons": "\n".join(opp.reasons),
+            # Migration 049: the SAME breakdown for the OTHER axis — the
+            # evidence-agreement confidence. Without this the popup could
+            # explain the opportunity score but not the confidence score.
+            "confidence_reasons": "\n".join(opp.confidence_reasons),
         }
         db.insert("market_analysis", row)
         results.append({"asset": asset, "opportunity": opp.model_dump(), "snapshot": vars(ind)})

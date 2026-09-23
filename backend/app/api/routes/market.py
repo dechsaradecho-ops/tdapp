@@ -91,11 +91,18 @@ async def market_summary(request: Request) -> MarketSummary:
             reasons = ([s for s in raw_reasons.split("\n") if s.strip()]
                        if raw_reasons
                        else [row.get("explanation", "")])
+            # Migration 049: the confidence breakdown is stored separately
+            # (confidence_reasons) — pre-049 rows have "" → popup falls back
+            # to the score breakdown so it is never empty.
+            raw_conf = str(row.get("confidence_reasons") or "")
+            conf_reasons = [s for s in raw_conf.split("\n") if s.strip()]
             opportunities.append(AssetOpportunity(
                 asset=row["asset"], score=float(row["confidence"]),
                 band=StrategyEngine.band_of(float(row["confidence"])),
                 reasons=reasons[:3],
                 score_reasons=reasons,
+                confidence=float(row["confidence"]),
+                confidence_reasons=conf_reasons,
             ))
             regime_by_asset[row["asset"]] = str(row.get("regime") or "")
             sentiment_by_asset[row["asset"]] = str(row.get("sentiment") or "")

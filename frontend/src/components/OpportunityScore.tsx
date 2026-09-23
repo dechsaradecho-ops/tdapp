@@ -123,6 +123,11 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
 
   const passes = gate != null && o.score >= gate;
   const details = (o.score_reasons?.length ? o.score_reasons : o.reasons).filter(Boolean);
+  // P1-3: confidence = evidence agreement (คนละแกนกับ score). แถวเก่าที่ไม่มี
+  // ค่า → ไม่แสดงบรรทัดนี้เลย (ไม่เดาเป็น 0).
+  const conf = typeof o.confidence === "number" ? o.confidence : null;
+  const confDetails = (o.confidence_reasons?.length ? o.confidence_reasons : []).filter(Boolean);
+  const confPasses = conf != null && gate != null && conf >= gate;
   // เช็คความเสี่ยงของ "คู่นี้" ก่อน แล้วโชว์ทุกอย่างเฉพาะเมื่อเสี่ยงจริง
   const risky = isRisky(risk);
   const chip = riskChip(risk);
@@ -164,6 +169,11 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
         </span>
         <span className="flex items-center gap-1">
           <span className={`font-bold ${scoreColor(o.score)}`}>{o.score.toFixed(0)}%</span>
+          {conf != null && (
+            <span className="text-xs text-slate-500" title="Confidence Score — ความสอดคล้องของหลักฐาน">
+              · C {conf.toFixed(0)}%
+            </span>
+          )}
           <span className={`text-slate-600 transition-transform ${pop ? "rotate-90" : ""}`}>›</span>
         </span>
       </div>
@@ -191,6 +201,21 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
         </span>
         <span>{o.reasons[0]?.slice(0, 60) ?? ""}</span>
       </div>
+      {/* P1-3: แกนที่สอง — evidence agreement. แสดงเฉพาะแถวที่มีค่า (แถวเก่า
+          ก่อน P1-3 ไม่มี confidence → ไม่มีบรรทัดนี้) */}
+      {conf != null && (
+        <div className="flex justify-between text-xs text-slate-500 mt-0.5">
+          <span>
+            Confidence Score {conf.toFixed(0)}%
+            {gate != null && (
+              <span className={confPasses ? "text-emerald-400 ml-1.5" : "text-rose-400 ml-1.5"}>
+                ({gate}% {confPasses ? "ผ่านเกณฑ์" : "ต่ำกว่าเกณฑ์"})
+              </span>
+            )}
+          </span>
+          <span className="text-slate-600">ความสอดคล้องของหลักฐาน</span>
+        </div>
+      )}
       {/* ความเสี่ยงเป็นรายคู่เงิน — โผล่เฉพาะคู่ที่ทับไม้เปิดจริง ไม่เสี่ยง = ไม่มีบรรทัดนี้ */}
       {risky && risk && (
         <p className={`mt-1 text-[11px] ${overCap ? "text-rose-300" : "text-amber-300/90"}`}>
@@ -219,7 +244,21 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
             <span className="font-semibold text-slate-100">
               {o.asset} <span className="text-xs font-normal text-slate-500">{BAND_LABEL[o.band] ?? o.band}</span>
             </span>
-            <span className={`font-bold ${scoreColor(o.score)}`}>{o.score.toFixed(0)}%</span>
+            <span className="flex items-baseline gap-1.5">
+              <span className={`font-bold ${scoreColor(o.score)}`}>{o.score.toFixed(0)}%</span>
+              {conf != null && (
+                <span className="text-xs text-slate-400">· C {conf.toFixed(0)}%</span>
+              )}
+            </span>
+          </div>
+          <div className="mt-1 text-xs">
+            <span className="text-slate-500">Opportunity Score</span>{" "}
+            <span className={`font-semibold ${scoreColor(o.score)}`}>{o.score.toFixed(0)}%</span>
+            <span className="text-slate-600"> · </span>
+            <span className="text-slate-500">Confidence Score</span>{" "}
+            {conf != null
+              ? <span className="font-semibold text-slate-200">{conf.toFixed(0)}%</span>
+              : <span className="text-slate-600">—</span>}
           </div>
           <div className="mt-1 text-xs">
             {gate != null ? (
@@ -288,8 +327,32 @@ function ScoreRow({ o, gate, tradable, risk, cap }: {
           ) : (
             <p className="text-xs text-slate-500">ยังไม่มีรายละเอียด — รอ Market Scanner รอบถัดไป</p>
           )}
+          {/* P1-3: แกนที่สอง — หลักฐานอิสระที่เห็นด้วย/สวนทาง (migration 049) */}
+          {conf != null && (
+            <>
+              <div className="border-t border-slate-800 my-2" />
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                ที่มาของ Confidence Score
+              </p>
+              {confDetails.length ? (
+                <ul className="space-y-1 text-xs text-slate-300 max-h-[45vh] overflow-y-auto pr-1">
+                  {confDetails.map((r, i) => (
+                    <li key={i} className="flex gap-1.5">
+                      <span className="text-slate-600 shrink-0">•</span>
+                      <span className="whitespace-pre-line">{r}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-slate-500">
+                  ยังไม่มีรายละเอียดหลักฐาน — รอ Market Scanner รอบถัดไป
+                </p>
+              )}
+            </>
+          )}
           <p className="mt-2 text-[10px] text-slate-600">
-            คะแนนรวมน้ำหนัก Trend / Momentum / Volatility / ข่าว — Market Scanner อัปเดตทุก 5 นาที
+            Opportunity Score = คุณภาพเซ็ตอัป (น้ำหนัก Trend / Momentum / Volatility / ข่าว) ·
+            Confidence Score = ความสอดคล้องของหลักฐานอิสระ — Market Scanner อัปเดตทุก 5 นาที
           </p>
         </div>,
         document.body

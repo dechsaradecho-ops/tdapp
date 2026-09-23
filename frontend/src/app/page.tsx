@@ -204,7 +204,7 @@ export default function DashboardPage() {
             <TradingViewChart symbol={tvSymbol(selected)} />
           </div>
           <div className="panel">
-            <h2 className="panel-title">Opportunity Score</h2>
+            <h2 className="panel-title">Opportunity Score &amp; Confidence Score</h2>
             <OpportunityScore
               opportunities={summary?.opportunities ?? []}
               loading={summaryLoading}
