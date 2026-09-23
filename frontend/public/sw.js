@@ -12,7 +12,11 @@
  *
  * Bumped on deploy: change CACHE_VERSION to invalidate old caches.
  */
-const CACHE_VERSION = "v3";
+// ⚠️ BUMP THIS ON EVERY DEPLOY that changes the app shell/JS. The browser only
+// installs a new service worker when this file's BYTES change; if the version
+// string is unchanged the old SW keeps controlling the page forever and the
+// phone serves a stale bundle (symptom: "มือถือยังไม่เปลี่ยน").
+const CACHE_VERSION = "v4";
 const SHELL_CACHE = `tdapp-shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `tdapp-assets-${CACHE_VERSION}`;
 
@@ -169,4 +173,17 @@ self.addEventListener("pushsubscriptionchange", (event) => {
         }
       })
   );
+});
+
+// ---------------------------------------------------------------------------
+// Update handshake — the page asks the waiting SW to activate immediately.
+// ---------------------------------------------------------------------------
+// Without this, a newly-installed SW sits in "waiting" until every tab of the
+// old version is closed. On a phone PWA that can be days, so the user keeps
+// seeing the old bundle. PwaRegister.tsx posts {type:"SKIP_WAITING"} when it
+// detects a waiting worker, then reloads once the new SW takes control.
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });

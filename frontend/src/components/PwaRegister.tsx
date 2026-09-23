@@ -20,9 +20,39 @@ export default function PwaRegister() {
 
     const stopSync = installPushSync(api.pushSubscribe);
 
+    // Auto-update: when a new SW is waiting, activate it now and reload once
+    // it takes control. Without this the phone keeps the old bundle until every
+    // tab is closed (symptom: "มือถือยังไม่เปลี่ยน" after a deploy).
+    let reloading = false;
+    const onControllerChange = () => {
+      if (reloading) return;
+      reloading = true;
+      window.location.reload();
+    };
+    navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
+
+    const promote = (reg: ServiceWorkerRegistration) => {
+      if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+      reg.addEventListener("updatefound", () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener("statechange", () => {
+          if (sw.state === "installed" && navigator.serviceWorker.controller) {
+            sw.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+      });
+    };
+
     const register = () => {
       navigator.serviceWorker
         .register("/sw.js")
+        .then((reg) => {
+          promote(reg);
+          // Check for a newer SW on every load (the browser also does this
+          // automatically, but an explicit call makes the update prompt).
+          reg.update().catch(() => {});
+        })
         .catch(() => { /* SW optional — app works fine without it */ });
     };
 
@@ -31,10 +61,14 @@ export default function PwaRegister() {
       window.addEventListener("load", register);
       return () => {
         window.removeEventListener("load", register);
+        navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
         stopSync();
       };
     }
-    return stopSync;
+    return () => {
+      navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
+      stopSync();
+    };
   }, []);
 
   return null;
