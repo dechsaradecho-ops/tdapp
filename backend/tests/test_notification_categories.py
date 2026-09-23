@@ -182,6 +182,144 @@ def test_risk_warning_cooldown_fail_open_on_db_error():
 
 
 # ---------------------------------------------------------------------------
+# 2c. sl_moved cooldown — a trailing stop ratchets every guard cycle, so one
+# trending pair used to push an identical "SL ขยับ" alert every ~1 minute
+# (prod 2026-09-23: GBPCHF/EURCHF moved SL 7× in a row). Scoped PER ASSET.
+# ---------------------------------------------------------------------------
+def test_sl_moved_cooldown_blocks_same_asset_within_window():
+    from app.services.notification_service import SL_MOVE_COOLDOWN_MIN
+    assert SL_MOVE_COOLDOWN_MIN == 20.0
+
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    msg = "🔔 SL ขยับ (trailing)\nAsset: GBPCHF\nDirection: long\nSL 1 → 2"
+    asyncio.run(svc.notify("u1", "sl_moved", msg, asset="GBPCHF"))
+    assert len(line.pushed) == 1                    # first move goes out
+
+    asyncio.run(svc.notify("u1", "sl_moved", msg, asset="GBPCHF"))
+    assert len(line.pushed) == 1                    # same asset within 20 min → held
+    assert len([r for t, r in db.inserted
+                if t == "notifications"]) == 1
+
+
+def test_sl_moved_cooldown_is_per_asset():
+    """A move on GBPCHF must NOT silence a move on EURCHF."""
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify(
+        "u1", "sl_moved", "🔔 SL ขยับ\nAsset: GBPCHF\nSL 1 → 2", asset="GBPCHF"))
+    asyncio.run(svc.notify(
+        "u1", "sl_moved", "🔔 SL ขยับ\nAsset: EURCHF\nSL 1 → 2", asset="EURCHF"))
+    assert len(line.pushed) == 2                    # different asset → delivered
+
+
+def test_sl_moved_resumes_after_cooldown_window():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=21)).isoformat()
+    db.rows["notifications"] = [{
+        "id": "old-sl", "user_id": "u1", "channel": "line",
+        "type": "sl_moved", "message": "🔔 SL ขยับ\nAsset: GBPCHF\nSL 1 → 2",
+        "status": "sent", "created_at": old,
+    }]
+
+    asyncio.run(svc.notify(
+        "u1", "sl_moved", "🔔 SL ขยับ\nAsset: GBPCHF\nSL 2 → 3", asset="GBPCHF"))
+    assert len(line.pushed) == 1                    # window passed → delivered
+
+
+def test_sl_moved_maps_to_notify_stop_loss_switch():
+    """sl_moved shares the notify_stop_loss switch — turning it off silences
+    both real stop-outs and SL moves."""
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+    db._client.upsert({"id": 1, "notify_stop_loss": False})
+
+    asyncio.run(svc.notify(
+        "u1", "sl_moved", "🔔 SL ขยับ\nAsset: GBPCHF", asset="GBPCHF"))
+    assert line.pushed == []
+    assert db.inserted == []
+
+
+# ---------------------------------------------------------------------------
+# 2d. truthful channel — the column used to be hardcoded 'line' even when
+# only Web Push reached the user.
+# ---------------------------------------------------------------------------
+class FakeWebPush:
+    """push_web returns a fixed bool; records the calls."""
+
+    def __init__(self, ok: bool):
+        self.ok = ok
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, ntype: str, message: str) -> bool:
+        self.calls.append((ntype, message))
+        return self.ok
+
+
+def _channel_of(db) -> str:
+    rows = [r for t, r in db.inserted if t == "notifications"]
+    assert rows, "no notification row queued"
+    return rows[-1].get("channel")
+
+
+def test_channel_both_when_line_and_push_deliver():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    svc.push_web = FakeWebPush(True)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify("u1", "trade_closed", "closed!", critical=True))
+    assert _channel_of(db) == "both"
+
+
+def test_channel_web_push_when_only_push_delivers():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    svc.push_web = FakeWebPush(True)
+    # no line_targets → push_line finds nothing → ok=False
+    asyncio.run(svc.notify("u1", "trade_closed", "closed!", critical=True))
+    assert _channel_of(db) == "web_push"
+
+
+def test_channel_line_when_only_line_delivers():
+    db = SettingsDatabase()
+    app.state.db = db
+    line = FakeLine()
+    svc = _service(db, line)
+    svc.push_web = FakeWebPush(False)
+    db.rows["line_targets"] = [
+        {"target_id": "grp1", "notification_enabled": True}]
+
+    asyncio.run(svc.notify("u1", "trade_closed", "closed!", critical=True))
+    assert _channel_of(db) == "line"
+
+
+# ---------------------------------------------------------------------------
 # 3. dispatch_pending marks disabled-category rows as skipped
 # ---------------------------------------------------------------------------
 def test_dispatch_pending_skips_disabled_category():

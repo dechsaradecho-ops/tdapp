@@ -47,8 +47,14 @@ async def dispatch_pending(db: Database, notifier: NotificationService) -> int:
         ok_line = await notifier.push_line(n["user_id"], n["message"])
         ok_push = await notifier.push_web(n.get("type", ""), n["message"])
         ok = ok_line or ok_push
+        # Record the transport(s) that ACTUALLY delivered (was hardcoded 'line').
+        channel = ("both" if (ok_line and ok_push)
+                   else "line" if ok_line
+                   else "web_push" if ok_push
+                   else n.get("channel") or "line")
         db.update("notifications", n["id"], {
             "status": "sent" if ok else "failed",
+            "channel": channel,
             "sent_at": datetime.now(timezone.utc).isoformat(),
         })
         sent += 1 if ok else 0

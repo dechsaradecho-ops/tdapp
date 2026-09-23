@@ -589,16 +589,19 @@ async def _manage_position(db, broker, pos: Position, price: float,
                         ticket=str(pos.ticket or ""), source="auto",
                         reason=f"SL ย้ายไป {pos.stop_loss:g} ({move_kind})"
                                f" จาก {old_sl:g}")
-                    # SL move LINE alert — stop_loss is CRITICAL so it pushes
+                    # SL move LINE alert — sl_moved is CRITICAL so it pushes
                     # immediately (honours the notify_stop_loss switch inside
-                    # NotificationService.notify). Fail-soft: never break guard.
+                    # NotificationService.notify, which also throttles it per
+                    # asset so a ratcheting trail can't spam LINE). Fail-soft:
+                    # never break guard.
                     try:
                         await notifier.notify(
-                            pos.user_id, "stop_loss",
+                            pos.user_id, "sl_moved",
                             f"🔔 SL ขยับ ({move_kind})\n"
                             f"Asset: {pos.asset}\nDirection: {pos.direction}\n"
                             f"SL {old_sl:g} → {pos.stop_loss:g} @ {price:g} "
                             f"({r_multiple:.2f}R)\nTicket {pos.ticket}",
+                            asset=str(pos.asset or ""),
                         )
                     except Exception as exc:
                         log.debug("sl-move notify failed: %s", exc)

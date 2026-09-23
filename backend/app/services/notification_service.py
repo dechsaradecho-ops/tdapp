@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news",
                   "trade_opened", "trade_closed",
+                  # A trailing/breakeven stop move — stop-related, so it
+                  # pushes immediately like stop_loss (and shares its switch).
+                  "sl_moved",
                   # Owner-confirmed risk-limit expansion: the Approve/Reject
                   # prompt must NOT be throttled by the risk_warning cooldown,
                   # or the owner could never answer it (prod 2026-09-14).
@@ -35,6 +38,13 @@ CRITICAL_TYPES = {"risk_warning", "stop_loss", "economic_news",
 # so a standing breach would push an identical LINE alert once a minute.
 # One alert per window is enough — the pause stays engaged the whole time.
 RISK_WARNING_COOLDOWN_MIN = 30.0
+
+# Cooldown for sl_moved, PER ASSET: the trailing stop ratchets every guard
+# cycle, so a trending pair pushed an identical "SL ขยับ" LINE alert every
+# ~1 minute (prod 2026-09-23: GBPCHF/EURCHF 7x in a row, 79 same-asset pairs
+# < 10 min apart). One alert per asset per window is enough — the stop keeps
+# moving silently in between and the final position is always in the journal.
+SL_MOVE_COOLDOWN_MIN = 20.0
 
 
 def _parse_utc(raw: str) -> Optional[datetime]:
@@ -52,7 +62,12 @@ def _parse_utc(raw: str) -> Optional[datetime]:
 NOTIFY_CATEGORY_FIELDS = {
     "notify_trade_opened": {"trade_opened"},
     "notify_trade_closed": {"trade_closed"},
-    "notify_stop_loss": {"stop_loss"},
+    # sl_moved = a TRAILING/breakeven stop move, NOT a stop-out. It shares the
+    # Stop Loss switch on purpose (both are stop-related), but it is a SEPARATE
+    # ntype so the "Stop Loss" statistic counts real stop-outs only (prod
+    # 2026-09-23: 95 of 119 stop_loss rows were trailing moves) and so it can
+    # carry its own per-asset cooldown without throttling real stop-outs.
+    "notify_stop_loss": {"stop_loss", "sl_moved"},
     # drawdown_warning = the EARLY "ใกล้ถึงเพดาน Max Drawdown" notice pushed by
     # portfolio_monitor while trading is still running. It shares the ความเสี่ยง
     # switch with risk_warning on purpose: both are drawdown/portfolio-risk
@@ -87,6 +102,7 @@ PUSH_TITLES = {
     "trade_opened": "เปิดไม้ใหม่",
     "trade_closed": "ปิดไม้แล้ว",
     "stop_loss": "ชน Stop Loss",
+    "sl_moved": "ขยับ Stop Loss",
     "risk_warning": "เตือนความเสี่ยง",
     "drawdown_warning": "ใกล้ถึงเพดาน Drawdown",
     "limit_expand": "ขอขยายลิมิตความเสี่ยง",
@@ -132,12 +148,16 @@ class NotificationService:
 
     async def notify(self, user_id: str, ntype: str, message: str,
                      critical: bool | None = None,
-                     quick_reply: Optional[list[dict]] = None) -> None:
+                     quick_reply: Optional[list[dict]] = None,
+                     asset: Optional[str] = None) -> None:
         """Dispatch one notification.
 
         ``quick_reply`` attaches LINE postback buttons (used by the
         owner-confirmed limit-expansion prompt: Approve / Reject). It only
         affects the immediate push — the queue row stores the plain text.
+
+        ``asset`` scopes the sl_moved per-asset cooldown (a trailing stop
+        ratchets every guard cycle; without it one trending pair spams LINE).
         """
         is_critical = critical if critical is not None else ntype in CRITICAL_TYPES
         # Per-category switch: a disabled category produces no queue row and
@@ -154,6 +174,10 @@ class NotificationService:
             log.info("notify skipped (risk_warning cooldown %.0f min)",
                      RISK_WARNING_COOLDOWN_MIN)
             return
+        if ntype == "sl_moved" and self._sl_move_on_cooldown(asset):
+            log.info("notify skipped (sl_moved cooldown %.0f min, %s)",
+                     SL_MOVE_COOLDOWN_MIN, asset)
+            return
         # Critical types push immediately; the queue row is stamped 'sent'
         # so worker #4 doesn't re-deliver the same message a minute later.
         # A failed immediate push stays 'pending' — the worker retries it.
@@ -163,7 +187,14 @@ class NotificationService:
             # Web Push is fired as a SEPARATE transport, not as a fallback: the
             # phone must be alerted even when the LINE group lost the bot.
             pushed = await self.push_web(ntype, message)
+            # Record the transport(s) that ACTUALLY delivered — the column used
+            # to be hardcoded 'line' even when only Web Push reached the user.
+            channel = ("both" if (ok and pushed)
+                       else "line" if ok
+                       else "web_push" if pushed
+                       else "line")
             queue_notification(self.db, user_id, ntype, message,
+                               channel=channel,
                                status="sent" if (ok or pushed) else "pending")
         else:
             queue_notification(self.db, user_id, ntype, message)
@@ -188,6 +219,33 @@ class NotificationService:
             return False
         age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
         return age_min < RISK_WARNING_COOLDOWN_MIN
+
+    def _sl_move_on_cooldown(self, asset: Optional[str]) -> bool:
+        """True when an sl_moved row for the SAME asset was queued recently.
+
+        The trailing stop ratchets every guard cycle, so without this one
+        trending pair pushes an identical "SL ขยับ" alert every ~1 minute
+        (prod 2026-09-23). Scoped per asset: a move on GBPCHF must not
+        silence a move on EURCHF. Fail-open: a broken lookup sends anyway.
+        """
+        if not asset:
+            return False
+        try:
+            rows = self.db.select("notifications",
+                                  filters={"type": "sl_moved"},
+                                  order="created_at", desc=True, limit=20)
+        except Exception:
+            return False
+        needle = f"Asset: {asset}"
+        for r in rows or []:
+            if needle not in str(r.get("message") or ""):
+                continue
+            dt = _parse_utc(str(r.get("created_at") or ""))
+            if dt is None:
+                continue
+            age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+            return age_min < SL_MOVE_COOLDOWN_MIN
+        return False
 
     async def push_line(self, user_id: str, message: str,
                         quick_reply: Optional[list[dict]] = None) -> bool:

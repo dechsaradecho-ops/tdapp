@@ -388,8 +388,11 @@ class TestSlMoveNotify:
         assert summary["moved_sl"] == 1
         # audit token ต้องบอก SL เดิม→ใหม่ (marker ที่หน้า Guard ใช้โชว์ chip)
         assert summary["sl_assets"] == "EURUSD@1.09>1.1"
-        sl_notes = [m for (_, t, m) in rec.sent if t == "stop_loss"]
-        assert sl_notes, "SL move must notify with stop_loss type"
+        # SL move is its own ntype (`sl_moved`), NOT `stop_loss` — the two were
+        # conflated, inflating the "Stop Loss" stat ~5× and making the
+        # notify_stop_loss switch also silence SL-move alerts (prod 2026-09-23).
+        sl_notes = [m for (_, t, m) in rec.sent if t == "sl_moved"]
+        assert sl_notes, "SL move must notify with sl_moved type"
         assert "1.09" in sl_notes[0] and "1.1" in sl_notes[0]
 
     @pytest.mark.asyncio

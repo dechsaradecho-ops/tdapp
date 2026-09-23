@@ -41,7 +41,11 @@ def test_trade_opened_last_week_but_closed_today_counts_today():
 
 
 def test_today_week_and_total_windows_are_nested():
-    rows = [_row(opened_days_ago=20, closed_days_ago=0.2, pnl=10.0),
+    # Anchor "today" rows to a few minutes ago rather than a fixed 0.2 days:
+    # 0.2d = 4.8h, which lands on YESTERDAY when the suite runs before ~04:48
+    # UTC (a time-of-day flake, not a logic bug). A small offset is always
+    # inside the current UTC day.
+    rows = [_row(opened_days_ago=20, closed_days_ago=0.01, pnl=10.0),
             _row(opened_days_ago=20, closed_days_ago=3.0, pnl=5.0),
             _row(opened_days_ago=20, closed_days_ago=8.0, pnl=-2.0)]
     st = realized_stats(rows)

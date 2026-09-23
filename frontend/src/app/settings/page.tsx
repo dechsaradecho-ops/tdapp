@@ -108,7 +108,7 @@ const NOTIFY_CATEGORIES: {
   { key: "notify_trade_closed", icon: "checkCircle", label: "ไม้ปิด / กำไร-ขาดทุน",
     desc: "แจ้งเมื่อปิดไม้ รวมถึง partial TP1 (trade_closed)" },
   { key: "notify_stop_loss", icon: "shield", label: "Stop Loss",
-    desc: "แจ้งเมื่อราคาชน SL และระบบตัดขาดทุนอัตโนมัติ (stop_loss)" },
+    desc: "แจ้งเมื่อราคาชน SL และเมื่อระบบขยับ SL ตาม trailing/breakeven (stop_loss, sl_moved)" },
   { key: "notify_risk_warning", icon: "warning", label: "ความเสี่ยง",
     desc: "เตือน drawdown / kill switch / ความเสี่ยงพอร์ต (risk_warning)" },
   { key: "notify_daily_digest", icon: "scroll", label: "สรุปประจำวัน (AI digest)",
