@@ -28,7 +28,7 @@ from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
 from app.integrations.line_client import (DRAWDOWN_APPROACH_COOLDOWN_MIN,
                                           build_drawdown_approach_alert,
                                           build_risk_alert)
-from app.models.schemas import contract_value_for, risk_usd_of_distance
+from app.models.schemas import G, S, contract_value_for, risk_usd_of_distance
 from app.services import execution, limit_expand
 from app.services.database import Database
 from app.services.notification_service import NotificationService
@@ -39,7 +39,8 @@ log = logging.getLogger(__name__)
 # LINE warning ("ใกล้ถึงเพดาน") while trading is still running. 0.8 matches
 # goal_engine.DRAWDOWN_PRESSURE_RATIO, so the goal assessment and the alert
 # agree on when a drawdown counts as "eating the budget".
-DRAWDOWN_APPROACH_RATIO = 0.8
+# Canonical value: AppSettings.drawdown_approach_ratio (Settings page).
+DRAWDOWN_APPROACH_RATIO = S("drawdown_approach_ratio")
 
 # Notification type for the early warning. It is NOT "risk_warning": that type
 # is a CRITICAL push with a 30-min cooldown and its own wording ("TRADING
@@ -158,7 +159,8 @@ def _drawdown_warning_due(db, cooldown_min: float) -> bool:
 
 def _notify_drawdown_approach(db, notifier, user_id: str, status,
                               equity: float, peak: float,
-                              open_positions: int, open_risk_pct: float) -> bool:
+                              open_positions: int, open_risk_pct: float,
+                              s=None) -> bool:
     """Push the "drawdown ใกล้ถึงเพดาน" early warning (throttled). Never raises.
 
     Fires while the account is STILL TRADING (the breach path below owns the
@@ -166,18 +168,20 @@ def _notify_drawdown_approach(db, notifier, user_id: str, status,
     switch stops everything. Returns True when a push was attempted.
     """
     try:
+        ratio = float(G(s, "drawdown_approach_ratio")) if s is not None else float(DRAWDOWN_APPROACH_RATIO)
+        cooldown = float(G(s, "drawdown_approach_cooldown_min")) if s is not None else float(DRAWDOWN_APPROACH_COOLDOWN_MIN)
         max_dd = float(getattr(status, "max_drawdown_pct", 0) or 0)
         dd = float(getattr(status, "current_drawdown_pct", 0) or 0)
-        if max_dd <= 0 or dd < max_dd * DRAWDOWN_APPROACH_RATIO:
+        if max_dd <= 0 or dd < max_dd * ratio:
             return False
-        if not _drawdown_warning_due(db, DRAWDOWN_APPROACH_COOLDOWN_MIN):
+        if not _drawdown_warning_due(db, cooldown):
             log.info("drawdown approach warning skipped (cooldown %.0f min)",
-                     DRAWDOWN_APPROACH_COOLDOWN_MIN)
+                     cooldown)
             return False
         alert = build_drawdown_approach_alert(
             dd, max_dd, max(0.0, max_dd - dd), equity=equity,
             peak_equity=peak, open_positions=open_positions,
-            open_risk_pct=open_risk_pct, warn_ratio=DRAWDOWN_APPROACH_RATIO)
+            open_risk_pct=open_risk_pct, warn_ratio=ratio)
         _dispatch_notify(notifier, user_id, DRAWDOWN_WARNING_TYPE, alert)
         log.warning("portfolio monitor: drawdown %.2f%% is %.0f%% of the %.2f%% "
                     "limit → early warning pushed", dd, dd / max_dd * 100, max_dd)
@@ -393,7 +397,7 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     warned = _notify_drawdown_approach(
         db, notifier, user_id, status, equity=equity,
         peak=snap.peak_equity, open_positions=len(open_rows),
-        open_risk_pct=status.open_risk_pct)
+        open_risk_pct=status.open_risk_pct, s=s)
 
     return {"checked": 1, "breach": False, "equity": round(equity, 2),
             "drawdown_warning": warned}

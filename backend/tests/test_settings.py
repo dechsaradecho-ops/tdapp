@@ -694,7 +694,25 @@ def test_risk_presets_moderate_mirrors_live_prod_profile():
                 # risk-appetite knobs. They default "" (derive from the legacy
                 # order_mode), and a risk preset must never silently flip the
                 # owner's autonomy level — same rationale as ``order_mode``.
-                "entry_mode", "position_management_mode"}
+                "entry_mode", "position_management_mode",
+                # Operational knobs (migration 053): timeouts, TTLs, steps,
+                # averaging and averaging-hygiene constants. Infrastructure
+                # the user owns via Settings — a risk preset must never
+                # silently retune cycle budgets or confirmation windows.
+                "signal_ttl_min", "auto_trader_batch_limit",
+                "kill_expand_step_pct", "kill_expand_reask_cooldown_min",
+                "kill_expand_reask_after_reject_min",
+                "kill_expand_once_quota_hours",
+                "kill_expand_fail_notify_min",
+                "avg_hold_min_span_days", "avg_hold_min_sample",
+                "avg_hold_fallback_days", "equity_stale_peak_mult",
+                "guard_marks_timeout_s", "guard_snap_timeout_s",
+                "guard_news_timeout_s", "guard_atr_proxy_mult",
+                "market_analysis_ttl_days",
+                "market_analysis_purge_interval_s",
+                "drawdown_approach_ratio",
+                "drawdown_approach_cooldown_min",
+                "spread_sl_floor_mult"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

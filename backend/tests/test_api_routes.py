@@ -518,7 +518,7 @@ class TestSignalsLatestTiers:
                  "approval": "pending", "created_at": now.isoformat()}],
             "paper_trades": [
                 {"id": f"t{i}", "asset": "EURUSD", "status": "open",
-                 "created_at": now.isoformat()} for i in range(4)],
+                 "created_at": now.isoformat()} for i in range(12)],
         })
         set_state(db)
         body = (await call("GET", "/api/signals/latest")).json()
@@ -2273,7 +2273,8 @@ class TestExtendedOpen:
         # 0.01 but the order opened 0.04 because execute_signal recomputed the
         # size from the full risk budget at a tighter SL instead of using the
         # lot the user reviewed and confirmed.
-        assert body["volume"] == pytest.approx(0.04, abs=0.001)
+        # 0.07 at the current 2.0% default risk (was 0.04 at 1.0%).
+        assert body["volume"] == pytest.approx(0.07, abs=0.001)
         assert body["remaining_legs"] == 2
         opens = db.rows.get("paper_trades", [])
         assert len(opens) == 1 and opens[0]["source"] == "extended"

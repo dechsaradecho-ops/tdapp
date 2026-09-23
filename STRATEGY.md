@@ -1,10 +1,11 @@
 # tdapp — หลักการ กลยุทธ์ การเปิด–ปิดออเดอร์ (STRATEGY)
 
 > อัปเดตล่าสุด: 2026-09-23 · เอกสารนี้รวบรวม **หลักการ + กลยุทธ์ + เกณฑ์ตัวเลขจริง** ของการเปิดออเดอร์ (entry) และปิดออเดอร์ (exit) รวมถึงการบริหารความเสี่ยงของระบบ
-> เอกสารเทคนิคอื่น: `FEATURES.md` (สรุปฟีเจอร์), `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `database/*.sql` (migration 001–050)
+> เอกสารเทคนิคอื่น: `FEATURES.md` (สรุปฟีเจอร์), `README.md` (quick start), `UI-DESIGN-SYSTEM.md` (ดีไซน์), `database/*.sql` (migration 001–053)
 >
 > ⚠️ **ค่าที่ใช้จริงใน production มาจากแถว `trading_settings` ใน DB** (ไม่ใช่ ENV/default ในโค้ด) — ตัวเลขในเอกสารนี้คือ **default ในโค้ด (`AppSettings`)** และ **preset** ตรวจค่าจริงด้วย `backend/scripts/check_config.py`
 > ⚠️ **Entry mode ปัจจุบัน**: `entry_mode` (`auto`/`confirm`/`advisory`) + `position_management_mode` (`auto`/`protective_only`/`advisory`) แยกอิสระ — `order_mode` เก่า (`auto`/`semi_auto`/`manual`) เป็น fallback เท่านั้นผ่าน `effective_entry_mode()`
+> ✅ **Single source of truth**: โค้ดห้าม hardcode ตัวเลข — ทุก default อยู่ที่ `AppSettings` (`schemas.py`) อ่านผ่าน helper `S(field)` (ค่า default) / `G(settings, field)` (ค่าจริง + fallback กลาง) ค่าคงที่ operational ทั้งหมด (TTL, step, timeout, quota) เป็น field ใน Settings page (migration 053)
 
 ---
 
@@ -146,12 +147,12 @@ flowchart LR
 - **Fill**: `apply_spread(entry, direction, effective_spread)` — BUY `+spread/2`, SELL `−spread/2`
 - **Spread resolution** (`effective_spread`): user `spread_overrides[ASSET]` → `DEFAULT_SPREADS[ASSET]` (EURUSD 0.00010 · GBPUSD 0.00015 · USDJPY 0.015 · XAUUSD **0.30**) → legacy `paper_spread`
 - **Live re-anchor**: `fetch_trusted_spot` เลื่อน entry/SL/TP ตามสัดส่วนก่อนเข้า gate
-- **Signal TTL**: `SIGNAL_TTL_MIN = 30` นาที → `expired`
+- **Signal TTL**: `signal_ttl_min` (Settings, default **30** นาที) → `expired`
 
 ### 3.6 Auto Trader — `auto_trader.trade_once()`
 
 - ทำงานเฉพาะ `entry_is_auto()` (`effective_entry_mode() == "auto"`; legacy `order_mode == "auto"` เท่านั้นที่ map มา — `semi_auto/manual` เดิม = `confirm/advisory` → ไม่เปิด แต่ยัง expire signal เก่า)
-- หยิบสูงสุด **10** `signals` ที่ `approval="pending"`
+- หยิบสูงสุด `auto_trader_batch_limit` (Settings, default **10**) `signals` ที่ `approval="pending"`
 - **Fail-closed duplicate guard**: อ่านไม้เปิด `paper_trades` ผ่าน `select_ex` — อ่าน error = **abort ทั้งรอบ** · merge book ของ broker เป็นแหล่งที่สอง · ข้าม asset ที่เปิดอยู่แล้ว
 - ปฏิเสธ `entry <= 0`
 - เรียก `execution.execute_signal(...)` — เส้นทางเดียวกับ `/approve` · เมื่อ `allowed` ตั้ง `approval="approved"` + `approved_at`
@@ -276,6 +277,7 @@ Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekl
 - `REASK_COOLDOWN_MIN = 30.0` · `REASK_AFTER_REJECT_MIN = 120.0`
 - `kill_expand_auto_apply` (migration 039, default **True**): True → apply ทุกครั้งที่หมดเวลา · False → apply **ครั้งเดียว** ต่อ `ONCE_QUOTA_HOURS = 24.0` ชม. แล้ว `capped` (guard ปิด)
 - `kill_expand_auto_widen` (migration 043, default **False**, P0-3 fail-closed): **False (default ปัจจุบัน) → หน้าต่างหมดเวลา = `kept` — ไม่ widen เลย คงลิมิตเดิม + คง pause + warn ครั้งเดียว** · True ถึงจะเข้า flow `apply/once/capped` ของ 039 ข้างบน — §นี้ทั้ง section อธิบายกรณี `True` เท่านั้น
+- `kill_expand_step_pct` (Settings, default **5.0**) — step ต่อการอนุมัติ · `kill_expand_reask_cooldown_min` (**30**) / `kill_expand_reask_after_reject_min` (**120**) — ถามซ้ำ · `kill_expand_once_quota_hours` (**24**) — โควตา one-shot · `kill_expand_fail_notify_min` (**360**) — เตือนเมื่อเขียนไม่สำเร็จ
 - `TRIGGERS` ลำดับ: **drawdown → daily → weekly → monthly**
 - `HOLD_KINDS = ("failed",)` — เฉพาะ settings write ที่ล้มเหลวเท่านั้นที่ยัง defer emergency exit
 - คำอนุมัติ: `approve/approved/dd_ok/yes/ok/อนุมัติ` · ปฏิเสธ: `reject/rejected/dd_no/no/ไม่อนุมัติ`
@@ -351,7 +353,7 @@ Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekl
 | Portfolio monitor (drawdown, pause, early warning) | `backend/app/workers/portfolio_monitor.py` |
 | Settings model, defaults, presets, engines | `backend/app/models/schemas.py` |
 | Manual close schema | `backend/app/models/close_position.py` |
-| Settings defaults ใน DB | `database/006_trading_settings.sql`, `012`, `014`–`018`, `023`–`029`, `032`–`041`, `043` (`kill_expand_auto_widen=False`), `051` (`no_behind` default 1.75), `052` (frequency 10/30/12/2.0 + RR 1.5) |
+| Settings defaults ใน DB | `database/006_trading_settings.sql`, `012`, `014`–`018`, `023`–`029`, `032`–`041`, `043` (`kill_expand_auto_widen=False`), `051` (`no_behind` default 1.75), `052` (frequency 10/30/12/2.0 + RR 1.5), `053` (operational knobs: TTL/batch/step/reask/quota/avg-hold/guard/monitor) |
 | เอกสาร | `FEATURES.md` (§3 pipeline, §5 engines, §6 position mgmt, §7 costs) |
 
 ---
@@ -376,6 +378,21 @@ Trigger (strict `>`): `daily_loss_pct > kill_daily_loss_pct` (**2.0**) · `weekl
 | `drawdown_throttle_pct` | **5.0** | **8.5** |
 | `no_behind_hold_mult` | **1.75** (โค้ด + migration 032 อัปแถว id=1 + 051 แก้ column default) | **1.75** |
 | `max_trades_daily/weekly/open/risk_per_trade` | **10 / 30 / 12 / 2.0** (aligned 2026-09-23 — `AppSettings` + `TRADE_LIMITS_TABLE` + preset ตรงกัน) | **10 / 30 / 12 / 2.0** |
+
+### Operational knobs (migration 053 — ตั้งจาก Settings page ได้ทั้งหมด)
+
+เคยเป็นค่าคงที่กระจายในโค้ด ตอนนี้เป็น field ใน `trading_settings` อ่านผ่าน `G(settings, field)`:
+
+| กลุ่ม | ฟิลด์ (default) |
+|---|---|
+| Signal/auto-trader | `signal_ttl_min` 30 · `auto_trader_batch_limit` 10 |
+| Limit expansion | `kill_expand_step_pct` 5.0 · `kill_expand_reask_cooldown_min` 30 · `kill_expand_reask_after_reject_min` 120 · `kill_expand_once_quota_hours` 24 · `kill_expand_fail_notify_min` 360 |
+| Avg-hold/equity | `avg_hold_min_span_days` 0.05 · `avg_hold_min_sample` 3 · `avg_hold_fallback_days` 4.0 · `equity_stale_peak_mult` 3.0 |
+| Guard feeds | `guard_marks_timeout_s` 20 · `guard_snap_timeout_s` 30 · `guard_news_timeout_s` 12 · `guard_atr_proxy_mult` 0.2 |
+| Monitor/retention | `drawdown_approach_ratio` 0.8 · `drawdown_approach_cooldown_min` 360 · `market_analysis_ttl_days` 7 · `market_analysis_purge_interval_s` 3600 |
+| Spread floor | `spread_sl_floor_mult` 3.0 |
+
+> ข้อยกเว้นที่ยังเป็นค่าคงที่ในโค้ด (strategy logic ไม่ใช่ risk knob): เกณฑ์ให้คะแนน ADX/RSI/volume bands, น้ำหนัก 9 ปัจจัย Smart Exit, `BANDS` 81/61/31, ladder 40/35/25, contract sizes, scheduler intervals (`run_all.py`) — ถ้าจะให้ตั้งได้ต้องเพิ่ม field ใหม่พร้อม migration (งานรอบหน้า)
 
 > ค่าที่ใช้จริงใน production ขึ้นกับ **แถว `trading_settings` ใน DB** — ตรวจด้วย `backend/scripts/check_config.py`
 

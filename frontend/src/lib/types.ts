@@ -973,6 +973,40 @@ export interface AppSettings {
   /** OpenAI-compatible base URL (e.g. https://api.deepseek.com) — "" = use
    *  ai.config.json. /chat/completions is appended by the backend. */
   ai_base_url: string;
+  /** Operational knobs (migration 053) — เคยเป็นค่าคงที่ในโค้ด ตอนนี้ตั้ง
+   *  จากหน้า Settings ได้ทั้งหมด (backend อ่านผ่าน G(settings, field)) */
+  /** Signal pending TTL (นาที) — เกินนี้ mark expired */
+  signal_ttl_min: number;
+  /** Auto-trader: จำนวน pending signals สูงสุดต่อรอบ 1 นาที */
+  auto_trader_batch_limit: number;
+  /** Limit expansion step (percentage points ต่อการอนุมัติ) */
+  kill_expand_step_pct: number;
+  /** ถามซ้ำได้หลัง cooldown (นาที) / หลัง reject (นาที) */
+  kill_expand_reask_cooldown_min: number;
+  kill_expand_reask_after_reject_min: number;
+  /** โควตา one-shot (ชม.) เมื่อ kill_expand_auto_apply=false */
+  kill_expand_once_quota_hours: number;
+  /** เตือนเมื่อ expansion เขียน DB ไม่สำเร็จ (นาที) */
+  kill_expand_fail_notify_min: number;
+  /** Avg-hold: span ขั้นต่ำ (วัน) / sample ขั้นต่ำ / fallback (วัน) */
+  avg_hold_min_span_days: number;
+  avg_hold_min_sample: number;
+  avg_hold_fallback_days: number;
+  /** Stale equity-peak clamp (× ของ capital ปัจจุบัน) */
+  equity_stale_peak_mult: number;
+  /** Guard feed budgets (วินาที): marks / snapshots / news + ATR proxy mult */
+  guard_marks_timeout_s: number;
+  guard_snap_timeout_s: number;
+  guard_news_timeout_s: number;
+  guard_atr_proxy_mult: number;
+  /** Market-analysis retention (วัน) + purge throttle (วินาที) */
+  market_analysis_ttl_days: number;
+  market_analysis_purge_interval_s: number;
+  /** Drawdown early-warning: สัดส่วนของลิมิต + cooldown (นาที) */
+  drawdown_approach_ratio: number;
+  drawdown_approach_cooldown_min: number;
+  /** Spread-vs-SL floor multiplier */
+  spread_sl_floor_mult: number;
 }
 
 /** Pairs the price feeds cover (mirror of backend quotes.SUPPORTED_ASSETS).

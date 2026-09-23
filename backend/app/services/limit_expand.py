@@ -65,7 +65,7 @@ from typing import Any, Optional
 
 from app.integrations.line_client import (build_limit_expand_prompt,
                                           build_limit_expand_result)
-from app.models.schemas import AppSettings
+from app.models.schemas import AppSettings, G, S
 from app.services import execution
 from app.services.execution import DEFAULT_USER
 
@@ -73,16 +73,17 @@ log = logging.getLogger(__name__)
 
 TABLE = "kill_expand_requests"
 
-# "+5% จากค่าเดิม" — the owner picked a flat 5 PERCENTAGE POINT step
+# "+5pp จากค่าเดิม" — the owner picked a flat 5 PERCENTAGE POINT step
 # (10.00% → 15.00%), applied to every limit that is currently breached.
-EXPAND_STEP_PCT = 5.0
+# Canonical value: AppSettings.kill_expand_step_pct (Settings page).
+EXPAND_STEP_PCT = S("kill_expand_step_pct")
 
 # A prompt quotes live metrics; after this long they are stale and a fresh
 # request (with fresh numbers) is required before anything can be widened.
 # This is only the FALLBACK for a caller without a settings row — the live
 # value is ``AppSettings.kill_expand_ttl_min`` (Settings page, migration 037,
 # default 180 min). A test keeps this constant equal to the schema default.
-PENDING_TTL_MIN = 180.0
+PENDING_TTL_MIN = S("kill_expand_ttl_min")
 
 # Sane range for the configurable window. Too short expires the request before
 # the owner can even read the LINE message; unbounded would let a month-old
@@ -94,8 +95,9 @@ MAX_TTL_MIN = 10080.0            # 7 days
 # Never ask twice inside this window. An explicit REJECT is respected longer
 # than an approved-but-still-breached request (which may legitimately ask for
 # another +5pp once the new limits are also exceeded).
-REASK_COOLDOWN_MIN = 30.0
-REASK_AFTER_REJECT_MIN = 120.0
+# Canonical values: AppSettings.kill_expand_reask_cooldown_min / _after_reject_min.
+REASK_COOLDOWN_MIN = S("kill_expand_reask_cooldown_min")
+REASK_AFTER_REJECT_MIN = S("kill_expand_reask_after_reject_min")
 
 # Extra minutes the position guard keeps deferring its emergency exit AFTER the
 # confirmation window has run out: NONE. The wait IS the window
@@ -122,14 +124,14 @@ REASK_AFTER_REJECT_MIN = 120.0
 # button that may never come. This is only the FALLBACK for a caller without a
 # settings row — the live value is ``AppSettings.kill_expand_auto_apply``
 # (Settings page, migration 039). Kept for the older callers/tests that pin it.
-AUTO_APPLY_ON_EXPIRY = True
+AUTO_APPLY_ON_EXPIRY = S("kill_expand_auto_apply")
 
 # P0-3 fail-closed default (migration 043): a LAPSED window must NOT widen a
 # risk limit. This is the fallback for a caller without settings — the live
 # value is ``AppSettings.kill_expand_auto_widen`` (Settings page). False so an
 # un-migrated row can never widen a limit on a timeout; only an explicit
 # opt-in (the 039 flow) may.
-AUTO_WIDEN_ON_EXPIRY = False
+AUTO_WIDEN_ON_EXPIRY = S("kill_expand_auto_widen")
 
 # ``decided_by`` marker for a window the timeout path KEPT (P0-3): the window
 # lapsed with no answer and the fail-closed policy refused to widen, so the
@@ -167,7 +169,8 @@ ONCE_SCAN_ROWS = 20
 # ครั้ง"). A DAY, because the limits being widened are mostly daily losses: "ครั้ง
 # ละ" must give the owner one rescue per breach day, not one for the lifetime of
 # the account (a breach a month later would otherwise find the bot mute).
-ONCE_QUOTA_HOURS = 24.0
+# Canonical value: AppSettings.kill_expand_once_quota_hours (Settings page).
+ONCE_QUOTA_HOURS = S("kill_expand_once_quota_hours")
 # Same, for a window that lapsed while NO limit is breached any more: the
 # request is retired instead of widening a risk limit the account no longer
 # needs (the flow is ask-first, never "widen because time ran out").
@@ -180,7 +183,8 @@ AUTO_NO_BREACH_BY = "auto:expired-no-breach"
 # stays stopped until the owner happens to look at /monitor. Throttled per request
 # id: BOTH workers retry every minute and the row stays pending until something
 # succeeds.
-AUTO_FAIL_NOTIFY_MIN = 360.0
+# Canonical value: AppSettings.kill_expand_fail_notify_min (Settings page).
+AUTO_FAIL_NOTIFY_MIN = S("kill_expand_fail_notify_min")
 _FAIL_NOTICES: dict[str, float] = {}
 
 # Settle kinds where the emergency exit must keep DEFERRING: only ``failed`` —
@@ -567,7 +571,7 @@ def breached_triggers(db, s: AppSettings) -> list[dict]:
             out.append({
                 "trigger": key, "field": field, "label": label,
                 "value": value, "limit": limit,
-                "new_limit": round(limit + EXPAND_STEP_PCT, 4),
+                "new_limit": round(limit + float(G(s, "kill_expand_step_pct")), 4),
             })
     return out
 
@@ -708,8 +712,9 @@ def request_expand(db, s: AppSettings, source: str = "monitor") -> dict:
 
     last = latest_request(db)
     if last:
-        gap = (REASK_AFTER_REJECT_MIN if last.get("status") == "rejected"
-               else REASK_COOLDOWN_MIN)
+        gap = (float(G(s, "kill_expand_reask_after_reject_min"))
+               if last.get("status") == "rejected"
+               else float(G(s, "kill_expand_reask_cooldown_min")))
         age = _age_min(last.get("requested_at") or last.get("created_at"))
         if age is not None and age < gap:
             return {"requested": False, "reason": "cooldown", "request": last,

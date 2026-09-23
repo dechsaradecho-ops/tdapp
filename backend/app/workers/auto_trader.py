@@ -17,7 +17,8 @@ import logging
 
 from app.models.schemas import AppSettings
 from app.services import execution, signal_log
-from app.services.execution import SIGNAL_TTL_MIN, expire_stale_pending_signals, now_iso
+from app.models.schemas import G
+from app.services.execution import expire_stale_pending_signals, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,8 @@ async def trade_once(db, broker, notifier) -> dict:
                 "expired": expired}
 
     expired = expire_stale_pending_signals(db)
-    pending = db.select("signals", filters={"approval": "pending"}, limit=10)
+    pending = db.select("signals", filters={"approval": "pending"},
+                        limit=int(G(s, "auto_trader_batch_limit")))
     # Defense-in-depth for the duplicate-position loop (2026-09-04): never
     # stack a second position on an asset that already has one open. The
     # scanner now dedups too, but this gate is the last line before an order

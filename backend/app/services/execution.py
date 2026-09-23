@@ -26,6 +26,7 @@ from app.models.schemas import (
     EconomicCalendarEngine,
     EconomicEvent,
     FrequencyEngine,
+    G,
     GateReport,
     KillSwitchEngine,
     KillSwitchStatus,
@@ -35,6 +36,7 @@ from app.models.schemas import (
     PnlBreakdownAmounts,
     RiskOfficer,
     RiskProfile,
+    S,
     SPREAD_SL_FLOOR_MULT,
     SessionEngine,
     TradeLimits,
@@ -82,16 +84,25 @@ def settings_or_none(db) -> Optional[AppSettings]:
 # Pending signals older than this leave the queue (marked 'expired') no matter
 # which order_mode the platform is in — otherwise the signals page shows
 # yesterday's entry prices forever in semi_auto/manual modes.
-SIGNAL_TTL_MIN = 30
+# Legacy alias — canonical value is AppSettings.signal_ttl_min (Settings page).
+# Settings-aware paths resolve the LIVE value via G(settings, "signal_ttl_min").
+SIGNAL_TTL_MIN = S("signal_ttl_min")
 
 
-def expire_stale_pending_signals(db) -> int:
-    """Mark pending signals older than SIGNAL_TTL_MIN as expired.
+def expire_stale_pending_signals(db, ttl_min: Optional[float] = None) -> int:
+    """Mark pending signals older than the signal TTL as expired.
 
+    ``ttl_min`` overrides; otherwise the LIVE Settings value
+    (``signal_ttl_min``) is read — never a literal here.
     Safe to call on every /signals/latest request — updates only rows that
     are actually stale, and degrades to 'rejected' when the DB lacks the
     009 migration's 'expired' enum value. Returns the number expired.
     """
+    if ttl_min is None:
+        try:
+            ttl_min = float(G(try_load_settings(db), "signal_ttl_min"))
+        except Exception:
+            ttl_min = float(S("signal_ttl_min"))
     if not db or not getattr(db, "available", False) \
             or not callable(getattr(db, "select", None)):
         return 0
@@ -110,28 +121,31 @@ def expire_stale_pending_signals(db) -> int:
             continue
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        if (now - dt).total_seconds() / 60 > SIGNAL_TTL_MIN:
+        if (now - dt).total_seconds() / 60 > ttl_min:
             if not db.update("signals", sig["id"], {"approval": "expired"}):
                 db.update("signals", sig["id"], {"approval": "rejected"})
             expired += 1
-            # Lifecycle log: pending past the 30-min TTL → never became an order.
+            # Lifecycle log: pending past the TTL → never became an order.
             signal_log.log_event(
                 db=db, event="expired", signal_id=str(sig.get("id") or ""),
                 asset=str(sig.get("asset") or ""),
                 direction=str(sig.get("direction") or ""),
                 confidence=sig.get("confidence"), entry=sig.get("entry"),
                 source="scanner",
-                reason=(f"สัญญาณนี้ pending เกิน {SIGNAL_TTL_MIN} นาที — "
+                reason=(f"สัญญาณนี้ pending เกิน {ttl_min:g} นาที — "
                         "หมดอายุ ไม่ได้ใช้เปิดออเดอร์"))
     return expired
 
 
-def is_stale(row: dict, max_age_min: int = SIGNAL_TTL_MIN) -> bool:
+def is_stale(row: dict, max_age_min: Optional[float] = None) -> bool:
     """True when the row has a parseable created_at older than max_age_min.
 
+    None → canonical AppSettings.signal_ttl_min.
     Rows without a parseable created_at (legacy/test data) are never stale —
     callers keep showing them rather than silently dropping history.
     """
+    if max_age_min is None:
+        max_age_min = S("signal_ttl_min")
     dt = _parse_dt(str(row.get("created_at") or ""))
     if dt is None:
         return False
@@ -743,7 +757,7 @@ def equity_drawdown_pct(db, capital: float) -> float:
         return 0.0
     # Ignore stale peaks from a previous capital regime (reseed/reset leaves
     # one row at the new capital; older 10k-era rows would fake 99% DD).
-    sane = [v for v in equities if v <= current * 3.0] or [current]
+    sane = [v for v in equities if v <= current * S("equity_stale_peak_mult")] or [current]
     peak = max(sane)
     if peak <= 0:
         return 0.0
@@ -761,9 +775,11 @@ def equity_drawdown_pct(db, capital: float) -> float:
 # days → floored to 0.5 → threshold 2.5 days → the three 2.8-day-old
 # positions were all closed in ONE guard cycle. Dropping that 60s row gives
 # 0.87 → threshold 4.35 days → none of them would have closed.
-_AVG_HOLD_MIN_SPAN_DAYS = 0.05   # ~72 min — shorter = artifact, not a hold
-_AVG_HOLD_MIN_SAMPLE = 3         # fewer usable rows than this = not a sample
-_AVG_HOLD_FALLBACK_DAYS = 4.0    # neutral default while the sample is thin
+# Legacy aliases — canonical values are the AppSettings fields
+# avg_hold_min_span_days / avg_hold_min_sample / avg_hold_fallback_days.
+_AVG_HOLD_MIN_SPAN_DAYS = S("avg_hold_min_span_days")   # ~72 min — shorter = artifact, not a hold
+_AVG_HOLD_MIN_SAMPLE = S("avg_hold_min_sample")         # fewer usable rows than this = not a sample
+_AVG_HOLD_FALLBACK_DAYS = S("avg_hold_fallback_days")    # neutral default while the sample is thin
 
 
 def avg_hold_days(db, closed_rows: list[dict] | None = None) -> float:
@@ -922,8 +938,8 @@ def peak_equity(db, capital: float, equity: float) -> float:
             try:
                 v = float(r.get("equity") or 0)
                 # Same stale-regime clamp as equity_drawdown_pct: ignore
-                # snapshots from an older capital era (>3x current base).
-                if v > peak and v <= base * 3.0:
+                # snapshots from an older capital era (>equity_stale_peak_mult × base).
+                if v > peak and v <= base * S("equity_stale_peak_mult"):
                     peak = v
             except Exception:
                 continue
@@ -983,10 +999,10 @@ def evaluate_kill(db, s: AppSettings,
         capital = float(getattr(s, "capital", 0) or 0)
         daily, weekly, monthly, dd = kill_metrics(db, capital)
         return KillSwitchEngine(
-            daily_loss_limit=float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0),
-            weekly_loss_limit=float(getattr(s, "kill_weekly_loss_pct", 5.0) or 5.0),
-            monthly_loss_limit=float(getattr(s, "kill_monthly_loss_pct", 8.0) or 8.0),
-            drawdown_limit=float(getattr(s, "max_drawdown_pct", 10.0) or 10.0),
+            daily_loss_limit=float(G(s, "kill_daily_loss_pct")),
+            weekly_loss_limit=float(G(s, "kill_weekly_loss_pct")),
+            monthly_loss_limit=float(G(s, "kill_monthly_loss_pct")),
+            drawdown_limit=float(G(s, "max_drawdown_pct")),
         ).evaluate(
             daily_loss_pct=daily, weekly_loss_pct=weekly,
             monthly_loss_pct=monthly, drawdown_pct=dd,
@@ -1516,7 +1532,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                     heat_new_pct = _new_risk / _cap * 100.0
                 except Exception:
                     heat_new_pct = 0.0
-            _limit = float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0)
+            _limit = float(G(s, "kill_daily_loss_pct"))
             if heat_open_pct + heat_new_pct > _limit:
                 rejects.append(
                     f"Portfolio heat เต็ม: ไม้เปิดเสี่ยง "
@@ -1880,7 +1896,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     if signal_row:
         _thesis_snapshot = await _fresh_thesis_snapshot(db, asset)
         _thesis = thesis_validation.validate_thesis(
-            signal_row, _thesis_snapshot, max_age_min=SIGNAL_TTL_MIN)
+            signal_row, _thesis_snapshot, max_age_min=G(s, "signal_ttl_min"))
         # Non-blocking confirmations (Supertrend-only conflict/flip — P0-5
         # refinement: EMA is the primary thesis, Supertrend is CONFIRMATION).
         # Log them so the conflict is auditable but DO NOT stop the order.

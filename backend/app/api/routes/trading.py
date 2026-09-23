@@ -43,6 +43,8 @@ from app.models.schemas import (
     analyze_pnl_breakdown,
     effective_min_confidence,
     effective_spread,
+    G,
+    S,
     is_market_closed,
     paper_trading_status,
     run_backtest,
@@ -528,7 +530,7 @@ async def get_gate_preview(request: Request) -> dict:
         })
 
     # ---- Gate 3b (1): spread guard — open-book proxy ---------------------
-    spread_cap = _f(getattr(s, "spread_guard_max_pct", 0))
+    spread_cap = _f(G(s, "spread_guard_max_pct", zero_as_missing=False))
     spread_positions = []
     for p in positions:
         dist = abs(p["entry_price"] - p["stop_loss"])
@@ -554,7 +556,7 @@ async def get_gate_preview(request: Request) -> dict:
 
     # ---- Gate 3b (2): pre-news flatten -----------------------------------
     try:
-        pre_min = int(getattr(s, "pre_news_flatten_min", 0) or 0)
+        pre_min = int(G(s, "pre_news_flatten_min", zero_as_missing=False) or 0)
     except (TypeError, ValueError):
         pre_min = 0
     nxt = None
@@ -589,7 +591,7 @@ async def get_gate_preview(request: Request) -> dict:
     # which is NOT behind `session_filter_enabled`. It is reported here as
     # `market_closed` + `market_block` so the dashboard can show the hard
     # rule even when the session filter itself is switched off.
-    session_enabled = bool(getattr(s, "session_filter_enabled", False))
+    session_enabled = bool(G(s, "session_filter_enabled"))
     market_closed = False
     sess_overlap = True
     sess_vol = "medium"
@@ -624,8 +626,8 @@ async def get_gate_preview(request: Request) -> dict:
     }
 
     # ---- Gate 4b: currency exposure (risk at stop) -----------------------
-    cap_ccy = _f(getattr(s, "max_currency_exposure_pct", 0))
-    cap_usd = _f(getattr(s, "capital", 0))
+    cap_ccy = _f(G(s, "max_currency_exposure_pct", zero_as_missing=False))
+    cap_usd = _f(G(s, "capital", zero_as_missing=False))
     try:
         risk = ExposureEngine.currency_risk(positions, cap_usd, cap_ccy)
     except Exception:
@@ -644,7 +646,7 @@ async def get_gate_preview(request: Request) -> dict:
 
     # ---- Gate 2b: same-asset re-entry cooldown ---------------------------
     try:
-        cool_min = int(getattr(s, "reentry_cooldown_min", 0) or 0)
+        cool_min = int(G(s, "reentry_cooldown_min", zero_as_missing=False) or 0)
     except (TypeError, ValueError):
         cool_min = 0
     cooling: list[dict] = []
@@ -1961,12 +1963,12 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
             _ind = IndicatorSnapshot(**{**_snap, "source": "live"})
             _opp = engine.opportunity_score(_ind)
             _bullish = bool(_ind.ema_fast > _ind.ema_slow)
-            _rr = max(0.5, float(getattr(s, "rr_target", 2.0) or 2.0))
+            _rr = max(0.5, float(G(s, "rr_target")))
             _prop = engine.build_proposal(
                 _ind, _opp, risk_per_trade_pct=float(s.risk_per_trade_pct or 0),
                 regime_bullish=_bullish, rr_target=_rr,
-                sl_min_pct=float(getattr(s, "sl_distance_min_pct", 0) or 0),
-                sl_max_pct=float(getattr(s, "sl_distance_max_pct", 0) or 0),
+                sl_min_pct=float(G(s, "sl_distance_min_pct", zero_as_missing=False) or 0),
+                sl_max_pct=float(G(s, "sl_distance_max_pct", zero_as_missing=False) or 0),
                 invalidation_level=(float(_ind.breakout_level)
                                     if str(asset).upper() == "XAUUSD" else 0.0))
             _direction = str(_prop.direction or "BUY").upper()
@@ -1998,7 +2000,7 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
             _dist = max(_spot * _atr / 100.0 * 1.5, _spot * 0.001)
             _direction = "BUY" if regime in ("bull_trend", "strong_bull_trend") else "SELL"
             _sign = 1.0 if _direction == "BUY" else -1.0
-            _rr = max(0.5, float(getattr(s, "rr_target", 2.0) or 2.0))
+            _rr = max(0.5, float(G(s, "rr_target")))
             _sl = _spot - _sign * _dist
             _tp = _spot + _sign * _dist * _rr
     plan = OrderStrategyEngine().build_plan(
@@ -2013,7 +2015,7 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
         # showed a lot up to 6x smaller than the one execution would use.
         # _evaluate_frequency always overrides limits with s.risk_per_trade_pct,
         # so reading the setting directly is both safer and identical.
-        risk_per_trade_pct=float(s.risk_per_trade_pct or 1.0))
+        risk_per_trade_pct=float(G(s, "risk_per_trade_pct")))
     # re-evaluate frequency + officer against the REAL proposal confidence
     # so the review/final decision match the plan shown (the old flow
     # reviewed the scanner-row score but displayed dummy BUY legs).
@@ -2037,10 +2039,10 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
         from app.models.schemas import INDICATORS as _INDS
         from app.models.schemas import run_backtest as _run_bt
         import httpx as _httpx
-        _bt_ind = str(getattr(s, "backtest_indicator", "EMA") or "EMA")
+        _bt_ind = str(G(s, "backtest_indicator") or "EMA")
         if _bt_ind not in list(_INDS):
             _bt_ind = "EMA"
-        _bt_days = int(getattr(s, "backtest_days", 120) or 120)
+        _bt_days = int(G(s, "backtest_days"))
         _bt_cfg = _BTC(asset=asset, indicator=_bt_ind,  # type: ignore[arg-type]
                        days=max(30, min(_bt_days, 365)),
                        initial_capital=float(s.capital or 0),
@@ -2109,7 +2111,7 @@ def _final_decision(officer: RiskOfficerReview, news: NewsRiskStatus,
         return "WAIT — ข่าว impact สูงใกล้ตัว"
     # Per-asset quality gate — gold uses Min Confidence (gold) when set.
     threshold = (effective_min_confidence(s, asset)
-                 if s is not None else 70.0)
+                 if s is not None else S("min_confidence"))
     if confidence < threshold:
         return "WAIT — Confidence ต่ำกว่าเกณฑ์"
     # P1-3: SETUP-QUALITY gate — the OPPORTUNITY score is an axis independent
@@ -2117,6 +2119,6 @@ def _final_decision(officer: RiskOfficerReview, news: NewsRiskStatus,
     # low-quality setup). Only gate when the caller supplied the score (the
     # other callers pass None and keep the pre-P1-3 confidence-only check).
     if opportunity is not None and s is not None:
-        if opportunity < float(getattr(s, "min_opportunity", 60.0) or 0.0):
+        if opportunity < float(G(s, "min_opportunity", zero_as_missing=False) or 0.0):
             return "WAIT — Opportunity Score ต่ำกว่าเกณฑ์"
     return "TRADE — ผ่านทุกด่าน อนุมัติเข้าไม้ตามแผน"

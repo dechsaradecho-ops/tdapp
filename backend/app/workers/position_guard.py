@@ -28,10 +28,12 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Optional
 
 from app.engine import smart_exit
 from app.integrations import quotes
 from app.integrations.brokers import Position
+from app.models.schemas import G, S
 from app.services import execution
 from app.services import limit_expand
 from app.services import signal_log
@@ -49,9 +51,10 @@ log = logging.getLogger(__name__)
 # position_guard, and the Logs page wrongly blamed migration 030.
 # The marks cap guards the SL/TP safety path and is never sacrificed to a
 # slow snapshot/news feed (each has its own independent cap).
-_GUARD_MARKS_BUDGET = 20.0   # live spot marks (safety path)
-_GUARD_SNAP_BUDGET = 30.0    # Smart-Exit snapshots (AI score enhancement)
-_GUARD_NEWS_BUDGET = 12.0    # Smart-Exit news calendar
+# Canonical values: AppSettings.guard_marks/snap/news_timeout_s (Settings page).
+_GUARD_MARKS_BUDGET = S("guard_marks_timeout_s")   # live spot marks (safety path)
+_GUARD_SNAP_BUDGET = S("guard_snap_timeout_s")    # Smart-Exit snapshots (AI score enhancement)
+_GUARD_NEWS_BUDGET = S("guard_news_timeout_s")    # Smart-Exit news calendar
 
 
 async def _none() -> None:
@@ -183,11 +186,13 @@ def _resolve_initial_volume(db, pos, row: dict | None = None) -> float | None:
         return None
 
 
-def _atr_for(pos: Position, fallback_distance: float, db=None) -> float:
-    """ATR estimate for trailing: 20% of the ORIGINAL SL distance.
+def _atr_for(pos: Position, fallback_distance: float, db=None,
+             proxy_mult: Optional[float] = None) -> float:
+    """ATR estimate for trailing: proxy_mult × the ORIGINAL SL distance.
 
     The guard has no candle history per ticket; the SL distance the signal
     was sized from is a stable proxy (SL = 1.5 × ATR at entry by default).
+    None → canonical AppSettings.guard_atr_proxy_mult (Settings page).
 
     CRITICAL: the denominator must be the INITIAL stop, never the current
     one. Breakeven / trailing move the stop toward (or past) entry, so
@@ -211,9 +216,12 @@ def _atr_for(pos: Position, fallback_distance: float, db=None) -> float:
             risk = None
     if risk is None:
         risk = getattr(pos, "stop_loss", None)
+    if proxy_mult is None:
+        from app.models.schemas import S as _S
+        proxy_mult = float(_S("guard_atr_proxy_mult"))
     if risk is None:
-        return fallback_distance * 0.2
-    return abs(pos.entry_price - float(risk)) * 0.2
+        return fallback_distance * proxy_mult
+    return abs(pos.entry_price - float(risk)) * proxy_mult
 
 
 def _r_multiple_at(pos: Position, price: float, db=None) -> float:
@@ -370,7 +378,7 @@ def _avg_hold_days(db) -> float:
     try:
         return execution.avg_hold_days(db)
     except Exception:
-        return 4.0
+        return S("avg_hold_fallback_days")
 
 
 async def _apply_smart_exit(db, broker, pos: Position, price: float,
@@ -600,10 +608,10 @@ async def _manage_position(db, broker, pos: Position, price: float,
     profit_distance = (price - pos.entry_price) * sign  # >0 when winning
     r_multiple = profit_distance / r_distance
 
-    be_trigger = float(getattr(s, "breakeven_trigger_r", 1.0) or 0)
-    trail_mult = float(getattr(s, "trail_atr_mult", 2.0) or 0)
-    partial_pct = float(getattr(s, "partial_close_pct", 0.0) or 0)
-    partial_trigger = float(getattr(s, "partial_trigger_r", 1.0) or 0)
+    be_trigger = float(G(s, "breakeven_trigger_r", zero_as_missing=False) or 0)
+    trail_mult = float(G(s, "trail_atr_mult", zero_as_missing=False) or 0)
+    partial_pct = float(G(s, "partial_close_pct", zero_as_missing=False) or 0)
+    partial_trigger = float(G(s, "partial_trigger_r", zero_as_missing=False) or 0)
 
     # ---- 1. partial close (TP1) — once per position -----------------------
     # Skipped while the market is closed: TP1 realises a PnL, so it is a
@@ -698,7 +706,9 @@ async def _manage_position(db, broker, pos: Position, price: float,
     if be_trigger > 0 and r_multiple >= be_trigger:
         be_price = pos.entry_price
         if trail_mult > 0:
-            atr = _atr_for(pos, r_distance, db)
+            atr = _atr_for(pos, r_distance, db,
+                           proxy_mult=float(G(s, "guard_atr_proxy_mult", zero_as_missing=False) or 0)
+                           or None)
             trail_price = price - sign * trail_mult * atr
             # trail only ever TIGHTENS: never below breakeven (BUY) or above
             # it (SELL), and never looser than the current SL.
@@ -710,7 +720,7 @@ async def _manage_position(db, broker, pos: Position, price: float,
             # Gated by trailing_ladder AND trail_mult>0 so breakeven-only
             # configs (trail 0) keep exact legacy behaviour.
             try:
-                if bool(getattr(s, "trailing_ladder", False)):
+                if bool(G(s, "trailing_ladder")):
                     ladder = smart_exit.ladder_sl(
                         entry_price=pos.entry_price, direction=pos.direction,
                         r_distance=r_distance, r_multiple=r_multiple)
@@ -831,7 +841,7 @@ async def guard_once(db, broker, notifier: NotificationService,
     # EXIT PRIORITY 1-8: emergency → SL/TP → trailing(ladder) → AI score →
     # reversal → time → news. SL/TP/trailing/time live in this loop; the AI
     # engine supplies score/reversal/news/left-behind/volatility/profit.
-    smart_on = bool(getattr(s, "smart_exit_enabled", True))
+    smart_on = bool(G(s, "smart_exit_enabled"))
     # ---- P1-2: position_management_mode gates DISCRETIONARY management -----
     # "auto" = full guard. "protective_only" / "advisory" = NO discretionary
     # management (partial / breakeven / trailing / R-ladder / smart-exit /
@@ -852,7 +862,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                  discretionary_block)
     snaps: dict[str, dict] = {}
     news_status, news_event = "SAFE", ""
-    avg_hold = 4.0
+    avg_hold = S("avg_hold_fallback_days")
     drawdown_pct = 0.0
     kill_engaged = False
     kill_triggers: list[str] = []
@@ -1082,11 +1092,16 @@ async def guard_once(db, broker, notifier: NotificationService,
     # live marks that drive the SL/TP safety path.
     live: dict[str, float] = {}
     if positions:
+        # LIVE Settings values (guard_*_timeout_s) — the module aliases are
+        # import-time fallback only.
+        _marks_c = float(G(s, "guard_marks_timeout_s", zero_as_missing=False) or _GUARD_MARKS_BUDGET)
+        _snaps_c = float(G(s, "guard_snap_timeout_s", zero_as_missing=False) or _GUARD_SNAP_BUDGET)
+        _news_c = float(G(s, "guard_news_timeout_s", zero_as_missing=False) or _GUARD_NEWS_BUDGET)
         marks_c, snaps_c, news_c = await asyncio.gather(
-            _bounded(_live_marks(assets), _GUARD_MARKS_BUDGET),
-            (_bounded(quotes.fetch_all_snapshots(assets), _GUARD_SNAP_BUDGET)
+            _bounded(_live_marks(assets), _marks_c),
+            (_bounded(quotes.fetch_all_snapshots(assets), _snaps_c)
              if smart_on else _none()),
-            (_bounded(_smart_exit_news(db, s), _GUARD_NEWS_BUDGET)
+            (_bounded(_smart_exit_news(db, s), _news_c)
              if smart_on else _none()),
         )
         live = marks_c or {}
@@ -1096,7 +1111,7 @@ async def guard_once(db, broker, notifier: NotificationService,
     # Quote→USD conversion map for every journaled PnL this cycle. Built from
     # the marks in hand plus a one-shot fetch of the missing <quote>USD legs.
     pnl_rates: dict[str, float] = (
-        await _bounded(_conversion_rates(positions, live), _GUARD_MARKS_BUDGET)
+        await _bounded(_conversion_rates(positions, live), float(G(s, "guard_marks_timeout_s", zero_as_missing=False) or _GUARD_MARKS_BUDGET))
         if positions else {}
     ) or {}
     # Publish the map on the broker so sibling workers (portfolio_monitor's
@@ -1109,10 +1124,10 @@ async def guard_once(db, broker, notifier: NotificationService,
         try:
             avg_hold = _avg_hold_days(db)
         except Exception:
-            avg_hold = 4.0
+            avg_hold = S("avg_hold_fallback_days")
         try:
             drawdown_pct = execution.equity_drawdown_pct(
-                db, float(getattr(s, "capital", 0) or 0))
+                db, float(G(s, "capital", zero_as_missing=False) or 0))
         except Exception:
             drawdown_pct = 0.0
     # Emergency closes aggregate into ONE LINE message after the loop
@@ -1313,7 +1328,7 @@ async def guard_once(db, broker, notifier: NotificationService,
             # (owner 2026-09-19): it books a PnL on a stale mark, so it waits
             # for the reopen exactly like Smart Exit. The position simply
             # ages one more weekend; SL/TP still protect it meanwhile.
-            max_hold = int(getattr(s, "max_hold_days", 0) or 0)
+            max_hold = int(G(s, "max_hold_days", zero_as_missing=False) or 0)
             if not mgmt_discretionary:
                 # P1-2: the time stop is discretionary → OFF in protective_only
                 # / advisory. Hard SL/TP still apply.
@@ -1331,7 +1346,7 @@ async def guard_once(db, broker, notifier: NotificationService,
                 # left_behind let through — a +3R position could be killed on
                 # day 5. R uses the ORIGINAL stop so a trailed/breakeven SL
                 # can't inflate it (see _r_multiple_at).
-                ts_min_r = float(getattr(s, "time_stop_min_r", 1.0) or 0)
+                ts_min_r = float(G(s, "time_stop_min_r", zero_as_missing=False) or 0)
                 r_now = _r_multiple_at(pos, price, db) if ts_min_r > 0 else 0.0
                 if age_days >= max_hold and (ts_min_r <= 0 or r_now < ts_min_r):
                     age_txt = f"{age_days:.1f}"

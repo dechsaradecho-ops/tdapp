@@ -8,14 +8,13 @@ from pydantic import BaseModel
 
 from app.engine.strategy_engine import StrategyEngine
 from app.integrations import quotes
-from app.models.schemas import (FinalDecision, QuoteFeedStatus, SignalProposal,
+from app.models.schemas import (FinalDecision, G, QuoteFeedStatus, S, SignalProposal,
                                 contract_value_for, effective_min_lot,
                                 effective_sl_tp, effective_spread,
                                 risk_to_lot_for, risk_usd_of_distance)
 from app.services import execution
 from app.services import signal_log
 from app.services.execution import (
-    SIGNAL_TTL_MIN,
     expire_stale_pending_signals,
     now_iso,
 )
@@ -132,9 +131,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     heat_open_usd += _t_risk
         except Exception:
             heat_open_usd = 0.0
-        heat_cap = float(getattr(s, "capital", 0) or 0)
+        heat_cap = float(G(s, "capital", zero_as_missing=False) or 0)
         heat_open_pct = (heat_open_usd / heat_cap * 100.0) if heat_cap > 0 else 0.0
-        heat_limit = float(getattr(s, "kill_daily_loss_pct", 2.0) or 2.0)
+        heat_limit = float(G(s, "kill_daily_loss_pct"))
         today = datetime.now(timezone.utc).date().isoformat()
         todays = db.select("paper_trades", limit=500)
         today_count = len([r for r in todays
@@ -149,7 +148,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             stop_loss = float(r["stop_loss"] or 0)
             take_profit = float(r["take_profit"] or 0)
             sl_distance = abs(entry - stop_loss)
-            rr = float(r["expected_rr"] or 2.0)
+            rr = float(r["expected_rr"] or S("rr_target"))
             # Effective SL/TP (same helper execute_signal uses): the stored
             # row carries กลาง prices — re-derive for sl_distance_mode, then
             # tighten to the risk-budget cap. The card's main SL/TP/lots and
@@ -189,7 +188,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     # Effective SL/TP notes — values are already effective
                     # (same helper as execute_signal); only explain here.
                     if _tiered:
-                        _mode = str(getattr(s, "sl_distance_mode", "medium"))
+                        _mode = str(G(s, "sl_distance_mode") or "medium")
                         _th = "สั้น" if _mode == "short" else "ยาว"
                         _mult = {"short": 1.0, "long": 2.0}.get(_mode, 1.5)
                         calc_notes.append(
@@ -319,7 +318,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
                 stop_loss=stop_loss, take_profit=take_profit,
-                expected_rr=float(r["expected_rr"] or 2.0),
+                expected_rr=float(r["expected_rr"] or S("rr_target")),
                 risk_per_trade_pct=s.risk_per_trade_pct,
                 # explanation เก็บแบบ " | "-joined — แตกกลับเป็นรายข้อเพื่อให้
                 # การ์ดจัดหมวด เทรนด์/โมเมนตัม/ผันผวน/ข่าว ได้ (เดิมห่อทั้งก้อน
@@ -333,7 +332,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 # block on the card.
                 sltp_levels=StrategyEngine.sltp_preview(
                     r["direction"].upper(), entry, _raw_dist,
-                    rr_target=float(r["expected_rr"] or 2.0))
+                    rr_target=float(r["expected_rr"] or S("rr_target")))
                 if entry > 0 and _raw_dist > 0 else [],
                 sl_distance_mode=s.sl_distance_mode,
                 approval=r.get("approval") or "pending",
@@ -346,13 +345,13 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 suggested_lots=_lots_card,
             ))
             # Countdown for pending cards: how long until this signal ages out
-            # of the queue (30-min TTL) and the scanner re-evaluates the setup.
+            # of the queue (signal_ttl_min) and the scanner re-evaluates the setup.
             if (r.get("approval") or "pending") == "pending" and r.get("created_at"):
                 dt = execution._parse_dt(str(r["created_at"]))
                 if dt is not None:
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
-                    left = SIGNAL_TTL_MIN - (
+                    left = float(G(s, "signal_ttl_min")) - (
                         datetime.now(timezone.utc) - dt).total_seconds() / 60
                     proposals[-1].expires_min_left = round(max(left, 0.0), 1)
         return proposals

@@ -28,6 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
+from app.models.schemas import G
+
 Recommendation = Literal[
     "HOLD", "MOVE_SL", "PARTIAL_25", "PARTIAL_50", "CLOSE", "EMERGENCY_CLOSE",
 ]
@@ -120,7 +122,7 @@ def left_behind_days(*, settings, avg_hold_days: float | None,
     Never raises; returns 0.0 when the rule is off (mult <= 0).
     """
     try:
-        mult = float(getattr(settings, "no_behind_hold_mult", 1.75) or 0)
+        mult = float(G(settings, "no_behind_hold_mult", zero_as_missing=False) or 0)
     except (TypeError, ValueError):
         mult = 0.0
     if mult <= 0:
@@ -131,13 +133,13 @@ def left_behind_days(*, settings, avg_hold_days: float | None,
         avg = 4.0
     days = avg * mult
     try:
-        floor = float(getattr(settings, "no_behind_min_days", 2.0) or 0)
+        floor = float(G(settings, "no_behind_min_days", zero_as_missing=False) or 0)
     except (TypeError, ValueError):
         floor = 0.0
     if floor > 0:
         days = max(days, floor)
-    hard = max_hold_days if max_hold_days is not None else getattr(
-        settings, "max_hold_days", 0)
+    hard = max_hold_days if max_hold_days is not None else G(
+        settings, "max_hold_days", zero_as_missing=False)
     try:
         hard = int(hard or 0)
     except (TypeError, ValueError):
@@ -204,15 +206,15 @@ def _evaluate(
         r_dist = abs(entry_price) * 0.01 or 1e-9
     r_mult = ((price - entry_price) * sign) / r_dist
 
-    max_hold = int(getattr(s, "max_hold_days", 5) or 0)
-    exit_close = float(getattr(s, "exit_score_close", 45.0) or 45.0)
-    protect_r = float(getattr(s, "profit_protect_r", 2.0) or 0)
-    reversal_opp = float(getattr(s, "reversal_opp_min", 50.0) or 50.0)
-    news_on = bool(getattr(s, "news_exit_enabled", True))
-    news_min_r = float(getattr(s, "news_exit_min_r", 1.0) or 0)
-    vol_exit_atr = float(getattr(s, "volatility_exit_atr", 2.5) or 0)
-    behind_min_r = float(getattr(s, "no_behind_min_r", 0.5) or 0)
-    behind_mult = float(getattr(s, "no_behind_hold_mult", 1.75) or 0)
+    max_hold = int(G(s, "max_hold_days", zero_as_missing=False) or 0)
+    exit_close = float(G(s, "exit_score_close"))
+    protect_r = float(G(s, "profit_protect_r", zero_as_missing=False) or 0)
+    reversal_opp = float(G(s, "reversal_opp_min"))
+    news_on = bool(G(s, "news_exit_enabled"))
+    news_min_r = float(G(s, "news_exit_min_r", zero_as_missing=False) or 0)
+    vol_exit_atr = float(G(s, "volatility_exit_atr", zero_as_missing=False) or 0)
+    behind_min_r = float(G(s, "no_behind_min_r", zero_as_missing=False) or 0)
+    behind_mult = float(G(s, "no_behind_hold_mult", zero_as_missing=False) or 0)
 
     ema_fast = float(snap.get("ema_fast") or 0)
     ema_slow = float(snap.get("ema_slow") or 0)

@@ -25,10 +25,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   min_confidence: 70,
   min_confidence_gold: null,
   min_opportunity: 60,
-  max_trades_daily: 6,
+  max_trades_daily: 10,
   max_trades_weekly: 30,
-  max_open_positions: 4,
-  risk_per_trade_pct: 1.0,
+  max_open_positions: 12,
+  risk_per_trade_pct: 2.0,
   reentry_cooldown_min: 30,
   min_lot: 0.01,
   min_lot_gold: null,
@@ -37,7 +37,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   partial_close_pct: 0,
   partial_trigger_r: 1.0,
   max_hold_days: 5,
-  rr_target: 2.0,
+  rr_target: 1.5,
   smart_exit_enabled: true,
   exit_score_close: 45,
   profit_protect_r: 2.0,
@@ -92,6 +92,27 @@ const DEFAULT_SETTINGS: AppSettings = {
   // AI chat — ค่าว่าง = ใช้ backend/ai.config.json (ดู migration 034)
   ai_model: "",
   ai_base_url: "",
+  // Operational knobs (migration 053) — ตรงกับ AppSettings defaults
+  signal_ttl_min: 30,
+  auto_trader_batch_limit: 10,
+  kill_expand_step_pct: 5.0,
+  kill_expand_reask_cooldown_min: 30,
+  kill_expand_reask_after_reject_min: 120,
+  kill_expand_once_quota_hours: 24,
+  kill_expand_fail_notify_min: 360,
+  avg_hold_min_span_days: 0.05,
+  avg_hold_min_sample: 3,
+  avg_hold_fallback_days: 4.0,
+  equity_stale_peak_mult: 3.0,
+  guard_marks_timeout_s: 20,
+  guard_snap_timeout_s: 30,
+  guard_news_timeout_s: 12,
+  guard_atr_proxy_mult: 0.2,
+  market_analysis_ttl_days: 7,
+  market_analysis_purge_interval_s: 3600,
+  drawdown_approach_ratio: 0.8,
+  drawdown_approach_cooldown_min: 360,
+  spread_sl_floor_mult: 3.0,
 };
 
 /** LINE notification categories shown on the Settings page — each row maps
@@ -1197,6 +1218,27 @@ export default function SettingsPage() {
               <NumField label="รอยืนยันขยายลิมิต (นาที)" value={cfg.kill_expand_ttl_min}
                 onChange={(v) => set("kill_expand_ttl_min", v)} step={30}
                 hint="เกินลิมิต ระบบส่งคำขอยืนยัน (LINE + popup) แล้วรอได้นานเท่านี้ — เกินเวลาระบบตัดสินให้ตามนโยบายด้านล่าง (ต่ำสุด 5 นาที / สูงสุด 7 วัน)" />
+              <NumField label="ขยายลิมิตครั้งละ (จุด %)" value={cfg.kill_expand_step_pct}
+                onChange={(v) => set("kill_expand_step_pct", v)} step={1}
+                hint="อนุมัติ 1 ครั้ง = ลิมิตที่ละเมิดขยับขึ้นเท่านี้ (percentage points — 10% → 15%)" />
+              <NumField label="ถามซ้ำหลังเงียบ (นาที)" value={cfg.kill_expand_reask_cooldown_min}
+                onChange={(v) => set("kill_expand_reask_cooldown_min", v)} step={5}
+                hint="ยังไม่ตอบ + ยังละเมิดอยู่ ถามซ้ำได้หลังเท่านี้" />
+              <NumField label="ถามซ้ำหลังปฏิเสธ (นาที)" value={cfg.kill_expand_reask_after_reject_min}
+                onChange={(v) => set("kill_expand_reask_after_reject_min", v)} step={10}
+                hint="กดปฏิเสธแล้ว ระบบเคารพคำตอบนานเท่านี้ก่อนถามใหม่" />
+              <NumField label="โควตาขยายเอง (ชม.)" value={cfg.kill_expand_once_quota_hours}
+                onChange={(v) => set("kill_expand_once_quota_hours", v)} step={1}
+                hint="นโยบายครั้งเดียว: ขยายให้เองได้ 1 ครั้งในกรอบเท่านี้" />
+              <NumField label="เตือนเมื่อขยายไม่สำเร็จ (นาที)" value={cfg.kill_expand_fail_notify_min}
+                onChange={(v) => set("kill_expand_fail_notify_min", v)} step={30}
+                hint="เขียน DB ขยายลิมิตไม่สำเร็จ เตือนซ้ำทุกเท่านี้" />
+              <NumField label="เตือน DD ก่อนถึงเพดาน (สัดส่วน)" value={cfg.drawdown_approach_ratio}
+                onChange={(v) => set("drawdown_approach_ratio", v)} step={0.05}
+                hint="DD ถึงสัดส่วนนี้ของลิมิต (0.8 = 80%) ส่ง LINE เตือนก่อนโดน kill" />
+              <NumField label="คูลดาวน์เตือน DD (นาที)" value={cfg.drawdown_approach_cooldown_min}
+                onChange={(v) => set("drawdown_approach_cooldown_min", v)} step={30}
+                hint="เตือน DD ใกล้เพดานซ้ำได้ทุกเท่านี้" />
               <div className="flex items-center gap-3 py-1">
                 <div className="flex-1">
                   <p className="text-sm">ขยายลิมิตให้เองเมื่อหมดเวลายืนยัน (Fail-Open)</p>
@@ -1328,6 +1370,52 @@ export default function SettingsPage() {
                   คู่เงินตั้งต้นสำหรับ backtest — เปลี่ยนตอนรันจริงได้
                 </span>
               </label>
+            </div>
+
+            {/* --- รอบระบบ / หน่วยความจำ (เดิมคือค่าคงที่ในโค้ด — migration 053) --- */}
+            <div className="space-y-3 rounded border border-slate-700/60 bg-surface/40 p-3">
+              <p className="text-xs font-semibold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Icon n="clock" size={13} /> รอบระบบ / หน่วยความจำ
+              </p>
+              <NumField label="Signal TTL (นาที)" value={cfg.signal_ttl_min}
+                onChange={(v) => set("signal_ttl_min", v)} step={5}
+                hint="สัญญาณ pending เกินเท่านี้ = หมดอายุ (auto-trader + thesis gate ใช้ค่าเดียวกัน)" />
+              <NumField label="Auto-trader ต่อรอบ (สัญญาณ)" value={cfg.auto_trader_batch_limit}
+                onChange={(v) => set("auto_trader_batch_limit", v)} step={1}
+                hint="หยิบ pending มาตัดสินมากสุดกี่ใบต่อรอบ 1 นาที" />
+              <NumField label="เก็บ market analysis (วัน)" value={cfg.market_analysis_ttl_days}
+                onChange={(v) => set("market_analysis_ttl_days", v)} step={1}
+                hint="ลบแถววิเคราะห์ตลาดที่เก่ากว่านี้ (กันตารางบวม)" />
+              <NumField label="Purge throttle (วินาที)" value={cfg.market_analysis_purge_interval_s}
+                onChange={(v) => set("market_analysis_purge_interval_s", v)} step={300}
+                hint="ลบขยะตารางวิเคราะห์ถี่สุดทุกเท่านี้" />
+              <NumField label="Avg-hold fallback (วัน)" value={cfg.avg_hold_fallback_days}
+                onChange={(v) => set("avg_hold_fallback_days", v)} step={0.5}
+                hint="ยังปิดไม้น้อยกว่าเกณฑ์ ใช้ค่านี้เป็นค่าเฉลี่ยเวลาถือ (ป้อนกฎ no-behind)" />
+              <NumField label="Avg-hold sample ขั้นต่ำ (ไม้)" value={cfg.avg_hold_min_sample}
+                onChange={(v) => set("avg_hold_min_sample", v)} step={1}
+                hint="ปิดไม้จริงน้อยกว่านี้ = ตัวอย่างไม่พอ ใช้ fallback" />
+              <NumField label="Avg-hold span ขั้นต่ำ (วัน)" value={cfg.avg_hold_min_span_days}
+                onChange={(v) => set("avg_hold_min_span_days", v)} step={0.01}
+                hint="ไม้ที่ถือสั้นกว่านี้ถือเป็น artifact ไม่นับเข้าเฉลี่ย" />
+              <NumField label="Stale peak clamp (× ทุน)" value={cfg.equity_stale_peak_mult}
+                onChange={(v) => set("equity_stale_peak_mult", v)} step={0.5}
+                hint="ยอด equity สูงสุดที่เกินเท่านี้ของทุนปัจจุบัน = ยุคทุนเก่า ไม่นับ (กัน DD หลอก 99%)" />
+              <NumField label="Guard: marks timeout (วิ)" value={cfg.guard_marks_timeout_s}
+                onChange={(v) => set("guard_marks_timeout_s", v)} step={5}
+                hint="รอราคาสดมากสุดเท่านี้ต่อรอบ (safety path — SL/TP)" />
+              <NumField label="Guard: snapshots timeout (วิ)" value={cfg.guard_snap_timeout_s}
+                onChange={(v) => set("guard_snap_timeout_s", v)} step={5}
+                hint="รอ snapshot อินดิเคเตอร์มากสุดเท่านี้ (Smart Exit)" />
+              <NumField label="Guard: news timeout (วิ)" value={cfg.guard_news_timeout_s}
+                onChange={(v) => set("guard_news_timeout_s", v)} step={2}
+                hint="รอปฏิทินข่าวมากสุดเท่านี้ (Smart Exit)" />
+              <NumField label="Guard: ATR proxy (× SL)" value={cfg.guard_atr_proxy_mult}
+                onChange={(v) => set("guard_atr_proxy_mult", v)} step={0.05}
+                hint="ประมาณ ATR = ระยะ SL × ค่านี้ (trailing ไม่มีแท่งเทียนราย ticket)" />
+              <NumField label="Spread floor (× สเปรด)" value={cfg.spread_sl_floor_mult}
+                onChange={(v) => set("spread_sl_floor_mult", v)} step={0.5}
+                hint="SL ต้องกว้างกว่า spread × เท่านี้เสมอ (กัน stop จมในสเปรด)" />
             </div>
           </div>
           </>

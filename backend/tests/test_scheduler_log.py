@@ -439,8 +439,10 @@ class TestGuardContextBudget:
         from app.models.schemas import AppSettings
         from app.workers import position_guard
 
-        # tiny snapshot cap so the test does not wait 30s
-        monkeypatch.setattr(position_guard, "_GUARD_SNAP_BUDGET", 0.05)
+        # tiny snapshot cap so the test does not wait 30s — via Settings
+        # (guard_once resolves the LIVE guard_*_timeout_s, not the module
+        # import-time alias, so pinning _GUARD_SNAP_BUDGET no longer works)
+        snap_settings = AppSettings(guard_snap_timeout_s=0.05)
 
         async def fake_spot(assets, **_kw):
             return {a: 1.2500 for a in assets}, {}
@@ -484,7 +486,7 @@ class TestGuardContextBudget:
 
         summary = await _asyncio.wait_for(
             position_guard.guard_once(db, broker, rec,
-                                      settings=AppSettings()),
+                                      settings=snap_settings),
             timeout=5)
 
         # snapshot timed out → no AI eval, but the SL/TP safety path ran:

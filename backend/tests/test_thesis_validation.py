@@ -348,7 +348,7 @@ class TestExecuteSignalThesisSeam:
         broker = _RecordingBroker()
         notifier = _RecordingNotifier()
         report = asyncio.run(execution.execute_signal(
-            db, broker, notifier, AppSettings(capital=10_000),
+            db, broker, notifier, AppSettings(capital=10_000, risk_per_trade_pct=1.0),
             user_id="demo", asset="EURUSD", direction="BUY",
             entry=1.1000, stop_loss=1.0950, take_profit=1.1100,
             confidence=90.0, opportunity=90.0, signal_id="sig-1",
@@ -366,7 +366,7 @@ class TestExecuteSignalThesisSeam:
         broker = _RecordingBroker()
         notifier = _RecordingNotifier()
         report = asyncio.run(execution.execute_signal(
-            db, broker, notifier, AppSettings(capital=10_000),
+            db, broker, notifier, AppSettings(capital=10_000, risk_per_trade_pct=1.0),
             user_id="demo", asset="EURUSD", direction="BUY",
             entry=1.1000, stop_loss=1.0950, take_profit=1.1100,
             confidence=90.0, opportunity=90.0, signal_id="sig-1",
@@ -381,7 +381,7 @@ class TestExecuteSignalThesisSeam:
         broker = _RecordingBroker()
         notifier = _RecordingNotifier()
         report = asyncio.run(execution.execute_signal(
-            db, broker, notifier, AppSettings(capital=10_000),
+            db, broker, notifier, AppSettings(capital=10_000, risk_per_trade_pct=1.0),
             user_id="demo", asset="EURUSD", direction="BUY",
             entry=1.1000, stop_loss=1.0950, take_profit=1.1100,
             confidence=90.0, opportunity=90.0, signal_id="sig-1",
@@ -398,7 +398,7 @@ class TestExecuteSignalThesisSeam:
         broker = _RecordingBroker()
         notifier = _RecordingNotifier()
         report = asyncio.run(execution.execute_signal(
-            db, broker, notifier, AppSettings(capital=10_000),
+            db, broker, notifier, AppSettings(capital=10_000, risk_per_trade_pct=1.0),
             user_id="demo", asset="EURUSD", direction="BUY",
             entry=1.1000, stop_loss=1.0950, take_profit=1.1100,
             confidence=90.0, opportunity=90.0, signal_id="plan-1",
@@ -414,7 +414,7 @@ class TestExecuteSignalThesisSeam:
         broker = _RecordingBroker()
         notifier = _RecordingNotifier()
         report = asyncio.run(execution.execute_signal(
-            db, broker, notifier, AppSettings(capital=10_000),
+            db, broker, notifier, AppSettings(capital=10_000, risk_per_trade_pct=1.0),
             user_id="demo", asset="EURUSD", direction="BUY",
             entry=1.1000, stop_loss=1.0950, take_profit=1.1100,
             confidence=90.0, opportunity=90.0, signal_id="sig-1",

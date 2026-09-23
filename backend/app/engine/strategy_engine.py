@@ -285,11 +285,11 @@ class StrategyEngine:
         opp: AssetOpportunity,
         risk_per_trade_pct: float,
         regime_bullish: bool,
-        atr_multiple_sl: float = 1.5,
-        rr_target: float = 1.5,
+        atr_multiple_sl: Optional[float] = None,
+        rr_target: Optional[float] = None,
         risk_profile: RiskProfile = RiskProfile.moderate,
-        sl_min_pct: float = 0.0,
-        sl_max_pct: float = 0.0,
+        sl_min_pct: Optional[float] = None,
+        sl_max_pct: Optional[float] = None,
         invalidation_level: float = 0.0,
     ) -> SignalProposal:
         """Turn the scored snapshot into an explainable BUY/SELL proposal with SL/TP.
@@ -305,7 +305,19 @@ class StrategyEngine:
         tighter than the plain ATR stop (floored at 0.5×ATR so a too-close
         level can't create a hair-trigger SL). The structural stop is
         EXEMPT from the clamp — clamping it would break the level anchor.
+
+        None → canonical AppSettings defaults (sl_distance_mode tier /
+        rr_target / sl clamp): single source of truth, no literals here.
         """
+        from app.models.schemas import S as _S, SL_TIER_MULT as _MULT
+        if atr_multiple_sl is None:
+            atr_multiple_sl = float(_MULT.get("medium", 1.5))
+        if rr_target is None:
+            rr_target = float(_S("rr_target"))
+        if sl_min_pct is None:
+            sl_min_pct = float(_S("sl_distance_min_pct"))
+        if sl_max_pct is None:
+            sl_max_pct = float(_S("sl_distance_max_pct"))
         direction = "BUY" if regime_bullish else "SELL"
         sign = 1 if regime_bullish else -1
         sl_distance = max(ind.price * ind.atr_pct / 100.0 * atr_multiple_sl, ind.price * 0.001)
@@ -413,12 +425,16 @@ class StrategyEngine:
     # ------------------------------------------------------------------
     @staticmethod
     def sltp_preview(direction: str, entry: float, sl_distance: float,
-                     rr_target: float = 1.5) -> list[SLTPLevel]:
+                     rr_target: Optional[float] = None) -> list[SLTPLevel]:
         """Preview SL/TP at 3 stop distances (สั้น ×1.0 / กลาง ×1.5 / ยาว ×2.0 ATR).
 
         The card always shows all 3 tiers; the user's sl_distance_mode setting
         decides which tier execute_signal actually uses for the real order.
+        None → canonical AppSettings.rr_target.
         """
+        if rr_target is None:
+            from app.models.schemas import S as _S
+            rr_target = float(_S("rr_target"))
         sign = 1 if direction == "BUY" else -1
         tiers = (("สั้น", 1.0), ("กลาง", 1.5), ("ยาว", 2.0))
         levels: list[SLTPLevel] = []
@@ -439,8 +455,8 @@ class StrategyEngine:
         direction: str,
         entry: float,
         sl_distance: float,
-        rr_target: float = 1.5,
-        atr_multiple_sl: float = 1.5,
+        rr_target: Optional[float] = None,
+        atr_multiple_sl: Optional[float] = None,
     ) -> list[LimitLevel]:
         """Laddered limit entries (แนวรับหลายระดับ) spaced by fractions of the SL distance.
 
@@ -448,7 +464,11 @@ class StrategyEngine:
         SELL → mirrored above market:              +0.25 / +0.50 / +0.75 × sl_distance
         Risk split 40/35/25; each rung keeps the same SL distance and RR target.
         (sl_distance already includes the ATR multiple — same as the main SL.)
+        None → canonical AppSettings.rr_target.
         """
+        if rr_target is None:
+            from app.models.schemas import S as _S
+            rr_target = float(_S("rr_target"))
         sign = 1 if direction == "BUY" else -1
         steps = (0.25, 0.50, 0.75)
         weights = (40.0, 35.0, 25.0)

@@ -19,8 +19,10 @@ from app.api.routes.settings import get_app_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
 from app.models.schemas import (
+    G,
     GOLD_ASSET,
     FrequencyEngine,
+    S,
     TradeLimits,
     effective_min_confidence,
     effective_min_opportunity,
@@ -97,8 +99,10 @@ def _insert_analysis_row(db: Database, row: dict) -> None:
 # dashboard popup shows the latest score). Prod audit 2026-09-11 found the
 # table at 240k+ rows with a 50-row unordered read on top of it.
 # 7 days matches the other log tables (quote_api_logs / signal_logs).
-MARKET_ANALYSIS_TTL_DAYS = 7
-PURGE_INTERVAL_S = 3600.0  # hourly; the scanner runs every 5 min
+# Canonical values: AppSettings.market_analysis_ttl_days /
+# market_analysis_purge_interval_s (Settings page).
+MARKET_ANALYSIS_TTL_DAYS = S("market_analysis_ttl_days")
+PURGE_INTERVAL_S = S("market_analysis_purge_interval_s")  # hourly; the scanner runs every 5 min
 _last_purge = 0.0
 
 
@@ -274,7 +278,7 @@ async def scan_once(db: Database) -> list[dict]:
             # day in a bull market and opened chase entries that lost.
             # gold_breakout_only=False restores the old behaviour.
             if (asset.upper() == GOLD_ASSET
-                    and getattr(settings, "gold_breakout_only", True)
+                    and G(settings, "gold_breakout_only")
                     and ind.breakout_state <= 0):
                 log.info("Signal for %s skipped: no breakout/retest setup "
                          "(strategy D gate)", asset)
@@ -334,7 +338,7 @@ async def scan_once(db: Database) -> list[dict]:
                 ind, opp, risk_per_trade_pct=settings.risk_per_trade_pct,
                 regime_bullish=bullish,
                 # Reward:Risk target (Settings) — TP = SL distance × rr_target.
-                rr_target=max(0.5, float(getattr(settings, "rr_target", 2.0) or 2.0)),
+                rr_target=max(0.5, float(G(settings, "rr_target"))),
                 # SL distance clamp (Settings) — equal risk distance per asset.
                 sl_min_pct=settings.sl_distance_min_pct,
                 sl_max_pct=settings.sl_distance_max_pct,
@@ -460,7 +464,7 @@ def _calendar_high_impact(db, settings) -> bool:
                     time_utc=t, impact=r.get("impact", "high")))
             except Exception:
                 continue
-        block_min = float(getattr(settings, "news_block_minutes", 30) or 30)
+        block_min = float(G(settings, "news_block_minutes"))
         status = EconomicCalendarEngine(
             block_minutes=block_min).news_risk(events)
         return str(getattr(status, "status", "SAFE")) != "SAFE"

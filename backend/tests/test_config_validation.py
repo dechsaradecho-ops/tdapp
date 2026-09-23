@@ -51,7 +51,7 @@ class TestValidConfig:
 
     def test_values_snapshot_is_populated(self):
         r = cv.validate_settings(AppSettings())
-        assert r.values["risk_per_trade_pct"] == 1.0
+        assert r.values["risk_per_trade_pct"] == 2.0
         assert r.values["kill_daily_loss_pct"] == 2.0
         assert set(r.values) >= {"capital", "min_lot", "max_drawdown_pct"}
 

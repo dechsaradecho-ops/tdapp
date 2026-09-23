@@ -236,7 +236,7 @@ class SignalProposal(BaseModel):
     # every card of the response — cards share the same fetch).
     feed_status: Optional[QuoteFeedStatus] = None
     # Pending-only: minutes remaining before this signal leaves the queue and
-    # the system re-evaluates (SIGNAL_TTL_MIN = 30). Approved/expired cards
+    # the system re-evaluates (signal_ttl_min, Settings page). Approved/expired cards
     # omit it (None) — no countdown needed once the fate is decided.
     expires_min_left: Optional[float] = None
     # --- Explainability (2026-09-09): step-by-step Thai calc notes ---
@@ -571,6 +571,50 @@ def risk_usd_of_distance(stop_distance: float, lots: float, asset: Optional[str]
     return raw * rate
 
 
+def S(field: str):
+    """Canonical default for an AppSettings field — single source of truth.
+
+    Every ``getattr(settings, "<field>", LITERAL)`` fallback in engines,
+    services, workers and routes must use ``S("<field>")`` instead of a
+    literal so a default change in ``AppSettings`` propagates everywhere
+    without drift. Evaluated at CALL time (AppSettings is defined below,
+    resolved from module globals then).
+    """
+    try:
+        _S = globals()["AppSettings"]
+        f = _S.model_fields[field]
+        d = f.default
+        if d is None:
+            return None
+        return d
+    except Exception:
+        return None
+
+
+def G(settings, field: str, *, zero_as_missing: bool = True):
+    """Settings value with canonical fallback: ``getattr`` or ``S(field)``.
+
+    ``zero_as_missing=True`` (default) preserves the legacy ``or`` semantics
+    (``0``/``""`` fall back to default). Pass ``False`` for fields where ``0``
+    is a valid "disabled" value. ``None`` always falls back. Booleans never
+    treat ``False`` as missing.
+    """
+    default = S(field)
+    try:
+        v = getattr(settings, field, default)
+    except Exception:
+        return default
+    if v is None:
+        return default
+    if isinstance(default, bool):
+        return bool(v)
+    if isinstance(v, str) and v == "":
+        return default
+    if zero_as_missing:
+        return v or default
+    return v
+
+
 def effective_min_confidence(settings: "AppSettings", asset: str) -> float:
     """Per-asset signal-quality threshold.
 
@@ -595,8 +639,11 @@ def effective_min_opportunity(settings: "AppSettings", asset: str) -> float:
     so every asset uses the base ``min_opportunity`` — but routing both the
     scanner and the execution gate through this helper keeps the two paths
     from drifting apart when an override is added later.
+    None (legacy NULL row) disables the gate (0.0); a MISSING attribute
+    falls back to the canonical default.
     """
-    return float(getattr(settings, "min_opportunity", 60.0) or 0.0)
+    v = getattr(settings, "min_opportunity", S("min_opportunity"))
+    return float(v or 0.0)
 
 
 
@@ -608,7 +655,7 @@ def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
     by position sizing (execution.size_position) so the floor matches the
     asset actually being ordered.
     """
-    base = float(getattr(settings, "min_lot", 0.01) or 0.01)
+    base = float(G(settings, "min_lot"))
     if str(asset or "").upper() != GOLD_ASSET:
         return base
     gold = getattr(settings, "min_lot_gold", None)
@@ -629,7 +676,10 @@ def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
 # Prod 2026-09-22 (PAPER-000083, USDJPY SELL): sl_cap_distance collapsed the
 # stop to 0.005 price units (~0.5 pip) — well inside the ~1.5 pip real spread
 # — so TP filled 43 seconds after entry and the journal booked a fake +$22.
-SPREAD_SL_FLOOR_MULT: float = 3.0
+# Canonical value: AppSettings.spread_sl_floor_mult (Settings page) — the
+# module alias is defined AFTER AppSettings below (S() needs the class);
+# spread_sl_floor() itself reads the LIVE value via G().
+SPREAD_SL_FLOOR_MULT: float  # rebound after AppSettings; do not assign here
 
 
 def spread_sl_floor(settings: "AppSettings", asset: Optional[str]) -> float:
@@ -643,7 +693,7 @@ def spread_sl_floor(settings: "AppSettings", asset: Optional[str]) -> float:
         spread = effective_spread(settings, asset)
         if spread <= 0:
             return 0.0
-        return SPREAD_SL_FLOOR_MULT * float(spread)
+        return float(G(settings, "spread_sl_floor_mult", zero_as_missing=False) or 0) * float(spread)
     except Exception:
         return 0.0
 
@@ -674,7 +724,7 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
     so every existing caller keeps working; pass ``price`` to get the fix.
     """
     try:
-        if not bool(getattr(settings, "sl_cap_enabled", False)):
+        if not G(settings, "sl_cap_enabled"):
             return 0.0
         budget = float(getattr(settings, "capital", 0) or 0) \
             * float(getattr(settings, "risk_per_trade_pct", 0) or 0) / 100.0
@@ -1015,12 +1065,13 @@ class FrequencyEngine:
 
     def __init__(self, profile: RiskProfile = RiskProfile.moderate,
                  limits_override: Optional[TradeLimits] = None,
-                 min_confidence: float = 70.0,
-                 drawdown_throttle_pct: float = 5.0) -> None:
+                 min_confidence: Optional[float] = None,
+                 drawdown_throttle_pct: Optional[float] = None) -> None:
         self.profile = profile
         self._override = limits_override
-        self.min_confidence = min_confidence
-        self.drawdown_throttle_pct = drawdown_throttle_pct
+        # None → canonical AppSettings default (single source of truth).
+        self.min_confidence = S("min_confidence") if min_confidence is None else min_confidence
+        self.drawdown_throttle_pct = S("drawdown_throttle_pct") if drawdown_throttle_pct is None else drawdown_throttle_pct
 
     def limits(self) -> TradeLimits:
         return self._override or TradeLimits(**TRADE_LIMITS_TABLE[self.profile])
@@ -1108,10 +1159,11 @@ class OrderStrategyEngine:
         take_profit: float,
         atr_pct: float = 0.8,
         regime: str = "bull_trend",
-        equity: float = 10_000.0,
-        risk_per_trade_pct: float = 1.0,
+        equity: Optional[float] = None,
+        risk_per_trade_pct: Optional[float] = None,
     ) -> OrderPlan:
         """Multi-entry: limit legs into pullbacks for trends, stop legs on breakouts.
+        None → canonical AppSettings defaults (capital / risk_per_trade_pct).
 
         CURRENCY (2026-09-22): leg lots go through ``risk_to_lot_for`` so the
         per-asset contract value (gold = 100 oz/lot, FX = 100k units/lot) AND
@@ -1122,6 +1174,10 @@ class OrderStrategyEngine:
         wrong lot became the REAL order size. ``entry`` is the live price the
         conversion reads through.
         """
+        if equity is None:
+            equity = S("capital")
+        if risk_per_trade_pct is None:
+            risk_per_trade_pct = S("risk_per_trade_pct")
         distance = abs(entry - stop_loss)
         if distance <= 0:
             distance = entry * max(atr_pct, 0.2) / 100.0
@@ -1587,15 +1643,19 @@ ECONOMIC_EVENT_TYPES = [
 
 
 class EconomicCalendarEngine:
-    """News-risk gate: blocks new orders within 30 min before high-impact events.
+    """News-risk gate: blocks new orders within news_block_minutes of high-impact events.
 
     The live calendar feed is fetched by the news worker; this engine only
     evaluates timing, so it stays testable without network.
+    Defaults resolve to the canonical AppSettings.news_block_minutes (Settings
+    page) — never literals here.
     """
-    HIGH_IMPACT_BLOCK_MIN = 30.0
+    # Rebound to S("news_block_minutes") after AppSettings below (S() needs
+    # the class at call time; the class body runs before AppSettings exists).
+    HIGH_IMPACT_BLOCK_MIN: float
 
-    def __init__(self, block_minutes: float = 30.0) -> None:
-        self.block_minutes = block_minutes
+    def __init__(self, block_minutes: Optional[float] = None) -> None:
+        self.block_minutes = S("news_block_minutes") if block_minutes is None else block_minutes
 
     def news_risk(
         self,
@@ -1803,14 +1863,15 @@ class KillSwitchStatus(BaseModel):
 class KillSwitchEngine:
     """Hard stop — any single trigger halts all trading immediately."""
 
-    def __init__(self, daily_loss_limit: float = 2.0,
-                 weekly_loss_limit: float = 5.0,
-                 monthly_loss_limit: float = 8.0,
-                 drawdown_limit: float = 10.0) -> None:
-        self.daily_loss_limit = daily_loss_limit
-        self.weekly_loss_limit = weekly_loss_limit
-        self.monthly_loss_limit = monthly_loss_limit
-        self.drawdown_limit = drawdown_limit
+    def __init__(self, daily_loss_limit: Optional[float] = None,
+                 weekly_loss_limit: Optional[float] = None,
+                 monthly_loss_limit: Optional[float] = None,
+                 drawdown_limit: Optional[float] = None) -> None:
+        # None → canonical AppSettings defaults (kill_daily/weekly/monthly/max_drawdown).
+        self.daily_loss_limit = S("kill_daily_loss_pct") if daily_loss_limit is None else daily_loss_limit
+        self.weekly_loss_limit = S("kill_weekly_loss_pct") if weekly_loss_limit is None else weekly_loss_limit
+        self.monthly_loss_limit = S("kill_monthly_loss_pct") if monthly_loss_limit is None else monthly_loss_limit
+        self.drawdown_limit = S("max_drawdown_pct") if drawdown_limit is None else drawdown_limit
 
     def evaluate(
         self,
@@ -1869,17 +1930,24 @@ class RiskOfficer:
         news_risk: NewsRiskStatus,
         kill_switch: KillSwitchStatus,
         correlation_score: float = 0.0,
-        correlation_cap: float = 80.0,
+        correlation_cap: Optional[float] = None,
         order_plan: Optional[OrderPlan] = None,
-        min_confidence: float = 70.0,
-        min_opportunity: float = 60.0,
+        min_confidence: Optional[float] = None,
+        min_opportunity: Optional[float] = None,
     ) -> RiskOfficerReview:
         """Quality thresholds come from the caller's AppSettings (Min
         Confidence — including the gold override via effective_min_confidence —
         and Min Opportunity), NOT hardcoded. The officer is the final veto on
         RISK; it must not re-reject a quality bar the user already lowered.
         Bug (2026-09-04): hardcoded 70 vetoed XAUUSD 65.8% even though the
-        user's Min Confidence (gold) allowed the signal through the scanner."""
+        user's Min Confidence (gold) allowed the signal through the scanner.
+        None → canonical AppSettings default (single source of truth)."""
+        if correlation_cap is None:
+            correlation_cap = S("correlation_cap")
+        if min_confidence is None:
+            min_confidence = S("min_confidence")
+        if min_opportunity is None:
+            min_opportunity = S("min_opportunity")
         rejects: list[str] = []
         notes: list[str] = []
         if confidence < min_confidence:
@@ -1897,7 +1965,7 @@ class RiskOfficer:
         if correlation_score > correlation_cap:
             rejects.append(
                 f"Reject Allocation: portfolio correlation {correlation_score:.0f} > cap {correlation_cap}")
-        if order_plan and order_plan.total_risk_pct > 2.0 and len(order_plan.entries) < 3:
+        if order_plan and order_plan.total_risk_pct > S("risk_per_trade_pct") and len(order_plan.entries) < 3:
             notes.append("Multi-entry risk concentration — prefer 3-leg plan")
         if rejects:
             notes.insert(0, "Risk Officer ใช้สิทธิ VETO — ไม่อนุมัติรายการนี้")
@@ -2024,7 +2092,7 @@ class BacktestConfig(BaseModel):
     indicator: Literal["EMA", "RSI", "MACD", "ADX", "ATR", "SuperTrend", "PriceAction"] = "EMA"
     days: int = Field(120, ge=30, le=365)
     initial_capital: float = 10_000.0
-    risk_per_trade_pct: float = 1.0
+    risk_per_trade_pct: float = 2.0  # mirrors AppSettings.risk_per_trade_pct
 
 
 class BacktestResult(BaseModel):
@@ -2212,7 +2280,7 @@ class PaperTradingStatus(BaseModel):
     readiness_min_sample: int = 30
 
 
-def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTradingStatus:
+def paper_trading_status(broker, virtual_capital: Optional[float] = None) -> PaperTradingStatus:
     """Summarize the PaperBroker state as live-readiness.
 
     Score: win rate (40%) + discipline (30%) + PnL (30%).
@@ -2224,7 +2292,10 @@ def paper_trading_status(broker, virtual_capital: float = 100_000.0) -> PaperTra
 
     Accepts the real PaperBroker (_positions + closed_trades dicts) or any object
     exposing a `.trades` list with `.pnl` attributes (tests / alt brokers).
+    None → canonical AppSettings.paper_virtual_capital (Settings page).
     """
+    if virtual_capital is None:
+        virtual_capital = S("paper_virtual_capital")
     if hasattr(broker, "closed_trades"):
         closed = [float(t.get("pnl") or 0) for t in broker.closed_trades]
         open_count = len(getattr(broker, "_positions", {}) or {})
@@ -2792,6 +2863,43 @@ class AppSettings(BaseModel):
     backtest_indicator: str = "EMA"
     backtest_asset: str = "EURUSD"
 
+    # ---- Operational knobs (were hardcoded module constants) --------------
+    # Single source of truth: every worker/service timeout, TTL, step and
+    # averaging constant below is editable from the Settings page. Code must
+    # read them via G(settings, "<field>") — never a literal.
+    # Signal pending TTL (minutes) — auto-trader + thesis validation expiry.
+    signal_ttl_min: int = 30
+    # Auto-trader batch: max pending signals evaluated per 1-min cycle.
+    auto_trader_batch_limit: int = 10
+    # Limit expansion step (percentage POINTS added per approval).
+    kill_expand_step_pct: float = 5.0
+    # Re-prompt cooldowns (minutes) after cooldown / after reject.
+    kill_expand_reask_cooldown_min: float = 30.0
+    kill_expand_reask_after_reject_min: float = 120.0
+    # One-shot quota window (hours) when kill_expand_auto_apply=False.
+    kill_expand_once_quota_hours: float = 24.0
+    # Silent-fail notify throttle (minutes) when an expansion write fails.
+    kill_expand_fail_notify_min: float = 360.0
+    # Avg-hold estimation: min span (days), min sample, fallback (days).
+    avg_hold_min_span_days: float = 0.05
+    avg_hold_min_sample: int = 3
+    avg_hold_fallback_days: float = 4.0
+    # Stale equity-peak clamp: peaks older/wilder than mult × capital ignored.
+    equity_stale_peak_mult: float = 3.0
+    # Position-guard per-cycle feed budgets (seconds) + ATR proxy multiplier.
+    guard_marks_timeout_s: float = 20.0
+    guard_snap_timeout_s: float = 30.0
+    guard_news_timeout_s: float = 12.0
+    guard_atr_proxy_mult: float = 0.2
+    # Market-analysis retention (days) + purge throttle (seconds).
+    market_analysis_ttl_days: int = 7
+    market_analysis_purge_interval_s: float = 3600.0
+    # Drawdown early-warning: ratio of limit + cooldown (minutes).
+    drawdown_approach_ratio: float = 0.8
+    drawdown_approach_cooldown_min: float = 360.0
+    # Spread-vs-SL floor multiplier (stop must clear k × spread).
+    spread_sl_floor_mult: float = 3.0
+
     # ---- UI preferences (moved out of localStorage 2026-09-06) -------------
     # Auto-refresh intervals (seconds) for the monitor / signals pages.
     # 0 = auto-refresh off. Stored in trading_settings so the choice follows
@@ -2905,6 +3013,17 @@ class AppSettings(BaseModel):
     def entry_accepts_manual_approve(self) -> bool:
         """True when a human Approve may still open (auto + confirm)."""
         return self.effective_entry_mode() in ("auto", "confirm")
+
+
+# Rebind the spread-floor alias to the canonical Settings default (single
+# source of truth — AppSettings.spread_sl_floor_mult). Defined here because
+# S() needs AppSettings to exist; spread_sl_floor() reads the LIVE value.
+SPREAD_SL_FLOOR_MULT: float = AppSettings.model_fields["spread_sl_floor_mult"].default
+
+
+# Same treatment for the news-gate class alias (class body runs before
+# AppSettings exists, so the rebound must happen here).
+EconomicCalendarEngine.HIGH_IMPACT_BLOCK_MIN = AppSettings.model_fields["news_block_minutes"].default
 
 
 class SettingsSaveResult(BaseModel):
