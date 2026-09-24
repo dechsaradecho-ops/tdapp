@@ -1409,6 +1409,25 @@ def test_guard_closes_when_the_request_was_already_settled(_marks):
     assert out["emergency_held"] == 0
 
 
+def test_emergency_close_reason_quotes_hold_state(_marks):
+    """Prod 2026-09-24: closes fired while fresh pendings were on the table
+    and the cycle logs were already purged, so the branch could not be
+    reconstructed. The journal reason must carry the hold-state
+    (pending count + flags) AT CLOSE TIME."""
+    db = _daily_loss_db()
+    db.rows["paper_trades"].append(_open_trade_row())
+    _ask_the_owner(db, status="rejected")
+    broker, closed = _book()
+
+    out = asyncio.run(position_guard.guard_once(
+        db, broker, RecordingNotifier(), settings=_GUARD_SETTINGS))
+
+    assert out["emergency_closed"] == 1 and closed == ["T1"]
+    reasons = [r.get("reason") or "" for r in db.rows.get("signal_logs", [])
+               if r.get("event") == "closed"]
+    assert reasons and all("[hold-state: pending=" in r for r in reasons)
+
+
 def test_a_held_position_keeps_its_sl_tp_management(_marks):
     """การเลื่อนฉุกเฉิน ≠ ปล่อยไม้ลอย: TP ยังทำงานในรอบเดียวกัน"""
     db = _daily_loss_db()

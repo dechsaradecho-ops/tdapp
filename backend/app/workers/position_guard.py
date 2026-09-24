@@ -1170,6 +1170,16 @@ async def guard_once(db, broker, notifier: NotificationService,
             log.info("emergency exit held %s: market closed", pos.ticket)
             continue
         if kill_engaged:
+            # Self-diagnosing close (prod 2026-09-24: 3 closes fired while 3
+            # fresh pendings were on the table and the cycle logs were already
+            # purged, so the branch could not be reconstructed). Quote the
+            # hold-state AT CLOSE TIME into the journal reason + server log.
+            try:
+                _diag = (f" [hold-state: pending={limit_expand.pending_count(db)}"
+                         f" request_known={request_known}"
+                         f" settings_ok={settings_ok}]")
+            except Exception:
+                _diag = " [hold-state: unreadable]"
             try:
                 result = await broker.close_position(pos.ticket)
             except Exception as exc:
@@ -1191,9 +1201,10 @@ async def guard_once(db, broker, notifier: NotificationService,
                 ticket=str(pos.ticket or ""), source="auto",
                 reason="🚨 Emergency Exit (kill switch: "
                        + ("; ".join(kill_triggers)[:200] or "engaged")
-                       + f") — ปิดที่ {price:g}")
+                       + f") — ปิดที่ {price:g}" + _diag)
             emergency_closed += 1
             closed += 1
+            log.warning("EMERGENCY CLOSE %s %s%s", pos.ticket, pos.asset, _diag)
             closed_assets.append(f"{pos.asset}:kill")
             emergency_pnl += float(pnl or 0)
             emergency_user = emergency_user or str(getattr(pos, "user_id", "") or "")

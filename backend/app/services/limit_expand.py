@@ -678,6 +678,20 @@ def stale_pending(db, settings: Optional[AppSettings] = None
     return row
 
 
+def pending_count(db) -> int:
+    """How many PENDING confirmation rows exist right now (any age).
+
+    Diagnostic for the emergency-close path: the close reason quotes this so
+    a later investigation can tell "closed with N rows awaiting the owner"
+    from "closed with an empty queue" without the (purged) cycle logs.
+    Never raises.
+    """
+    try:
+        return len(_select(db, filters={"status": "pending"}, limit=50) or [])
+    except Exception:
+        return -1
+
+
 def pending_age_min(row: dict) -> float:
     """How long the owner has had this request in hand (minutes).
 
