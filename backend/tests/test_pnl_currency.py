@@ -252,6 +252,13 @@ class TestPaperBrokerPnlFacade:
 # fetch_pnl_rates — the shared one-shot rate-map builder
 # ---------------------------------------------------------------------------
 class TestFetchPnlRates:
+    @pytest.fixture(autouse=True)
+    def _reset_conv_cache(self):
+        from app.services import execution as ex
+        ex._conv_rates_cache.clear()
+        yield
+        ex._conv_rates_cache.clear()
+
     async def test_seed_is_reused_and_only_legs_fetched(self, monkeypatch):
         from app.services import execution as ex
         from app.integrations import quotes as q
@@ -343,3 +350,27 @@ class TestFetchPnlRates:
         assert "CHFUSD" not in out  # daily rate refused
         assert out["USDCHF"] == pytest.approx(0.8195)
         assert ex.pnl_conversion_rate("EURCHF", out) == pytest.approx(1 / 0.8195)
+
+    async def test_conversion_legs_reuse_ten_minute_cache(self, monkeypatch):
+        """Prod 2026-09-24: per-minute leg fetches burned the exchangerate
+        quota. Legs reuse for 10 min; trade assets still fetch fresh."""
+        from app.services import execution as ex
+        from app.integrations import quotes as q
+
+        ex._conv_rates_cache.clear()
+        calls: list[list[str]] = []
+
+        async def fake_spot(assets):
+            calls.append(list(assets))
+            return ({"JPYUSD": 1 / 157.013}, {})
+
+        monkeypatch.setattr(q, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(q, "spot_source", lambda a: "spot")
+
+        out1 = await ex.fetch_pnl_rates(["USDJPY"], seed={"USDJPY": 157.013})
+        assert out1["JPYUSD"] == pytest.approx(1 / 157.013)
+        assert len(calls) == 1
+        out2 = await ex.fetch_pnl_rates(["USDJPY"], seed={"USDJPY": 157.013})
+        assert out2["JPYUSD"] == pytest.approx(1 / 157.013)
+        assert len(calls) == 1  # leg served from cache, no second fetch
+        ex._conv_rates_cache.clear()

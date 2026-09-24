@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -539,6 +540,16 @@ def pnl_breakdown(asset: str, direction: str, entry: float, mark: float,
     )
 
 
+# Conversion-leg cache (prod 2026-09-24): <quote>USD legs (CHFUSD, …)
+# are slow-moving ratios used for PnL DISPLAY math, but the guard fetched
+# them every 1-min cycle and burned the whole exchangerate-api.com monthly
+# quota (HTTP 429 on every key). Legs now price from Yahoo-inverse first
+# (see quotes._yahoo_inverse_symbol) and reuse here for 10 minutes —
+# strictly better than n/a, and fail-closed is preserved (absent on miss).
+_CONV_RATES_TTL = 600.0  # seconds
+_conv_rates_cache: dict[str, tuple[float, float]] = {}  # leg → (mono_ts, price)
+
+
 async def fetch_pnl_rates(assets, seed: dict | None = None) -> dict[str, float]:
     """Trusted spot map (asset + its ``<quote>USD`` leg) for PnL conversion.
 
@@ -562,10 +573,12 @@ async def fetch_pnl_rates(assets, seed: dict | None = None) -> dict[str, float]:
             out[str(a).upper()] = pv
     assets_u = sorted({str(a or "").upper() for a in (assets or []) if a})
     need = {a for a in assets_u if a not in out}
+    need_legs: set[str] = set()
     for a in assets_u:
         leg = pnl_conversion_asset(a)
         if leg and leg not in out:
             need.add(leg)
+            need_legs.add(leg)
         # Also request the legs the cross-through fallbacks in
         # ``pnl_conversion_rate`` need, so a quote whose ``<quote>USD`` leg is
         # daily-only (CHFUSD, JPYUSD) can still be derived:
@@ -577,10 +590,20 @@ async def fetch_pnl_rates(assets, seed: dict | None = None) -> dict[str, float]:
             inv = f"USD{q}"
             if inv not in out:
                 need.add(inv)
+                need_legs.add(inv)
         if base and base != "USD":
             base_usd = f"{base}USD"
             if base_usd not in out:
                 need.add(base_usd)
+                need_legs.add(base_usd)
+    # Conversion legs reuse the 10-min cache (slow ratios, display math) —
+    # trade assets in `need` always fetch fresh (30 s spot cache inside).
+    now = time.monotonic()
+    for leg in list(need_legs):
+        hit = _conv_rates_cache.get(leg)
+        if hit is not None and now - hit[0] < _CONV_RATES_TTL:
+            out[leg] = hit[1]
+            need.discard(leg)
     if not need:
         return out
     try:
@@ -596,7 +619,10 @@ async def fetch_pnl_rates(assets, seed: dict | None = None) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
         if pv > 0:
-            out[str(a).upper()] = pv
+            au = str(a).upper()
+            out[au] = pv
+            if au in need_legs:
+                _conv_rates_cache[au] = (now, pv)
     return out
 
 

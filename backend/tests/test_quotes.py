@@ -603,6 +603,39 @@ class TestSpotFeed:
         assert calls == []
 
     @pytest.mark.asyncio
+    async def test_inverse_leg_priced_from_yahoo_without_exchangerate(self, monkeypatch):
+        """Conversion legs (CHFUSD) price as 1/USDCHF from Yahoo intraday —
+        exchangerate is never touched (prod 2026-09-24: quota 429 on all keys)."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [_yahoo_payload(1.10)]  # USDCHF=X
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        prices, failures = await quotes.fetch_spot_prices(["CHFUSD"])
+        assert prices["CHFUSD"] == pytest.approx(1 / 1.10)
+        assert failures == {}
+        assert quotes.spot_source("CHFUSD") == "spot"
+        assert any("USDCHF=X" in c for c in calls)
+        assert not any("exchangerate" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_inverse_leg_failure_still_falls_through(self, monkeypatch):
+        """Inverse quote missing too → existing fallback chain runs."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        calls: list[str] = []
+        responses = [
+            _resp({}, status=404),            # USDCHF=X missing
+            _ex_resp("USD", 0.909),           # exchangerate /latest/CHF → USD leg
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        prices, failures = await quotes.fetch_spot_prices(["CHFUSD"])
+        assert prices["CHFUSD"] == pytest.approx(0.909)
+        assert failures == {}
+
+    @pytest.mark.asyncio
     async def test_fetch_spot_prices_chain_yahoo_then_exchangerate(self, monkeypatch):
         """Yahoo serves both FX and gold; exchangerate stays untouched."""
         from app.core.config import get_settings as _gs

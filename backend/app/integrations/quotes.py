@@ -109,7 +109,8 @@ GOLD_SYMBOL = "XAU/USD"
 # Frankfurter only publishes ONE close per business day (ECB), so intraday
 # positions opened at today's close look "pinned" until tomorrow.
 # Priority: Yahoo chart API (real intraday FX spots + gold via the COMEX
-# future GC=F) → v6.exchangerate-api.com (6 rotating keys, FX pairs only).
+# future GC=F) → Yahoo INVERSE for unquoted conversion legs (CHFUSD = 1/USDCHF,
+# same intraday feed) → v6.exchangerate-api.com (6 rotating keys, FX pairs only).
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -134,6 +135,25 @@ def _yahoo_symbol(asset: str) -> str | None:
         return YAHOO_SYMBOLS[a]
     if fx_parts(a) and a in SUPPORTED_ASSETS:
         return f"{a}=X"
+    return None
+
+
+def _yahoo_inverse_symbol(asset: str) -> str | None:
+    """Yahoo symbol of the INVERSE pair (FEDCBA=X for ABCDEF), or None.
+
+    Conversion legs (CHFUSD, JPYUSD, CADUSD, USDNZD, …) are not quoted
+    anywhere — but their inverse (USDCHF, USDJPY, USDCAD, NZDUSD) IS a real
+    Yahoo spot symbol, so the leg prices as 1/inverse from the same
+    intraday feed. Only for 6-letter alpha FX; never metals/crypto.
+    Prod 2026-09-24: these legs fell through to exchangerate-api.com and
+    burned its whole monthly quota (HTTP 429) because Yahoo was never
+    tried for the inverse.
+    """
+    a = str(asset or "").upper()
+    if len(a) == 6 and a.isalpha() and a not in YAHOO_SYMBOLS:
+        inv = a[3:] + a[:3]
+        if inv != a:
+            return f"{inv}=X"
     return None
 SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps feeds tiny
 _spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
@@ -719,9 +739,17 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
         async def _yahoo_one(asset: str, client: httpx.AsyncClient,
                              ) -> tuple[str, float | None, str]:
             sym = _yahoo_symbol(asset)
-            if not sym:
+            inverse_sym = _yahoo_inverse_symbol(asset) if not sym else None
+            if not sym and not inverse_sym:
                 return asset, None, f"no spot symbol mapping for {asset}"
-            url = f"{YAHOO_CHART_URL}/{sym}"
+            # Unmapped conversion legs (CHFUSD, …) price via the inverse
+            # pair's real Yahoo quote (USDCHF=X → 1/price). Only attempted
+            # when there is NO direct mapping — a mapped pair whose fetch
+            # fails goes straight to the existing fallback (no doubled
+            # outage traffic).
+            target = inverse_sym or sym
+            invert = bool(inverse_sym)
+            url = f"{YAHOO_CHART_URL}/{target}"
             t0 = time.monotonic()
             try:
                 resp = await client.get(
@@ -745,8 +773,9 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
                     provider="yahoo", url=url, status="success",
                     http_status=resp.status_code, price=float(price),
                     duration_ms=dur)
-                _spot_live[asset] = (time.monotonic(), float(price))
-                return asset, float(price), ""
+                final = (1.0 / float(price)) if invert else float(price)
+                _spot_live[asset] = (time.monotonic(), final)
+                return asset, final, ""
             except httpx.TimeoutException:
                 quote_log.log_call(
                     asset=asset, category=quote_log.category_for(asset),
