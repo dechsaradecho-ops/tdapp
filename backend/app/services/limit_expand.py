@@ -588,6 +588,40 @@ def _mark(db, row: dict, status: str, decided_by: str = "") -> None:
         log.debug("kill_expand_requests update failed: %s", exc)
 
 
+SUPERSEDED_BY = "auto:superseded"
+
+
+def _supersede_others(db, keep_id: str) -> int:
+    """Close every OTHER pending row as superseded by the decision on keep_id.
+
+    Prod 2026-09-24: the 1-min monitor and the 1-min guard called
+    ``request_expand`` in the same second (rows 0.2 s apart), so one breach
+    produced FIVE pending rows and the owner had to reject each one by hand
+    before the popup went away. One decision must settle the whole queue:
+    the kept row carries the real outcome, the rest are closed as
+    ``superseded`` (never widened, never counted by ``silent_widen_count``,
+    never shown as pending again). Returns the closed count. Never raises.
+    """
+    try:
+        rows = _select(db, filters={"status": "pending"}, limit=50)
+    except Exception as exc:
+        log.debug("supersede scan failed: %s", exc)
+        return 0
+    n = 0
+    for r in rows or []:
+        try:
+            if str(r.get("id") or "") == str(keep_id or ""):
+                continue
+            _mark(db, r, "superseded", SUPERSEDED_BY)
+            n += 1
+        except Exception as exc:
+            log.debug("supersede failed for %s: %s", r.get("id"), exc)
+    if n:
+        log.warning("kill expand: %d duplicate pending row(s) superseded by %s",
+                    n, keep_id)
+    return n
+
+
 def latest_request(db) -> Optional[dict]:
     rows = _select(db, limit=1)
     return rows[0] if rows else None
@@ -741,6 +775,10 @@ def request_expand(db, s: AppSettings, source: str = "monitor") -> dict:
                   "kill_expand_confirm.sql): %s", saved)
         return {"requested": False, "reason": "insert_failed",
                 "triggers": triggers, "request": None}
+    # Self-heal (prod 2026-09-24): monitor + guard raced in the same second
+    # and stacked duplicate pendings — one decision must settle the queue, so
+    # an insert that finds siblings keeps the newest and supersedes the rest.
+    _supersede_others(db, (fresh or {}).get("id"))
     return {"requested": True, "reason": "created", "request": fresh,
             "triggers": (fresh.get("detail") or {}).get("triggers") or triggers}
 
@@ -785,6 +823,7 @@ def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
 
     if not patch:
         _mark(db, req, "approved", decided_by)
+        _supersede_others(db, req.get("id"))
         _audit(db, "limit_expanded", req, triggers, approved=True,
                decided_by=decided_by)
         log.info("kill expand approved by %s — limits already at/above the "
@@ -808,6 +847,7 @@ def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
             + " (ลิมิตปัจจุบันสูงกว่าที่คำขอเสนออยู่แล้ว)")
 
     _mark(db, req, "approved", decided_by)
+    _supersede_others(db, req.get("id"))
     _audit(db, "limit_expanded", req, written, approved=True,
            decided_by=decided_by)
 
@@ -874,6 +914,7 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
         # with a distinct decided_by) so the guard/monitor may act as usual.
         # The monitor re-asks on its next cycle, so the flow is not a dead end.
         _mark(db, row, "expired", AUTO_KEPT_BY)
+        _supersede_others(db, row.get("id"))
         log.warning("kill expand timeout: auto-widen is OFF — request %s closed "
                     "with ORIGINAL limits kept (fail-closed)", row.get("id"))
         return _res("kept", report=_kept_notice(ttl))
@@ -884,6 +925,7 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
         # candidate every cycle and the guard is free to close the book — the
         # owner is warned once per window (``settle_lapsed_window``).
         _mark(db, row, "expired", AUTO_CAPPED_BY)
+        _supersede_others(db, row.get("id"))
         log.warning("kill expand timeout: auto-expand quota used up — request %s "
                     "closed without widening (one-shot policy)", row.get("id"))
         return _res("capped", notice=_fail_notice("capped", ttl))
@@ -893,6 +935,7 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
         # A request with no quotable limit can never widen anything: retire it
         # (with a decided_by) so it stops being a candidate every cycle.
         _mark(db, row, "expired", AUTO_DECIDED_BY)
+        _supersede_others(db, row.get("id"))
         log.error("kill expand timeout: request %s lists no triggers — retired",
                   row.get("id"))
         return _res("retired", report=_retired_notice(ttl))
@@ -902,6 +945,7 @@ def settle_expired(db, settings: Optional[AppSettings] = None) -> SettleResult:
         # Widening now would raise a risk limit the account does not need, so
         # the request is retired and reported instead.
         _mark(db, row, "expired", AUTO_NO_BREACH_BY)
+        _supersede_others(db, row.get("id"))
         log.info("kill expand timeout: no limit is breached any more — retired "
                  "without widening (request %s)", row.get("id"))
         return _res("no-breach", report=(
@@ -1050,6 +1094,7 @@ def decide(db, decision: str, decided_by: str = "line",
                  "คำตอบนี้ยังมีผล")
     if not approve:
         _mark(db, req, "rejected", decided_by)
+        _supersede_others(db, req.get("id"))
         _audit(db, "limit_expand_rejected", req, triggers, approved=False)
         execution.set_pause(db, True, "risk limits kept — owner rejected expansion")
         log.info("kill expand REJECTED by %s (%s)", decided_by,

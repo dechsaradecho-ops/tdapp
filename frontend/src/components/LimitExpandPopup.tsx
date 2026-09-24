@@ -43,6 +43,7 @@ export default function LimitExpandPopup() {
   const [error, setError] = useState("");
   const [hiddenReq, setHiddenReq] = useState("");      // ปิดกล่องชั่วคราว (คำขอนี้)
   const [setupHidden, setSetupHidden] = useState(false);
+  const [decidedReq, setDecidedReq] = useState("");    // id คำขอที่เพิ่งตัดสินใจ
 
   const load = useCallback(async () => {
     try {
@@ -64,6 +65,10 @@ export default function LimitExpandPopup() {
   const decide = async (decision: "approve" | "reject") => {
     setBusy(decision);
     setError("");
+    // id คำขอที่กำลังจะตัดสิน — ถ้าระหว่างนี้มีคำขอใหม่ (race สร้างซ้อน)
+    // จะได้ล้างจอผลเก่าแล้วโชว์คำขอใหม่แทน ไม่ค้างจอเดิม
+    const decidingId = state?.request?.id ?? "";
+    setDecidedReq(decidingId);
     try {
       const res = await api.decideLimitExpand(decision);
       setResult(res);
@@ -86,7 +91,10 @@ export default function LimitExpandPopup() {
   if (!mounted || !state) return null;
 
   const req = state.request;
-  const showConfirm = !!req && state.pending && req.id !== hiddenReq && !result;
+  // คำขอใหม่โผล่มาหลังเราตัดสินใจ (id ไม่ใช่คำขอที่เพิ่งกด) → ทิ้งจอผลเก่า
+  // โชว์คำขอใหม่ทันที ไม่ต้องรอให้ user ปิดจอเอง
+  const resultStale = !!result && !!req && state.pending && req.id !== decidedReq;
+  const showConfirm = !!req && state.pending && req.id !== hiddenReq && (resultStale || !result);
   const showSetup = !showConfirm && !result && state.setup_required && !setupHidden;
   if (!showConfirm && !showSetup && !result) return null;
 
@@ -101,7 +109,7 @@ export default function LimitExpandPopup() {
       <div className="panel w-full max-w-md space-y-4 animate-pop" role="dialog" aria-modal="true"
         aria-label="ยืนยันขยายลิมิตความเสี่ยง">
 
-        {result ? (
+        {result && !resultStale ? (
           <>
             <div className="flex items-center justify-between">
               <h3 className="panel-title flex items-center gap-1.5">

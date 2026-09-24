@@ -139,6 +139,46 @@ def test_request_expand_dedupes_while_pending():
     assert len(db.rows["kill_expand_requests"]) == 1
 
 
+def test_request_expand_heals_duplicate_pendings_on_insert():
+    """Prod 2026-09-24: monitor + guard raced in the same second (rows 0.2 s
+    apart) and stacked duplicate pendings. An insert that finds siblings
+    keeps the newest and supersedes the rest — never widened, never pending.
+    (The aged sibling is past its window so the dedupe check lets the fresh
+    insert through — exactly the race shape.)"""
+    db, s = _dd_db(), AppSettings()
+    db.insert("kill_expand_requests", {
+        "id": "old-dup", "status": "pending", "trigger_type": "drawdown",
+        "requested_at": _minutes_ago(200.0),
+    })
+    res = limit_expand.request_expand(db, s)
+    assert res["requested"] and res["reason"] == "created"
+    rows = db.rows["kill_expand_requests"]
+    pendings = [r for r in rows if r.get("status") == "pending"]
+    assert len(pendings) == 1
+    assert len(rows) == 2
+    old = next(r for r in rows if r.get("id") != pendings[0]["id"])
+    assert old["status"] == "superseded"
+
+
+def test_decide_reject_supersedes_duplicate_pendings():
+    """One reject settles the whole queue — prod needed 5 manual rejects."""
+    db, s = _dd_db(equity=8900.0), AppSettings()
+    limit_expand.request_expand(db, s)
+    db.insert("kill_expand_requests", {
+        "id": "race-dup", "status": "pending", "trigger_type": "drawdown",
+        "requested_at": _minutes_ago(1.0),
+    })
+    reply = limit_expand.decide(db, "/dd_no", decided_by="ui")
+    assert "ลิมิตเดิม" in reply
+    rows = db.rows["kill_expand_requests"]
+    assert [r.get("status") for r in rows].count("pending") == 0
+    assert [r.get("status") for r in rows].count("rejected") == 1
+    assert [r.get("status") for r in rows].count("superseded") == 1
+    # limits untouched, pause kept
+    assert "trading_settings" not in db._client.store
+    assert db._client.store["trading_pause"][1]["paused"] is True
+
+
 def test_rejected_request_is_in_cooldown():
     db, s = _dd_db(), AppSettings()
     limit_expand.request_expand(db, s)
