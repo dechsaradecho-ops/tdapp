@@ -391,6 +391,27 @@ async def scan_once(db: Database) -> list[dict]:
                         for lv in proposal.sltp_levels
                     ],
                 })
+            # Tripwire (prod 2026-09-24): a CREATED row must never sit below
+            # the active SL floor — build_proposal pins it at creation, so a
+            # sub-floor row means the cycle's settings object disagreed with
+            # the DB row (mid-save edit / stale read). Log-only: the order
+            # itself is repaired at execution by effective_sl_tp step 1b.
+            try:
+                _tw_floor = float(getattr(settings, "sl_distance_min_pct", 0) or 0)
+                _tw_entry = float(proposal.entry or 0)
+                _tw_dist = (abs(_tw_entry - float(proposal.stop_loss or 0))
+                            / abs(_tw_entry) * 100.0) if _tw_entry else 0.0
+                if _tw_floor > 0 and _tw_dist < _tw_floor - 1e-9:
+                    log.error(
+                        "SUB-FLOOR ROW %s %s: dist %.3f%% < floor %.3f%% "
+                        "(atr %.3f%%, inv_level %.5f, cycle sl_min/max %s/%s)",
+                        asset, proposal.direction, _tw_dist, _tw_floor,
+                        float(getattr(ind, "atr_pct", 0) or 0),
+                        float(getattr(ind, "breakout_level", 0) or 0),
+                        getattr(settings, "sl_distance_min_pct", None),
+                        getattr(settings, "sl_distance_max_pct", None))
+            except Exception as exc:
+                log.debug("sub-floor tripwire failed: %s", exc)
             inserted = db.insert("signals", {
                 "asset": asset, "direction": proposal.direction.lower(),
                 "confidence": proposal.confidence, "opportunity_score": opp.score,

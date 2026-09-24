@@ -239,6 +239,38 @@ class TestMarketScanner:
         assert [t for t, _ in db.inserted if t == "signals"] == []
 
     @pytest.mark.asyncio
+    async def test_subfloor_row_logs_tripwire(self, monkeypatch, caplog):
+        """Tripwire (prod 2026-09-24): if a created row sits below the active
+        floor (settings mid-save / stale read), the cycle logs the full
+        context — asset, distances, ATR, invalidation, cycle settings."""
+        import logging
+
+        from app.engine.strategy_engine import StrategyEngine
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "try_load_settings",
+                            lambda _db: AppSettings(
+                                allowed_assets=["EURUSD"],
+                                sl_distance_min_pct=0.5))
+        real = StrategyEngine.build_proposal
+
+        def thin(self, ind, opp, **kw):
+            p = real(self, ind, opp, **{**kw, "sl_min_pct": 0.0,
+                                        "sl_max_pct": 0.0})
+            return p.model_copy(update={"stop_loss": round(p.entry * 0.999, 5)})
+
+        monkeypatch.setattr(StrategyEngine, "build_proposal", thin)
+        with caplog.at_level(logging.ERROR):
+            await market_scanner.scan_once(db)
+        assert any("SUB-FLOOR ROW EURUSD" in r.message
+                   for r in caplog.records), (
+            "a 0.1% row under an active 0.5% floor must trip the wire")
+
+    @pytest.mark.asyncio
     async def test_signals_only_for_allowed_assets(self, monkeypatch):
         """allowed_assets stays the TRADING whitelist: pairs outside it get
         analysis rows (Confidence % display) but NEVER signal rows."""
