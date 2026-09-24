@@ -1103,6 +1103,25 @@ class TestAutoTrader:
         assert "อ่านสถานะไม้เปิดไม่สำเร็จ" in blocks[0].get("reason", "")
 
     @pytest.mark.asyncio
+    async def test_settings_unreadable_aborts_cycle(self, broker, notifier, monkeypatch):
+        """Fail-closed (prod 2026-09-24): unreadable settings aborts the
+        cycle — sizing/gates on guessed limits is how sub-floor stops fired
+        while the floor was active."""
+        import app.workers.auto_trader as auto_trader_mod
+        monkeypatch.setattr(auto_trader_mod, "try_load_settings",
+                            lambda _db: None)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "approval": "pending",
+             "created_at": datetime.now(timezone.utc).isoformat()}]})
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["fired"] == 0
+        assert out["aborted"] == "settings_unreadable"
+        assert broker.orders == []
+        assert db.rows["signals"][0]["approval"] == "pending"
+
+    @pytest.mark.asyncio
     async def test_broker_book_blocks_even_without_db_rows(self, broker):
         """Second line of defense: the broker's own position book (kept in
         memory, rehydrated from the broker at startup) must block a duplicate

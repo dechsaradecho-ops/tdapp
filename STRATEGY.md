@@ -105,6 +105,7 @@ flowchart LR
 ต้องผ่าน **ทุกข้อ** จึงออก signal:
 
 1. `ind.source == "live"` — snapshot demo/random-walk **ห้ามออก signal**
+2. Settings อ่านไม่ได้ → **ข้ามรอบ** (fail-closed, ไม่เดาค่า default — `try_load_settings`)
 2. `asset ∈ allowed_assets` — `settings.effective_assets()` (default `quotes.DEFAULT_ASSETS = ["EURUSD","GBPUSD","USDJPY","AUDUSD","XAUUSD"]`)
 3. **สองแกน P1-3**: `opp.score ≥ effective_min_opportunity` (base **60.0**) **และ** `opp.confidence ≥ effective_min_confidence` — base `min_confidence` **70.0**, override ทอง `min_confidence_gold` (None → base)
 4. **Strategy D gold gate**: `asset == "XAUUSD" and gold_breakout_only and ind.breakout_state <= 0` → ข้าม — `gold_breakout_only` default **True** (migration 024) · breakout = ปิดเหนือ high 20 แท่งก่อนหน้า, retest = ย่อกลับแล้วปิดเหนือ
@@ -143,6 +144,7 @@ flowchart LR
 - `risk_to_lot = equity × risk_pct/100 / (stop_distance × contract_value)` · `contract_value_for`: **XAUUSD = 100.0**, อื่น ๆ **100 000.0**
 - `min_lot` default **0.01** · `min_lot_gold` override (None → base)
 - **SL risk cap** (`sl_cap_enabled`, default **True**, migration 035): `sl_cap_distance = budget / (min_lot × contract)` โดย `budget = capital × risk_per_trade_pct/100` — **tighten-only**, TP คำนวณใหม่ที่ RR เดิม
+- **Effective SL/TP** (`effective_sl_tp` — การ์ด preview = order จริง): tier (`short` หด / `long` ขยาย) → **clamp band ปัจจุบัน** (tier หดหลุด floor / แถวเก่าก่อนตั้ง clamp → ขยายกลับ, TP ตาม RR เดิม — ไม่บล็อก ไม่เดดล็อก) → cap (รัดเฉพาะเกินงบ) → spread floor → sizing ใหม่บนระยะสุดท้าย (P0-2 ปฏิเสธถ้าทุนจ่าย floor ไม่ไหว)
 - **SL distance mode** (`sl_distance_mode`, default `"medium"`): `SL_TIER_MULT = {"short": 1.0, "medium": 1.5, "long": 2.0}`
 - **Fill**: `apply_spread(entry, direction, effective_spread)` — BUY `+spread/2`, SELL `−spread/2`
 - **Spread resolution** (`effective_spread`): user `spread_overrides[ASSET]` → `DEFAULT_SPREADS[ASSET]` (EURUSD 0.00010 · GBPUSD 0.00015 · USDJPY 0.015 · XAUUSD **0.30**) → legacy `paper_spread`

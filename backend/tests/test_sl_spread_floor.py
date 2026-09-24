@@ -273,6 +273,44 @@ class TestEffectiveSlTpSpreadFloor:
         out = effective_sl_tp(s, 0.0, 0.0, 0.0, "USDJPY", "BUY")
         assert out == (0.0, 0.0, 0.0, False, False)
 
+    def test_short_tier_reclamped_to_the_floor(self):
+        """Prod 2026-09-24: a floored กลาง row (0.62%) tier-shrunk to 0.41%
+        under short mode and opened below the active 0.5% floor. The clamp
+        re-pins AFTER the tier so no path opens a sub-floor stop; TP holds
+        the row RR (1.5) on the widened distance. Big capital so the budget
+        cap cannot interfere with the clamp assertion."""
+        s = cfg(capital=5000.0, sl_distance_mode="short",
+                sl_distance_min_pct=0.5, sl_distance_max_pct=1.2)
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.239, 1.234, 1.2465, "AUDNZD", "BUY")
+        assert tiered
+        assert dist == pytest.approx(1.239 * 0.5 / 100.0, rel=1e-9)
+        assert sl == pytest.approx(round(1.239 - dist, 5), abs=1e-9)
+        assert tp == pytest.approx(round(1.239 + dist * 1.5, 5), abs=1e-4)
+
+    def test_stale_subfloor_row_widened_not_blocked(self):
+        """A row created BEFORE the owner set the clamp (no floor at birth)
+        is repaired to the floor at execution — never blocked (no deadlock:
+        every fresh signal stays openable; an unfundable floor is refused
+        downstream by P0-2 with a clear reason)."""
+        s = cfg(capital=5000.0, sl_distance_mode="medium",
+                sl_distance_min_pct=0.5, sl_distance_max_pct=0.0)
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.239, 1.234, 1.2465, "AUDNZD", "BUY")
+        assert not tiered
+        assert dist == pytest.approx(1.239 * 0.5 / 100.0, rel=1e-9)
+        assert tp == pytest.approx(round(1.239 + dist * 1.5, 5), abs=1e-4)
+
+    def test_clamp_ceiling_narrows_a_long_tier(self):
+        """Symmetric side: long ×2.0 stretching past the ceiling is pinned
+        back (tighten direction — always safe)."""
+        s = cfg(capital=5000.0, sl_distance_mode="long",
+                sl_distance_min_pct=0.0, sl_distance_max_pct=1.2)
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 1.239, 1.227, 1.257, "AUDNZD", "BUY")
+        assert tiered
+        assert dist == pytest.approx(1.239 * 1.2 / 100.0, rel=1e-9)
+
     def test_floor_uses_the_same_spread_the_fill_uses(self):
         """Lockstep: the fill (apply_spread at effective_spread) and the SL
         floor must read the SAME number, or the guard measures a spread the

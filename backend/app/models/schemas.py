@@ -839,7 +839,7 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
         base_dist = abs(float(entry) - float(stop_loss))
         if base_dist <= 0:
             return stop_loss, take_profit, 0.0, False, False
-        mode = str(getattr(settings, "sl_distance_mode", "medium") or "medium")
+        mode = str(G(settings, "sl_distance_mode") or "medium")
         mult = SL_TIER_MULT.get(mode, 1.5)
         sign = 1.0 if str(direction or "").upper() == "BUY" else -1.0
         sl = float(stop_loss)
@@ -856,6 +856,37 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
             if tp and row_rr > 0:
                 tp = round(float(entry) + sign * dist * row_rr, 5)
         capped = False
+        # ---- step 1b: SL clamp band (Settings → sl_distance_min/max_pct) ----
+        # The tier above can shrink a floored กลาง row BELOW the floor
+        # (short ×1.0 of a 0.5%-floored row ≈ 0.33%) or stretch past the
+        # ceiling (long ×2.0) — and a row created BEFORE the owner set the
+        # clamp carries no floor at all (prod 2026-09-24: 0.21–0.44% stops
+        # fired under an active 0.5% floor). Re-pin here so NO path opens a
+        # sub-floor stop. TP follows at the held RR (same promise as the
+        # tier). Runs BEFORE the cap on purpose: widening is deliberate
+        # (like the spread floor below) — the floor guarantees minimum
+        # room, not minimum risk. If the floored stop costs more than the
+        # budget at the min-lot floor, the cap below still tightens and the
+        # min-lot budget gate (P0-2) refuses the order with a clear reason
+        # instead of deadlocking silently — sizing then shrinks the lots so
+        # the dollar risk of an opened order never grows.
+        try:
+            _band_lo = float(G(settings, "sl_distance_min_pct", zero_as_missing=False) or 0)
+            _band_hi = float(G(settings, "sl_distance_max_pct", zero_as_missing=False) or 0)
+        except Exception:
+            _band_lo, _band_hi = 0.0, 0.0
+        _lo_d = abs(float(entry)) * _band_lo / 100.0 if _band_lo > 0 else 0.0
+        _hi_d = abs(float(entry)) * _band_hi / 100.0 if _band_hi > 0 else 0.0
+        if (_lo_d > 0 and dist < _lo_d - 1e-12) or (_hi_d > 0 and dist > _hi_d + 1e-12):
+            _rr = (abs(float(take_profit) - float(entry)) / base_dist
+                   if take_profit and base_dist > 0 else 0.0)
+            if _lo_d > 0 and dist < _lo_d:
+                dist = _lo_d
+            if _hi_d > 0 and dist > _hi_d:
+                dist = _hi_d
+            sl = round(float(entry) - sign * dist, 5)
+            if tp and _rr > 0:
+                tp = round(float(entry) + sign * dist * _rr, 5)
         if apply_cap:
             # Same as execute_signal: RR measured from the TIER sl/tp
             # (equals the row RR — the tier preserves it — but recomputed

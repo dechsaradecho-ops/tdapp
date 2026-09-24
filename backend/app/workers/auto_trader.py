@@ -15,6 +15,7 @@ from __future__ import annotations
 import inspect
 import logging
 
+from app.api.routes.settings import try_load_settings
 from app.models.schemas import AppSettings
 from app.services import execution, signal_log
 from app.models.schemas import G
@@ -25,7 +26,17 @@ log = logging.getLogger(__name__)
 
 async def trade_once(db, broker, notifier) -> dict:
     """One auto-trader cycle. Returns a small summary for logs/tests."""
-    s: AppSettings = execution.get_app_settings(db)
+    # STRICT read (fail-closed, prod 2026-09-24): an unreadable settings row
+    # aborts the cycle — sizing/gates on guessed limits is how sub-floor
+    # stops fired while the floor was active. Expiry still runs (harmless
+    # cleanup with its own canonical fallback).
+    s = try_load_settings(db)
+    if s is None:
+        log.error("auto-trader: settings unreadable — aborting cycle "
+                  "(fail-closed, no guessed limits)")
+        expired = expire_stale_pending_signals(db)
+        return {"mode": "unknown", "picked": 0, "fired": 0,
+                "expired": expired, "aborted": "settings_unreadable"}
     if not s.entry_is_auto():
         # Still expire stale pending signals so the signals page never shows
         # dead entries — expiry is not an auto-mode-only concern.

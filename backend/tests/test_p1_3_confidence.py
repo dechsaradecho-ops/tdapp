@@ -317,7 +317,7 @@ class _GateHarness:
         return self._snapshot_factory(asset)
 
     async def run(self, monkeypatch, settings: AppSettings):
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: settings)
         await market_scanner.scan_once(self.db)
         return {row["asset"] for table, row in self.db.inserted

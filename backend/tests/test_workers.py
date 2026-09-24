@@ -25,6 +25,39 @@ from app.workers import (calendar_sync, daily_digest, market_scanner,
 # ---------------------------------------------------------------------------
 # FakeDatabase — records inserts, selectable rows
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Settings KV stub — lets try_load_settings (strict loader) work against the
+# fake: no trading_settings row = legitimate first-run (defaults), while a
+# broken _client = read failure (None). Mirrors FakeKVClient in
+# test_auto_trader.py but reads the list-backed db.rows.
+# ---------------------------------------------------------------------------
+class _FakeSettingsQuery:
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, col, val):
+        self._rows = [r for r in self._rows if r.get(col) == val]
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def execute(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(data=list(self._rows))
+
+
+class _FakeKVClient:
+    def __init__(self, db):
+        self._db = db
+
+    def table(self, name: str):
+        return _FakeSettingsQuery(list(self._db.rows.get(name, [])))
+
+
 class FakeDatabase:
     """In-memory stand-in with the same insert/select/update surface."""
 
@@ -33,7 +66,7 @@ class FakeDatabase:
         self.rows = rows or {}
         self.fail_tables = fail_tables or set()
         self.inserted: list[tuple[str, dict]] = []
-        self._client = object()  # settings loader probes db._client
+        self._client = _FakeKVClient(self)  # strict settings loader reads this
 
     def insert(self, table: str, row: dict) -> dict | None:
         if table in self.fail_tables:
@@ -189,6 +222,23 @@ class TestMarketScanner:
         assert assets == set(quotes_mod.SUPPORTED_ASSETS)
 
     @pytest.mark.asyncio
+    async def test_scan_skips_cycle_when_settings_unreadable(self, monkeypatch):
+        """Fail-closed (prod 2026-09-24): an unreadable settings row must
+        SKIP the cycle — never emit cards on guessed limits (sub-floor
+        stops fired while the floor was active)."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "try_load_settings",
+                            lambda _db: None)
+        out = await market_scanner.scan_once(db)
+        assert out == []
+        assert [t for t, _ in db.inserted if t == "signals"] == []
+
+    @pytest.mark.asyncio
     async def test_signals_only_for_allowed_assets(self, monkeypatch):
         """allowed_assets stays the TRADING whitelist: pairs outside it get
         analysis rows (Confidence % display) but NEVER signal rows."""
@@ -199,7 +249,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(allowed_assets=["EURUSD"]))
         await market_scanner.scan_once(db)
         analysis = {row["asset"] for table, row in db.inserted
@@ -221,7 +271,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(
                                 allowed_assets=["EURUSD", "GBPJPY", "FAKEUSD"]))
         await market_scanner.scan_once(db)
@@ -239,7 +289,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(allowed_assets=[]))
         await market_scanner.scan_once(db)
         signals = {row["asset"] for table, row in db.inserted
@@ -300,7 +350,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings())
         await market_scanner.scan_once(db)
         signals = {row["asset"] for table, row in db.inserted
@@ -320,7 +370,7 @@ class TestMarketScanner:
                 return self._gold_breakout_snapshot(asset, _state, news_sentiment)
 
             monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-            monkeypatch.setattr(market_scanner, "get_app_settings",
+            monkeypatch.setattr(market_scanner, "try_load_settings",
                                 lambda _db: AppSettings())
             await market_scanner.scan_once(db)
             gold = [row for table, row in db.inserted
@@ -342,7 +392,7 @@ class TestMarketScanner:
             return self._gold_breakout_snapshot(asset, 0.0, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(gold_breakout_only=False))
         await market_scanner.scan_once(db)
         signals = {row["asset"] for table, row in db.inserted
@@ -362,7 +412,7 @@ class TestMarketScanner:
             return ind
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(sl_distance_min_pct=0.8,
                                                     sl_distance_max_pct=0.8))
         await market_scanner.scan_once(db)
@@ -391,7 +441,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings())
         await market_scanner.scan_once(db)
         rows = [row for table, row in db.inserted if table == "signals"]
@@ -425,7 +475,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(max_trades_daily=20))
 
         await market_scanner.scan_once(db)
@@ -497,7 +547,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(max_trades_daily=3))
         await market_scanner.scan_once(db)
         emitted = [row for table, row in db.inserted
@@ -533,7 +583,7 @@ class TestMarketScanner:
                                 asset=ind.asset, direction=direction or "BUY",
                                 score=80.0, band=OpportunityBand.high,
                                 confidence=75.0, reasons=["t"]))
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(min_confidence=70.0,
                                                     min_confidence_gold=90.0))
         await market_scanner.scan_once(db)
@@ -566,7 +616,7 @@ class TestMarketScanner:
                                 asset=ind.asset, direction=direction or "BUY",
                                 score=60.0, band=OpportunityBand.medium,
                                 confidence=50.0, reasons=["t"]))
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(min_confidence=70.0,
                                                     min_confidence_gold=30.0))
         await market_scanner.scan_once(db)
@@ -589,7 +639,7 @@ class TestMarketScanner:
             return strong_snapshot(asset, news_sentiment)
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner, "get_app_settings",
+        monkeypatch.setattr(market_scanner, "try_load_settings",
                             lambda _db: AppSettings(min_confidence=70.0))
         await market_scanner.scan_once(db)
         emitted = [row for table, row in db.inserted

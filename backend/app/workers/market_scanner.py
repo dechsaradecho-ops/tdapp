@@ -15,7 +15,7 @@ import random
 import time
 from datetime import datetime, timedelta, timezone
 
-from app.api.routes.settings import get_app_settings
+from app.api.routes.settings import try_load_settings
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
 from app.models.schemas import (
@@ -161,8 +161,16 @@ async def scan_once(db: Database) -> list[dict]:
     news_by_asset = _news_sentiment_by_asset(db)
     live_used, demo_used = 0, 0
     # Settings loaded once per cycle — the per-asset Min Confidence (gold)
-    # gate below needs them BEFORE the emit block.
-    settings = get_app_settings(db)
+    # gate below needs them BEFORE the emit block. STRICT read (fail-closed):
+    # an unreadable row must SKIP the cycle, never emit cards on guessed
+    # limits (prod 2026-09-24: sub-floor stops fired while the floor was
+    # active — the cycle read defaults silently). A reachable-but-empty row
+    # is legitimate first-run and still yields AppSettings() defaults.
+    settings = try_load_settings(db)
+    if settings is None:
+        log.error("market scanner: settings unreadable — skipping cycle "
+                  "(fail-closed, no guessed limits)")
+        return []
     tradable = _tradable_assets(settings)
     universe = _scan_assets(settings)
 
