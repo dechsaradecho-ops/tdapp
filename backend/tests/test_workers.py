@@ -2162,6 +2162,7 @@ class TestPositionGuardManagement:
             db, broker, _SilentNotifier(), settings=settings)
         assert db.rows["paper_trades"][0]["status"] == "closed"
         assert db.rows["paper_trades"][0]["close_reason"] == "zero_volume_swept"
+        assert db.rows["paper_trades"][0]["closed_at"] is not None
         events = [r.get("event") for _, r in db.inserted if "event" in r]
         assert "closed" in events
 

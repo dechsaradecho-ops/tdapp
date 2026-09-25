@@ -591,12 +591,16 @@ async def _manage_position(db, broker, pos: Position, price: float,
                                  limit=1)
                 row_id = str(rows[0].get("id") or "") if rows else ""
             if row_id:
-                # close_reason + journal event: a swept row must not look
-                # like an unexplained close (prod 2026-09-25 PAPER-000109
-                # showed closed/pnl 5.2/reason None with no close event).
+                # close_reason + closed_at + journal event: a swept row must
+                # not look like an unexplained close (prod 2026-09-25
+                # PAPER-000109 showed closed/pnl 5.2/reason None/closed_at
+                # None — and realized_stats windows on closed_at, so its
+                # +5.2 never appeared in "PnL วันนี้" either).
+                from datetime import datetime as _dt, timezone as _tz
                 db.update("paper_trades", row_id,
                           {"status": "closed",
-                           "close_reason": "zero_volume_swept"})
+                           "close_reason": "zero_volume_swept",
+                           "closed_at": _dt.now(_tz.utc).isoformat()})
                 log.info("position %s had zero volume — marked closed",
                          pos.ticket)
                 signal_log.log_event(
