@@ -418,6 +418,9 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
             return out
         if slice_vol <= 0:
             return out
+        # Same double-subtract guard as the TP1 path: snapshot BEFORE the
+        # broker call (PaperBroker mutates pos.volume in place).
+        pre_vol = float(pos.volume or 0)
         try:
             result = await broker.partial_close(ticket, slice_vol)
         except Exception as exc:
@@ -429,7 +432,15 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
             return out
         out["partial_closed"] = True
         pos.partial_done = True  # type: ignore[attr-defined]
-        remaining_vol = round(max(0.0, float(pos.volume or 0) - slice_vol), 2)
+        after_vol = float(getattr(pos, "volume", pre_vol) or 0)
+        if after_vol < pre_vol - 1e-9:
+            remaining_vol = round(max(0.0, after_vol), 2)
+        else:
+            remaining_vol = round(max(0.0, pre_vol - slice_vol), 2)
+        try:
+            pos.volume = remaining_vol
+        except Exception:
+            pass
         try:
             row_id = str(getattr(pos, "row_id", "") or "")
             if not row_id:
@@ -633,17 +644,28 @@ async def _manage_position(db, broker, pos: Position, price: float,
                 reason="tp", reason_text="ปิดบางส่วนครบขนาด (TP1) — ปิดทั้งไม้")
             return out
         if slice_vol > 0:
+            # Snapshot BEFORE the broker call: PaperBroker mutates pos.volume
+            # in place (0.02 → 0.01), a non-mutating adapter leaves it whole.
+            # The remainder is what's LEFT, not left-minus-slice-again —
+            # subtracting twice zeroed the DB row while 0.01 lots were still
+            # live (prod 2026-09-25 PAPER-000109: monitor 0/0.02, PnL 0).
+            pre_vol = float(pos.volume or 0)
             try:
                 result = await broker.partial_close(pos.ticket, slice_vol)
                 if result.ok:
                     out["partial_closed"] = True
                     out["partial_volume"] = slice_vol
                     pos.partial_done = True  # type: ignore[attr-defined]
-                    # Remaining size after the scale-out. The real broker
-                    # already reduced pos.volume; compute it explicitly so a
-                    # broker that does NOT mutate the book still persists the
-                    # right number (and never a negative one).
-                    remaining_vol = round(max(0.0, float(pos.volume or 0) - slice_vol), 2)
+                    # Remaining size after the scale-out.
+                    after_vol = float(getattr(pos, "volume", pre_vol) or 0)
+                    if after_vol < pre_vol - 1e-9:
+                        remaining_vol = round(max(0.0, after_vol), 2)
+                    else:
+                        remaining_vol = round(max(0.0, pre_vol - slice_vol), 2)
+                    try:
+                        pos.volume = remaining_vol
+                    except Exception:
+                        pass
                     # Persist the flag AND the reduced volume — otherwise a
                     # restart re-fires TP1 (partial_done lost) and the monitor
                     # keeps showing the original size (volume never updated).
