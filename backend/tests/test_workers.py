@@ -2137,6 +2137,34 @@ class TestPositionGuardManagement:
             assert db.rows["paper_trades"][0]["volume"] == pytest.approx(0.01), label
             assert db.rows["paper_trades"][0]["status"] == "open", label
 
+    @pytest.mark.asyncio
+    async def test_zero_volume_sweep_closes_with_reason_and_event(self, monkeypatch):
+        """A zero-volume row left open must be swept closed WITH a reason and
+        a journal event — never linger as 0/0.0xx with close_reason=None
+        (prod 2026-09-25 PAPER-000109 showed closed/5.2/None, unauditable)."""
+        from app.workers import position_guard
+        from app.services import execution
+        from app.integrations.brokers import Position
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+        broker = SimpleNamespace()
+        broker._positions = {"T1": Position(
+            ticket="T1", user_id="u1", asset="EURUSD", direction="BUY",
+            volume=0.0, entry_price=1.1000, stop_loss=1.0900,
+            take_profit=1.3000, current_price=1.1500)}
+        broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+        broker.mark_price = lambda ticket: _AsyncFloat(1.1500)
+        broker.quote = lambda asset: _AsyncFloat(0.0)
+        broker.close_position = lambda ticket: _AsyncClosed()
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL([], sl)
+        db = self._db(volume=0.0)
+        settings = self._settings()
+        summary = await position_guard.guard_once(
+            db, broker, _SilentNotifier(), settings=settings)
+        assert db.rows["paper_trades"][0]["status"] == "closed"
+        assert db.rows["paper_trades"][0]["close_reason"] == "zero_volume_swept"
+        events = [r.get("event") for _, r in db.inserted if "event" in r]
+        assert "closed" in events
+
     # ---- P1-1: HARD SL/TP outranks every discretionary management step ---
     @pytest.mark.asyncio
     async def test_hard_sl_hit_skips_partial_and_be(self, monkeypatch):
