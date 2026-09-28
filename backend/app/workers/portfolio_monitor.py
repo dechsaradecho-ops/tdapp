@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from app.api.routes.settings import try_load_settings
 from app.engine.risk_engine import PortfolioSnapshot, risk_engine_for_settings
 from app.integrations.line_client import (DRAWDOWN_APPROACH_COOLDOWN_MIN,
                                           build_drawdown_approach_alert,
@@ -248,7 +249,20 @@ def _write_equity_snapshot(db, user_id: str, equity: float) -> bool:
 
 def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
     """Evaluate the portfolio against the Risk Engine; act on breaches."""
-    s = execution.get_app_settings(db)
+    # STRICT read (fail-closed, prod 2026-09-28): an unreadable settings row
+    # must SKIP the cycle. The lenient get_app_settings() falls back to
+    # AppSettings() defaults (max_drawdown 10.0) on ANY read error, and this
+    # worker then pauses + alerts + files expansion requests quoting a limit
+    # the owner never set (07:56-57Z: "Drawdown 16.83% เกิน 10.00%" while the
+    # row said 25.0). Same class as the 2026-09-22 guard incident — a safety
+    # gate must never guess a limit it could not actually read. try_load
+    # returns defaults ONLY for a legitimately missing row (first run).
+    s = try_load_settings(db)
+    if s is None:
+        log.error("portfolio monitor: settings unreadable — skipping cycle "
+                  "(fail-closed, no guessed limits)")
+        return {"checked": 0, "breach": False,
+                "aborted": "settings_unreadable"}
     capital = s.capital
     user_id = execution.DEFAULT_USER
 

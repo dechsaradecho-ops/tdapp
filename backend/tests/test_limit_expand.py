@@ -810,6 +810,28 @@ def test_monitor_breach_asks_the_owner():
     assert quiet.of("limit_expand") == []
 
 
+def test_monitor_skips_cycle_when_settings_unreadable():
+    """Prod 2026-09-28: monitor quoted default 10.00% (pause + alerts +
+    expansion request) while the row said 25.0 — a swallowed settings read
+    fed every gate the schema default. Fail-closed: skip the cycle, touch
+    nothing (no pause, no prompt, no audit)."""
+    db = _dd_db()  # 20% dd — WOULD breach under a guessed 10% default
+
+    class _BrokenSettingsClient:
+        def table(self, name):
+            raise RuntimeError("supabase hiccup (transient)")
+
+    db._client = _BrokenSettingsClient()
+    notifier = RecordingNotifier()
+    out = portfolio_monitor.monitor_once(db, None, notifier)
+
+    assert out["aborted"] == "settings_unreadable"
+    assert out["breach"] is False
+    assert not db.rows.get("kill_expand_requests")
+    assert notifier.of("limit_expand") == []
+    assert notifier.of("risk_warning") == []
+
+
 def test_monitor_applies_a_lapsed_window_before_judging_the_account():
     """Settled at the TOP of the cycle → the risk check sees the new limits."""
     db = _daily_loss_db()                     # 3% daily vs a 2% limit
