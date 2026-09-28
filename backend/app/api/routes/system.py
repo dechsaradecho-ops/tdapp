@@ -981,3 +981,59 @@ async def risk_logs(request: Request, limit: int = 100, offset: int = 0,
     out["has_more"] = (page_offset + len(rows)) < (out["summary"]["total"] or 0)
     out["verdict"] = "ok"
     return out
+
+
+@router.get("/settings-changes")
+async def settings_changes(request: Request, limit: int = 100,
+                           offset: int = 0) -> dict:
+    """Audit trail ของการเปลี่ยน Settings — settings_change_logs (ถาวร ไม่มี TTL).
+
+    หนึ่งแถวต่อการบันทึกสำเร็จ (PUT /api/settings, preset, reset,
+    limit-expand approve): ใคร/ช่องทางไหน (source) + เปลี่ยนช่องไหนจากค่า
+   เดิมอะไรเป็นค่าใหม่อะไร (changes: [{field, old, new}]) + สรุปย่อ
+    ใช้ server paging รูปแบบเดียวกับ /quote-logs
+    ถ้าตารางยังไม่มี (ยังไม่รัน migration 054) จะบอก setup_required แทนล้มเหลว.
+    """
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+
+    page_size = max(1, min(limit, 500))
+    page_offset = max(0, offset)
+    try:
+        rows = db.select(SETTINGS_CHANGE_TABLE, order="created_at",
+                         desc=True, limit=page_size, offset=page_offset)
+    except Exception as exc:
+        out["verdict"] = "fail"
+        out["setup_required"] = True
+        out["error"] = str(exc)
+        out["hint"] = ("ยังไม่มีตาราง settings_change_logs — รัน "
+                       "database/054_settings_change_log.sql ใน Supabase SQL "
+                       "Editor แล้วการเปลี่ยนครั้งถัดไปจะถูกบันทึก")
+        out["logs"] = []
+        return out
+    out["logs"] = [
+        {
+            "id": r.get("id"),
+            "created_at": r.get("created_at"),
+            "source": str(r.get("source") or "ui"),
+            "summary": str(r.get("summary") or ""),
+            "changes": r.get("changes") or [],
+        }
+        for r in rows
+    ]
+    try:
+        total = db.count(SETTINGS_CHANGE_TABLE)
+    except Exception:
+        total = None
+    out["total"] = total if total is not None else len(rows)
+    out["offset"] = page_offset
+    out["limit"] = page_size
+    out["has_more"] = (page_offset + len(rows)) < (out["total"] or 0)
+    out["verdict"] = "ok"
+    return out

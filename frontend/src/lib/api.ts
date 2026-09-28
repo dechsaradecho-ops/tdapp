@@ -49,6 +49,7 @@ import {
   LineTestResult,
   RiskStatus,
   SessionStatus,
+  SettingsChangesResponse,
   SettingsSaveResult,
   SignalLogsResponse,
   SignalReport,
@@ -328,6 +329,12 @@ export const api = {
     get<RiskLogsResponse>(
       `/api/system/risk-logs?limit=${limit}&offset=${offset}` +
       `&event=${encodeURIComponent(event)}`
+    ),
+
+  // ---------- Settings change history (settings_change_logs — ถาวร, ไม่มี TTL) ----------
+  settingsChanges: (limit = 100, offset = 0) =>
+    get<SettingsChangesResponse>(
+      `/api/system/settings-changes?limit=${limit}&offset=${offset}`
     ),
 
   // ---------- LINE: notification targets + test button ----------

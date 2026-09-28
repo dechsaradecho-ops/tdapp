@@ -18,9 +18,33 @@ import {
   SchedulerLog,
   SchedulerLogsResponse,
   SchedulerJobStat,
+  SettingsChangeLog,
+  SettingsChangesResponse,
   SignalLog,
   SignalLogsResponse,
 } from "@/lib/types";
+
+/** ป้ายชื่อช่องทางที่เปลี่ยน Settings */
+function settingsSourceLabel(s: string): string {
+  if (s === "ui") return "หน้า Settings";
+  if (s === "reset") return "รีเซ็ตค่าเริ่มต้น";
+  if (s === "limit_expand") return "ขยายลิมิต (approve)";
+  if (s.startsWith("preset:")) return `พรีเซ็ต ${s.slice(7)}`;
+  return s;
+}
+
+/** แสดงค่าเก่า/ใหม่ทุกชนิด (number/bool/string/null/array/object) */
+function settingsValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "boolean") return v ? "เปิด" : "ปิด";
+  if (typeof v === "number") {
+    const r = Math.round(v * 10000) / 10000;
+    return String(r);
+  }
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
 
 /** สีของ badge ตามสถานะ call */
 function statusBadge(status: string) {
@@ -849,7 +873,7 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
@@ -865,7 +889,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -899,6 +923,11 @@ export default function LogsPage() {
   const [auditState, setAuditState] = useState<"" | "ok" | "empty" | "write_failed">("");
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditHasMore, setAuditHasMore] = useState(false);
+  // แท็บ Settings = settings_change_logs (ประวัติเปลี่ยน Settings — ไม่มี TTL)
+  const [settingsLogs, setSettingsLogs] = useState<SettingsChangeLog[]>([]);
+  const [settingsTotal, setSettingsTotal] = useState(0);
+  const [settingsHasMore, setSettingsHasMore] = useState(false);
+  const [settingsHint, setSettingsHint] = useState("");
   type RiskFilter = "all" | "limit_breach" | "limit_expanded" | "limit_expand_rejected";
   const [auditFilter, setAuditFilter] = useState<RiskFilter>("all");
   const auditFilterRef = useRef<RiskFilter>("all");
@@ -936,10 +965,15 @@ export default function LogsPage() {
     return api.riskLogs(SERVER_PAGE, offset, auditFilterRef.current);
   }, []);
 
+  const loadSettings = useCallback(async (pg: number) => {
+    const offset = (pg - 1) * SERVER_PAGE;
+    return api.settingsChanges(SERVER_PAGE, offset);
+  }, []);
+
   // โหลดเฉพาะแท็บที่เปิดอยู่ (lazy) — เข้าหน้าครั้งแรกยิงแค่ 1 request
   // แทน 5 requests พร้อมกัน (quotes+news+scheduler+guard+gate) ทำให้หน้าแรกไวขึ้น ~5 เท่า
   const loadedRef = useRef<Set<string>>(new Set());
-  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit", flt?: "all" | "forex" | "gold") => {
+  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings", flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       if (t === "quotes") {
@@ -984,6 +1018,12 @@ export default function LogsPage() {
         setAuditState(ares.audit_state ?? "");
         setAuditTotal(ares.summary?.total ?? (ares.logs ?? []).length);
         setAuditHasMore(ares.has_more ?? false);
+      } else if (t === "settings") {
+        const sres = await loadSettings(1);
+        setSettingsLogs(sres.logs ?? []);
+        setSettingsTotal(sres.total ?? (sres.logs ?? []).length);
+        setSettingsHasMore(sres.has_more ?? false);
+        setSettingsHint(sres.setup_required ? (sres.hint ?? "") : "");
       } else {
         const sres = await loadSched(1);
         setSchedLogs(sres.logs ?? []);
@@ -1000,7 +1040,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [loadAudit, loadGate, loadGuard, loadNews, loadQuotes, loadSched]);
+  }, [loadAudit, loadGate, loadGuard, loadNews, loadQuotes, loadSched, loadSettings]);
 
   // เปลี่ยน server page (ทุก 10 หน้า UI = 500 แถว) — ดึง chunk ถัดไปจาก backend
   const gotoServerPage = useCallback(async (pg: number) => {
@@ -1033,6 +1073,11 @@ export default function LogsPage() {
         setAuditReqs(ares.requests ?? []);
         setAuditTotal(ares.summary?.total ?? (ares.logs ?? []).length);
         setAuditHasMore(ares.has_more ?? false);
+      } else if (tabRef.current === "settings") {
+        const sres = await loadSettings(pg);
+        setSettingsLogs(sres.logs ?? []);
+        setSettingsTotal(sres.total ?? (sres.logs ?? []).length);
+        setSettingsHasMore(sres.has_more ?? false);
       } else {
         const sres = await loadSched(pg);
         setSchedLogs(sres.logs ?? []);
@@ -1117,6 +1162,14 @@ export default function LogsPage() {
   const auditPageRows = auditLogs.slice((auditChunkPage - 1) * PAGE_SIZE, auditChunkPage * PAGE_SIZE);
   const auditServerPage = Math.floor((auditSafePage - 1) / uiPagesPerChunk) + 1;
   const auditServerPages = Math.max(1, Math.ceil(auditTotalPages / uiPagesPerChunk));
+  // แท็บ Settings ใช้ chunk ตัวเอง (ไม่มี filter)
+  const settingsChunkTotal = settingsLogs.length;
+  const settingsTotalPages = Math.max(1, Math.ceil((settingsTotal || settingsChunkTotal) / PAGE_SIZE));
+  const settingsSafePage = Math.min(page, settingsTotalPages);
+  const settingsChunkPage = ((settingsSafePage - 1) % uiPagesPerChunk) + 1;
+  const settingsPageRows = settingsLogs.slice((settingsChunkPage - 1) * PAGE_SIZE, settingsChunkPage * PAGE_SIZE);
+  const settingsServerPage = Math.floor((settingsSafePage - 1) / uiPagesPerChunk) + 1;
+  const settingsServerPages = Math.max(1, Math.ceil(settingsTotalPages / uiPagesPerChunk));
   const serverPage = Math.floor((safePage - 1) / uiPagesPerChunk) + 1;
   const newsServerPage = Math.floor((newsSafePage - 1) / uiPagesPerChunk) + 1;
   const schedServerPage = Math.floor((schedSafePage - 1) / uiPagesPerChunk) + 1;
@@ -1201,6 +1254,12 @@ export default function LogsPage() {
           title="ประวัติเหตุการณ์ความเสี่ยง (kill switch / ขยายลิมิต) — เก็บถาวร"
           className={`px-2.5 sm:px-3 py-1 rounded ${tab === "audit" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           Audit{auditTotal > 0 ? ` ${auditTotal}` : ""}
+        </button>
+        <button
+          onClick={() => { setTab("settings"); tabRef.current = "settings"; setPage(1); if (!loadedRef.current.has("settings")) loadOne("settings"); }}
+          title="ประวัติเปลี่ยน Settings — ช่องไหน จากค่าเดิมอะไรเป็นค่าใหม่อะไร — เก็บถาวร"
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "settings" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          ตั้งค่า{settingsTotal > 0 ? ` ${settingsTotal}` : ""}
         </button>
       </div>
 
@@ -2131,6 +2190,96 @@ export default function LogsPage() {
           </tbody>
         </table>
         </div>
+      </section>
+      )}
+
+      {/* ---------- Settings change history (settings_change_logs — เก็บถาวร) ---------- */}
+      {tab === "settings" && settingsHint && (
+        <section className="panel border-amber-400/25">
+          <p className="text-xs text-amber-300">{settingsHint}</p>
+        </section>
+      )}
+      {tab === "settings" && (
+      <section className="panel">
+        <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 text-left border-b border-slate-800">
+              <th className="py-2 pr-3">เวลา</th>
+              <th className="py-2 pr-3">ช่องทาง</th>
+              <th className="py-2 pr-3">ช่องที่เปลี่ยน (เก่า → ใหม่)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && settingsLogs.length === 0 && (
+              <tr><td colSpan={3} className="py-6">
+                <LoadingGraphic message="กำลังโหลดประวัติเปลี่ยน Settings..." compact />
+              </td></tr>
+            )}
+            {!loading && settingsLogs.length === 0 && (
+              <tr><td colSpan={3} className="py-6 text-center text-slate-500">
+                ยังไม่มีประวัติเปลี่ยน Settings — ระบบเขียนที่นี่ทุกครั้งที่บันทึกสำเร็จ
+                (หน้า Settings / พรีเซ็ต / รีเซ็ต / อนุมัติขยายลิมิต)
+              </td></tr>
+            )}
+            {settingsPageRows.map((lg) => (
+              <tr key={lg.id} className="border-b border-slate-800/50 hover:bg-white/[0.04] align-top">
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">{auditTime(lg.created_at)}</td>
+                <td className="py-2 pr-3">
+                  <span className="px-2 py-0.5 rounded whitespace-nowrap bg-accent/15 text-accent">
+                    {settingsSourceLabel(lg.source)}
+                  </span>
+                </td>
+                <td className="py-2 pr-3 min-w-[280px] max-w-[560px]">
+                  <ul className="space-y-1">
+                    {(lg.changes ?? []).map((c, i) => (
+                      <li key={i} className="flex flex-wrap items-baseline gap-x-1.5">
+                        <span className="font-mono text-slate-300">{c.field}</span>
+                        <span className="text-loss line-through decoration-loss/60">{settingsValue(c.old)}</span>
+                        <span className="text-slate-500">→</span>
+                        <span className="text-profit font-semibold">{settingsValue(c.new)}</span>
+                      </li>
+                    ))}
+                    {(lg.changes ?? []).length === 0 && (
+                      <span className="text-slate-500">{lg.summary || "—"}</span>
+                    )}
+                  </ul>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+        {(settingsLogs.length > 0 || settingsTotal > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <p className="text-xs text-slate-500">
+              หน้า {settingsSafePage}/{settingsTotalPages} · แสดง {settingsPageRows.length} จาก {settingsTotal.toLocaleString()} รายการ
+              {settingsServerPages > 1 && ` · ชุดที่ ${settingsServerPage}/${settingsServerPages}`} · เก็บถาวร (ไม่มี TTL)
+            </p>
+            {settingsTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <button onClick={() => {
+                    if (settingsChunkPage > 1 || settingsSafePage <= 1) { setPage((p) => Math.max(1, p - 1)); return; }
+                    gotoServerPage(settingsServerPage - 1).then(() => setPage((settingsServerPage - 2) * uiPagesPerChunk + uiPagesPerChunk));
+                  }}
+                  disabled={settingsSafePage <= 1 || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ก่อนหน้า
+                </button>
+                <span className="text-xs text-slate-400">{settingsSafePage} / {settingsTotalPages}</span>
+                <button onClick={() => {
+                    if (settingsChunkPage < uiPagesPerChunk && settingsChunkPage * PAGE_SIZE < settingsChunkTotal) { setPage((p) => Math.min(settingsTotalPages, p + 1)); return; }
+                    if (!settingsHasMore && settingsServerPage >= settingsServerPages) { setPage((p) => Math.min(settingsTotalPages, p + 1)); return; }
+                    gotoServerPage(settingsServerPage + 1).then(() => setPage(settingsServerPage * uiPagesPerChunk + 1));
+                  }}
+                  disabled={settingsSafePage >= settingsTotalPages || loading}
+                  className="border border-slate-700 rounded px-3 py-1 text-xs text-slate-300 disabled:opacity-40">
+                  ถัดไป
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </section>
       )}
     </div>

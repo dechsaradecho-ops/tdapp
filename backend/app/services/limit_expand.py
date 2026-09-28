@@ -849,6 +849,11 @@ def _approve(db, req: dict, decided_by: str, note: str = "", title: str = "",
     if not _persist_settings(db, merged):
         return ("⚠️ บันทึกลิมิตใหม่ไม่สำเร็จ — ลิมิตเดิมยังมีผลและเทรดยังหยุดอยู่\n"
                 "ตรวจว่า trading_settings เขียนได้ แล้วกดอนุมัติอีกครั้ง", "failed")
+    try:
+        from app.api.routes.settings import log_settings_change
+        log_settings_change(db, s, merged, source="limit_expand")
+    except Exception:
+        pass
 
     # Only quote what was ACTUALLY written: a request can carry several
     # triggers, and one of them may have been raised by hand in the meantime.

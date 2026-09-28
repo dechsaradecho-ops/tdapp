@@ -27,6 +27,50 @@ SETTINGS_TABLE = "trading_settings"
 # Fields accepted from the client (mirrors AppSettings model fields)
 _FIELDS = set(AppSettings.model_fields.keys())
 
+# Audit trail for Settings changes (migration 054, Logs menu → settings tab).
+SETTINGS_CHANGE_TABLE = "settings_change_logs"
+
+
+def diff_settings(old: AppSettings, new: AppSettings) -> list[dict[str, Any]]:
+    """Per-field old→new diff (only fields whose value actually changed).
+
+    Pure function — compared on JSON-coerced values so int/float/enum
+    mismatches (30 vs 30.0) do not fabricate changes.
+    """
+    try:
+        old_d = old.model_dump(mode="json")
+        new_d = new.model_dump(mode="json")
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for k in sorted(set(old_d) | set(new_d)):
+        o, n = old_d.get(k), new_d.get(k)
+        if o != n:
+            out.append({"field": k, "old": o, "new": n})
+    return out
+
+
+def log_settings_change(db, old: AppSettings, new: AppSettings,
+                        source: str = "ui") -> None:
+    """Insert one audit row for a successful settings write. Never raises —
+    a missing table (migration not run) must never break a Settings save."""
+    try:
+        changes = diff_settings(old, new)
+        if not changes:
+            return
+        if not db or not getattr(db, "available", False):
+            return
+        head = changes[0]
+        summary = (f"{head['field']}: {head['old']} → {head['new']}"
+                   + (f" (+{len(changes) - 1} ช่อง)" if len(changes) > 1 else ""))
+        db.insert(SETTINGS_CHANGE_TABLE, {
+            "source": str(source or "ui"),
+            "changes": changes,
+            "summary": summary,
+        })
+    except Exception as exc:  # never fail a save because of the audit
+        log.debug("settings change audit failed: %s", exc)
+
 
 def _apply_ai_overrides(app_settings: AppSettings) -> str:
     """Push the AI model/base-url from settings into the live AI provider config.
@@ -233,6 +277,7 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
                 })
         except Exception as exc:
             log.warning("equity reseed on capital change failed: %s", exc)
+        log_settings_change(db, current, merged, source="ui")
         return SettingsSaveResult(
             ok=True, settings=_row_to_settings(resp.data[0]),
             message="saved" + _apply_ai_overrides(merged))
@@ -265,6 +310,7 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
                     msg += (f" (ข้าม column ที่ยังไม่มี: {', '.join(skipped)} — "
                             "รัน migration ที่เกี่ยวข้องใน Supabase SQL Editor "
                             "เพื่อเปิดใช้ฟีเจอร์นี้)")
+                log_settings_change(db, current, merged, source="ui")
                 return SettingsSaveResult(
                     ok=True, settings=_row_to_settings(resp.data[0]),
                     message=msg)
@@ -280,6 +326,7 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
 def reset_settings(request: Request) -> SettingsSaveResult:
     """POST /api/settings/reset — drop the row; engines revert to defaults."""
     db = request.app.state.db
+    before = _load_settings(db)
     try:
         if db and db.available:
             db._client.table(SETTINGS_TABLE).delete().eq("id", 1).execute()
@@ -288,6 +335,7 @@ def reset_settings(request: Request) -> SettingsSaveResult:
     # Model/URL overrides live in that row → drop them too, so the AI falls back
     # to ai.config.json instead of keeping a now-forgotten model name.
     clear_ai_overrides()
+    log_settings_change(db, before, AppSettings(), source="reset")
     return SettingsSaveResult(ok=True, settings=AppSettings(), message="reset to defaults")
 
 
@@ -347,6 +395,8 @@ def apply_preset(request: Request, profile: RiskProfile) -> SettingsSaveResult:
         if not resp.data:
             return SettingsSaveResult(ok=False, settings=merged,
                                       message="upsert returned no data")
+        log_settings_change(db, current, merged,
+                            source=f"preset:{profile.value}")
         return SettingsSaveResult(
             ok=True, settings=_row_to_settings(resp.data[0]),
             message=f"ใช้ preset {profile.value} แล้ว")

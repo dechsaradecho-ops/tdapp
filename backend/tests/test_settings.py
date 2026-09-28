@@ -133,6 +133,84 @@ def test_app_settings_defaults_match_engine_defaults():
     assert s.max_trades_daily == 10 and s.risk_per_trade_pct == 2.0
 
 
+# ---------------------------------------------------------------------------
+# Settings change audit (migration 054 — Logs menu → settings tab)
+# ---------------------------------------------------------------------------
+def test_diff_settings_lists_only_changed_fields():
+    from app.api.routes.settings import diff_settings
+    old = AppSettings(max_drawdown_pct=10.0, risk_per_trade_pct=2.0)
+    new = AppSettings(max_drawdown_pct=25.0, risk_per_trade_pct=2.0)
+    diff = diff_settings(old, new)
+    assert diff == [{"field": "max_drawdown_pct", "old": 10.0, "new": 25.0}]
+    assert diff_settings(old, old) == []
+
+
+@pytest.mark.asyncio
+async def test_put_settings_writes_change_log():
+    """PUT success → one audit row with per-field old→new (prod 2026-09-28:
+    max_drawdown 10 → 25 had no trail)."""
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+    db = SettingsDatabase(AppSettings(max_drawdown_pct=10.0).model_dump(mode="json"))
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"max_drawdown_pct": 25.0})
+    assert res.status_code == 200 and res.json()["ok"] is True
+    rows = db.rows.get(SETTINGS_CHANGE_TABLE) or []
+    assert len(rows) == 1
+    assert rows[0]["source"] == "ui"
+    assert {"field": "max_drawdown_pct", "old": 10.0, "new": 25.0} in rows[0]["changes"]
+
+
+@pytest.mark.asyncio
+async def test_put_settings_no_change_writes_no_log():
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+    db = SettingsDatabase(AppSettings().model_dump(mode="json"))
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"capital": 10000.0})
+    assert res.json()["ok"] is True
+    assert not db.rows.get(SETTINGS_CHANGE_TABLE)
+
+
+@pytest.mark.asyncio
+async def test_preset_apply_writes_change_log():
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+    db = SettingsDatabase(AppSettings().model_dump(mode="json"))
+    set_state(db)
+    res = await call("POST", "/api/settings/preset/conservative", None)
+    assert res.json()["ok"] is True
+    rows = db.rows.get(SETTINGS_CHANGE_TABLE) or []
+    assert len(rows) == 1
+    assert rows[0]["source"] == "preset:conservative"
+    assert any(c["field"] == "max_trades_daily" for c in rows[0]["changes"])
+
+
+@pytest.mark.asyncio
+async def test_reset_writes_change_log():
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+    db = SettingsDatabase(AppSettings(max_drawdown_pct=25.0).model_dump(mode="json"))
+    set_state(db)
+    res = await call("POST", "/api/settings/reset", None)
+    assert res.json()["ok"] is True
+    rows = db.rows.get(SETTINGS_CHANGE_TABLE) or []
+    assert len(rows) == 1
+    assert rows[0]["source"] == "reset"
+    assert {"field": "max_drawdown_pct", "old": 25.0, "new": 10.0} in rows[0]["changes"]
+
+
+@pytest.mark.asyncio
+async def test_settings_changes_endpoint_lists_newest_first():
+    """GET /api/system/settings-changes — the Logs tab reader."""
+    from app.api.routes.system import settings_changes
+    from types import SimpleNamespace
+    db = SettingsDatabase(AppSettings(max_drawdown_pct=10.0).model_dump(mode="json"))
+    set_state(db)
+    await call("PUT", "/api/settings", {"max_drawdown_pct": 25.0})
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=db)))
+    body = await settings_changes(req, limit=100, offset=0)
+    assert body["verdict"] == "ok"
+    assert body["total"] == 1
+    assert body["logs"][0]["changes"][0]["field"] == "max_drawdown_pct"
+
+
 def test_settings_fields_accepted_by_put_endpoint():
     """UI prefs (monitor_refresh_sec / signals_refresh_sec) are part of
     AppSettings → _FIELDS auto-includes them → PUT /api/settings persists

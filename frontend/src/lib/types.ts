@@ -355,6 +355,29 @@ export interface RiskLogsResponse {
   has_more: boolean;
 }
 
+/** หนึ่งแถวประวัติเปลี่ยน Settings — [{field, old, new}] เฉพาะช่องที่เปลี่ยนจริง */
+export interface SettingsChangeLog {
+  id: string;
+  created_at: string | null;
+  /** ui | preset:<profile> | reset | limit_expand */
+  source: string;
+  summary: string;
+  changes: { field: string; old: unknown; new: unknown }[];
+}
+
+export interface SettingsChangesResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  hint?: string;
+  setup_required?: boolean;
+  logs: SettingsChangeLog[];
+  total?: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 export interface MarketSummary {
   regime: string;
   confidence: number;
