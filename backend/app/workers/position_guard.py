@@ -441,26 +441,37 @@ async def _apply_smart_exit(db, broker, pos: Position, price: float,
             pos.volume = remaining_vol
         except Exception:
             pass
-        try:
-            row_id = str(getattr(pos, "row_id", "") or "")
-            if not row_id:
-                rows = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
-                row_id = str(rows[0].get("id") or "") if rows else ""
-            if row_id:
-                patch = {"partial_done": True, "volume": remaining_vol}
-                init_vol = _resolve_initial_volume(db, pos)
-                if init_vol is not None:
-                    patch["initial_volume"] = init_vol
-                db.update("paper_trades", row_id, patch)
-        except Exception as exc:
-            log.debug("smart-exit partial_done persist failed: %s", exc)
-        # Realized PnL of the CLOSED SLICE only (USD) — see the TP1 path.
+        # Bank the slice PnL into row.realized_pnl (migration 055) in the
+        # SAME patch as volume/flag — see the TP1 path.
         slice_pnl = execution.PaperBrokerPnl.compute(
             SimpleNamespace(
                 direction=pos.direction, asset=pos.asset,
                 entry_price=pos.entry_price,
                 current_price=price, volume=slice_vol),
             s, asset=asset, rates=rates)
+        try:
+            banked = round(float(getattr(pos, "realized_pnl", 0) or 0)
+                           + float(slice_pnl or 0), 2)
+        except (TypeError, ValueError):
+            banked = float(getattr(pos, "realized_pnl", 0) or 0)
+        try:
+            pos.realized_pnl = banked  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            row_id = str(getattr(pos, "row_id", "") or "")
+            if not row_id:
+                rows = db.select("paper_trades", filters={"ticket": ticket}, limit=1)
+                row_id = str(rows[0].get("id") or "") if rows else ""
+            if row_id:
+                patch = {"partial_done": True, "volume": remaining_vol,
+                         "realized_pnl": banked}
+                init_vol = _resolve_initial_volume(db, pos)
+                if init_vol is not None:
+                    patch["initial_volume"] = init_vol
+                db.update("paper_trades", row_id, patch)
+        except Exception as exc:
+            log.debug("smart-exit partial_done persist failed: %s", exc)
         signal_log.log_event(
             db=db, event="closed", asset=asset, direction=direction,
             entry=pos.entry_price, exit_price=price, ticket=ticket,
@@ -688,6 +699,28 @@ async def _manage_position(db, broker, pos: Position, price: float,
                     # keeps showing the original size (volume never updated).
                     # `initial_volume` (migration 048) is backfilled here for
                     # legacy rows so the UI can show "closed / original".
+                    # Realized PnL of the CLOSED SLICE only (in USD) — the
+                    # remaining lots keep their own unrealized PnL. Computed
+                    # on a slice-volume view so the journal/timeline shows the
+                    # money actually banked by this scale-out. Banked into
+                    # row.realized_pnl (migration 055) in the SAME patch so a
+                    # restart can never split volume from its banked PnL — the
+                    # final whole close reports realized + final (TOTAL).
+                    slice_pnl = execution.PaperBrokerPnl.compute(
+                        SimpleNamespace(
+                            direction=pos.direction, asset=pos.asset,
+                            entry_price=pos.entry_price,
+                            current_price=price, volume=slice_vol),
+                        s, asset=str(pos.asset or ""), rates=rates)
+                    try:
+                        banked = round(float(getattr(pos, "realized_pnl", 0) or 0)
+                                       + float(slice_pnl or 0), 2)
+                    except (TypeError, ValueError):
+                        banked = float(getattr(pos, "realized_pnl", 0) or 0)
+                    try:
+                        pos.realized_pnl = banked  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                     try:
                         row_id = str(getattr(pos, "row_id", "") or "")
                         if not row_id:
@@ -697,23 +730,14 @@ async def _manage_position(db, broker, pos: Position, price: float,
                             row_id = str(rows[0].get("id") or "") if rows else ""
                         if row_id:
                             patch = {"partial_done": True,
-                                     "volume": remaining_vol}
+                                     "volume": remaining_vol,
+                                     "realized_pnl": banked}
                             init_vol = _resolve_initial_volume(db, pos)
                             if init_vol is not None:
                                 patch["initial_volume"] = init_vol
                             db.update("paper_trades", row_id, patch)
                     except Exception as exc:
                         log.debug("partial_done persist failed: %s", exc)
-                    # Realized PnL of the CLOSED SLICE only (in USD) — the
-                    # remaining lots keep their own unrealized PnL. Computed
-                    # on a slice-volume view so the journal/timeline shows the
-                    # money actually banked by this scale-out.
-                    slice_pnl = execution.PaperBrokerPnl.compute(
-                        SimpleNamespace(
-                            direction=pos.direction, asset=pos.asset,
-                            entry_price=pos.entry_price,
-                            current_price=price, volume=slice_vol),
-                        s, asset=str(pos.asset or ""), rates=rates)
                     signal_log.log_event(
                         db=db, event="closed", asset=str(pos.asset or ""),
                         direction=str(pos.direction or ""),
@@ -1608,6 +1632,12 @@ async def rehydrate_book(db, broker) -> int:
             # TP1 already fired for this position before the restart — carry
             # the flag into the book or the guard would partial-close again.
             book[ticket].partial_done = bool(row.get("partial_done"))  # type: ignore[attr-defined]
+            # Banked slice PnL (migration 055) — carried so a later whole
+            # close reports realized + final (TOTAL), surviving restarts.
+            try:
+                book[ticket].realized_pnl = float(row.get("realized_pnl") or 0)  # type: ignore[attr-defined]
+            except (TypeError, ValueError):
+                pass
             # Original size (migration 048) — carried so a later partial can
             # persist it for legacy rows and the UI can show closed/original.
             if row.get("initial_volume") is not None:

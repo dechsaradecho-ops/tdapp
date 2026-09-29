@@ -368,11 +368,33 @@ def close_trade_rows(db, ticket: str, exit_price: float, pnl: float,
                     ticket, want_asset or "?", want_dir or "?",
                     [(r.get("asset"), r.get("direction")) for r in rows])
             return
-        db.update("paper_trades", row["id"], {
+        # Whole-trade totals (migration 055): a position closed in slices
+        # banked part of its PnL at each partial (row.realized_pnl). The
+        # journal row must carry the TOTAL — realized + this final slice —
+        # and the CLOSED size back to the initial size, so a fully-closed
+        # position reads N/N (prod 2026-09-29 PAPER-000120 showed 0.01/0.02
+        # with pnl 1.62 while +3.05 sat only in signal_logs). Rows that never
+        # partial-closed keep realized_pnl = 0 and behave as before.
+        try:
+            banked = float(row.get("realized_pnl") or 0)
+        except (TypeError, ValueError):
+            banked = 0.0
+        init_vol = row.get("initial_volume") or row.get("volume")
+        try:
+            total_pnl = round(banked + float(pnl), 2) if pnl is not None \
+                else (round(banked, 2) if banked else row.get("pnl"))
+        except (TypeError, ValueError):
+            log.error("close_trade_rows %s: bad pnl %r (banked %r)",
+                      ticket, pnl, banked)
+            return
+        patch: dict = {
             "status": "closed", "exit_price": exit_price,
-            "pnl": round(pnl, 2), "close_reason": reason,
+            "pnl": total_pnl, "close_reason": reason,
             "closed_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if banked and init_vol:
+            patch["volume"] = init_vol
+        db.update("paper_trades", row["id"], patch)
     except Exception as exc:
         log.error("close_trade_rows failed: %s", exc)
 

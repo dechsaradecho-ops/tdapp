@@ -2140,7 +2140,6 @@ class TestPositionGuardManagement:
     @pytest.mark.asyncio
     async def test_zero_volume_sweep_closes_with_reason_and_event(self, monkeypatch):
         """A zero-volume row left open must be swept closed WITH a reason and
-        a journal event — never linger as 0/0.0xx with close_reason=None
         (prod 2026-09-25 PAPER-000109 showed closed/5.2/None, unauditable)."""
         from app.workers import position_guard
         from app.services import execution
@@ -2165,6 +2164,53 @@ class TestPositionGuardManagement:
         assert db.rows["paper_trades"][0]["closed_at"] is not None
         events = [r.get("event") for _, r in db.inserted if "event" in r]
         assert "closed" in events
+
+    @pytest.mark.asyncio
+    async def test_partial_then_sl_reports_total_pnl_and_full_size(self, monkeypatch):
+        """Prod 2026-09-29 PAPER-000120: TP1 banked +3.05 on 0.01, then the
+        remaining 0.01 hit SL for +1.62 — but the journal showed 0.01/0.02
+        with pnl 1.62 only. The whole close must report TOTAL closed size
+        (0.02/0.02) and TOTAL PnL (slice + final)."""
+        from app.workers import position_guard
+        from app.services import execution
+        from app.integrations.brokers import PaperBroker, Position
+        monkeypatch.setattr(execution, "is_market_closed", lambda *a, **k: False)
+
+        prices = {"now": 1.1500}
+
+        async def fake_spot(assets, **kw):
+            return {a: prices["now"] for a in assets}, {}
+
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+        broker = PaperBroker()
+        broker._positions["T1"] = Position(
+            ticket="T1", user_id="u1", asset="EURUSD", direction="BUY",
+            volume=0.02, entry_price=1.1000, stop_loss=1.0900,
+            take_profit=1.3000, current_price=1.1500)
+        db = self._db(volume=0.02)
+        settings = self._settings(partial_close_pct=50, partial_trigger_r=1.0,
+                                  breakeven_trigger_r=0, trail_atr_mult=0,
+                                  smart_exit_enabled=False,
+                                  paper_exit_spread_mult=0.0,
+                                  paper_commission_per_lot=0.0)
+        # cycle 1 — TP1 banks half at +5R: slice (1.15-1.10)*0.01*100k = +$50
+        s1 = await position_guard.guard_once(
+            db, broker, _SilentNotifier(), settings=settings)
+        assert s1["partial_closed"] == 1
+        assert db.rows["paper_trades"][0]["volume"] == pytest.approx(0.01)
+        assert db.rows["paper_trades"][0]["status"] == "open"
+        # cycle 2 — remainder hits hard SL at 1.085:
+        # final (1.085-1.10)*0.01*100k = -$15 → TOTAL +$35, size 0.02/0.02
+        prices["now"] = 1.085
+        s2 = await position_guard.guard_once(
+            db, broker, _SilentNotifier(), settings=settings)
+        assert s2["closed"] == 1
+        row = db.rows["paper_trades"][0]
+        assert row["status"] == "closed"
+        assert row["close_reason"] == "sl"
+        assert row["volume"] == pytest.approx(0.02)
+        assert row["initial_volume"] == pytest.approx(0.02)
+        assert row["pnl"] == pytest.approx(35.0)
 
     # ---- P1-1: HARD SL/TP outranks every discretionary management step ---
     @pytest.mark.asyncio
