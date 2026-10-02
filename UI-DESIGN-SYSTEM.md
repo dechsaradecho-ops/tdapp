@@ -3,7 +3,7 @@
 > เอกสารนี้สรุป UI ทั้งหมดของ tdapp เพื่อให้เว็บอื่นอ่านแล้วสร้าง UI เดียวกันได้
 > ต้นทางจริง: `frontend/src/app/globals.css`, `frontend/tailwind.config.ts`,
 > `frontend/src/app/layout.tsx`, `frontend/src/components/MobileNav.tsx`, `frontend/src/components/BackgroundLayer.tsx`
-> สถานะล่าสุด: commit `2d76bca`, verified 2026-09-07 — pill เข้ม /30 + ตัวเลขหนาทั้งหน้า signals/monitor (§10.1–10.2) · ก่อนหน้า: `67a2dfd` (§10.1 pill แบบ component บนหน้า signals — SL/TP, ▲▼, BUY/SELL, PnL + tier badge เลข 1/2/3) · `a13eb36` verified 2026-09-06 (§15 ระบบไอคอน SVG monotone + §16 สวิตช์แจ้งเตือนต่อหมวด — 6 หมวด, migration 020 รันแล้ว — เดิมชื่อ 012 ถูก rename เพราะชนเบอร์กับ 012_min_confidence_gold)
+> สถานะล่าสุด: commit `1ca0f00`, verified 2026-10-02 — กวาด UI ทั้งหมดตั้งแต่ 2026-09-07 (§18 กระดิ่งแจ้งเตือน + Web Push · §19 popup ขอยืนยันขยายลิมิต · §20 เมนู Logs 7 แท็บ + ตาราง/เพจเจอร์ · §21 ประวัติ order มอนิเตอร์ + ปริมาณ/กำไร · §22 หน้า home: PnL breakdown, การ์ดความพร้อมเทรด, แถบ dual-score, แบนเนอร์ · §23 หน้า Settings: preset/export/import) · ก่อนหน้า: `2d76bca`, verified 2026-09-07 — pill เข้ม /30 + ตัวเลขหนาทั้งหน้า signals/monitor (§10.1–10.2)
 >
 > ⚠️ **ห้ามเทียบ prod ด้วย hash ของ index.html หรือชื่อไฟล์ chunk** — Next.js สร้าง buildId/chunk-hash
 > ใหม่ทุกครั้งที่ build และ build บน Render ให้ hash ต่างจาก local เสมอ (แม้โค้ดเดียวกัน — ยืนยันแล้ว
@@ -526,6 +526,9 @@ button, a, select, input[type="checkbox"] { touch-action: manipulation; }
 13. ☐ ไอคอนทุกจุดใช้ `Icon.tsx` — ห้าม emoji ใน UI (§15)
 14. ☐ สวิตช์ on/off ใช้ pattern iOS toggle (§16)
 15. ☐ หมวดตั้งค่าที่ "ไม่ใช่หัวใจการเทรด" (พื้นหลัง/ภาพ) ให้ใช้การ์ดพับได้ `CollapsePanel` + `defaultOpen = false` (§17)
+16. ☐ กระดิ่งแจ้งเตือน portal ลง body + badge แดง + เปิด=อ่านหมด (§18.1) · popup ยืนยันเต็มจอใช้ overlay ดำ 0.75 + blur(18px) (§19)
+17. ☐ เมนู Logs: แท็บ pill สั้น + ตาราง/เพจเจอร์มาตรฐาน + overflow ที่ div ลูก (§20)
+18. ☐ มอนิเตอร์: เวลาเปิด/ปิดแยกช่อง + ปริมาณแบบ ปิดจริง/เปิด + PnL มี title กำกับ lots (§21) · home: แบนเนอร์ role=alert ขอบเหลือง + การ์ด verdict ขอบเขียว/แดง (§22)
 
 ---
 
@@ -600,4 +603,93 @@ import Icon from "@/components/Icon";
 - **ผลข้างเคียงที่ยอมรับ:** ดาวน์ `lg-press` (กดแล้วยุบ) ยกเว้นการ์ดที่มี input/select/textarea/table — ตอน **พับ** การ์ดนี้ยังเข้าเงื่อนไข (ยังไม่มี input) จึงยุบตอนแตะ ส่วนตอน **กาง** จะไม่ยุบ · ถ้าไม่ต้องการให้ยุบเลยให้เพิ่ม `.panel:has(> h2 > button[aria-controls])` เข้าไปในลิสต์ `:not()` ของกฎ `lg-press` ทั้ง 4 บล็อก
 - **หน้าการตั้งค่าปัจจุบัน:** การ์ด "ตกแต่ง (Appearance)" วางระหว่าง "Portfolio Recommendation" กับ "การตั้งค่าระบบเทรด (ใช้จริงทั้งระบบ)" · ข้างในมี 2 บล็อก = `ภาพพื้นหลัง (Background)` (พื้นหลังแอป + สไลเดอร์ความสว่าง) และ `Image zoom (Hero)` (รูปฮีโร่ + ความสว่างแบบด์ + `ความยาวแบบด์` 50–200% + `ระดับการซูม` 0–300%) — **เดิมสองเรื่องนี้เป็นการ์ด `.panel` แยกกันคนละใบที่หัวหน้าการตั้งค่า ตอนนี้รวมเป็นการ์ดพับได้ใบเดียวแล้ว**
 - ✅ **Verified 2026-09-12 (390 / 1280 px):** พับอยู่ `h2` = 6 ใบตามลำดับ, `aria-expanded="false"`, ความสูงการ์ด ~78px (หัว 44px + hint 1 บรรทัด), ไม่มีสไลเดอร์/เนื้อในใน DOM · กดกาง → 4 สไลเดอร์ครบ, `collapse-open 0.22s` ทำงาน, ลูกศร `matrix(0,1,-1,0,0,0)` (= rotate 90°), ป้ายเปลี่ยนเป็น "ย่อ" · จอ 1280 → `grid-column: span 2 / span 2`, กว้าง 1224px (grid 2 คอลัมน์ 604+604)
+
+- ✅ **Verified 2026-09-12 (390 / 1280 px):** พับอยู่ `h2` = 6 ใบตามลำดับ, `aria-expanded="false"`, ความสูงการ์ด ~78px (หัว 44px + hint 1 บรรทัด), ไม่มีสไลเดอร์/เนื้อในใน DOM · กดกาง → 4 สไลเดอร์ครบ, `collapse-open 0.22s` ทำงาน, ลูกศร `matrix(0,1,-1,0,0,0)` (= rotate 90°), ป้ายเปลี่ยนเป็น "ย่อ" · จอ 1280 → `grid-column: span 2 / span 2`, กว้าง 1224px (grid 2 คอลัมน์ 604+604)
+
+---
+
+## 18. กระดิ่งแจ้งเตือน — `NotificationBell.tsx` + การ์ด Web Push
+
+### 18.1 กระดิ่ง (global, ทุกหน้า)
+
+- **ตำแหน่ง 2 จุด:** desktop อยู่ใน `DesktopNav` (pill nav) · มือถือ floating แยกใน `layout.tsx` (`md:hidden fixed right-3 z-40`, top เว้น safe-area `calc(env(safe-area-inset-top, 0px) + 0.6rem`)
+- **ปุ่มกระดิ่ง:** `relative inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-300 hover:text-white hover:bg-white/10` + `Icon n="bell" size={17}` · badge เฉพาะเมื่อมี unread: `absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-loss text-[9px] font-bold text-white` (เกิน 99 โชว์ `99+`)
+- **Popover:** portal ลง `document.body` ตรง (`createPortal`) — ⚠️ ห้าม render ใต้ `.panel`/`.lg-refract` เพราะ `backdrop-filter` สร้าง containing block ขัง `position:fixed` (pattern เดียวกับ `CloseReasonBadge`) · ตำแหน่งคำนวณจากปุ่ม (`top = bottom+8`, ชิดขวา, clamp 8px จากขอบจอ) · ขนาด `width: min(380px, calc(100vw - 16px))` · กล่องแก้วเข้ม `rounded-2xl` + `background: rgba(12,12,16,.42)` + `blur(30px) saturate(180%)` + `border rgba(255,255,255,.14)` + `animate-pop` + `z-50`
+- **พฤติกรรม:** poll เงียบทุก 60 วิ · เปิดครั้งแรกดึง 30 แถว, scroll ใกล้สุด (`< 120px`) โหลดเพิ่มทีละชุด (dedup ด้วย id) · **เปิด = อ่านหมดทันที** (`unread → 0` + จำเวลาใน localStorage `tdapp.notif.seenAt`) · backend เก็บย้อนหลัง 7 วัน (footer `แสดงครบแล้ว (เก็บย้อนหลัง 7 วัน)`)
+- **แถวแจ้งเตือน:** ปุ่มเต็มแถว (`w-full text-left px-3 py-2 border-b border-white/5 hover:bg-white/5`) แตะเพื่อกาง/พับ · ย่อโชว์บรรทัดแรกตัด `truncate`, กางโชว์เต็ม + เวลาไทยเต็ม + สถานะ (`failed` แดง / `sent` เขียว) · เวลา relative (`เมื่อสักครู่ / N นาทีที่แล้ว / N ชม. / N วัน`) · ไอคอนตามชนิด (`trade_opened` เขียว, `stop_loss` แดง ฯลฯ ผ่าน `Icon.tsx` — emoji ต้นข้อความถูก strip ออก)
+- **รายการ:** `max-h-[min(60vh,420px)] overflow-y-auto overscroll-contain` + `touch-action: pan-y` · ⚠️ scroll ข้างในต้องไม่ปิด popover (ดัก capture phase) — เคยพังบนมือถือ: ลากนิดเดียว popover หาย
+
+### 18.2 การ์ด Web Push (หน้า Settings)
+
+`PushNotificationCard.tsx` — การ์ด `.panel` มาตรฐาน หัว `Icon bell + การแจ้งเตือนมือถือ`:
+- ปุ่มหลัก `bg-accent` (`ทดสอบการแจ้งเตือน` / `กำลังส่ง...`) · ปุ่มรองขอบ (`เปิดการแจ้งเตือนบนอุปกรณ์นี้` / `ปิดบนเครื่องนี้` / `ซ่อมการเชื่อมต่อ` เคส endpoint ตาย)
+- บล็อกสถานะ (`rounded border border-slate-700 bg-surface/40 p-3`): แถวละเรื่อง (browser รองรับไหม / permission / ผูกเครื่องนี้แล้วไหม / endpoint ยัง alive ไหม / server พร้อมไหม) — ไอคอนเขียว/แดง + โน้ตเทา
+- กล่องวิธีทำ (`list-decimal ml-4`): Android / iPhone Add-to-Home / DND — iOS ต้อง install ก่อนถึงเปิดได้ (blockedReason แถบเหลือง)
+- **PWA:** ไม่มี popup ถามอัปเดต — `PwaRegister` return `null`, เจอ SW ตัวใหม่ reload เงียบ (`CACHE_VERSION` ใน `public/sw.js` ต้อง bump ทุก deploy ไม่งั้นมือถือเสิร์ฟ bundle เก่า) · เลขเวอร์ชันท้ายหน้า home `v{GIT_SHA}` ตัวเล็กจาง (`text-[10px] text-slate-600/70`, generated ไม่ commit)
+
+---
+
+## 19. Popup ขอยืนยันขยายลิมิต — `LimitExpandPopup.tsx`
+
+dialog กลางจอ (`fixed inset-0 z-50`, backdrop ดำ 0.75 + `blur(18px)`, การ์ด `.panel max-w-md animate-pop`, `role="dialog" aria-modal`) — mount ใน `layout.tsx` ใต้ `AuthGate`, poll `GET /api/trading/limit-expand` ทุก 60 วิ, โผล่เฉพาะตอนมีคำขอ pending:
+
+- **รายการลิมิตที่เกิน:** แถวละ `ชื่อลิมิต` + `ค่าปัจจุบัน% เกิน ลิมิต%` (เทา) + `→ เสนอ X% (+5%)` (accent หนา)
+- **แบนเนอร์เหลือง 2 แบบ** (`rounded-lg border-amber-400/25 bg-amber-400/10` + `Icon clock`): เลยเวลายืนยันแล้วแต่ยังตอบได้ (ระบบยังไม่ปิดไม้) vs เลยเวลา + ไม่ขยายแล้ว (kill switch จะปิดไม้)
+- **ปุ่มคู่** (`grid grid-cols-2 gap-2`): `btn-secondary` ไม่อนุมัติ / `btn-primary` อนุมัติ +N% (busy มี spinner + `aria-busy`)
+- **จอผลลัพธ์:** ไอคอนเขียว/แดง + กล่อง `pre` พื้นขาวจาง + สถานะเทรด (หยุด/เทรดอยู่) + ปุ่ม `รับทราบ` เต็มใบ
+- ⚠️ กด ✕ แค่ซ่อนคำขอนี้ชั่วคราว (จำ id) — ไม่ใช่ปฏิเสธ · คำขอใหม่ id ใหม่จะทิ้งจอผลเก่าแล้วโผล่ทันที (ไม่ต้องปิดจอเอง)
+- ข้อความ/ปุ่ม mirror กับ LINE ทุกตัว (`/dd_ok` / `/dd_no`) — ตัดสินใจช่องไหนผลเดียวกัน
+
+---
+
+## 20. เมนู Logs — 7 แท็บ + ตาราง/เพจเจอร์มาตรฐาน
+
+แท็บ (`flex flex-wrap gap-1.5 text-xs`, pill `px-2.5 sm:px-3 py-1`, active `bg-accent text-white font-bold`): **ราคา · ข่าว · Scheduler · Guard · Gate · Audit · ตั้งค่า** (+ตัวเลขนับท้ายป้าย) — ⚠️ ป้ายสั้นจงใจ (ตัดวงเล็บอังกฤษบนจอเล็ก) เพราะแถบเคยล้นจอแล้วโดน clip กดแท็บท้ายไม่ถึง
+
+**ตารางมาตรฐานทุกแท็บ:** `section.panel > div.overflow-x-auto > table.w-full text-xs` (⚠️ overflow ต้องอยู่ div ลูก — ใส่บน `.panel` ตรง ๆ backdrop-filter พัง §11) · หัว `text-slate-500 text-left border-b border-slate-800` · แถว `border-b border-slate-800/50 hover:bg-white/[0.04] align-top` · เวลา `whitespace-nowrap text-slate-400` · badge `px-2 py-0.5 rounded whitespace-nowrap`
+
+**เพจเจอร์มาตรฐาน:** server ครั้งละ 500 แถว แบ่งโชว์ 50/หน้า · footer `หน้า a/b · แสดง n จาก total รายการ · ชุดที่ x/y` + ปุ่ม `ก่อนหน้า/ถัดไป` (`border border-slate-700 rounded px-3 py-1 text-xs`) · แท็บ TTL (quotes/scheduler/guard/gate) เขียน "เก็บสูงสุด 7 วัน", แท็บถาวร (audit/settings) เขียน "เก็บถาวร (ไม่มี TTL)"
+
+- **Audit:** สรุป 4 การ์ด (ทั้งหมด/เกินลิมิต/ขยายแล้ว/ปฏิเสธ) + การ์ดคำขอล่าสุด + ตารางเหตุการณ์ (badge สีตามชนิด + ปุ่มรายละเอียดกาง popup `z-50`) + ตารางคำขอยืนยัน (ขอเมื่อ/สถานะ/เข้าเงื่อนไข/ลิมิตก่อน→หลัง/ตัดสินเมื่อ/ใครตัดสิน)
+- **ตั้งค่า (migration 054):** ประวัติเปลี่ยน Settings ถาวร — แถวละ เวลา + badge ช่องทาง (`หน้า Settings` / `พรีเซ็ต X` / `รีเซ็ตค่าเริ่มต้น` / `ขยายลิมิต (approve)`, พื้น accent จาง) + ลิสต์ช่องที่เปลี่ยน (`ul.space-y-1`: ชื่อฟิลด์ mono + ค่าเก่าขีดฆ่าแดง + `→` + ค่าใหม่เขียวหนา) · ยังไม่รัน migration จะขึ้นกล่องเหลืองบอกวิธีแทนตารางว่าง
+
+---
+
+## 21. มอนิเตอร์ — ประวัติ order + ปริมาณ/กำไร + ปุ่มรีเฟรช
+
+**ตารางประวัติ order (12 คอลัมน์):** เวลาเปิด / เวลาปิด (แยก 2 ช่อง — เคยใช้ช่องเดียวแล้วเวลาปิดทับเวลาเปิด ย้อนหา "เปิดเมื่อไร" ไม่ได้; ไม้ไม่ปิดโชว์ `-`) / Asset / ฝั่ง / Lots / Entry / Exit / PnL / สถานะ / เหตุผลปิด / Ticket / ที่มา (Auto/Approve)
+
+**ปริมาณแบบ "ปิดจริง/เปิด" (`initial_volume`):**
+- ไม้ค้าง: `0.01` + suffix `/0.02` เทาเล็ก (title อธิบาย เปิด/ปิดบางส่วนไปแล้ว/เหลือ)
+- ประวัติ: `0.01/0.02` = ปิดจริง 0.01 จากที่เปิด 0.02 (title อธิบาย lots ที่ปิดจริง)
+- PnL แถวแบ่งปิด = กำไรเฉพาะส่วนที่ปิด (title กำกับ lots) — journal รวมยอดทั้งไม้ตอนปิดหมด (realized + ไม้สุดท้าย)
+
+**แถบสถิติ:** grid การ์ด `.panel` ธรรมดา (ไม่ใช่ StatCard — StatCard มีเฉพาะหน้า signals เป็นปุ่ม filter) + helper `PnlText` (`text-xl font-bold` เขียว/แดง, ไม่มีค่าโชว์ `-`) · การ์ด: เทรดวันนี้ / PnL วันนี้ / PnL 7 วัน / PnL รวม (ปิดแล้ว) / PnL ไม้ค้าง / ยอดรวมสุทธิ / Win Rate
+
+**ปุ่มรีเฟรช icon-only:** `inline-flex h-10 w-10 border border-slate-700 rounded` + `Icon refresh/spinner` (`aria-label="รีเฟรช"` + title) — ไม่มีข้อความ (เคยเป็นปุ่มมีข้อความแล้วล้น panel บนมือถือ) · ต่างจากหน้า signals ที่ปุ่มรีเฟรชยังมีข้อความ
+
+---
+
+## 22. หน้า Home — วิดเจ็ต 5 ชิ้น (เรียงจากบน)
+
+1. **แบนเนอร์ตลาดปิด** (`role="alert"`, ขอบเหลือง/พื้นเหลืองจาง `rounded-xl border-amber-500/40 bg-amber-500/10` + `Icon lock`): `ตลาดปิดอยู่ — งดเปิดออเดอร์ใหม่ และงดปิดไม้` + ช่วงเวลา ศ.21:00 UTC → อา.21:00 UTC + เปิดอีกครั้ง (เวลาไทย) — โผล่เฉพาะตอนปิด
+2. **สถิติ 4 ช่อง** (Capital / Equity / PnL / Monthly Goal): `.panel` + `text-xl font-bold` (กำไรเขียว)
+3. **การ์ดความพร้อมเทรดอัตโนมัติ** (`bot` + `สถานะการเทรดอัตโนมัติ` + เวลาตรวจ + ปุ่มตรวจซ้ำ): กล่องคำตัดสินขอบเขียว/แดง (`เปิดเทรดอัตโนมัติได้ตอนนี้` / `ยัง...ไม่ได้ตอนนี้ + ติด N ข้อ`) + แถบความพร้อม + grid ปัจจัย 2 คอลัมน์ (จุดสี เขียว/แดง/เหลืองเรืองแสง + ชื่อหนา + รายละเอียดเทา + แถบ progress) — ครอบโหมดเทรด, pause, kill, ข่าว, โควตา (ใช้/ลิมิต), correlation, และ gate ก่อนเปิด (cooldown 2b / spread 3b / ข่าว 3b / session / currency 4b)
+4. **แถบ Opportunity + Confidence (แท่งเดียว 2 ค่า):** แถวละชื่อคู่ + band + คะแนนหนา + `· C {conf}%` · แท่งเดียว (`h-2 rounded bg-slate-800`): fill สีตาม opportunity (เขียว81+/ฟ้า61+/เหลือง31+/เทา) + ขีดขาว 3px = confidence + ขีดแดง = เกณฑ์ผ่าน · มี legend (สี่เหลี่ยมเล็ก) + สถานะผ่าน/ไม่ผ่านเกณฑ์ต่อคู่ · คลิกแถวได้ (cursor-pointer)
+5. **PnL แยกตามเหตุผล/สินทรัพย์:** 2 การ์ด (`แยกตามเหตุผลการปิด` / `แยกตามสินทรัพย์`) — แถวละชื่อ + `N ไม้` + `±$` หนา + `(W/L)` · แถวขาดทุนสุดตัวหนา · ท้ายมีแถวรวม (เส้นคั่นบน)
+- ท้ายหน้า: `FeedStatusBanner` ถ้าฟีดพัง (เหลือง: `ดึงราคาจากตลาดไม่สำเร็จ...`) + เลขเวอร์ชัน `v{GIT_SHA}` จาง
+
+---
+
+## 23. หน้า Settings — แพทเทิร์นฟอร์ม + โฟลว์ preset/export
+
+**โครง:** grid 2 คอลัมน์ (`grid md:grid-cols-2 gap-4`) · ฟิลด์ตัวเลข = `NumField` (label + input + hint เทาใต้ช่อง) · ฟิลด์ทอง override มีปุ่ม `ล้าง` ข้างช่อง · สวิตช์ใช้ iOS toggle §16 (บางตัวบันทึกทันทีไม่ต้องกด Save)
+
+**การ์ดย่อยมาตรฐาน:** `rounded border border-slate-700/60 bg-surface/40 p-3` (⚠️ ห้ามใช้ `.panel` ซ้อน — เบลอซ้อนเบลอ) รวมกลุ่ม: คู่เงิน (chip วงรี `rounded-full` มี × ลบ) / AI Chat / โปรไฟล์&Gate / ลิมิต / จัดการไม้+สเปรด / Smart Exit / Kill Switch / ข่าว-Correlation-Backtest / ระบบ-หน้าจอ / รอบระบบ-หน่วยความจำ
+
+**โฟลว์พรีเซ็ต (กฎสำคัญ):** dropdown เลือกโปรไฟล์ + ปุ่ม `ใช้ preset` (ฟ้า, `min-h-[40px]`) — กดแล้ว**ใส่ค่าแค่ในฟอร์ม ยังไม่ลง DB** (ข้อความกำกับบอกให้กดบันทึก) · เปลี่ยน dropdown เฉย ๆ = เปลี่ยนชื่อโปรไฟล์เท่านั้น ค่าไม่เปลี่ยน
+
+**แถวบน Save/Export/Import/Reset:** Export/Import/Reset = ปุ่มขอบเทา (`text-xs ... border-slate-700 ... min-h-[40px]`) · Save = ปุ่มฟ้า (`bg-accent ... px-4`) · Import โหลดไฟล์ JSON ลงฟอร์มเฉย ๆ (ยังไม่ลง DB) + รายงานฟิลด์ที่ไม่รู้จัก · การ์ด Web Push (`PushNotificationCard`) วางเป็นการ์ด `.panel` เต็มแถวระหว่าง Database test กับ LINE
+
+**แบนเนอร์ Pause/Resume:** แถบเต็ม (`rounded border px-4 py-3 flex justify-between`) — หยุดอยู่ขอบแดงพื้นแดงจาง / ปกติขอบเทา · ปุ่ม Resume เขียว / Pause แดง (`px-4 py-2.5 min-h-[44px]`)
 
