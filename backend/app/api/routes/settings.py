@@ -161,10 +161,16 @@ def _upsert_settings_row(db, row: dict[str, Any]):
     e.g. an owner-approved limit expansion (limit_expand.decide) would refuse
     the whole update because of one new optional column. The unknown column is
     dropped and the rest lands; non-PGRST204 errors propagate as before.
+
+    Returns ``(response, dropped)``. ``dropped`` names the columns that were
+    skipped so the caller can TELL the owner — a save that quietly discards
+    the value they just typed is its own kind of data loss, and this helper
+    used to log the skip without surfacing it anywhere.
     """
+    dropped: list[str] = []
     while True:
         try:
-            return db._client.table(SETTINGS_TABLE).upsert(row).execute()
+            return db._client.table(SETTINGS_TABLE).upsert(row).execute(), dropped
         except Exception as exc:
             raw = str(exc)
             if "PGRST204" not in raw:
@@ -173,6 +179,7 @@ def _upsert_settings_row(db, row: dict[str, Any]):
             if not missing or missing not in row:
                 raise
             row.pop(missing, None)
+            dropped.append(missing)
             log.warning("settings upsert: dropped unknown column %s "
                         "(migration not applied) — the rest of the row is "
                         "written", missing)
@@ -193,7 +200,7 @@ def persist_settings(db, merged: AppSettings) -> bool:
         row = merged.model_dump(mode="json")
         row["id"] = 1
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
-        resp = _upsert_settings_row(db, row)
+        resp, _dropped = _upsert_settings_row(db, row)
         if resp is not None and resp.data:
             return True
         # No representation returned (client/config dependent): confirm by
@@ -222,9 +229,25 @@ def get_settings(request: Request) -> AppSettings:
 
 @router.put("", response_model=SettingsSaveResult)
 def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResult:
-    """PUT /api/settings — merge-persist to the single app_settings row."""
+    """PUT /api/settings — merge-persist to the single app_settings row.
+
+    PARTIAL-WRITE SAFETY (prod 2026-10-06, owner-requested change 2).
+    This used to merge onto ``_load_settings(db)``, which silently substitutes
+    ``AppSettings()`` DEFAULTS for any field the read did not return, then
+    upserted the WHOLE row. One column missing from the read — a stale
+    PostgREST schema cache drops it from ``select("*")``, and
+    ``_row_to_settings`` filters ``None`` out — was enough to write that
+    field's default over the live value. It happened for real:
+    ``allowed_assets`` came back empty and a 14-pair whitelist was replaced by
+    the 5-pair schema default, silently unbinding every pair the owner had
+    added.
+
+    Now the save writes ONLY what it can justify: the fields in the patch,
+    plus the fields the raw row actually contained. A degraded read therefore
+    leaves the un-read columns untouched instead of resetting them, and the
+    response names them so the UI can say what did not save.
+    """
     db = request.app.state.db
-    current = _load_settings(db)
     patch = {k: v for k, v in (payload or {}).items() if k in _FIELDS and v is not None}
     # Optional per-asset overrides: an explicit null CLEARS the override so the
     # engine falls back to the base field (the Settings page "ล้าง" button).
@@ -239,21 +262,50 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     if "spread_overrides" in (payload or {}) \
             and not (payload or {}).get("spread_overrides"):
         patch["spread_overrides"] = None
+    if not db or not db.available:
+        return SettingsSaveResult(
+            ok=False, settings=AppSettings(),
+            message="DB unavailable — settings not saved")
+
+    # Read the RAW row so the merge base is what the database actually holds,
+    # not a model that has quietly filled the gaps with defaults.
+    raw_row: Optional[dict[str, Any]] = None
+    try:
+        _resp = db._client.table(SETTINGS_TABLE).select("*").eq("id", 1).limit(1).execute()
+        _rows = list(_resp.data or [])
+        raw_row = _rows[0] if _rows else None
+    except Exception as exc:
+        log.error("save_settings: raw row read failed (%s) — refusing to "
+                  "write a merged row from defaults", exc)
+        return SettingsSaveResult(
+            ok=False, settings=AppSettings(),
+            message="อ่านค่าตั้งเดิมไม่สำเร็จ — ยกเลิกบันทึกเพื่อไม่ให้ค่าอื่นถูกรีเซ็ต")
+
+    current = _row_to_settings(raw_row)
     # model_validate (NOT model_copy) so client values are coerced to field types —
     # e.g. float 30.0 → int 30; Postgres integer columns reject "30.0" (22P02)
     merged = AppSettings.model_validate({**current.model_dump(), **patch})
 
-    if not db or not db.available:
-        return SettingsSaveResult(
-            ok=False, settings=merged,
-            message="DB unavailable — settings not saved")
+    # Which AppSettings fields the read genuinely returned. On a first run
+    # there is no row and every field is legitimately "new".
+    known: set[str] = set(raw_row.keys()) if raw_row else set(AppSettings.model_fields)
+    unread: list[str] = sorted(set(AppSettings.model_fields) - known)
 
     try:
         row = merged.model_dump(mode="json")
+        # Partial write: keep only the patched fields + fields the read proved
+        # it had. Anything the read could not see is left alone in Postgres.
+        if raw_row is not None and unread:
+            keep = set(patch) | (known & set(AppSettings.model_fields))
+            row = {k: v for k, v in row.items() if k in keep}
+            log.warning("save_settings: read omitted %d column(s) (%s) — "
+                        "writing only the patched fields so the rest keep "
+                        "their stored values", len(unread),
+                        ", ".join(unread[:8]))
         row["id"] = 1
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
-        resp = db._client.table(SETTINGS_TABLE).upsert(row).execute()
-        if not resp.data:
+        resp, dropped = _upsert_settings_row(db, row)
+        if resp is None or not resp.data:
             return SettingsSaveResult(ok=False, settings=merged,
                                       message="upsert returned no data")
         # Capital regime change → reseed equity history. A 10k→100 change
@@ -278,9 +330,20 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
         except Exception as exc:
             log.warning("equity reseed on capital change failed: %s", exc)
         log_settings_change(db, current, merged, source="ui")
+        _note = "saved" + _apply_ai_overrides(merged)
+        if unread:
+            # Name up to 10. A shorter cap was a trap: `max_drawdown_pct`
+            # sorts late, so the one field that actually failed to read was
+            # exactly the one the warning failed to mention.
+            _names = (", ".join(unread[:10]) + ("..." if len(unread) > 10 else ""))
+            _note += (f" (อ่านค่าไม่ได้ {len(unread)} ช่อง: {_names} — "
+                      "เก็บค่าเดิมไว้ ไม่ได้ถูกรีเซ็ต)")
+        if dropped:
+            _note += (f" (ข้าม column ที่ยังไม่มี: {', '.join(dropped)} — "
+                      "รัน migration ที่เกี่ยวข้องใน Supabase SQL Editor "
+                      "เพื่อเปิดใช้ฟีเจอร์นี้)")
         return SettingsSaveResult(
-            ok=True, settings=_row_to_settings(resp.data[0]),
-            message="saved" + _apply_ai_overrides(merged))
+            ok=True, settings=_row_to_settings(resp.data[0]), message=_note)
     except Exception as exc:
         log.error("save app_settings failed: %s", exc)
         # PGRST204 = PostgREST schema cache miss — almost always a missing
