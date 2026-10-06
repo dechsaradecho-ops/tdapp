@@ -393,12 +393,18 @@ export interface SimWalkForwardCheck {
 export interface SimWalkForward {
   train_n?: number;
   test_n?: number;
+  gate?: { min_opp: number; min_conf: number };
+  gated_train_n?: number;
+  gated_test_n?: number;
   checks?: SimWalkForwardCheck[];
   winner?: { sl_mult: number; tp_r: number; max_bars: number; train_mean_r: number };
   test_mean_r?: number;
   test_win_rate_pct?: number;
   /** false = อันดับ 1 พังนอกตัวอย่าง = ตัวเลขที่ได้มาเป็นสัญญาณรบกวน */
   holds_out?: boolean;
+  /** กี่อันดับบนสุดที่ยังบวกอยู่หลังทดสอบนอกตัว */
+  survivors?: number;
+  candidates_checked?: number;
   error?: string;
 }
 
@@ -414,9 +420,40 @@ export interface SimPerAsset {
 }
 
 export interface SimMfeMae {
+  /** เซลล์กำแพงที่คำนวณ MFE/MAE (ค่าเป็น R จึงผูกกับเซลล์) */
+  cell?: string;
   mfe_p25: number; mfe_median: number; mfe_p75: number; mfe_p95: number; mfe_max: number;
   mae_p25: number; mae_median: number; mae_p75: number; mae_min: number;
   reached_1r_pct?: number; reached_1_5r_pct?: number; reached_2r_pct?: number;
+  error?: string;
+}
+
+export interface SimGateRow {
+  min_opp: number;
+  min_conf: number;
+  train_n: number;
+  train_mean_r: number;
+  test_n: number;
+  test_mean_r: number;
+  test_win_rate_pct: number;
+}
+
+/** ค่าที่ production ใช้อยู่ตอนนี้ เทียบบนข้อมูลชุดเดียวกัน */
+export interface SimBenchmark {
+  available: boolean;
+  reason?: string;
+  config?: {
+    sl_distance_mode?: string;
+    sl_atr_mult?: number;
+    sl_min_pct?: number;
+    sl_max_pct?: number;
+    rr_target?: number;
+    min_opportunity?: number;
+    min_confidence?: number;
+  };
+  train?: { n: number; mean_r: number; win_rate_pct: number };
+  test?: { n: number; mean_r: number; win_rate_pct: number };
+  positive_test?: boolean;
 }
 
 export interface SimResult {
@@ -427,11 +464,25 @@ export interface SimResult {
   bars?: number;
   /** จำนวนช่องที่การจัดอันดับแข่งขันจริง — ใช้อธิบายว่าทำไมอันดับ 1 ยังเชื่อไม่ได้ */
   grid_cells?: number;
+  gate_candidates?: number;
   top_paid?: SimCellRow[];
   top_worth?: SimCellRow[];
+  /** เกณฑ์กรองสัญญาณ — เลือกจากช่วงแรกเท่านั้น */
+  gate_sweep?: SimGateRow[];
+  best_gate?: {
+    min_opp: number;
+    min_conf: number;
+    selected_on: string;
+    train_mean_r: number | null;
+    test_mean_r: number | null;
+  };
   walk_forward?: SimWalkForward;
+  production_benchmark?: SimBenchmark;
   per_asset?: SimPerAsset[];
-  per_asset_cell?: { sl_mult: number; tp_r: number; max_bars: number };
+  per_asset_cell?: {
+    sl_mult: number; tp_r: number; max_bars: number;
+    gate?: { min_opp: number; min_conf: number };
+  };
   mfe_mae?: SimMfeMae;
   assets_seen?: string[];
   bars_by_asset?: Record<string, number>;

@@ -72,6 +72,48 @@ SL_MULTIPLES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 TP_RS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 MAX_BARS = (5, 10, 20)
 
+#: Signal-gate thresholds the sweep explores. The simulation NEVER reads these
+#: from production — a candidate config that inherited the live gate could
+#: never be evaluated independently of it, which is the whole point of running
+#: the simulation separately.
+GATE_OPPS = (0, 50, 60, 70)
+GATE_CONFS = (0, 60, 70, 80)
+
+
+def live_baseline(db) -> dict[str, Any]:
+    """What production is running RIGHT NOW, as a comparable config.
+
+    Read-only and used purely as the benchmark every candidate is scored
+    against. It is captured into the run row at START so the comparison stays
+    reproducible even after someone edits the live settings mid-run — a
+    baseline that moves under the experiment is not a baseline.
+
+    The barrier cell is reconstructed the way ``effective_sl_tp`` builds it:
+    the mode's ATR multiple, clamped to the configured band.
+    """
+    out: dict[str, Any] = {"source": "unavailable"}
+    try:
+        from app.api.routes.settings import try_load_settings
+        s = try_load_settings(db)
+        if s is None:
+            return out
+        from app.models.schemas import SL_TIER_MULT
+        mode = str(getattr(s, "sl_distance_mode", "") or "medium")
+        out.update({
+            "source": "db",
+            "sl_distance_mode": mode,
+            "sl_atr_mult": float(SL_TIER_MULT.get(mode, 1.5)),
+            "sl_min_pct": float(getattr(s, "sl_distance_min_pct", 0) or 0),
+            "sl_max_pct": float(getattr(s, "sl_distance_max_pct", 0) or 0),
+            "rr_target": float(getattr(s, "rr_target", 0) or 0),
+            "min_opportunity": float(getattr(s, "min_opportunity", 0) or 0),
+            "min_confidence": float(getattr(s, "min_confidence", 0) or 0),
+        })
+        return out
+    except Exception as exc:
+        out["error"] = str(exc)[:200]
+        return out
+
 #: How long a run and its events are kept. 14 days, not 7: a simulation is
 #: something the owner comes back to compare ("the last run said the opposite
 #: — which is right?"), so a week is barely enough to notice the difference.
@@ -121,8 +163,16 @@ def start_run(db, *, target_events: int = DEFAULT_TARGET,
               assets: Optional[list[str]] = None,
               days: int = 1095,
               sl_multiples=SL_MULTIPLES, tp_rs=TP_RS,
-              max_bars=MAX_BARS) -> dict[str, Any]:
-    """Register a run and hand it to the worker. Returns immediately."""
+              max_bars=MAX_BARS,
+              gate_opps=GATE_OPPS, gate_confs=GATE_CONFS) -> dict[str, Any]:
+    """Register a run and hand it to the worker. Returns immediately.
+
+    ``gate_opps`` / ``gate_confs`` are the SIMULATION's own thresholds. They
+    default to the exploration ladder, NOT to production — the owner asked
+    (2026-10-06) for the simulation to be judgeable separately from live
+    settings, so nothing here is inherited from the trading config. Production
+    is captured once as ``live_baseline`` purely to be scored against.
+    """
     if not db or not db.available:
         return {"ok": False, "error": "DB unavailable — cannot start a run"}
     live = active_run_id()
@@ -138,6 +188,10 @@ def start_run(db, *, target_events: int = DEFAULT_TARGET,
             "sl_multiples": [float(x) for x in sl_multiples],
             "tp_rs": [float(x) for x in tp_rs],
             "max_bars": [int(x) for x in max_bars],
+            "gate_opps": [float(x) for x in (gate_opps or GATE_OPPS)],
+            "gate_confs": [float(x) for x in (gate_confs or GATE_CONFS)],
+            # captured once, at start, so the benchmark cannot drift mid-run
+            "live_baseline": live_baseline(db),
         }
         db.insert(RUNS_TABLE, {
             "id": run_id,
@@ -434,83 +488,165 @@ def purge_old_runs(db, force: bool = False) -> int:
 # ---------------------------------------------------------------------------
 # Analysis (runs after every event is labelled)
 # ---------------------------------------------------------------------------
-def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Sweep the grid, then hold the ranking to a chronological test split.
+def _gate_pass(ev, min_opp: float, min_conf: float) -> bool:
+    return (float(ev.opportunity or 0) >= min_opp
+            and float(ev.confidence or 0) >= min_conf)
 
-    The split is not optional decoration. 192 cells ranked on one sample is a
-    192-way race, and the winner of such a race is positive even when there is
-    no edge at all — that is exactly what the first run of this study showed
-    (+0.101R in-sample collapsing to -0.061R out). Anything reported without
-    the out-of-sample number is a number that has not been tested.
+
+def _score(events, sl_mult: float, tp_r: float, max_bars: int,
+           min_opp: float, min_conf: float) -> dict[str, Any]:
+    """Mean R / win rate for one (barrier cell, gate) pair."""
+    from app.engine.triple_barrier import grid_key, summarise_cell, BarrierSpec, label_event
+
+    keep = [e for e in events if _gate_pass(e, min_opp, min_conf)]
+    rs: list[float] = []
+    for e in keep:
+        key = grid_key(sl_mult, tp_r, max_bars)
+        if key in e.outcomes:
+            rs.append(e.outcomes[key].r_multiple)
+            continue
+        atr = e.entry * e.atr_pct / 100.0
+        sp = BarrierSpec(sl_mult * atr, sl_mult * atr * tp_r, int(max_bars))
+        rs.append(label_event(e.direction, e.entry, sp, e.future).r_multiple)
+    n = len(rs)
+    return {
+        "n": n,
+        "mean_r": round(sum(rs) / n, 4) if n else 0.0,
+        "win_rate_pct": round(100.0 * sum(1 for x in rs if x > 0) / n, 1) if n else 0.0,
+    }
+
+
+def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Sweep the grid, then hold every ranking to a chronological test split.
+
+    The split is not optional decoration. Ranking 192 cells on one sample is a
+    192-way race, and the winner of such a race is positive even with no edge
+    at all — that is exactly what the first run of this study showed (+0.101R
+    in-sample collapsing to -0.061R out). Anything reported without the
+    out-of-sample number is a number that has not been tested.
+
+    SELECTION DISCIPLINE (owner 2026-10-06: "แยกค่า setting sim กับของจริง"):
+    every choice below is made on the TRAIN period only, then scored once on
+    TEST:
+      1. the gate (min_opportunity x min_confidence),
+      2. the barrier cell (SL x ATR, target R, clock).
+    Two independent selections rather than one search over the product,
+    because the product is 192 x 16 = 3,072 candidates and the winner of a
+    3,072-way race tells you nothing. Production is then scored the same way
+    as a benchmark, not as a candidate.
     """
     from app.engine.triple_barrier import summarise_cell, sweep_grid
 
     sl_mults = cfg.get("sl_multiples") or list(SL_MULTIPLES)
     tp_rs = cfg.get("tp_rs") or list(TP_RS)
     max_bars = cfg.get("max_bars") or list(MAX_BARS)
+    gate_opps = cfg.get("gate_opps") or list(GATE_OPPS)
+    gate_confs = cfg.get("gate_confs") or list(GATE_CONFS)
+    base = cfg.get("live_baseline") or {}
 
     min_n = max(30, len(events) // 20)
+    ordered = sorted(events, key=lambda e: (e.bar_index, e.asset))
+    cut = int(len(ordered) * 0.7)
+    train, test = ordered[:cut], ordered[cut:]
+    enough = len(train) >= 60 and len(test) >= 30
+
+    # ---- ungated views (what the whole grid looks like) ------------------
     by_paid = sweep_grid(events, sl_mults, tp_rs, max_bars, min_n=min_n)
     by_worth = sweep_grid(events, sl_mults, tp_rs, max_bars, min_n=min_n,
                           rank_by_resolved=True)
-
     verdict: dict[str, Any] = {
         "n_events": len(events),
         "min_n": min_n,
         "assets": sorted({e.asset for e in events}),
         "bars": cfg.get("days"),
         "cooldown": cfg.get("cooldown"),
-        # How many cells this ranking raced through. The UI needs the real
-        # number to explain WHY the winner is suspect — a hardcoded "192"
-        # would go stale the moment a preset changes and quietly keep making
-        # the same argument about a different search.
         "grid_cells": len(sl_mults) * len(tp_rs) * len(max_bars),
+        "gate_candidates": len(gate_opps) * len(gate_confs),
         "top_paid": [r.as_row() for r in by_paid[:12]],
         "top_worth": [r.as_row() for r in by_worth[:12]],
     }
 
-    ordered = sorted(events, key=lambda e: (e.bar_index, e.asset))
-    cut = int(len(ordered) * 0.7)
-    train, test = ordered[:cut], ordered[cut:]
-    if len(train) >= 60 and len(test) >= 30:
-        tr_rows = sweep_grid(train, sl_mults, tp_rs, max_bars,
-                             min_n=max(20, len(train) // 20))
-        if tr_rows:
-            checks = []
-            for r in tr_rows[:8]:
-                t = summarise_cell(test, r.sl_width, r.tp_r, r.max_bars)
-                d = t.as_row()
-                checks.append({"sl_mult": r.sl_width, "tp_r": r.tp_r,
-                               "max_bars": r.max_bars,
-                               "train_mean_r": round(r.mean_r, 4),
-                               "test_mean_r": d["mean_r"],
-                               "test_win_rate_pct": d["win_rate_pct"],
-                               "test_n": d["n"]})
-            win = tr_rows[0]
-            tst = summarise_cell(test, win.sl_width, win.tp_r, win.max_bars)
-            td = tst.as_row()
-            verdict["walk_forward"] = {
-                "train_n": len(train), "test_n": len(test),
-                "checks": checks,
-                "winner": {"sl_mult": win.sl_width, "tp_r": win.tp_r,
-                           "max_bars": win.max_bars,
-                           "train_mean_r": round(win.mean_r, 4)},
-                "test_mean_r": td["mean_r"],
-                "test_win_rate_pct": td["win_rate_pct"],
-                "holds_out": bool(td["mean_r"] > 0),
-            }
-    else:
+    if not enough:
         verdict["walk_forward"] = {"error": "เหตุการณ์ไม่พอสำหรับแบ่ง train/test"}
+        verdict["mfe_mae"] = _mfe_mae(events)
+        return verdict
 
-    # --- per asset, ranked on the TRAIN period only -----------------------
-    best = by_paid[0] if by_paid else None
-    if best and train:
+    # ---- stage 1: pick the gate on TRAIN only -----------------------------
+    # Averaged across every barrier cell, so the gate is chosen for how the
+    # signal behaves overall rather than for one lucky cell.
+    gate_rows = []
+    for mo in gate_opps:
+        for mc in gate_confs:
+            tr = _score(train, sl_mults[0], tp_rs[0], max_bars[-1], mo, mc)
+            if tr["n"] < 40:
+                continue
+            te = _score(test, sl_mults[0], tp_rs[0], max_bars[-1], mo, mc)
+            gate_rows.append({"min_opp": mo, "min_conf": mc,
+                              "train_n": tr["n"], "train_mean_r": tr["mean_r"],
+                              "test_n": te["n"], "test_mean_r": te["mean_r"],
+                              "test_win_rate_pct": te["win_rate_pct"]})
+    gate_rows.sort(key=lambda r: -r["train_mean_r"])
+    verdict["gate_sweep"] = gate_rows
+    best_gate = (gate_rows[0]["min_opp"], gate_rows[0]["min_conf"]) \
+        if gate_rows else (0.0, 0.0)
+    verdict["best_gate"] = {"min_opp": best_gate[0], "min_conf": best_gate[1],
+                            "selected_on": "train",
+                            "train_mean_r": gate_rows[0]["train_mean_r"]
+                            if gate_rows else None,
+                            "test_mean_r": gate_rows[0]["test_mean_r"]
+                            if gate_rows else None}
+
+    # ---- stage 2: pick the barrier cell on TRAIN only, gate fixed ---------
+    tr_events = [e for e in train if _gate_pass(e, *best_gate)]
+    te_events = [e for e in test if _gate_pass(e, *best_gate)]
+    tr_rows = sweep_grid(tr_events, sl_mults, tp_rs, max_bars,
+                         min_n=max(20, len(tr_events) // 20)) if tr_events else []
+    checks = []
+    for r in tr_rows[:8]:
+        te = summarise_cell(te_events, r.sl_width, r.tp_r, r.max_bars)
+        d = te.as_row()
+        checks.append({"sl_mult": r.sl_width, "tp_r": r.tp_r,
+                       "max_bars": r.max_bars,
+                       "train_mean_r": round(r.mean_r, 4),
+                       "test_mean_r": d["mean_r"],
+                       "test_win_rate_pct": d["win_rate_pct"],
+                       "test_n": d["n"]})
+    verdict["walk_forward"] = {
+        "train_n": len(train), "test_n": len(test),
+        "gate": {"min_opp": best_gate[0], "min_conf": best_gate[1]},
+        "gated_train_n": len(tr_events), "gated_test_n": len(te_events),
+        "checks": checks,
+    }
+    if tr_rows:
+        win = tr_rows[0]
+        tst = summarise_cell(te_events, win.sl_width, win.tp_r, win.max_bars)
+        td = tst.as_row()
+        verdict["walk_forward"].update({
+            "winner": {"sl_mult": win.sl_width, "tp_r": win.tp_r,
+                       "max_bars": win.max_bars,
+                       "train_mean_r": round(win.mean_r, 4)},
+            "test_mean_r": td["mean_r"],
+            "test_win_rate_pct": td["win_rate_pct"],
+            "test_n": td["n"],
+            "holds_out": bool(td["mean_r"] > 0),
+            "survivors": sum(1 for c in checks if c["test_mean_r"] > 0),
+            "candidates_checked": len(checks),
+        })
+
+    # ---- the benchmark: production, scored identically -------------------
+    verdict["production_benchmark"] = _score_production(train, test, base)
+
+    # ---- per asset at the train-selected cell ----------------------------
+    best = tr_rows[0] if tr_rows else (by_paid[0] if by_paid else None)
+    if best and te_events:
         per = []
         for asset in sorted({e.asset for e in events}):
-            a = [e for e in train if e.asset == asset]
-            b = [e for e in test if e.asset == asset]
+            a = [e for e in tr_events if e.asset == asset]
+            b = [e for e in te_events if e.asset == asset]
             ra = summarise_cell(a, best.sl_width, best.tp_r, best.max_bars)
             rb = summarise_cell(b, best.sl_width, best.tp_r, best.max_bars)
+            if not ra.n:
+                continue
             per.append({"asset": asset, "train_n": ra.n,
                         "train_mean_r": round(ra.mean_r, 4),
                         "train_win_rate_pct": round(100 * ra.win_rate, 1),
@@ -522,11 +658,66 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
         verdict["per_asset"] = per
         verdict["per_asset_cell"] = {"sl_mult": best.sl_width,
                                      "tp_r": best.tp_r,
-                                     "max_bars": best.max_bars}
+                                     "max_bars": best.max_bars,
+                                     "gate": verdict["best_gate"]}
 
     verdict["mfe_mae"] = _mfe_mae(events)
-    verdict["elapsed_s"] = None       # filled in by the caller's log line
     return verdict
+
+
+def _score_production(train: list, test: list, base: dict[str, Any]) -> dict[str, Any]:
+    """Score the LIVE config on the same data, same split.
+
+    The production stop is a percentage of price clamped to a band, so it is
+    not one ATR multiple — it is re-derived per event the way
+    ``effective_sl_tp`` does. Skipping this would leave the report comparing
+    candidates against nothing.
+    """
+    if not base or base.get("source") != "db":
+        return {"available": False,
+                "reason": base.get("error") or "live settings unavailable"}
+
+    mult = float(base.get("sl_atr_mult") or 1.5)
+    rr = float(base.get("rr_target") or 0)
+    lo = float(base.get("sl_min_pct") or 0) / 100.0
+    hi = float(base.get("sl_max_pct") or 0) / 100.0
+    mo = float(base.get("min_opportunity") or 0)
+    mc = float(base.get("min_confidence") or 0)
+    if rr <= 0:
+        return {"available": False, "reason": "rr_target not readable"}
+
+    from app.engine.triple_barrier import BarrierSpec, label_event
+
+    def run(events):
+        rs, n = [], 0
+        for e in events:
+            if not _gate_pass(e, mo, mc):
+                continue
+            dist = e.entry * (e.atr_pct / 100.0) * mult
+            if hi > 0 and dist > e.entry * hi:
+                dist = e.entry * hi
+            if lo > 0 and dist < e.entry * lo:
+                dist = e.entry * lo
+            sp = BarrierSpec(dist, dist * rr, 20)
+            res = label_event(e.direction, e.entry, sp, e.future)
+            if res.label == "pending":
+                continue
+            rs.append(res.r_multiple)
+            n += 1
+        return {"n": n,
+                "mean_r": round(sum(rs) / n, 4) if n else 0.0,
+                "win_rate_pct": round(100.0 * sum(1 for x in rs if x > 0) / n, 1)
+                if n else 0.0}
+
+    tr, te = run(train), run(test)
+    return {
+        "available": True,
+        "config": {k: base.get(k) for k in (
+            "sl_distance_mode", "sl_atr_mult", "sl_min_pct", "sl_max_pct",
+            "rr_target", "min_opportunity", "min_confidence")},
+        "train": tr, "test": te,
+        "positive_test": bool(te["mean_r"] > 0),
+    }
 
 
 def _mfe_mae(events: list) -> dict[str, Any]:

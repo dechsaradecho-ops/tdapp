@@ -536,6 +536,9 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
   const holds = wf?.holds_out;
   const testR = wf?.test_mean_r;
   const gridCells = res.grid_cells ?? 0;
+  const gate = res.gate_sweep;
+  const bestGate = res.best_gate;
+  const pb = res.production_benchmark;
 
   return (
     <>
@@ -572,8 +575,12 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
               (win rate {num(wf.test_win_rate_pct, 1)}%, n={int(wf.test_n)})
             </div>
             <p className="text-slate-400 mt-1">
-              การจัดอันดับ {int(gridCells)} ช่องบนข้อมูลชุดเดียวกัน
-              ได้ผู้ชนะที่บวกเสมอแม้ไม่มี edge — ตัวเลขนอกตัวอย่างคือตัวที่ผ่านการทดสอบจริง
+              การจัดอันดับ {int(gridCells)} ช่องกำแพง
+              {res.gate_candidates ? ` × ${int(res.gate_candidates)} เกณฑ์กรอง` : ""}
+              {" "}บนข้อมูลชุดเดียวกัน — ผู้ชนะจะบวกเสมอแม้ไม่มี edge
+              {wf?.candidates_checked
+                ? ` · จากที่ตรวจ ${int(wf.candidates_checked)} อันดับ ยังบวกนอกตัวอย่าง ${int(wf.survivors ?? 0)} อัน`
+                : ""}
             </p>
           </div>
         )}
@@ -581,7 +588,7 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
           <p className="text-xs text-slate-400 mb-2">{wf.error}</p>
         )}
 
-        {mfe && (
+        {mfe && mfe.mfe_median !== undefined && (
           <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
             <div className="text-xs font-bold text-slate-300 mb-1">
               เป้าหมายแตะได้จริงไหม (MFE — กำไรสูงสุดที่สัญญาณเสนอ)
@@ -597,11 +604,100 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
               <Kv k="ไปถึง ≥1.5R" v={`${num(mfe.reached_1_5r_pct, 0)}%`} />
               <Kv k="ไปถึง ≥2R" v={`${num(mfe.reached_2r_pct, 0)}%`} />
             </div>
+            {mfe.cell && (
+              <p className="text-[10px] text-slate-500 mt-1">คำนวณจากเซลล์ {mfe.cell}</p>
+            )}
             <p className="text-[10px] text-slate-500 mt-1">
-              ถ้ามัธยฐานใกล้ 0 แปลว่าสัญญาณครึ่งหนึ่งไม่เคยเคลื่อนเข้าหากำไรเลย
-              — ปัญหาอยู่ที่สัญญาณ ไม่ใช่ที่ SL/TP
+              ถ้าสัดส่วนที่ไปถึง ≥2R น้อยมาก แปลว่าเป้าหมายที่ตั้งไว้อยู่ไกลเกินสิ่งที่
+              สัญญาณให้จริง — ไม้ที่หมดเวลาโดยไม่ได้อะไรคือการผูกเงินทิ้งฟรี
             </p>
           </div>
+        )}
+
+        {/* ---- production benchmark: the config that is running right now,
+                scored on exactly the same data and split as every candidate.
+                Without this the table below is a list with nothing to compare
+                it to. ---- */}
+        {pb?.available && pb.train && pb.test && (
+          <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
+            <div className="text-xs font-bold text-slate-300 mb-1">
+              ค่าที่ระบบจริงใช้อยู่ตอนนี้ (เทียบบนข้อมูลชุดเดียวกัน)
+            </div>
+            <div className="text-[10px] text-slate-500 mb-1">
+              SL {pb.config?.sl_distance_mode} ({num(pb.config?.sl_atr_mult, 2)}×ATR,
+              clamp {num(pb.config?.sl_min_pct, 2)}–{num(pb.config?.sl_max_pct, 2)}%)
+              · เป้า {num(pb.config?.rr_target, 2)}R · gate
+              opp ≥{num(pb.config?.min_opportunity, 0)} conf ≥{num(pb.config?.min_confidence, 0)}
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-[11px]">
+              <Kv k="ช่วงแรก" v={`${signed(pb.train.mean_r, 3)}R (n=${int(pb.train.n)})`} />
+              <Kv k="ช่วงหลัง" v={
+                <span className={pb.test.mean_r > 0 ? "text-profit" : "text-loss"}>
+                  {signed(pb.test.mean_r, 3)}R (n={int(pb.test.n)})
+                </span>} />
+              <Kv k="WR ช่วงหลัง" v={`${num(pb.test.win_rate_pct, 1)}%`} />
+            </div>
+          </div>
+        )}
+        {pb && pb.available === false && (
+          <p className="text-[11px] text-slate-500 mb-2">
+            อ่านค่าของระบบจริงเพื่อใช้เทียบไม่ได้: {pb.reason}
+          </p>
+        )}
+
+        {/* ---- gate sweep: the simulation's own thresholds, never inherited
+                from production ---- */}
+        {gate && gate.length > 0 && (
+          <>
+            <h4 className="text-xs font-bold text-slate-300 mb-1">
+              เกณฑ์กรองสัญญาณ (เลือกจากช่วงแรกเท่านั้น — ไม่ใช่ค่าของระบบจริง)
+            </h4>
+            <div className="overflow-x-auto scroll-x-thin mb-3">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-slate-500 border-b border-slate-800">
+                    <th className="py-1.5 pr-3">minOpp</th>
+                    <th className="py-1.5 pr-3">minConf</th>
+                    <th className="py-1.5 pr-3">n ช่วงแรก</th>
+                    <th className="py-1.5 pr-3">R ช่วงแรก</th>
+                    <th className="py-1.5 pr-3">n ช่วงหลัง</th>
+                    <th className="py-1.5 pr-3">R ช่วงหลัง</th>
+                    <th className="py-1.5">WR ช่วงหลัง</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gate.map((g, i) => (
+                    <tr key={i}
+                        className={`border-b border-slate-800/50 ${
+                          i === 0 ? "bg-white/[0.05]" : ""}`}>
+                      <td className="py-1 pr-3">{num(g.min_opp, 0)}</td>
+                      <td className="py-1 pr-3">{num(g.min_conf, 0)}</td>
+                      <td className="py-1 pr-3">{int(g.train_n)}</td>
+                      <td className={`py-1 pr-3 font-bold ${
+                        g.train_mean_r > 0 ? "text-profit" : "text-loss"}`}>
+                        {signed(g.train_mean_r, 3)}
+                      </td>
+                      <td className="py-1 pr-3">{int(g.test_n)}</td>
+                      <td className={`py-1 pr-3 font-bold ${
+                        g.test_mean_r > 0 ? "text-profit" : "text-loss"}`}>
+                        {signed(g.test_mean_r, 3)}
+                      </td>
+                      <td className="py-1">{num(g.test_win_rate_pct, 1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {bestGate && (
+              <p className="text-[11px] text-slate-400 mb-3">
+                เลือกได้: opp ≥{num(bestGate.min_opp, 0)} conf ≥{num(bestGate.min_conf, 0)}
+                {" "}(เลือกจากช่วงแรก) → ช่วงหลัง {signed(bestGate.test_mean_r, 3)}R
+                {" "}{bestGate.test_mean_r !== null && bestGate.test_mean_r <= 0
+                  ? "— ยังไม่รอด"
+                  : "— รอด"}
+              </p>
+            )}
+          </>
         )}
 
         <h4 className="text-xs font-bold text-slate-300 mb-1">
@@ -692,7 +788,7 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
   );
 }
 
-function Kv({ k, v }: { k: string; v: string }) {
+function Kv({ k, v }: { k: string; v: React.ReactNode }) {
   return (
     <div className="flex justify-between gap-2">
       <span className="text-slate-500">{k}</span>
