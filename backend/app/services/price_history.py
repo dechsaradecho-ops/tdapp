@@ -113,14 +113,27 @@ def _validate(asset, bar_date, o, h, l, c, prev_close, today) -> list[str]:
 
 
 def _fetch(asset: str, days: int):
-    """Default fetch: Yahoo-first candle chain, same as the live replay."""
+    """Default fetch: Yahoo directly, same feed the live replay reads first.
+
+    Deliberately NOT `fetch_candles`: that entry point enforces a 30-bar
+    minimum for indicator math, which a 7-day forming-bar refresh can never
+    satisfy (5 daily bars). Routing history syncs through it meant every
+    small-span sync failed — the refresh path was dead code in production.
+    On Yahoo failure it falls back to the full chain (which keeps its
+    minimum, so a tiny span still reports instead of silently returning
+    nothing).
+    """
     import httpx
 
     from app.integrations import quotes
 
     async def _go():
         async with httpx.AsyncClient() as client:
-            return await quotes.fetch_candles(asset, client, days=days)
+            try:
+                return await quotes._fetch_yahoo_candles(
+                    asset, client, days=days)
+            except quotes.QuotesUnavailable:
+                return await quotes.fetch_candles(asset, client, days=days)
 
     return asyncio.run(_go())
 
@@ -215,8 +228,13 @@ def sync_asset(db, asset: str, days: int = 1095, fetch=None,
                 rep["invalid"].append({"bar_date": d,
                                        "reasons": [f"refresh_failed: {exc}"[:80]]})
         else:
+            # Tolerance matches the storage precision (round to 6dp): without
+            # it every re-fetched bar "conflicts" with its own rounded copy
+            # and each daily sync cries wolf. A genuine revision (>= 1e-6
+            # relative) still trips the report.
             try:
-                same = all(abs(float(old.get(k) or 0) - float(v)) < 1e-9
+                same = all(abs(float(old.get(k) or 0) - float(v))
+                           <= 1e-6 * max(abs(float(v)), 1.0)
                            for k, v in (("open", o), ("high", h),
                                         ("low", l), ("close", c)))
             except (TypeError, ValueError):

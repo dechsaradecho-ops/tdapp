@@ -159,6 +159,33 @@ class TestSyncIncremental:
         reasons = {r["bar_date"]: r["reasons"] for r in rep["invalid"]}
         assert reasons["2026-10-05"] == ["spike_suspect"]
 
+    def test_rounding_dust_is_not_a_conflict(self):
+        """Stored bars are rounded to 6dp; a reprint differing only in the
+        7th decimal is the same bar, not a revision. Without this tolerance
+        every daily sync reported phantom conflicts."""
+        db = HistDB()
+        db.insert(price_history.TABLE, bar("2026-09-30"))
+
+        def fetch(asset, span):
+            dusty = _candle("2026-09-30", c=1.1050004, o=1.1000002,
+                            h=1.1100001, l=1.0899998)
+            return [dusty, _candle("2026-10-01")]
+
+        rep = price_history.sync_asset(db, "EURUSD", fetch=fetch, _today=TODAY)
+        assert rep["conflicts"] == []
+        assert rep["skipped"] == 1 and rep["inserted"] == 1
+
+    def test_a_real_revision_still_reports(self):
+        db = HistDB()
+        db.insert(price_history.TABLE, bar("2026-09-30"))
+
+        def fetch(asset, span):
+            return [_candle("2026-09-30", c=1.19, h=1.20),
+                    _candle("2026-10-01")]
+
+        rep = price_history.sync_asset(db, "EURUSD", fetch=fetch, _today=TODAY)
+        assert len(rep["conflicts"]) == 1
+
     def test_a_frozen_bar_is_never_overwritten(self):
         """The feed reprints 09-30 with a different close: report the
         conflict, keep the stored bar. Reproducibility beats freshness."""
@@ -190,6 +217,41 @@ class TestSyncIncremental:
         stored = db.select(price_history.TABLE,
                            filters={"asset": "EURUSD", "bar_date": "2026-10-06"})
         assert stored and float(stored[0]["close"]) == 1.12
+
+    def test_small_spans_bypass_the_30_bar_live_minimum(self, monkeypatch):
+        """The forming-bar refresh fetches a 7-day span (~5 bars). Going
+        through fetch_candles would raise 'only N candles' every time, which
+        is exactly how the refresh path silently died in production."""
+        import app.services.price_history as ph
+
+        seen = {}
+
+        async def fake_yahoo(asset, client, days=40):
+            seen["days"] = days
+            return [_candle("2026-10-06")]
+
+        async def boom(asset, client, days=40):
+            raise AssertionError("fallback chain must not run on success")
+
+        monkeypatch.setattr("app.integrations.quotes._fetch_yahoo_candles",
+                            fake_yahoo)
+        monkeypatch.setattr("app.integrations.quotes.fetch_candles", boom)
+        out = ph._fetch("EURUSD", 7)
+        assert len(out) == 1 and seen["days"] == 7
+
+    def test_yahoo_failure_falls_back_to_the_full_chain(self, monkeypatch):
+        import app.integrations.quotes as q
+        import app.services.price_history as ph
+
+        async def fail(asset, client, days=40):
+            raise q.QuotesUnavailable("yahoo down")
+
+        async def chain(asset, client, days=40):
+            return [_candle("2026-10-06")]
+
+        monkeypatch.setattr(q, "_fetch_yahoo_candles", fail)
+        monkeypatch.setattr(q, "fetch_candles", chain)
+        assert len(ph._fetch("EURUSD", 7)) == 1
 
     def test_db_down_and_fetch_down_are_reports_not_crashes(self):
         db = HistDB()
