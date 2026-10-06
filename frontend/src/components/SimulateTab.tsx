@@ -87,6 +87,10 @@ export default function SimulateTab() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runIdRef = useRef<string | null>(null);
   runIdRef.current = runId;
+  // Which run the events on screen belong to. seq counts alone cannot tell
+  // runs apart (two finished runs both end at seq 5000), so without this a
+  // switch between two completed runs would keep showing the old trace.
+  const loadedIdRef = useRef<string | null>(null);
 
   // ---- running aggregates, derived from the stream -----------------------
   // Kept client-side on purpose: the server would have to re-read every event
@@ -134,10 +138,15 @@ export default function SimulateTab() {
     if (!id) return;
     try {
       const st = await api.simRun(id);
+      // The user may have clicked another run while this request was in
+      // flight — dropping a late response beats showing run A's verdict
+      // under run B's header.
+      if (runIdRef.current !== id) return;
       setRun({ ...st, result: st.result || {} });
 
       // Reset the trace when switching to a different run.
-      if (seqRef.current > st.processed && st.processed > 0) {
+      if (loadedIdRef.current !== id) {
+        loadedIdRef.current = id;
         seqRef.current = 0;
         setEvents([]);
       }
@@ -146,6 +155,7 @@ export default function SimulateTab() {
       // Drain in pages so a fast run cannot outrun a single request.
       for (;;) {
         const page = await api.simEvents(id, seqRef.current, PAGE);
+        if (runIdRef.current !== id) return;
         if (!page.events?.length) break;
         setEvents((prev) => [...prev, ...page.events].slice(-6000));
         seqRef.current = page.events[page.events.length - 1].seq;
@@ -159,6 +169,14 @@ export default function SimulateTab() {
       setErr(String(e));
     }
   }, [loadRuns]);
+
+  const selectRun = useCallback((id: string) => {
+    if (id === runIdRef.current && loadedIdRef.current === id) return;
+    seqRef.current = 0;
+    setEvents([]);
+    setRun(null);
+    setRunId(id);
+  }, []);
 
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -269,6 +287,25 @@ export default function SimulateTab() {
       {/* ---------------- progress + live counters ---------------- */}
       {run && (
         <section className="panel p-4">
+          {/* Which run is on screen — past results load here when picked
+              from the history below, so the header has to say so. */}
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <span className="text-xs text-slate-400">
+              {runs.length > 1 && runId !== runs[0]?.id
+                ? `กำลังดูผลรันเก่า (${run.created_at
+                    ? String(run.created_at).slice(5, 16).replace("T", " ")
+                    : run.id.slice(0, 8)}) — ไม่ใช่งานล่าสุด`
+                : `ผลรัน (${run.created_at
+                    ? String(run.created_at).slice(5, 16).replace("T", " ")
+                    : run.id.slice(0, 8)})`}
+            </span>
+            {runs.length > 1 && runId !== runs[0]?.id && (
+              <button onClick={() => selectRun(runs[0].id)}
+                className="text-[11px] px-2 py-1 rounded border border-slate-700 text-slate-300 min-h-[32px]">
+                ← กลับไปงานล่าสุด
+              </button>
+            )}
+          </div>
           <div className="flex items-center justify-between text-xs mb-1">
             <span className="text-slate-300">
               ขั้นตอน: <span className="text-white font-bold">
@@ -366,9 +403,14 @@ export default function SimulateTab() {
       )}
 
       {/* ---------------- run history ---------------- */}
+      {/* Every past run stays here with its verdict summary; tapping a row
+          loads the FULL result (chart + trade trace + verdict tables) into
+          the sections above. */}
       {runs.length > 0 && (
         <section className="panel p-4">
-          <h3 className="panel-title">ประวัติการจำลอง</h3>
+          <h3 className="panel-title">
+            ประวัติการจำลอง ({runs.length}) — แตะแถวเพื่อดูผลเต็ม
+          </h3>
           <div className="overflow-x-auto scroll-x-thin">
             <table className="w-full text-xs">
               <thead>
@@ -376,22 +418,25 @@ export default function SimulateTab() {
                   <th className="py-2 pr-3">เวลา</th>
                   <th className="py-2 pr-3">สถานะ</th>
                   <th className="py-2 pr-3">ตัวอย่าง</th>
-                  <th className="py-2 pr-3">ช่องที่รอด</th>
+                  <th className="py-2 pr-3">ช่องดีสุด</th>
                   <th className="py-2 pr-3">เป้าหมาย</th>
-                  <th className="py-2">ผล</th>
+                  <th className="py-2 pr-3">ผลนอกตัว</th>
+                  <th className="py-2">ดูผล</th>
                 </tr>
               </thead>
               <tbody>
                 {runs.map((r) => {
                   const w = r.result?.walk_forward;
                   const top = r.result?.top_paid?.[0];
+                  const selected = r.id === runId;
                   return (
                     <tr key={r.id}
-                        onClick={() => { seqRef.current = 0; setEvents([]); setRunId(r.id); }}
+                        onClick={() => selectRun(r.id)}
                         className={`border-b border-slate-800/50 hover:bg-white/[0.04] cursor-pointer ${
-                          r.id === runId ? "bg-white/[0.06]" : ""}`}>
+                          selected ? "bg-white/[0.06]" : ""}`}>
                       <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap">
                         {r.created_at ? String(r.created_at).slice(5, 16).replace("T", " ") : "—"}
+                        {selected && <span className="text-accent"> ●</span>}
                       </td>
                       <td className="py-1.5 pr-3">
                         <span className={r.status === "done" ? "text-profit"
@@ -404,12 +449,17 @@ export default function SimulateTab() {
                         {top ? `${num(top.sl_pct, 2)}×ATR` : "—"}
                       </td>
                       <td className="py-1.5 pr-3">{top ? `${num(top.tp_r, 2)}R` : "—"}</td>
-                      <td className="py-1.5">
+                      <td className="py-1.5 pr-3">
                         {w && w.holds_out !== undefined
                           ? (w.holds_out
                             ? <span className="text-profit">รอด {signed(w.test_mean_r, 3)}R</span>
                             : <span className="text-loss">พัง {signed(w.test_mean_r, 3)}R</span>)
                           : "—"}
+                      </td>
+                      <td className="py-1.5">
+                        <span className="px-2 py-1 rounded border border-slate-700 text-slate-300 whitespace-nowrap">
+                          {selected ? "กำลังดู" : "ดูผล"}
+                        </span>
                       </td>
                     </tr>
                   );
