@@ -1266,9 +1266,32 @@ class TestPositionGuardManagement:
 
     @pytest.fixture(autouse=True)
     def _no_network_spot(self, monkeypatch):
+        """No live market data may reach this class.
+
+        BOTH feeds have to be stubbed. ``fetch_spot_prices`` drives the mark
+        price, but ``fetch_all_snapshots`` drives Smart Exit — and leaving it
+        live made the suite depend on what EURUSD was doing on the day it
+        ran: with Yahoo reachable, ``guard_once`` pulled a real snapshot and
+        ``smart_exit`` fired ``reversal`` on it, closing the fixture position
+        at a real-world price (1.1222) instead of the test's (1.1000). Twelve
+        tests here failed for that reason alone with the code under test
+        untouched.
+
+        An EMPTY snapshot dict is the guard's own documented blind-HOLD path
+        (``skip_assets: "EURUSD:no_snapshot"``) — the correct default for a
+        class that tests breakeven / trailing / partial-close, and the state
+        production falls back to whenever the feed is down. Tests that
+        actually exercise Smart Exit inject their own snapshot.
+        """
         async def fake_spot(assets, **_kw):
             return {a: 1.2500 for a in assets}, {}
+
+        async def fake_snaps(assets, **_kw):
+            return {}
+
         monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(position_guard.quotes, "fetch_all_snapshots",
+                            fake_snaps)
 
     def _broker(self, entry=1.1000, sl=1.0900, tp=None, volume=0.02):
         from app.integrations.brokers import Position
@@ -1584,7 +1607,12 @@ class TestPositionGuardManagement:
         assert summary["sl_assets"] == "EURUSD@1.09>1.1"
         # ไม่มีการปิด/ข้ามในรอบนี้ → list ว่าง (หน้าเว็บไม่โชว์ chip)
         assert summary["closed_assets"] == ""
-        assert summary["skip_assets"] == ""
+        # The ONLY permitted skip is the guard's documented blind-HOLD when no
+        # indicator snapshot is available (see the `_no_network_spot` fixture).
+        # Asserting a bare "" here would mean the test depends on Yahoo being
+        # up — which is exactly the flake this fixture exists to remove.
+        assert [s for s in summary["skip_assets"].split(",") if s
+                and s != "EURUSD:no_snapshot"] == []
 
     @pytest.mark.asyncio
     async def test_trailing_audit_shows_old_and_new_sl(self):
