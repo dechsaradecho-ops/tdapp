@@ -444,6 +444,18 @@ class TestRunLifecycle:
         assert events, "no events persisted"
         assert row["result"], "no verdict written"
 
+    def test_final_verdict_keeps_the_history_report(self, monkeypatch):
+        """The replaying-stage patch writes result.history, but _finish
+        REPLACES the whole result JSON with the verdict — without merging,
+        the verdict (and the tab's history line) silently loses it."""
+        db = FakeDB()
+        row, _ = self._run(db, monkeypatch)
+        hist = (row.get("result") or {}).get("history")
+        assert isinstance(hist, dict), \
+            "history validation report did not survive into the verdict"
+        # this class forces the fallback path, so the report must say so
+        assert hist.get("source", "").startswith("direct fetch")
+
     def test_every_event_carries_the_label_and_the_r(self, monkeypatch):
         db = FakeDB()
         _, events = self._run(db, monkeypatch)

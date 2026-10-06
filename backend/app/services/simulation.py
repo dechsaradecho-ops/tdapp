@@ -327,6 +327,12 @@ def _run_job(db, run_id: str, cfg: dict[str, Any]) -> None:
 
         _patch(db, run_id, stage="analysing", processed=total)
         verdict = _analyse(events, cfg)
+        # The history validation report was written at the replaying stage,
+        # but _finish REPLACES the whole result JSON — without this line the
+        # verdict (and the tab's history line) silently loses it — same class
+        # of bug as the settings partial-write fix: merge, don't replace.
+        if isinstance(history_report, dict):
+            verdict["history"] = history_report
         _finish(db, run_id, "done", cancel, t0, result=verdict)
     except Exception as exc:                       # noqa: BLE001 - must not kill the pool
         log.exception("simulation run %s failed", run_id)
