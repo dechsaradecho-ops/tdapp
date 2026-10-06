@@ -1037,3 +1037,199 @@ async def settings_changes(request: Request, limit: int = 100,
     out["has_more"] = (page_offset + len(rows)) < (out["total"] or 0)
     out["verdict"] = "ok"
     return out
+
+
+# ---------------------------------------------------------------------------
+# Barrier simulation — Logs > Simulate (migration 057)
+#
+# A 5,000-event replay is CPU-bound for minutes, so it cannot live in a
+# request: POST starts a job on a single-worker pool and returns immediately,
+# and the UI polls the run + streams labelled events as they land. See
+# app/services/simulation.py for why every event is persisted.
+# ---------------------------------------------------------------------------
+@router.post("/simulate")
+async def start_simulation(request: Request,
+                           payload: Optional[dict[str, Any]] = None) -> dict:
+    """Start a barrier-simulation run. 409-equivalent while one is live."""
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    body = payload or {}
+    try:
+        target = max(50, min(int(body.get("target_events")
+                                  or simulation.DEFAULT_TARGET), 20000))
+        cooldown = max(0, min(int(body.get("cooldown")
+                                    if body.get("cooldown") is not None
+                                    else simulation.DEFAULT_COOLDOWN), 30))
+        days = max(180, min(int(body.get("days") or 1095), 3650))
+        assets = body.get("assets")
+        if not isinstance(assets, list) or not assets:
+            assets = None
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "ค่าที่ส่งมาไม่ถูกต้อง"}
+
+    res = simulation.start_run(db, target_events=target, cooldown=cooldown,
+                               assets=assets, days=days)
+    if not res.get("ok"):
+        return res
+    res["verdict"] = "ok"
+    return res
+
+
+@router.get("/simulate")
+async def list_simulations(request: Request, limit: int = 20) -> dict:
+    """Recent runs, newest first. Also reports which run is live."""
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        out["runs"] = []
+        return out
+    try:
+        rows = db.select(simulation.RUNS_TABLE, order="created_at", desc=True,
+                         limit=max(1, min(limit, 100)))
+    except Exception as exc:
+        out["verdict"] = "fail"
+        out["setup_required"] = True
+        out["error"] = str(exc)
+        out["hint"] = ("ยังไม่มีตาราง simulation_runs — รัน "
+                       "database/057_simulation_runs.sql ใน Supabase SQL Editor")
+        out["runs"] = []
+        return out
+    out["runs"] = [_sim_run_row(r) for r in rows]
+    out["active_run_id"] = simulation.active_run_id()
+    out["verdict"] = "ok"
+    return out
+
+
+@router.get("/simulate/{run_id}")
+async def simulation_status(request: Request, run_id: str) -> dict:
+    """Status + stage + partial verdict for one run."""
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        return out
+    try:
+        rows = db.select(simulation.RUNS_TABLE, filters={"id": run_id}, limit=1)
+    except Exception as exc:
+        out["verdict"] = "fail"
+        out["error"] = str(exc)
+        return out
+    if not rows:
+        out["verdict"] = "fail"
+        out["error"] = "ไม่พบงานรันนี้"
+        return out
+    out.update(_sim_run_row(rows[0]))
+    out["live_stats"] = _sim_live_stats(db, run_id)
+    out["verdict"] = "ok"
+    return out
+
+
+@router.get("/simulate/{run_id}/events")
+async def simulation_events(request: Request, run_id: str,
+                            after: int = 0, limit: int = 500) -> dict:
+    """Labelled events after ``after`` — the live TP/SL/PnL trace.
+
+    ``after`` is a seq cursor, so polling is incremental rather than
+    re-fetching the whole run every second.
+    """
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    out: dict[str, Any] = {"client": "ok" if db.available else "unavailable"}
+    if not db.available:
+        out["verdict"] = "fail"
+        out["error"] = db.init_error or "client unavailable"
+        out["events"] = []
+        return out
+    page = max(1, min(limit, 2000))
+    try:
+        rows = db._client.table(simulation.EVENTS_TABLE).select(
+            "seq, asset, direction, entry, atr_pct, opportunity, confidence, "
+            "sl_mult, tp_r, max_bars, label, r_multiple, bars_held, "
+            "exit_price, ambiguous, mfe_r, mae_r"
+        ).eq("run_id", run_id).gt("seq", max(0, after)) \
+            .order("seq").limit(page).execute()
+    except Exception as exc:
+        out["verdict"] = "fail"
+        out["error"] = str(exc)
+        out["events"] = []
+        return out
+    out["events"] = [
+        {
+            "seq": r.get("seq"), "asset": r.get("asset"),
+            "direction": r.get("direction"), "entry": r.get("entry"),
+            "atr_pct": r.get("atr_pct"), "opportunity": r.get("opportunity"),
+            "confidence": r.get("confidence"), "sl_mult": r.get("sl_mult"),
+            "tp_r": r.get("tp_r"), "max_bars": r.get("max_bars"),
+            "label": r.get("label"), "r_multiple": r.get("r_multiple"),
+            "bars_held": r.get("bars_held"), "exit_price": r.get("exit_price"),
+            "ambiguous": bool(r.get("ambiguous")), "mfe_r": r.get("mfe_r"),
+            "mae_r": r.get("mae_r"),
+        }
+        for r in (rows.data or [])
+    ]
+    out["after"] = after
+    out["more"] = len(out["events"]) >= page
+    out["verdict"] = "ok"
+    return out
+
+
+@router.post("/simulate/{run_id}/cancel")
+async def cancel_simulation(request: Request, run_id: str) -> dict:
+    """Cooperative stop — the worker checks the flag between batches."""
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    if not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    if simulation.request_cancel(run_id):
+        return {"ok": True, "message": "สั่งหยุดแล้ว — จะจบที่ชิดรอบถัดไป"}
+    return {"ok": False, "error": "งานนี้ไม่ได้รันอยู่แล้ว หรือหยุดไปแล้ว"}
+
+
+def _sim_run_row(r: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": r.get("id"),
+        "status": r.get("status"),
+        "stage": r.get("stage"),
+        "target_events": r.get("target_events"),
+        "total_events": r.get("total_events"),
+        "processed": r.get("processed"),
+        "config": r.get("config") or {},
+        "result": r.get("result") or {},
+        "error": r.get("error"),
+        "started_at": r.get("started_at"),
+        "finished_at": r.get("finished_at"),
+        "created_at": r.get("created_at"),
+    }
+
+
+def _sim_live_stats(db, run_id: str) -> dict[str, Any]:
+    """Running TP / SL / expired counts for the progress bar.
+
+    Deliberately three COUNT queries rather than "SELECT every event and sum
+    in Python": the UI polls this every second, and at 5,000 rows that read
+    would cost more than the run's entire analysis. Cumulative R and the
+    equity curve are derived client-side from the event stream the tab is
+    already pulling incrementally — the numbers are the same, the transfer is
+    not.
+    """
+    out: dict[str, Any] = {"n": 0, "tp": 0, "sl": 0, "expired": 0}
+    from app.services.simulation import EVENTS_TABLE
+    for label in ("tp", "sl", "expired"):
+        try:
+            out[label] = int(db.count(EVENTS_TABLE, {"run_id": run_id,
+                                                     "label": label}) or 0)
+        except Exception as exc:
+            out["error"] = str(exc)
+            return out
+        out["n"] += out[label]
+    return out

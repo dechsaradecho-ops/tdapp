@@ -1,0 +1,702 @@
+"use client";
+
+/**
+ * Logs > จำลอง — barrier simulation panel.
+ *
+ * WHY A DEDICATED COMPONENT (owner 2026-10-06)
+ * ---------------------------------------------
+ * The owner asked for a "run 5,000 samples" button with a live progress bar
+ * and a running TP/SL/PnL trace. That is three different concerns — job
+ * control, a streaming chart, and a result report — and folding them into the
+ * 2,200-line logs page would have made both harder to read, so this is its
+ * own file and the page just renders <SimulateTab />.
+ *
+ * THE HONESTY RULE BAKED IN
+ * -------------------------
+ * The panel never shows an in-sample number without the out-of-sample one
+ * next to it. Ranking 192 grid cells on a single sample is a 192-way race and
+ * its winner is positive even with no edge at all — the first run of this
+ * study produced +0.101R in-sample that collapsed to −0.061R out. When the
+ * walk-forward says the ranking was noise, the panel says so in the verdict
+ * box instead of burying it under a green number.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import Icon from "@/components/Icon";
+import { api } from "@/lib/api";
+import type { SimCellRow, SimEvent, SimLabel, SimResult, SimRun } from "@/lib/types";
+
+const POLL_MS = 1000;
+const PAGE = 500;
+
+const STAGE_TH: Record<string, string> = {
+  queued: "เข้าคิว",
+  fetching: "ดึงราคาย้อนหลัง",
+  replaying: "เล่นสัญญาณย้อนหลัง",
+  labelling: "คำนวณ TP / SL / PnL",
+  analysing: "วิเคราะห์ผล",
+  running: "กำลังรัน",
+  done: "เสร็จแล้ว",
+  failed: "ล้มเหลว",
+  cancelled: "ถูกหยุด",
+};
+
+/** Bar colour + Thai label for each barrier outcome. */
+const LABEL_TH: Record<SimLabel, string> = {
+  tp: "TP",
+  sl: "SL",
+  expired: "หมดเวลา",
+  pending: "รอข้อมูล",
+};
+
+const LABEL_COLOR: Record<SimLabel, string> = {
+  tp: "text-profit",
+  sl: "text-loss",
+  expired: "text-slate-400",
+  pending: "text-slate-500",
+};
+
+const num = (v: unknown, d = 2): string => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(d) : "—";
+};
+const signed = (v: unknown, d = 3): string => {
+  const n = Number(v);
+  return Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(d)}` : "—";
+};
+const int = (v: unknown): string => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString("th-TH") : "—";
+};
+
+export default function SimulateTab() {
+  const [runs, setRuns] = useState<SimRun[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [run, setRun] = useState<SimRun | null>(null);
+  const [events, setEvents] = useState<SimEvent[]>([]);
+  const [starting, setStarting] = useState(false);
+  const [err, setErr] = useState("");
+  const [hint, setHint] = useState("");
+  const [target, setTarget] = useState(5000);
+  const [cooldown, setCooldown] = useState(1);
+  const [days, setDays] = useState(1095);
+  const [follow, setFollow] = useState(true);
+  const logRef = useRef<HTMLDivElement | null>(null);
+
+  const seqRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const runIdRef = useRef<string | null>(null);
+  runIdRef.current = runId;
+
+  // ---- running aggregates, derived from the stream -----------------------
+  // Kept client-side on purpose: the server would have to re-read every event
+  // row each poll to produce the same numbers.
+  const stats = useMemo(() => {
+    let tp = 0, sl = 0, ex = 0, wins = 0, sum = 0;
+    const curve: number[] = [];
+    for (const e of events) {
+      const r = Number(e.r_multiple || 0);
+      if (e.label === "tp") tp++;
+      else if (e.label === "sl") sl++;
+      else if (e.label === "expired") ex++;
+      sum += r;
+      if (r > 0) wins++;
+      curve.push(sum);
+    }
+    const n = events.length;
+    return {
+      n, tp, sl, ex, wins, sum,
+      meanR: n ? sum / n : 0,
+      wr: n ? (100 * wins) / n : 0,
+      curve,
+    };
+  }, [events]);
+
+  const loadRuns = useCallback(async () => {
+    try {
+      const r = await api.simRuns(20);
+      setRuns(r.runs || []);
+      setHint(r.setup_required ? r.hint || "" : "");
+      if (r.active_run_id) setRunId((cur) => cur ?? r.active_run_id!);
+      if (!r.active_run_id && r.runs?.length && !runIdRef.current) {
+        setRunId(r.runs[0].id);
+      }
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, []);
+
+  useEffect(() => { void loadRuns(); }, [loadRuns]);
+
+  // ---- poll the run + stream events --------------------------------------
+  const pull = useCallback(async () => {
+    const id = runIdRef.current;
+    if (!id) return;
+    try {
+      const st = await api.simRun(id);
+      setRun({ ...st, result: st.result || {} });
+
+      // Reset the trace when switching to a different run.
+      if (seqRef.current > st.processed && st.processed > 0) {
+        seqRef.current = 0;
+        setEvents([]);
+      }
+
+      let guard = 0;
+      // Drain in pages so a fast run cannot outrun a single request.
+      for (;;) {
+        const page = await api.simEvents(id, seqRef.current, PAGE);
+        if (!page.events?.length) break;
+        setEvents((prev) => [...prev, ...page.events].slice(-6000));
+        seqRef.current = page.events[page.events.length - 1].seq;
+        if (!page.more || guard++ > 40) break;
+      }
+
+      if (st.status === "done" || st.status === "failed" || st.status === "cancelled") {
+        void loadRuns();
+      }
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, [loadRuns]);
+
+  useEffect(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (!runId) return;
+    void pull();
+    const live = run && (run.status === "pending" || run.status === "running");
+    if (live) timerRef.current = setInterval(() => { void pull(); }, POLL_MS);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, run?.status]);
+
+  // Auto-scroll the live trade log to the newest row.
+  useEffect(() => {
+    if (follow && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [events, follow]);
+
+  const start = async () => {
+    setStarting(true);
+    setErr("");
+    try {
+      const res = await api.simStart({
+        target_events: target,
+        cooldown,
+        days,
+      });
+      if (!res.ok) {
+        setErr(res.error || "เริ่มไม่สำเร็จ");
+        return;
+      }
+      seqRef.current = 0;
+      setEvents([]);
+      setRun(null);
+      setRunId(res.run_id!);
+      await loadRuns();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const cancel = async () => {
+    if (!runId) return;
+    try {
+      const res = await api.simCancel(runId);
+      if (!res.ok) setErr(res.error || "หยุดไม่สำเร็จ");
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const busy = run?.status === "pending" || run?.status === "running";
+  const pct = run && run.target_events
+    ? Math.min(100, Math.round((100 * run.processed) / run.target_events))
+    : run?.total_events
+      ? Math.min(100, Math.round((100 * run.processed) / run.total_events))
+      : 0;
+
+  const res = run?.result || {};
+  const wf = res.walk_forward;
+
+  return (
+    <div className="space-y-3">
+      {/* ---------------- controls ---------------- */}
+      <section className="panel p-4">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <h2 className="panel-title mb-0">
+            <Icon n="bot" size={14} className="inline mr-1" />
+            จำลองสัญญาณด้วย Triple Barrier
+          </h2>
+        </div>
+        <p className="text-xs text-slate-400 mb-3">
+          ดึงราคาย้อนหลังจริง เล่นเครื่องสร้างสัญญาณตัวเดียวกับตอนเทรดจริง
+          แล้ววางกำแพง TP/SL หลายขนาดลงไปดูว่าตลาดแตะกำแพงไหนก่อน
+          {" "}— เพื่อหาว่า SL กว้างพอดีเท่าไหร่ และเป้าหมายที่กี่ R
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+          <Field label="จำนวนตัวอย่าง" value={target} min={50} max={20000}
+                 onChange={setTarget} />
+          <Field label="คั่งกันซ้ำ (แท่ง)" value={cooldown} min={0} max={30}
+                 onChange={setCooldown} />
+          <Field label="ย้อนหลัง (วัน)" value={days} min={180} max={3650}
+                 onChange={setDays} />
+          <div className="flex items-end">
+            <button onClick={start} disabled={starting || !!busy}
+              className="w-full px-4 py-2 rounded bg-accent text-white font-bold disabled:opacity-50 min-h-[40px]">
+              {starting ? "กำลังเริ่ม..." : busy ? "กำลังรันอยู่" : "รันจำลอง"}
+            </button>
+          </div>
+        </div>
+        {busy && (
+          <button onClick={cancel}
+            className="px-3 py-1.5 rounded border border-loss text-loss text-xs min-h-[36px]">
+            หยุด
+          </button>
+        )}
+        {hint && (
+          <p className="mt-3 text-xs text-amber-300 rounded border border-amber-400/25 bg-amber-400/10 p-2">
+            {hint}
+          </p>
+        )}
+        {err && <p className="mt-2 text-loss text-sm">{err}</p>}
+        {run?.error && (
+          <p className="mt-2 text-loss text-xs">รันไม่สำเร็จ: {run.error}</p>
+        )}
+      </section>
+
+      {/* ---------------- progress + live counters ---------------- */}
+      {run && (
+        <section className="panel p-4">
+          <div className="flex items-center justify-between text-xs mb-1">
+            <span className="text-slate-300">
+              ขั้นตอน: <span className="text-white font-bold">
+                {STAGE_TH[run.stage] || run.stage}
+              </span>
+              {run.status === "running" && (
+                <span className="text-accent ml-2 animate-pulse">●</span>
+              )}
+            </span>
+            <span className="text-slate-400">
+              {int(run.processed)}
+              {run.target_events ? ` / ${int(run.target_events)}` : ""} ตัวอย่าง
+              {run.total_events ? ` (มีประวัติให้ ${int(run.total_events)})` : ""}
+            </span>
+          </div>
+          <div className="h-2.5 rounded bg-slate-800 overflow-hidden">
+            <div
+              className={`h-full transition-all duration-500 ${
+                run.status === "failed" ? "bg-loss"
+                  : run.status === "cancelled" ? "bg-slate-500"
+                  : "bg-accent"}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <div className="text-[10px] text-slate-500 mt-1">{pct}%</div>
+
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mt-3">
+            <Metric label="ตัวอย่าง" value={int(stats.n)} />
+            <Metric label="TP" value={int(stats.tp)} tone="text-profit" />
+            <Metric label="SL" value={int(stats.sl)} tone="text-loss" />
+            <Metric label="หมดเวลา" value={int(stats.ex)} />
+            <Metric label="Win rate" value={`${num(stats.wr, 1)}%`}
+                    tone={stats.wr >= 50 ? "text-profit" : "text-loss"} />
+            <Metric label="สะสม R" value={signed(stats.sum, 1)} bold
+                    tone={stats.sum > 0 ? "text-profit"
+                      : stats.sum < 0 ? "text-loss" : ""} />
+          </div>
+          <p className="text-[10px] text-slate-500 mt-2">
+            เซลล์ที่นับสด: SL {num(run.config?.sl_multiples?.[0] ?? 1.5, 2)}×ATR
+            {" · "}เป้า {num(run.config?.tp_rs?.[0] ?? 1.5, 2)}R
+            {" · "}ถือสูงสุด {int(run.config?.max_bars?.[2] ?? 20)} แท่ง
+          </p>
+        </section>
+      )}
+
+      {/* ---------------- live chart + trade log ---------------- */}
+      {run && stats.n > 0 && (
+        <section className="panel p-4">
+          <h3 className="panel-title">ผลสด — สะสม R ต่อเหตุการณ์</h3>
+          <EquityCurve points={stats.curve} tp={stats.tp} sl={stats.sl} ex={stats.ex} />
+          <div className="flex items-center justify-between mt-3 mb-1">
+            <h3 className="panel-title mb-0">เหตุการณ์ล่าสุด (เข้า/ออก/TP/SL/PnL)</h3>
+            <label className="text-[10px] text-slate-400 flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" checked={follow}
+                     onChange={(e) => setFollow(e.target.checked)} />
+              เลื่อนตาม
+            </label>
+          </div>
+          <div ref={logRef}
+               className="overflow-y-auto scroll-x-thin text-xs font-mono max-h-72 rounded border border-slate-800">
+            {events.slice(-300).reverse().map((e) => (
+              <div key={e.seq}
+                   className="flex gap-2 px-2 py-0.5 border-b border-slate-800/50 whitespace-nowrap">
+                <span className="text-slate-600 w-12 text-right">{e.seq}</span>
+                <span className="text-slate-300 w-16">{e.asset}</span>
+                <span className={e.direction === "BUY" ? "text-profit w-10"
+                  : "text-loss w-10"}>
+                  {e.direction === "BUY" ? "▲" : "▼"}
+                </span>
+                <span className="text-slate-400 w-20">
+                  {num(e.entry, e.entry && e.entry > 10 ? 2 : 5)}
+                </span>
+                <span className={`w-10 font-bold ${LABEL_COLOR[e.label]}`}>
+                  {LABEL_TH[e.label]}
+                </span>
+                <span className="text-slate-500 w-10">{e.bars_held ?? "-"}d</span>
+                <span className={Number(e.r_multiple) > 0 ? "text-profit w-14"
+                  : Number(e.r_multiple) < 0 ? "text-loss w-14" : "text-slate-400 w-14"}>
+                  {signed(e.r_multiple, 2)}R
+                </span>
+                {e.ambiguous && (
+                  <span className="text-amber-400" title="แท่งเดียวแตะทั้ง TP และ SL — นับเป็น SL ( conservative )">
+                    ⚠
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ---------------- verdict ---------------- */}
+      {run && (run.status === "done" || run.status === "cancelled") && (
+        <Verdict res={res} status={run.status} />
+      )}
+
+      {/* ---------------- run history ---------------- */}
+      {runs.length > 0 && (
+        <section className="panel p-4">
+          <h3 className="panel-title">ประวัติการจำลอง</h3>
+          <div className="overflow-x-auto scroll-x-thin">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-slate-500 border-b border-slate-800">
+                  <th className="py-2 pr-3">เวลา</th>
+                  <th className="py-2 pr-3">สถานะ</th>
+                  <th className="py-2 pr-3">ตัวอย่าง</th>
+                  <th className="py-2 pr-3">ช่องที่รอด</th>
+                  <th className="py-2 pr-3">เป้าหมาย</th>
+                  <th className="py-2">ผล</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((r) => {
+                  const w = r.result?.walk_forward;
+                  const top = r.result?.top_paid?.[0];
+                  return (
+                    <tr key={r.id}
+                        onClick={() => { seqRef.current = 0; setEvents([]); setRunId(r.id); }}
+                        className={`border-b border-slate-800/50 hover:bg-white/[0.04] cursor-pointer ${
+                          r.id === runId ? "bg-white/[0.06]" : ""}`}>
+                      <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap">
+                        {r.created_at ? String(r.created_at).slice(5, 16).replace("T", " ") : "—"}
+                      </td>
+                      <td className="py-1.5 pr-3">
+                        <span className={r.status === "done" ? "text-profit"
+                          : r.status === "failed" ? "text-loss" : "text-slate-400"}>
+                          {STAGE_TH[r.status] || r.status}
+                        </span>
+                      </td>
+                      <td className="py-1.5 pr-3">{int(r.processed)}</td>
+                      <td className="py-1.5 pr-3">
+                        {top ? `${num(top.sl_pct, 2)}×ATR` : "—"}
+                      </td>
+                      <td className="py-1.5 pr-3">{top ? `${num(top.tp_r, 2)}R` : "—"}</td>
+                      <td className="py-1.5">
+                        {w && w.holds_out !== undefined
+                          ? (w.holds_out
+                            ? <span className="text-profit">รอด {signed(w.test_mean_r, 3)}R</span>
+                            : <span className="text-loss">พัง {signed(w.test_mean_r, 3)}R</span>)
+                          : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* pieces                                                             */
+/* ------------------------------------------------------------------ */
+
+function Field({ label, value, min, max, onChange }: {
+  label: string; value: number; min: number; max: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block text-sm">
+      <span className="text-slate-300">{label}</span>
+      <input
+        type="number" value={value} min={min} max={max}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          if (Number.isFinite(n)) onChange(Math.max(min, Math.min(max, n)));
+        }}
+        className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2"
+      />
+    </label>
+  );
+}
+
+function Metric({ label, value, tone = "", bold }: {
+  label: string; value: string; tone?: string; bold?: boolean;
+}) {
+  return (
+    <div className="rounded border border-slate-700/60 bg-surface/40 p-2">
+      <div className="text-[10px] text-slate-500">{label}</div>
+      <div className={`text-base ${bold ? "font-bold" : "font-semibold"} ${tone}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Cumulative-R curve as inline SVG.
+ *
+ * Hand-rolled because the project ships no chart library, and because this
+ * needs exactly one thing: a polyline that grows, a zero line, and dots
+ * coloured by which barrier was hit. The zero line is not decoration — a
+ * curve sitting above it is the only honest read of "this made money", and
+ * without it a viewer cannot tell +0.05R from -0.05R on a flat axis.
+ */
+function EquityCurve({ points, tp, sl, ex }: {
+  points: number[]; tp: number; sl: number; ex: number;
+}) {
+  const W = 900, H = 180, PAD = 24;
+  if (points.length < 2) {
+    return (
+      <p className="text-xs text-slate-500 py-6 text-center">
+        กำลังสะสมข้อมูลเพื่อวาดกราฟ...
+      </p>
+    );
+  }
+  // Downsample: 5,000 points in an SVG is a 40KB attribute string for a
+  // shape the eye cannot resolve.
+  const step = Math.max(1, Math.floor(points.length / 300));
+  const pts = points.filter((_, i) => i % step === 0);
+  if (pts[pts.length - 1] !== points[points.length - 1]) {
+    pts.push(points[points.length - 1]);
+  }
+
+  const min = Math.min(0, ...pts);
+  const max = Math.max(0, ...pts);
+  const span = (max - min) || 1;
+  const x = (i: number) => PAD + (i / (pts.length - 1)) * (W - PAD * 2);
+  const y = (v: number) => H - PAD - ((v - min) / span) * (H - PAD * 2);
+
+  const d = pts.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const last = pts[pts.length - 1];
+  const up = last >= 0;
+
+  return (
+    <div className="mt-1">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded bg-surface/40"
+           preserveAspectRatio="none" role="img"
+           aria-label={`สะสม R จบที่ ${last.toFixed(2)}R`}>
+        <line x1={PAD} x2={W - PAD} y1={y(0)} y2={y(0)}
+              stroke="#475569" strokeWidth="1" strokeDasharray="4 4" />
+        <text x={PAD + 2} y={y(0) - 4} fill="#64748b" fontSize="10">0R</text>
+        <text x={PAD + 2} y={y(max) + 11} fill="#64748b" fontSize="10">
+          {max.toFixed(1)}
+        </text>
+        <text x={PAD + 2} y={y(min) - 3} fill="#64748b" fontSize="10">
+          {min.toFixed(1)}
+        </text>
+        <path d={d} fill="none"
+              stroke={up ? "#22c55e" : "#ef4444"} strokeWidth="1.6" />
+        <circle cx={x(pts.length - 1)} cy={y(last)} r="3"
+                fill={up ? "#22c55e" : "#ef4444"} />
+      </svg>
+      <div className="flex gap-3 text-[10px] text-slate-400 mt-1">
+        <span>🟢 TP {int(tp)}</span>
+        <span>🔴 SL {int(sl)}</span>
+        <span>⚪ หมดเวลา {int(ex)}</span>
+        <span className="ml-auto">
+          ตัวอย่างสุดท้าย {int(points.length)} · จบที่ {signed(last, 2)}R
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function Verdict({ res, status }: { res: SimResult; status: string }) {
+  const top = res.top_paid || [];
+  const wf = res.walk_forward;
+  const per = res.per_asset || [];
+  const mfe = res.mfe_mae;
+  const holds = wf?.holds_out;
+  const testR = wf?.test_mean_r;
+  const gridCells = res.grid_cells ?? 0;
+
+  return (
+    <>
+      <section className="panel p-4">
+        <h3 className="panel-title">ผลการวิเคราะห์</h3>
+        {status === "cancelled" && (
+          <p className="text-xs text-slate-400 mb-2">
+            งานถูกหยุดก่อนครบ — ตัวเลขข้างล่างมาจากเฉพาะส่วนที่ประมวลผลแล้ว
+          </p>
+        )}
+        {res.error && <p className="text-loss text-sm">{res.error}</p>}
+
+        {/* The verdict box comes FIRST and states the out-of-sample result,
+            because that is the only number that has been tested. */}
+        {wf && !wf.error && (
+          <div className={`rounded border p-3 mb-3 text-xs ${
+            holds
+              ? "border-amber-400/25 bg-amber-400/10"
+              : "border-loss/30 bg-loss/10"}`}>
+            <div className="font-bold mb-1">
+              {holds
+                ? "⚠️ อันดับ 1 รอดนอกตัวอย่าง — แต่ยังไม่ถือว่ายืนยันแล้ว"
+                : "❌ อันดับ 1 พังนอกตัวอย่าง — ตัวเลขที่ได้เป็นสัญญาณรบกวน"}
+            </div>
+            <div className="text-slate-300">
+              เรียงอันดับช่วงแรก (ในตัว):{" "}
+              <span className="font-bold text-white">
+                {signed(wf.winner?.train_mean_r ?? 0, 3)}R
+              </span>{" "}
+              → วัดช่วงหลัง (นอกตัว):{" "}
+              <span className={`font-bold ${holds ? "text-profit" : "text-loss"}`}>
+                {signed(testR ?? 0, 3)}R
+              </span>{" "}
+              (win rate {num(wf.test_win_rate_pct, 1)}%, n={int(wf.test_n)})
+            </div>
+            <p className="text-slate-400 mt-1">
+              การจัดอันดับ {int(gridCells)} ช่องบนข้อมูลชุดเดียวกัน
+              ได้ผู้ชนะที่บวกเสมอแม้ไม่มี edge — ตัวเลขนอกตัวอย่างคือตัวที่ผ่านการทดสอบจริง
+            </p>
+          </div>
+        )}
+        {wf?.error && (
+          <p className="text-xs text-slate-400 mb-2">{wf.error}</p>
+        )}
+
+        {mfe && (
+          <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
+            <div className="text-xs font-bold text-slate-300 mb-1">
+              เป้าหมายแตะได้จริงไหม (MFE — กำไรสูงสุดที่สัญญาณเสนอ)
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+              <Kv k="มัธยฐาน" v={signed(mfe.mfe_median, 2) + "R"} />
+              <Kv k="p75" v={signed(mfe.mfe_p75, 2) + "R"} />
+              <Kv k="p95" v={signed(mfe.mfe_p95, 2) + "R"} />
+              <Kv k="สูงสุด" v={signed(mfe.mfe_max, 2) + "R"} />
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-[11px] mt-2">
+              <Kv k="ไปถึง ≥1R" v={`${num(mfe.reached_1r_pct, 0)}%`} />
+              <Kv k="ไปถึง ≥1.5R" v={`${num(mfe.reached_1_5r_pct, 0)}%`} />
+              <Kv k="ไปถึง ≥2R" v={`${num(mfe.reached_2r_pct, 0)}%`} />
+            </div>
+            <p className="text-[10px] text-slate-500 mt-1">
+              ถ้ามัธยฐานใกล้ 0 แปลว่าสัญญาณครึ่งหนึ่งไม่เคยเคลื่อนเข้าหากำไรเลย
+              — ปัญหาอยู่ที่สัญญาณ ไม่ใช่ที่ SL/TP
+            </p>
+          </div>
+        )}
+
+        <h4 className="text-xs font-bold text-slate-300 mb-1">
+          10 ช่องที่จ่ายดีที่สุด (ในตัวอย่าง)
+        </h4>
+        <div className="overflow-x-auto scroll-x-thin">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-slate-500 border-b border-slate-800">
+                <th className="py-1.5 pr-3">SL×ATR</th>
+                <th className="py-1.5 pr-3">เป้า</th>
+                <th className="py-1.5 pr-3">นาฬิกา</th>
+                <th className="py-1.5 pr-3">n</th>
+                <th className="py-1.5 pr-3">WR%</th>
+                <th className="py-1.5 pr-3">mean R</th>
+                <th className="py-1.5 pr-3">เฉพาะที่แตะราคา</th>
+                <th className="py-1.5 pr-3">payoff</th>
+                <th className="py-1.5">กำกวม</th>
+              </tr>
+            </thead>
+            <tbody>
+              {top.map((r, i) => (
+                <tr key={i} className="border-b border-slate-800/50">
+                  <td className="py-1 pr-3">{num(r.sl_pct, 2)}</td>
+                  <td className="py-1 pr-3">{num(r.tp_r, 2)}R</td>
+                  <td className="py-1 pr-3">{int(r.n)}</td>
+                  <td className="py-1 pr-3">{int(r.n)}</td>
+                  <td className="py-1 pr-3">{num(r.win_rate_pct, 1)}</td>
+                  <td className={`py-1 pr-3 font-bold ${r.mean_r > 0 ? "text-profit" : "text-loss"}`}>
+                    {signed(r.mean_r, 3)}
+                  </td>
+                  <td className="py-1 pr-3">{signed(r.mean_r_resolved, 3)}</td>
+                  <td className="py-1 pr-3">{num(r.payoff, 2)}</td>
+                  <td className="py-1 text-slate-500">{num(r.ambiguous_pct, 1)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {per.length > 0 && (
+        <section className="panel p-4">
+          <h3 className="panel-title">รายสินทรัพย์ (คัดจากช่วงแรกเท่านั้น)</h3>
+          <div className="overflow-x-auto scroll-x-thin">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-slate-500 border-b border-slate-800">
+                  <th className="py-1.5 pr-3">คู่</th>
+                  <th className="py-1.5 pr-3">ช่วงแรก R</th>
+                  <th className="py-1.5 pr-3">WR%</th>
+                  <th className="py-1.5 pr-3">n</th>
+                  <th className="py-1.5 pr-3">ช่วงหลัง R</th>
+                  <th className="py-1.5 pr-3">WR%</th>
+                  <th className="py-1.5">ตัดสิน</th>
+                </tr>
+              </thead>
+              <tbody>
+                {per.map((r) => (
+                  <tr key={r.asset} className="border-b border-slate-800/50">
+                    <td className="py-1 pr-3 font-semibold">{r.asset}</td>
+                    <td className={`py-1 pr-3 ${r.train_mean_r > 0 ? "text-profit" : "text-loss"}`}>
+                      {signed(r.train_mean_r, 3)}
+                    </td>
+                    <td className="py-1 pr-3">{num(r.train_win_rate_pct, 1)}</td>
+                    <td className="py-1 pr-3">{int(r.train_n)}</td>
+                    <td className={`py-1 pr-3 ${r.test_mean_r > 0 ? "text-profit" : "text-loss"}`}>
+                      {signed(r.test_mean_r, 3)}
+                    </td>
+                    <td className="py-1 pr-3">{num(r.test_win_rate_pct, 1)}</td>
+                    <td className="py-1">
+                      {r.keep
+                        ? <span className="text-amber-400">คงไว้เฝ้าดู</span>
+                        : <span className="text-loss">ตัดออก</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[10px] text-slate-500 mt-2">
+            "คงไว้เฝ้าดู" = ผลบวกในช่วงแรกเท่านั้น — ยังเป็นการเลือกจากหลายคู่
+            จึงต้องทดสอบต่อหน้าทำงานจริงก่อนเชื่อถือ
+          </p>
+        </section>
+      )}
+    </>
+  );
+}
+
+function Kv({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex justify-between gap-2">
+      <span className="text-slate-500">{k}</span>
+      <span className="font-semibold text-slate-200">{v}</span>
+    </div>
+  );
+}

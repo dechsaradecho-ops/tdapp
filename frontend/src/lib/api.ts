@@ -51,6 +51,9 @@ import {
   SessionStatus,
   SettingsChangesResponse,
   SettingsSaveResult,
+  SimEventsResponse,
+  SimRunResponse,
+  SimRunsResponse,
   SignalLogsResponse,
   SignalReport,
   StatsResetResult,
@@ -336,6 +339,25 @@ export const api = {
     get<SettingsChangesResponse>(
       `/api/system/settings-changes?limit=${limit}&offset=${offset}`
     ),
+
+  // ---------- Barrier simulation (migration 057 — Logs > จำลอง) ----------
+  // POST เริ่มงานแล้วคืน run_id ทันที (รันเบื้องหลัง ~บน thread เดียว)
+  // GET  รายการงาน + ไหนกำลังรันอยู่
+  // GET  สถานะ/ผลของงานหนึ่ง (ตั้ง progress bar)
+  // GET  event หลัง seq ที่ (สตรีมเข้า-ออก/TP/SL/PnL สด)
+  simStart: (input?: { target_events?: number; cooldown?: number; days?: number; assets?: string[] }) =>
+    post<{ ok: boolean; run_id?: string; error?: string; config?: unknown }>(
+      "/api/system/simulate", input ?? {}),
+  simRuns: (limit = 20) =>
+    get<SimRunsResponse>(`/api/system/simulate?limit=${limit}`),
+  simRun: (id: string) =>
+    get<SimRunResponse>(`/api/system/simulate/${encodeURIComponent(id)}`),
+  simEvents: (id: string, after = 0, limit = 500) =>
+    get<SimEventsResponse>(
+      `/api/system/simulate/${encodeURIComponent(id)}/events?after=${after}&limit=${limit}`),
+  simCancel: (id: string) =>
+    post<{ ok: boolean; message?: string; error?: string }>(
+      `/api/system/simulate/${encodeURIComponent(id)}/cancel`, {}),
 
   // ---------- LINE: notification targets + test button ----------
   lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),

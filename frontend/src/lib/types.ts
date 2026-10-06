@@ -355,6 +355,158 @@ export interface RiskLogsResponse {
   has_more: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Barrier simulation (migration 057) — Logs > จำลอง
+// ---------------------------------------------------------------------------
+
+/** ป้ายของ barrier ที่ถูกแตะก่อน — tp = เป้ากำไร, sl = ตัดขาดทุน, expired = หมดเวลา */
+export type SimLabel = "tp" | "sl" | "expired" | "pending";
+
+/** หนึ่งเซลล์ของกริด: SL (เท่า ATR) × เป้าหมาย (R) × นาฬิกา (แท่ง) */
+export interface SimCellRow {
+  sl_pct: number;
+  tp_r: number;
+  n: number;
+  n_tp: number;
+  n_sl: number;
+  n_expired: number;
+  n_ambiguous: number;
+  ambiguous_pct: number;
+  win_rate_pct: number;
+  mean_r: number;
+  mean_r_resolved: number;
+  payoff: number;
+  sum_r: number;
+}
+
+/** ผลของการจัดอันดับบนช่วงเวลาหนึ่ง แล้ววัดบนช่วงเวลาถัดมา */
+export interface SimWalkForwardCheck {
+  sl_mult: number;
+  tp_r: number;
+  max_bars: number;
+  train_mean_r: number;
+  test_mean_r: number;
+  test_win_rate_pct: number;
+  test_n: number;
+}
+
+export interface SimWalkForward {
+  train_n?: number;
+  test_n?: number;
+  checks?: SimWalkForwardCheck[];
+  winner?: { sl_mult: number; tp_r: number; max_bars: number; train_mean_r: number };
+  test_mean_r?: number;
+  test_win_rate_pct?: number;
+  /** false = อันดับ 1 พังนอกตัวอย่าง = ตัวเลขที่ได้มาเป็นสัญญาณรบกวน */
+  holds_out?: boolean;
+  error?: string;
+}
+
+export interface SimPerAsset {
+  asset: string;
+  train_n: number;
+  train_mean_r: number;
+  train_win_rate_pct: number;
+  test_n: number;
+  test_mean_r: number;
+  test_win_rate_pct: number;
+  keep: boolean;
+}
+
+export interface SimMfeMae {
+  mfe_p25: number; mfe_median: number; mfe_p75: number; mfe_p95: number; mfe_max: number;
+  mae_p25: number; mae_median: number; mae_p75: number; mae_min: number;
+  reached_1r_pct?: number; reached_1_5r_pct?: number; reached_2r_pct?: number;
+}
+
+export interface SimResult {
+  n_events?: number;
+  min_n?: number;
+  assets?: string[];
+  cooldown?: number;
+  bars?: number;
+  /** จำนวนช่องที่การจัดอันดับแข่งขันจริง — ใช้อธิบายว่าทำไมอันดับ 1 ยังเชื่อไม่ได้ */
+  grid_cells?: number;
+  top_paid?: SimCellRow[];
+  top_worth?: SimCellRow[];
+  walk_forward?: SimWalkForward;
+  per_asset?: SimPerAsset[];
+  per_asset_cell?: { sl_mult: number; tp_r: number; max_bars: number };
+  mfe_mae?: SimMfeMae;
+  assets_seen?: string[];
+  bars_by_asset?: Record<string, number>;
+  error?: string;
+}
+
+export interface SimRun {
+  id: string;
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  /** ขั้นตอนปัจจุบัน — ให้ผู้ใช้รู้ว่าค้างที่ดึงราคาหรือกำลังวิเคราะห์ */
+  stage: string;
+  target_events: number | null;
+  total_events: number;
+  processed: number;
+  config?: {
+    target_events?: number;
+    cooldown?: number;
+    days?: number;
+    assets?: string[];
+    sl_multiples?: number[];
+    tp_rs?: number[];
+    max_bars?: number[];
+  };
+  result: SimResult;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+}
+
+export interface SimEvent {
+  seq: number;
+  asset: string;
+  direction: string;
+  entry: number | null;
+  atr_pct: number | null;
+  opportunity: number | null;
+  confidence: number | null;
+  sl_mult: number | null;
+  tp_r: number | null;
+  max_bars: number | null;
+  label: SimLabel;
+  r_multiple: number | null;
+  bars_held: number | null;
+  exit_price: number | null;
+  ambiguous: boolean;
+  mfe_r: number | null;
+  mae_r: number | null;
+}
+
+export interface SimLiveStats { n: number; tp: number; sl: number; expired: number }
+
+export interface SimRunsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  hint?: string;
+  setup_required?: boolean;
+  runs: SimRun[];
+  active_run_id?: string | null;
+}
+
+export interface SimRunResponse extends SimRun {
+  live_stats?: SimLiveStats;
+}
+
+export interface SimEventsResponse {
+  client: "ok" | "unavailable";
+  verdict: "ok" | "fail";
+  error?: string;
+  events: SimEvent[];
+  after: number;
+  more: boolean;
+}
+
 /** หนึ่งแถวประวัติเปลี่ยน Settings — [{field, old, new}] เฉพาะช่องที่เปลี่ยนจริง */
 export interface SettingsChangeLog {
   id: string;

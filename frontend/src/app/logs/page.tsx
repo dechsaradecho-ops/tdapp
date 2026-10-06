@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
+import SimulateTab from "@/components/SimulateTab";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
 import LoadingGraphic from "@/components/LoadingGraphic";
@@ -873,7 +874,7 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
@@ -889,7 +890,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -973,7 +974,7 @@ export default function LogsPage() {
   // โหลดเฉพาะแท็บที่เปิดอยู่ (lazy) — เข้าหน้าครั้งแรกยิงแค่ 1 request
   // แทน 5 requests พร้อมกัน (quotes+news+scheduler+guard+gate) ทำให้หน้าแรกไวขึ้น ~5 เท่า
   const loadedRef = useRef<Set<string>>(new Set());
-  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings", flt?: "all" | "forex" | "gold") => {
+  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate", flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       if (t === "quotes") {
@@ -1194,10 +1195,17 @@ export default function LogsPage() {
                     ? "Gate อนุมัติ/ปัดตกออเดอร์ — เหตุผลทุกครั้งที่เปิดหรือบล็อก (เก็บ 7 วัน)"
                     : tab === "audit"
                       ? "ประวัติเหตุการณ์ความเสี่ยง — kill switch เข้าเงื่อนไข · เจ้าของอนุมัติ/ปฏิเสธขยายลิมิต (เก็บถาวร ไม่มีอายุ)"
-                      : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
+                      : tab === "settings"
+                        ? "ประวัติการเปลี่ยน Settings — ช่องไหน จากค่าเดิมอะไรเป็นค่าใหม่อะไร (เก็บถาวร ไม่มีอายุ)"
+                        : tab === "simulate"
+                          ? "จำลองสัญญาณย้อนหลังด้วย Triple Barrier — เล่นเครื่องสร้างสัญญาณตัวจริงบนราคาย้อนหลัง แล้ววัดว่า SL/TP แบบไหนได้ผลจริง"
+                          : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
+        {/* ปุ่มรีเฟรช/ทดสอบเป็นของแท็บราคา — ซ่อนไว้ตอนอยู่แท็บจำลอง
+            (แท็บนั้น poll ตัวเองและมีปุ่มจัดการงานของตัวเอง) */}
+        {tab !== "simulate" && (
         <div className="flex gap-2">
           <button onClick={() => loadOne(tabRef.current)} disabled={loading}
             aria-busy={loading} aria-live="polite"
@@ -1215,6 +1223,7 @@ export default function LogsPage() {
             </span>
           </button>
         </div>
+        )}
       </section>
 
       {/* ---------- Tabs: quotes / news / scheduler / guard / gate / audit ---------- */}
@@ -1260,6 +1269,12 @@ export default function LogsPage() {
           title="ประวัติเปลี่ยน Settings — ช่องไหน จากค่าเดิมอะไรเป็นค่าใหม่อะไร — เก็บถาวร"
           className={`px-2.5 sm:px-3 py-1 rounded ${tab === "settings" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           ตั้งค่า{settingsTotal > 0 ? ` ${settingsTotal}` : ""}
+        </button>
+        <button
+          onClick={() => { setTab("simulate"); tabRef.current = "simulate"; setPage(1); }}
+          title="จำลองสัญญาณย้อนหลังด้วย Triple Barrier — หา SL/TP ที่ให้ผลดีจริง"
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "simulate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          จำลอง
         </button>
       </div>
 
@@ -2194,6 +2209,10 @@ export default function LogsPage() {
       )}
 
       {/* ---------- Settings change history (settings_change_logs — เก็บถาวร) ---------- */}
+      {/* ---------- Simulate: barrier simulation (no server paging needed —
+           the panel owns its own polling + progress) ---------- */}
+      {tab === "simulate" && <SimulateTab />}
+
       {tab === "settings" && settingsHint && (
         <section className="panel border-amber-400/25">
           <p className="text-xs text-amber-300">{settingsHint}</p>
