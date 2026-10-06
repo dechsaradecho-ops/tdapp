@@ -152,6 +152,59 @@ class TestThinning:
         gaps = [out[i + 1] - out[i] for i in range(len(out) - 1)]
         assert max(gaps) - min(gaps) <= 1
 
+    def test_sorting_before_thinning_keeps_every_pair_in_every_era(self):
+        """replay() emits events GROUPED BY ASSET, each asset's own history in
+        time order. Thinning that raw list samples by list position, which
+        means taking a different slice of TIME per pair — so the chronological
+        train/test split ends up comparing pair A's early history against pair
+        B's late one. Sorting to one timeline first is the fix, and this pins
+        the property it buys: both pairs represented in both eras.
+        """
+        from app.engine.triple_barrier import LabelledEvent
+
+        def mk(asset, bar_index):
+            return LabelledEvent(asset=asset, direction="BUY",
+                                 bar_index=bar_index, entry=1.1, atr_pct=0.5)
+
+        raw = ([mk("AAA", i) for i in range(50)]
+               + [mk("BBB", i) for i in range(50)])
+        assert [e.asset for e in raw[:3]] == ["AAA", "AAA", "AAA"], \
+            "premise: the raw list is asset-grouped"
+
+        thinned = simulation._thin(
+            sorted(raw, key=lambda e: (e.bar_index, e.asset)), 20)
+        assert len(thinned) == 20
+        early = [e for e in thinned if e.bar_index < 25]
+        late = [e for e in thinned if e.bar_index >= 25]
+        assert early and late, "one era came out empty"
+        assert {e.asset for e in early} == {"AAA", "BBB"}
+        assert {e.asset for e in late} == {"AAA", "BBB"}
+
+    def test_thinning_the_unsorted_list_would_not_be_a_time_split(self):
+        """The failure the sort prevents, stated as a test so it cannot come
+        back unnoticed: on an asset-grouped list, "first 70% vs last 30%" is
+        pair A vs pair B, not early vs late."""
+        from app.engine.triple_barrier import LabelledEvent
+
+        def mk(asset, bar_index):
+            return LabelledEvent(asset=asset, direction="BUY",
+                                 bar_index=bar_index, entry=1.1, atr_pct=0.5)
+
+        raw = ([mk("AAA", i) for i in range(50)]
+               + [mk("BBB", i) for i in range(50)])
+
+        def halves(xs):
+            h = len(xs) // 2
+            return {e.asset for e in xs[:h]}, {e.asset for e in xs[h:]}
+
+        unsorted_halves = halves(simulation._thin(raw, 20))
+        assert unsorted_halves[0] != unsorted_halves[1], \
+            "premise: on the grouped list the two halves are different pairs"
+
+        sorted_halves = halves(simulation._thin(
+            sorted(raw, key=lambda e: (e.bar_index, e.asset)), 20))
+        assert sorted_halves[0] == sorted_halves[1] == {"AAA", "BBB"}
+
 
 class TestCancellation:
     def test_request_cancel_sets_the_flag(self):
@@ -220,13 +273,14 @@ class TestStartRun:
 
 
 class TestMfeMae:
-    def test_empty_input_returns_empty(self):
-        assert simulation._mfe_mae([]) == {}
+    def test_empty_input_says_so_instead_of_returning_an_empty_dict(self):
+        out = simulation._mfe_mae([])
+        assert out.get("error"), "a silent {} here is what hid the bug"
 
     def test_quantiles_and_reach_rates(self):
         class Ev:
             def __init__(self, mfe, mae):
-                self.outcomes = {"1.5000|2.2500|20": type(
+                self.outcomes = {"1.5000|1.5000|20": type(
                     "R", (), {"mfe_r": mfe, "mae_r": mae})()}
 
         events = [Ev(float(i), -1.0) for i in range(100)]
@@ -238,6 +292,39 @@ class TestMfeMae:
         assert out["reached_1r_pct"] == 99.0
         assert out["reached_2r_pct"] == 98.0
         assert out["mae_p25"] == -1.0
+
+    def test_names_the_cell_the_numbers_came_from(self):
+        """MFE/MAE are in R units, so they depend on the cell. Reporting the
+        cell is what makes the number checkable."""
+        class Ev:
+            def __init__(self, mfe, mae):
+                self.outcomes = {"1.5000|1.5000|20": type(
+                    "R", (), {"mfe_r": mfe, "mae_r": mae})()}
+
+        out = simulation._mfe_mae([Ev(1.0, -0.5) for _ in range(10)])
+        assert out["cell"] == "1.5000|1.5000|20"
+
+    def test_falls_back_to_whatever_cell_the_events_carry(self):
+        """The original bug: it looked for a key that was not in the grid, so
+        the 5,000-sample run reported no excursion stats at all — including
+        the 'only 2.3% of signals ever reached +2R' finding, which is the whole
+        argument against the live target. A custom grid must still produce
+        numbers, with the cell named."""
+        class Ev:
+            def __init__(self, mfe, mae):
+                self.outcomes = {"2.0000|2.5000|10": type(
+                    "R", (), {"mfe_r": mfe, "mae_r": mae})()}
+
+        out = simulation._mfe_mae([Ev(1.0, -0.5) for _ in range(10)])
+        assert out["cell"] == "2.0000|2.5000|10"
+        assert out["mfe_max"] == 1.0
+
+    def test_no_cells_at_all_reports_rather_than_vanishing(self):
+        class Ev:
+            outcomes: dict = {}
+
+        out = simulation._mfe_mae([Ev() for _ in range(5)])
+        assert "error" in out
 
 
 class TestMissingMigrationIsVisible:

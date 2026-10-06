@@ -187,7 +187,15 @@ def _run_job(db, run_id: str, cfg: dict[str, Any]) -> None:
         # up short. Report the real number rather than padding or pretending.
         target = int(cfg.get("target_events") or 0)
         if target and len(events) > target:
-            events = _thin(events, target)
+            # Sort BEFORE thinning. replay() emits events grouped by asset
+            # (each asset's own history in time order), so thinning the raw
+            # list would sample by list position — which means taking a
+            # different slice of TIME for every pair. The train/test split
+            # downstream would then compare "the early half of pair A"
+            # against "the late half of pair B". Sorting to one timeline
+            # first is what makes the split chronological.
+            events = _thin(sorted(events, key=lambda e: (e.bar_index, e.asset)),
+                           target)
 
         total = len(events)
         _patch(db, run_id, stage="labelling", total_events=total)
@@ -217,9 +225,11 @@ def _run_job(db, run_id: str, cfg: dict[str, Any]) -> None:
 def _thin(events: list, target: int) -> list:
     """Evenly sample the event list down to ``target``.
 
-    Even spacing, not a head/tail cut: taking the first N would silently
-    restrict the study to the oldest slice of history, which is the one way
-    a sample can be made to look better without changing a single number.
+    Assumes the caller already put the list on one timeline (sorted by
+    ``bar_index``) — see the call site. Even spacing, not a head/tail cut:
+    taking the first N would silently restrict the study to the oldest slice
+    of history, which is the one way a sample can be made to look better
+    without changing a single number.
     """
     n = len(events)
     if target >= n:
@@ -520,20 +530,39 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mfe_mae(events: list) -> dict[str, Any]:
-    """Excursion distribution — answers "was the target ever reachable?"."""
-    mfes = sorted(e.outcomes.get(k).mfe_r
-                  for e in events
-                  for k in [f"1.5000|2.2500|20"] if k in e.outcomes)
-    maes = sorted(e.outcomes.get(k).mae_r
-                  for e in events
-                  for k in [f"1.5000|2.2500|20"] if k in e.outcomes)
+    """Excursion distribution — answers "was the target ever reachable?".
+
+    MFE/MAE are denominated in R, so they depend on which barrier cell
+    produced them. The cell is NAMED in the result rather than assumed —
+    an earlier version hardcoded a key that was not in the grid and returned
+    {} silently, which cost the first 5,000-sample run its most important
+    number (only 2.3% of signals ever offered +2R, i.e. the live target was
+    unreachable) without any error to show for it.
+
+    Falls back to whatever cell the events actually carry, so a custom grid
+    still produces excursion stats instead of nothing.
+    """
+    cells = ("1.5000|1.5000|20", "1.5000|2.2500|20")
+    key = next((k for k in cells
+                if any(k in e.outcomes for e in events)), None)
+    if key is None:
+        counts: dict[str, int] = {}
+        for e in events:
+            for k in e.outcomes:
+                counts[k] = counts.get(k, 0) + 1
+        if not counts:
+            return {"error": "no labelled cell available for the excursion stats"}
+        key = max(counts.items(), key=lambda kv: kv[1])[0]
+    mfes = sorted(e.outcomes[key].mfe_r for e in events if key in e.outcomes)
+    maes = sorted(e.outcomes[key].mae_r for e in events if key in e.outcomes)
     if not mfes:
-        return {}
+        return {"error": "no excursions recorded"}
 
     def q(a, p):
         return a[min(len(a) - 1, int(len(a) * p))]
 
     out = {
+        "cell": key,
         "mfe_p25": round(q(mfes, .25), 3), "mfe_median": round(q(mfes, .5), 3),
         "mfe_p75": round(q(mfes, .75), 3), "mfe_p95": round(q(mfes, .95), 3),
         "mfe_max": round(mfes[-1], 3),
