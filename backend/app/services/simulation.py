@@ -572,19 +572,37 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
         return verdict
 
     # ---- stage 1: pick the gate on TRAIN only -----------------------------
-    # Averaged across every barrier cell, so the gate is chosen for how the
-    # signal behaves overall rather than for one lucky cell.
+    # Averaged across a representative subset of the grid (3 SL x 3 TP at the
+    # longest clock), so the gate is chosen for how the signal behaves overall
+    # rather than for one lucky cell. Averaging across the FULL grid would be
+    # 192 cells x 16 gates on every run; the 9-cell subset keeps the cost flat
+    # while covering tight/typical/wide stops against 1R/1.5R/2R targets.
+    # The subset is fixed below so the number stays comparable run to run.
+    ref_cells = [(m, r, max_bars[-1])
+                 for m in (1.0, 1.5, 2.0) for r in (1.0, 1.5, 2.0)]
+
+    def _gate_avg(evts, mo, mc):
+        rs, ns = [], []
+        for sm, tr_, mb in ref_cells:
+            s = _score(evts, sm, tr_, mb, mo, mc)
+            if s["n"] >= 40:
+                rs.append(s["mean_r"])
+                ns.append(s["n"])
+        n = min(ns) if ns else 0
+        return (sum(rs) / len(rs), n) if rs else (0.0, 0)
+
     gate_rows = []
     for mo in gate_opps:
         for mc in gate_confs:
-            tr = _score(train, sl_mults[0], tp_rs[0], max_bars[-1], mo, mc)
-            if tr["n"] < 40:
+            tr_mean, tr_n = _gate_avg(train, mo, mc)
+            if tr_n < 40:
                 continue
-            te = _score(test, sl_mults[0], tp_rs[0], max_bars[-1], mo, mc)
+            te_mean, te_n = _gate_avg(test, mo, mc)
+            te_wr = _score(test, 1.5, 1.5, max_bars[-1], mo, mc)["win_rate_pct"]
             gate_rows.append({"min_opp": mo, "min_conf": mc,
-                              "train_n": tr["n"], "train_mean_r": tr["mean_r"],
-                              "test_n": te["n"], "test_mean_r": te["mean_r"],
-                              "test_win_rate_pct": te["win_rate_pct"]})
+                              "train_n": tr_n, "train_mean_r": round(tr_mean, 4),
+                              "test_n": te_n, "test_mean_r": round(te_mean, 4),
+                              "test_win_rate_pct": te_wr})
     gate_rows.sort(key=lambda r: -r["train_mean_r"])
     verdict["gate_sweep"] = gate_rows
     best_gate = (gate_rows[0]["min_opp"], gate_rows[0]["min_conf"]) \
