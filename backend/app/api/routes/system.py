@@ -1058,6 +1058,27 @@ async def start_simulation(request: Request,
         return {"ok": False, "error": "ยังไม่มีตารางจำลอง",
                 "hint": _SIM_SETUP_HINT}
     body = payload or {}
+
+    def _num_list(key: str, lo: float, hi: float, count: int,
+                  as_int: bool = False) -> list | None:
+        """Optional numeric list param. None = caller did not send it (keep the
+        default); a bad value fails the whole request rather than silently
+        running a different search than the UI showed."""
+        if key not in body or body.get(key) is None:
+            return None
+        raw = body.get(key)
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(key)
+        out = []
+        for v in raw:
+            f = float(v)
+            if not (lo <= f <= hi):
+                raise ValueError(key)
+            out.append(int(f) if as_int else f)
+        if len(out) > count:
+            raise ValueError(key)
+        return sorted(set(out))
+
     try:
         target = max(50, min(int(body.get("target_events")
                                   or simulation.DEFAULT_TARGET), 20000))
@@ -1068,11 +1089,25 @@ async def start_simulation(request: Request,
         assets = body.get("assets")
         if not isinstance(assets, list) or not assets:
             assets = None
+        else:
+            assets = sorted({str(a).upper() for a in assets if str(a).strip()})
+            if not assets or len(assets) > 40:
+                raise ValueError("assets")
+        sl_multiples = _num_list("sl_multiples", 0.25, 5.0, 10)
+        tp_rs = _num_list("tp_rs", 0.25, 5.0, 10)
+        max_bars = _num_list("max_bars", 1, 60, 6, as_int=True)
+        gate_opps = _num_list("gate_opps", 0, 100, 8)
+        gate_confs = _num_list("gate_confs", 0, 100, 8)
     except (TypeError, ValueError):
         return {"ok": False, "error": "ค่าที่ส่งมาไม่ถูกต้อง"}
 
     res = simulation.start_run(db, target_events=target, cooldown=cooldown,
-                               assets=assets, days=days)
+                               assets=assets, days=days,
+                               sl_multiples=sl_multiples or simulation.SL_MULTIPLES,
+                               tp_rs=tp_rs or simulation.TP_RS,
+                               max_bars=max_bars or simulation.MAX_BARS,
+                               gate_opps=gate_opps or simulation.GATE_OPPS,
+                               gate_confs=gate_confs or simulation.GATE_CONFS)
     if not res.get("ok"):
         return res
     res["verdict"] = "ok"

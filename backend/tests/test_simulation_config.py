@@ -210,3 +210,122 @@ class TestSelectionDiscipline:
         v = simulation._analyse(self._labelled(20), self._cfg())
         assert "error" in v["walk_forward"]
         assert "gate_sweep" not in v
+
+
+class TestRecommendation:
+    """After a run: what changes next round (from -> to), and nothing else."""
+
+    def _cfg(self):
+        return {"sl_multiples": [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
+                "tp_rs": [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
+                "max_bars": [5, 10, 20],
+                "live_baseline": {"source": "db", "sl_distance_mode": "medium",
+                                  "sl_atr_mult": 1.5, "sl_min_pct": 0.65,
+                                  "sl_max_pct": 1.2, "rr_target": 1.5,
+                                  "min_opportunity": 60.0,
+                                  "min_confidence": 70.0}}
+
+    def _verdict(self, holds=True, test_r=0.12, gate_test=0.08,
+                 prod_test=-0.07):
+        return {
+            "walk_forward": {
+                "holds_out": holds, "survivors": 3 if holds else 0,
+                "candidates_checked": 8,
+                "test_mean_r": test_r if holds else -0.10,
+                "winner": {"sl_mult": 2.0, "tp_r": 0.75, "max_bars": 20,
+                           "train_mean_r": 0.10},
+            },
+            "best_gate": {"min_opp": 50.0, "min_conf": 0.0,
+                          "selected_on": "train",
+                          "train_mean_r": 0.05, "test_mean_r": gate_test},
+            "per_asset": [
+                {"asset": "AUDUSD", "train_mean_r": 0.2, "test_mean_r": 0.3,
+                 "train_n": 100, "test_n": 50},
+                {"asset": "EURUSD", "train_mean_r": -0.2, "test_mean_r": 0.3,
+                 "train_n": 100, "test_n": 50},
+                {"asset": "GBPUSD", "train_mean_r": -0.2, "test_mean_r": -0.3,
+                 "train_n": 100, "test_n": 50},
+            ],
+            "mfe_mae": {"mfe_median": 0.7, "reached_1r_pct": 40.0,
+                        "reached_1_5r_pct": 22.0, "reached_2r_pct": 2.0},
+            "production_benchmark": {
+                "available": True, "test": {"mean_r": prod_test, "n": 900,
+                                            "win_rate_pct": 41.0}},
+        }
+
+    def test_surviving_winner_narrows_the_grid(self):
+        rec = simulation._recommend_next(self._cfg(), self._verdict())
+        assert rec["has_plan"] is True
+        nxt = rec["next_config"]
+        # zoom around 2.0xATR / 0.75R / 20 bars, not the whole grid
+        assert nxt["sl_multiples"] == [1.5, 2.0, 2.5]
+        assert nxt["tp_rs"] == [0.5, 0.75, 1.0]
+        assert nxt["max_bars"] == [20]
+        fields = {c["field"] for c in rec["changes"]}
+        assert {"sl_multiples", "tp_rs"} <= fields
+        for c in rec["changes"]:
+            assert c["from"] != c["to"] and c["reason"]
+
+    def test_failed_winner_does_not_narrow_but_prunes_unreachable(self):
+        rec = simulation._recommend_next(self._cfg(), self._verdict(holds=False))
+        assert rec["has_plan"] is True  # the prune is still actionable
+        nxt = rec["next_config"]
+        assert "sl_multiples" not in nxt, \
+            "narrowing around a failed winner is cherry-picking"
+        # only 2.3% ever reached +2R: 2.5R/3.0R go, 2.0R stays as the
+        # boundary (dropping the exact region production targets would blind
+        # the comparison against live).
+        assert nxt["tp_rs"] == [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        assert "assets" not in nxt
+
+    def test_positive_gate_is_fixed_otherwise_the_ladder_stays(self):
+        rec = simulation._recommend_next(self._cfg(), self._verdict())
+        assert rec["next_config"]["gate_opps"] == [50.0]
+        assert rec["next_config"]["gate_confs"] == [0.0]
+        rec2 = simulation._recommend_next(
+            self._cfg(), self._verdict(gate_test=-0.05))
+        assert "gate_opps" not in rec2["next_config"]
+
+    def test_asset_subset_only_behind_a_survivor(self):
+        rec = simulation._recommend_next(self._cfg(), self._verdict())
+        # only AUDUSD is positive in BOTH periods with n>=30
+        assert rec["next_config"]["assets"] == ["AUDUSD"]
+        rec2 = simulation._recommend_next(self._cfg(), self._verdict(holds=False))
+        assert "assets" not in rec2["next_config"]
+
+    def test_live_is_suggested_only_on_a_margin_over_production(self):
+        rec = simulation._recommend_next(self._cfg(), self._verdict())
+        live = rec["live_suggestion"]
+        assert live is not None  # 0.12 vs -0.07 clears the 0.05 margin
+        assert live["candidate_test_r"] == 0.12
+        assert "ต้องกดยืนยันเอง" in live["note"]
+        rec2 = simulation._recommend_next(
+            self._cfg(), self._verdict(test_r=0.01, prod_test=0.0))
+        assert rec2["live_suggestion"] is None, \
+            "a 0.01 margin over production is noise, not a suggestion"
+
+    def test_nothing_actionable_says_so_plainly(self):
+        v = self._verdict(holds=False, gate_test=-0.2)
+        v["mfe_mae"] = {"mfe_median": 1.5, "reached_1r_pct": 80.0,
+                        "reached_1_5r_pct": 60.0, "reached_2r_pct": 40.0}
+        rec = simulation._recommend_next(self._cfg(), v)
+        assert rec["has_plan"] is False
+        assert rec["live_suggestion"] is None
+        assert "ยังสรุปอะไรไม่ได้" in rec["note"] or "เดา" in rec["note"]
+
+    def test_never_raises_on_a_malformed_verdict(self):
+        rec = simulation._recommend_next({}, {})
+        assert rec["has_plan"] is False
+        assert rec["live_suggestion"] is None
+
+    def test_mfe_key_uses_underscore(self):
+        """reached_1.5r_pct rendered as '—' in the UI; the key must not
+        contain a dot."""
+        class Ev:
+            def __init__(self):
+                self.outcomes = {"1.5000|1.5000|20": type(
+                    "R", (), {"mfe_r": 1.6, "mae_r": -0.5})()}
+
+        out = simulation._mfe_mae([Ev() for _ in range(10)])
+        assert "reached_1_5r_pct" in out
+        assert "reached_1.5r_pct" not in out

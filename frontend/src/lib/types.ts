@@ -419,6 +419,40 @@ export interface SimPerAsset {
   keep: boolean;
 }
 
+/** หนึ่งข้อเสนอ "รอบหน้าปรับอะไร" — from → to พร้อมเหตุผล */
+export interface SimChange {
+  field: string;
+  field_th: string;
+  from: unknown;
+  to: unknown;
+  reason: string;
+}
+
+/**
+ * ข้อเสนอรอบหน้าหลังรันจบ. `next_config` เปลี่ยนเฉพาะค่าจำลองเท่านั้น —
+ * ไม่มีทางแตะ setting เทรดจริงผ่านช่องนี้ `live_suggestion` เป็นข้อความ
+ * อย่างเดียว ต้องกดยืนยันเองที่หน้า Settings
+ */
+export interface SimRecommendation {
+  has_plan: boolean;
+  changes: SimChange[];
+  next_config: {
+    sl_multiples?: number[];
+    tp_rs?: number[];
+    max_bars?: number[];
+    gate_opps?: number[];
+    gate_confs?: number[];
+    assets?: string[];
+  };
+  live_suggestion: {
+    changes: SimChange[];
+    candidate_test_r: number;
+    production_test_r: number;
+    note: string;
+  } | null;
+  note: string;
+}
+
 export interface SimMfeMae {
   /** เซลล์กำแพงที่คำนวณ MFE/MAE (ค่าเป็น R จึงผูกกับเซลล์) */
   cell?: string;
@@ -478,6 +512,8 @@ export interface SimResult {
   };
   walk_forward?: SimWalkForward;
   production_benchmark?: SimBenchmark;
+  /** ข้อเสนอรอบหน้า (จาก → เป็น) + ปุ่มใช้ค่ารันรอบหน้า */
+  recommendation?: SimRecommendation;
   per_asset?: SimPerAsset[];
   per_asset_cell?: {
     sl_mult: number; tp_r: number; max_bars: number;

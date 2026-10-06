@@ -680,6 +680,9 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
                                      "gate": verdict["best_gate"]}
 
     verdict["mfe_mae"] = _mfe_mae(events)
+    # The next-round proposal, built from this verdict only. Stored with the
+    # run so the UI can offer "run next with these values" without recomputing.
+    verdict["recommendation"] = _recommend_next(cfg, verdict)
     return verdict
 
 
@@ -778,7 +781,199 @@ def _mfe_mae(events: list) -> dict[str, Any]:
         "mae_p25": round(q(maes, .25), 3), "mae_median": round(q(maes, .5), 3),
         "mae_p75": round(q(maes, .75), 3), "mae_min": round(maes[0], 3),
     }
-    for r in (1.0, 1.5, 2.0):
+    # Keys use underscores, never dots: the frontend reads `reached_1_5r_pct`,
+    # and the old `reached_1.5r_pct` silently rendered as "—".
+    for r, key in ((1.0, "reached_1r_pct"), (1.5, "reached_1_5r_pct"),
+                   (2.0, "reached_2r_pct")):
         n = sum(1 for m in mfes if m >= r)
-        out[f"reached_{r:g}r_pct"] = round(100.0 * n / len(mfes), 1)
+        out[key] = round(100.0 * n / len(mfes), 1)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Next-round recommendation (owner 2026-10-06)
+# ---------------------------------------------------------------------------
+# "หลังรันแล้วสรุปว่ารอบหน้าจะปรับค่าจากอะไรเป็นอะไร แล้วให้รันรอบหน้าใช้ค่า
+# ใหม่ได้เลย" — with one hard rule: the proposal changes the SIMULATION config
+# only. Live trading settings are never touched by this; at most the report
+# carries a text-only suggestion the owner must confirm by hand in Settings.
+#
+# SELECTION DISCIPLINE, same as everything else here: a change is proposed
+# only from TRAIN-selected evidence. Anything else is labelled exploration,
+# never a finding.
+def _neighbors(cur: list, winner: float) -> list:
+    """Winner plus one grid step each side, clipped to the current grid."""
+    xs = sorted({float(x) for x in cur})
+    if not xs:
+        return []
+    i = min(range(len(xs)), key=lambda k: abs(xs[k] - float(winner)))
+    lo = max(0, i - 1)
+    return xs[lo:i + 2]
+
+
+def _prune_tp_by_mfe(tp_rs: list, mfe: dict) -> tuple[list, str]:
+    """Drop targets the signals demonstrably never reach.
+
+    Mechanical pruning, NOT an edge claim: when fewer than 10% of signals ever
+    offered +2R, spending cells on 2.5R/3.0R targets wastes the next run's
+    resolution. The MFE distribution (not the ranking) is the evidence, so
+    this cannot cherry-pick a winner — it only removes dead search space.
+    Never narrows below 3 values; an over-pruned grid tests nothing.
+    """
+    cur = sorted({float(x) for x in tp_rs})
+    if len(cur) <= 3 or not mfe or mfe.get("error"):
+        return cur, ""
+    r2 = float(mfe.get("reached_2r_pct") or 0)
+    r15 = float(mfe.get("reached_1_5r_pct") or 0)
+    r1 = float(mfe.get("reached_1r_pct") or 0)
+    if r2 >= 10:
+        return cur, ""
+    cap = 2.0 if r15 >= 10 else (1.5 if r1 >= 10 else 1.0)
+    kept = [t for t in cur if t <= cap + 1e-9]
+    if len(kept) < 3:
+        return cur, ""
+    return kept, (f"สัญญาณไปถึง +2R แค่ {r2:.1f}% — "
+                  f"ตัดเป้าเกิน {cap:g}R ออก เหลือที่ไปถึงจริง")
+
+
+def _nearest_mode(sl_mult: float) -> str:
+    if sl_mult <= 1.25:
+        return "short"
+    if sl_mult <= 1.75:
+        return "medium"
+    return "long"
+
+
+def _recommend_next(cfg: dict[str, Any], verdict: dict[str, Any]) -> dict[str, Any]:
+    """Build the next-round proposal. Never raises; never touches live."""
+    rec: dict[str, Any] = {"has_plan": False, "changes": [], "next_config": {},
+                           "live_suggestion": None, "note": ""}
+    try:
+        sl_mults = sorted({float(x) for x in (cfg.get("sl_multiples") or [])})
+        tp_rs = sorted({float(x) for x in (cfg.get("tp_rs") or [])})
+        max_bars = sorted({int(x) for x in (cfg.get("max_bars") or [])})
+        wf = verdict.get("walk_forward") or {}
+        if wf.get("error") or not wf.get("winner"):
+            rec["note"] = ("รอบนี้ข้อมูลไม่พอแบ่ง train/test — "
+                           "ยังสรุปอะไรไม่ได้ รันใหม่ด้วยตัวอย่างที่มากขึ้น")
+            return rec
+
+        holds = bool(wf.get("holds_out"))
+        win = wf["winner"]
+        nxt: dict[str, Any] = {}
+
+        if holds and (wf.get("survivors") or 0) >= 1:
+            # Evidence-backed zoom: the winner survived out-of-sample, so the
+            # next run spends its resolution around it instead of re-racing
+            # the whole grid.
+            new_sl = _neighbors(sl_mults, win["sl_mult"])
+            new_tp = _neighbors(tp_rs, win["tp_r"])
+            new_mb = [int(win["max_bars"])]
+            if new_sl != sl_mults:
+                rec["changes"].append({
+                    "field": "sl_multiples", "field_th": "SL (×ATR)",
+                    "from": sl_mults, "to": new_sl,
+                    "reason": (f"ช่อง {win['sl_mult']:g}×ATR รอดนอกตัวอย่าง "
+                               f"({wf.get('test_mean_r'):+.3f}R) — ซูมรอบมัน")})
+                nxt["sl_multiples"] = new_sl
+            if new_tp != tp_rs:
+                rec["changes"].append({
+                    "field": "tp_rs", "field_th": "เป้าหมาย (R)",
+                    "from": tp_rs, "to": new_tp,
+                    "reason": (f"เป้า {win['tp_r']:g}R รอดนอกตัวอย่าง — "
+                               "ซูมรอบมัน")})
+                nxt["tp_rs"] = new_tp
+            if new_mb != max_bars:
+                rec["changes"].append({
+                    "field": "max_bars", "field_th": "นาฬิกา (แท่ง)",
+                    "from": max_bars, "to": new_mb,
+                    "reason": "คงนาฬิกาของช่องที่รอด"})
+                nxt["max_bars"] = new_mb
+        else:
+            # No survivor: narrowing around a failed winner would be
+            # cherry-picking. Prune only the demonstrably unreachable targets.
+            kept, why = _prune_tp_by_mfe(tp_rs, verdict.get("mfe_mae") or {})
+            if kept != tp_rs:
+                rec["changes"].append({
+                    "field": "tp_rs", "field_th": "เป้าหมาย (R)",
+                    "from": tp_rs, "to": kept, "reason": why})
+                nxt["tp_rs"] = kept
+
+        # Gate: fix it only when the train-picked gate is ALSO positive out
+        # of sample. Otherwise the ladder stays — the data said nothing.
+        bg = verdict.get("best_gate") or {}
+        if (bg.get("test_mean_r") or 0) > 0:
+            nxt["gate_opps"] = [bg["min_opp"]]
+            nxt["gate_confs"] = [bg["min_conf"]]
+            rec["changes"].append({
+                "field": "gate", "field_th": "เกณฑ์กรองสัญญาณ",
+                "from": "หลายค่าทดสอบ",
+                "to": f"opp≥{bg['min_opp']:g} conf≥{bg['min_conf']:g}",
+                "reason": (f"เกณฑ์นี้บวกทั้งในตัว ({bg.get('train_mean_r'):+.3f}R) "
+                           f"และนอกตัว ({bg.get('test_mean_r'):+.3f}R)")})
+
+        # Assets: subset only behind a surviving cell, and only pairs positive
+        # in BOTH periods with a real sample. Anything looser is the same
+        # multiple-testing trap this whole module exists to avoid.
+        per = verdict.get("per_asset") or []
+        total_assets = len({a.get("asset") for a in per if a.get("asset")})
+        strict = [a["asset"] for a in per
+                  if (a.get("train_mean_r") or 0) > 0
+                  and (a.get("test_mean_r") or 0) > 0
+                  and (a.get("test_n") or 0) >= 30]
+        if holds and strict and 0 < len(strict) < total_assets:
+            nxt["assets"] = sorted(strict)
+            rec["changes"].append({
+                "field": "assets", "field_th": "สินทรัพย์",
+                "from": f"{total_assets} คู่", "to": f"{len(strict)} คู่",
+                "reason": ("บวกทั้งสองช่วงพร้อมตัวอย่างจริง — "
+                           "ยังเป็นสมมติฐาน ต้องทดสอบต่อ")})
+
+        if nxt:
+            rec["has_plan"] = True
+            rec["next_config"] = nxt
+        else:
+            rec["note"] = ("รอบนี้ไม่มีหลักฐานพอจะปรับอะไร — ไม่มีช่องไหนรอดนอก"
+                           "ตัวอย่าง เกณฑ์ไหนก็ไม่บวกนอกตัว "
+                           "การปรับตอนนี้คือเดา ไม่ใช่สรุป")
+
+        # Live suggestion: text ONLY, and only when the candidate beats
+        # production out-of-sample by a margin AND is positive itself.
+        # Applying it stays a manual act in Settings.
+        pb = verdict.get("production_benchmark") or {}
+        if (holds and pb.get("available") and pb.get("test")
+                and (wf.get("test_mean_r") or 0) > 0
+                and wf["test_mean_r"] - (pb["test"].get("mean_r") or 0) > 0.05):
+            base = cfg.get("live_baseline") or {}
+            mode_to = _nearest_mode(win["sl_mult"])
+            live_changes = []
+            if str(base.get("sl_distance_mode") or "") != mode_to:
+                live_changes.append({
+                    "field": "sl_distance_mode", "field_th": "โหมด SL",
+                    "from": base.get("sl_distance_mode"), "to": mode_to})
+            if abs(float(base.get("rr_target") or 0) - float(win["tp_r"])) > 1e-9:
+                live_changes.append({
+                    "field": "rr_target", "field_th": "เป้า RR",
+                    "from": base.get("rr_target"), "to": float(win["tp_r"])})
+            if abs(float(base.get("min_opportunity") or 0) - float(bg.get("min_opp", 0))) > 1e-9:
+                live_changes.append({
+                    "field": "min_opportunity", "field_th": "เกณฑ์ opportunity",
+                    "from": base.get("min_opportunity"), "to": bg.get("min_opp")})
+            if abs(float(base.get("min_confidence") or 0) - float(bg.get("min_conf", 0))) > 1e-9:
+                live_changes.append({
+                    "field": "min_confidence", "field_th": "เกณฑ์ confidence",
+                    "from": base.get("min_confidence"), "to": bg.get("min_conf")})
+            if live_changes:
+                rec["live_suggestion"] = {
+                    "changes": live_changes,
+                    "candidate_test_r": round(wf["test_mean_r"], 4),
+                    "production_test_r": round(pb["test"].get("mean_r") or 0, 4),
+                    "note": ("ข้อเสนอสำหรับ setting จริง — ยังไม่เปลี่ยน "
+                             "ต้องกดยืนยันเองที่หน้า Settings"),
+                }
+        return rec
+    except Exception as exc:
+        log.debug("recommendation failed: %s", exc)
+        return {"has_plan": False, "changes": [], "next_config": {},
+                "live_suggestion": None,
+                "note": "คำนวณข้อเสนอไม่สำเร็จ — ดูตารางเอง"}

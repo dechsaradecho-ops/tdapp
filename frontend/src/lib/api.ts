@@ -345,7 +345,13 @@ export const api = {
   // GET  รายการงาน + ไหนกำลังรันอยู่
   // GET  สถานะ/ผลของงานหนึ่ง (ตั้ง progress bar)
   // GET  event หลัง seq ที่ (สตรีมเข้า-ออก/TP/SL/PnL สด)
-  simStart: (input?: { target_events?: number; cooldown?: number; days?: number; assets?: string[] }) =>
+  // กริด/เกณฑ์รอบหน้าส่งมาตรงนี้ได้เลย — ค่าเหล่านี้อยู่เฉพาะในงานจำลอง
+  // ไม่แตะ setting เทรดจริง
+  simStart: (input?: {
+    target_events?: number; cooldown?: number; days?: number; assets?: string[];
+    sl_multiples?: number[]; tp_rs?: number[]; max_bars?: number[];
+    gate_opps?: number[]; gate_confs?: number[];
+  }) =>
     post<{ ok: boolean; run_id?: string; error?: string; config?: unknown }>(
       "/api/system/simulate", input ?? {}),
   simRuns: (limit = 20) =>

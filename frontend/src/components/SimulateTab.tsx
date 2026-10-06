@@ -24,7 +24,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import Icon from "@/components/Icon";
 import { api } from "@/lib/api";
-import type { SimCellRow, SimEvent, SimLabel, SimResult, SimRun } from "@/lib/types";
+import type { SimCellRow, SimEvent, SimLabel, SimRecommendation, SimResult, SimRun } from "@/lib/types";
+
+/** แสดงค่า from → to ของข้อเสนอรอบหน้า (array ย่อให้อ่านง่าย) */
+const fmtVal = (v: unknown): string => {
+  if (Array.isArray(v)) {
+    const s = v.map((x) => String(x)).join(", ");
+    return s.length > 80 ? `${v.length} ค่า: ${s.slice(0, 80)}…` : s || "—";
+  }
+  if (v === null || v === undefined) return "—";
+  return String(v);
+};
 
 const POLL_MS = 1000;
 const PAGE = 500;
@@ -228,6 +238,32 @@ export default function SimulateTab() {
     }
   };
 
+  // Apply the run's own proposal to the NEXT simulation run. The payload
+  // carries only simulation parameters (grid / gate / assets) — there is no
+  // code path here that can reach live trading settings.
+  const applyRec = async (next: SimRecommendation["next_config"]) => {
+    setStarting(true);
+    setErr("");
+    try {
+      const res = await api.simStart({
+        target_events: run?.target_events ?? target,
+        cooldown,
+        days: run?.config?.days ?? days,
+        ...next,
+      });
+      if (!res.ok) {
+        setErr(res.error || "เริ่มไม่สำเร็จ");
+        return;
+      }
+      selectRun(res.run_id!);
+      await loadRuns();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
   const busy = run?.status === "pending" || run?.status === "running";
   const pct = run && run.target_events
     ? Math.min(100, Math.round((100 * run.processed) / run.target_events))
@@ -399,7 +435,8 @@ export default function SimulateTab() {
 
       {/* ---------------- verdict ---------------- */}
       {run && (run.status === "done" || run.status === "cancelled") && (
-        <Verdict res={res} status={run.status} />
+        <Verdict res={res} status={run.status} busy={!!busy}
+                 starting={starting} onApply={applyRec} />
       )}
 
       {/* ---------------- run history ---------------- */}
@@ -578,7 +615,10 @@ function EquityCurve({ points, tp, sl, ex }: {
   );
 }
 
-function Verdict({ res, status }: { res: SimResult; status: string }) {
+function Verdict({ res, status, busy, starting, onApply }: {
+  res: SimResult; status: string; busy: boolean; starting: boolean;
+  onApply: (next: SimRecommendation["next_config"]) => void;
+}) {
   const top = res.top_paid || [];
   const wf = res.walk_forward;
   const per = res.per_asset || [];
@@ -589,6 +629,7 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
   const gate = res.gate_sweep;
   const bestGate = res.best_gate;
   const pb = res.production_benchmark;
+  const rec = res.recommendation;
 
   return (
     <>
@@ -636,6 +677,59 @@ function Verdict({ res, status }: { res: SimResult; status: string }) {
         )}
         {wf?.error && (
           <p className="text-xs text-slate-400 mb-2">{wf.error}</p>
+        )}
+
+        {/* ---- next round: what changes (from -> to), applied to the NEXT
+                SIMULATION run only. Live trading settings are never touched
+                here; a live suggestion is text that must be confirmed by hand
+                in Settings. ---- */}
+        {rec && (rec.has_plan || rec.note) && (
+          <div className="rounded border border-accent/30 bg-accent/5 p-3 mb-3">
+            <div className="text-xs font-bold text-slate-200 mb-1">
+              รอบหน้า: ปรับอะไร (เฉพาะการจำลอง — ไม่แตะเทรดจริง)
+            </div>
+            {rec.changes.map((c, i) => (
+              <div key={i} className="text-[11px] text-slate-300 mb-1">
+                <span className="font-semibold text-white">{c.field_th}</span>
+                {": "}
+                <span className="line-through text-loss/80">{fmtVal(c.from)}</span>
+                {" → "}
+                <span className="font-bold text-profit">{fmtVal(c.to)}</span>
+                <div className="text-slate-500">{c.reason}</div>
+              </div>
+            ))}
+            {rec.note && !rec.has_plan && (
+              <p className="text-[11px] text-slate-400">{rec.note}</p>
+            )}
+            {rec.has_plan && (
+              <button onClick={() => onApply(rec.next_config)}
+                disabled={starting || busy}
+                className="mt-2 px-4 py-2 rounded bg-accent text-white text-xs font-bold disabled:opacity-50 min-h-[40px]">
+                {starting ? "กำลังเริ่ม..." : "ใช้ค่านี้รันรอบหน้า"}
+              </button>
+            )}
+          </div>
+        )}
+        {rec?.live_suggestion && (
+          <div className="rounded border border-amber-400/25 bg-amber-400/10 p-3 mb-3">
+            <div className="text-xs font-bold text-amber-200 mb-1">
+              ข้อเสนอสำหรับ setting จริง — ยังไม่เปลี่ยน
+            </div>
+            {rec.live_suggestion.changes.map((c, i) => (
+              <div key={i} className="text-[11px] text-slate-300">
+                <span className="font-semibold">{c.field_th}</span>
+                {": "}
+                <span className="line-through text-loss/80">{fmtVal(c.from)}</span>
+                {" → "}
+                <span className="font-bold">{fmtVal(c.to)}</span>
+              </div>
+            ))}
+            <p className="text-[10px] text-slate-400 mt-1">
+              ตัวเต็งนอกตัว {signed(rec.live_suggestion.candidate_test_r, 3)}R
+              เทียบของจริง {signed(rec.live_suggestion.production_test_r, 3)}R
+              {" · "}{rec.live_suggestion.note}
+            </p>
+          </div>
         )}
 
         {mfe && mfe.mfe_median !== undefined && (
