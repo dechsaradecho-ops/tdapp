@@ -1214,7 +1214,7 @@ async def simulation_events(request: Request, run_id: str,
         rows = db._client.table(simulation.EVENTS_TABLE).select(
             "seq, asset, direction, entry, atr_pct, opportunity, confidence, "
             "sl_mult, tp_r, max_bars, label, r_multiple, bars_held, "
-            "exit_price, ambiguous, mfe_r, mae_r"
+            "exit_price, ambiguous, mfe_r, mae_r, bar_index"
         ).eq("run_id", run_id).gt("seq", max(0, after)) \
             .order("seq").limit(page).execute()
     except Exception as exc:
@@ -1240,6 +1240,57 @@ async def simulation_events(request: Request, run_id: str,
     out["more"] = len(out["events"]) >= page
     out["verdict"] = "ok"
     return out
+
+
+@router.get("/simulate-history/export")
+async def export_history(request: Request, days: int = 1095,
+                         assets: str = ""):
+    """Download the daily price history the replay runs on, as CSV.
+
+    The candles themselves are NOT stored in the database — every run fetches
+    them fresh from Yahoo, and the run row keeps only the per-asset bar counts
+    plus the `days` parameter, so you can tell what went in. This endpoint
+    pulls the same feed through the same `fetch_candles` the worker uses and
+    streams it out, oldest-first:
+        asset,bar_index,open,high,low,close
+    `bar_index` is the replay timeline position, and (asset, bar_index) is the
+    join key to the events CSV — which entry came from which bar.
+    """
+    import logging
+
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    from app.integrations import quotes
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    if not db.available:
+        return JSONResponse(status_code=503, content={
+            "ok": False, "error": db.init_error or "client unavailable"})
+    span = max(30, min(int(days or 1095), 3650))
+    names = [a.strip().upper() for a in (assets or "").split(",") if a.strip()] \
+        or list(simulation.DEFAULT_ASSETS)
+    names = names[:40]
+
+    async def gen():
+        import httpx
+
+        yield "﻿asset,bar_index,open,high,low,close\n"
+        async with httpx.AsyncClient() as client:
+            for a in names:
+                try:
+                    candles = await quotes.fetch_candles(a, client, days=span)
+                except Exception as exc:
+                    logging.getLogger("tdapp.system").warning(
+                        "history export: %s unavailable: %s", a, exc)
+                    continue
+                for i, cnd in enumerate(candles or []):
+                    yield (f"{a},{i},{cnd.o},{cnd.h},{cnd.l},{cnd.c}\n")
+
+    return StreamingResponse(
+        gen(), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="history-{span}d.csv"'})
 
 
 @router.post("/simulate/{run_id}/cancel")

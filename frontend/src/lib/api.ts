@@ -375,6 +375,17 @@ export const api = {
     return res.blob();
   },
 
+  // ---------- Price history CSV: the daily candles the replay runs on -----
+  // Not stored in the DB (fetched fresh from Yahoo per run), so this pulls
+  // the same feed and streams it. (asset, bar_index) joins to the events file.
+  simHistoryExport: async (days = 1095): Promise<Blob> => {
+    const res = await fetch(
+      `${API_BASE}/api/system/simulate-history/export?days=${days}`,
+      { cache: "no-store", headers: headers() });
+    if (!res.ok) handle401(res, "simulate-history/export");
+    return res.blob();
+  },
+
   // ---------- LINE: notification targets + test button ----------
   lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),
   lineAddTarget: (target_id: string, target_type = "group") =>

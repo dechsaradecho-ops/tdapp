@@ -258,6 +258,28 @@ export default function SimulateTab() {
     }
   };
 
+  // Download the daily price history behind the replay. Not stored in the DB,
+  // so this pulls the same Yahoo feed the worker uses (asset,bar_index,...).
+  const downloadHistory = async () => {
+    setExporting(true);
+    setErr("");
+    try {
+      const blob = await api.simHistoryExport(days);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `history-${days}d.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Download this run's samples as CSV — the same rows the chart streams.
   const downloadCsv = async () => {
     if (!runId) return;
@@ -382,6 +404,11 @@ export default function SimulateTab() {
                 title="ดาวน์โหลดตัวอย่างทั้งหมดของรันนี้เป็น CSV (แถวเดียวกับที่เห็นในกราฟ)"
                 className="text-[11px] px-2 py-1 rounded border border-slate-700 text-slate-300 disabled:opacity-50 min-h-[32px]">
                 {exporting ? "กำลังเตรียม..." : "ดาวน์โหลด CSV"}
+              </button>
+              <button onClick={downloadHistory} disabled={exporting}
+                title="ดาวน์โหลดราคาย้อนหลังรายวันที่ใช้จำลอง (asset,bar_index,open,high,low,close) — join กับไฟล์ตัวอย่างด้วย asset+bar_index"
+                className="text-[11px] px-2 py-1 rounded border border-slate-700 text-slate-300 disabled:opacity-50 min-h-[32px]">
+                {exporting ? "กำลังเตรียม..." : "ราคา CSV"}
               </button>
               {runs.length > 1 && runId !== runs[0]?.id && (
                 <button onClick={() => selectRun(runs[0].id)}

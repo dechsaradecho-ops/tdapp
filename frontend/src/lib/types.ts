@@ -552,6 +552,8 @@ export interface SimRun {
 export interface SimEvent {
   seq: number;
   asset: string;
+  /** ตำแหน่งแท่งบนไทม์ไลน์ของคู่นั้น — join key กับไฟล์ราคาย้อนหลัง */
+  bar_index?: number | null;
   direction: string;
   entry: number | null;
   atr_pct: number | null;

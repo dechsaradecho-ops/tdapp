@@ -82,6 +82,10 @@ SIM_EXPORT_COLUMNS = (
     "seq", "asset", "direction", "entry", "atr_pct", "opportunity",
     "confidence", "sl_mult", "tp_r", "max_bars", "label", "r_multiple",
     "bars_held", "exit_price", "ambiguous", "gap_fill", "mfe_r", "mae_r",
+    # bar_index LAST on purpose: it is the join key to the history CSV
+    # (asset + bar_index), and appending keeps every existing column position
+    # stable for readers of older files.
+    "bar_index",
 )
 
 

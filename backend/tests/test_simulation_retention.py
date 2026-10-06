@@ -211,6 +211,101 @@ class TestCsvExport:
         resp = await system.export_simulation(Req(), "nope")
         assert resp.status_code == 404
 
+
+class TestHistoryExport:
+    """The replay's price history is NOT stored — every run fetches it fresh.
+    This endpoint pulls the same feed and streams it, so the file and the run
+    always agree on what went in."""
+
+    def _req(self, db):
+        class Req:
+            class app:
+                class state:
+                    db = None
+        Req.app.state.db = db
+        return Req()
+
+    async def _body(self, resp):
+        chunks = [c async for c in resp.body_iterator]
+        return b"".join(
+            c.encode("utf-8") if isinstance(c, str) else c for c in chunks
+        ).decode("utf-8-sig")
+
+    @pytest.mark.asyncio
+    async def test_streams_candles_oldest_first(self, monkeypatch):
+        from app.api.routes import system
+        from app.integrations.quotes import Candle
+        from tests.test_simulation import FakeDB
+
+        async def fake_candles(asset, client, days=365):
+            assert days == 1095
+            return [Candle(o=1.0 + i, h=1.1 + i, l=0.9 + i, c=1.05 + i)
+                    for i in range(3)]
+
+        monkeypatch.setattr("app.integrations.quotes.fetch_candles",
+                            fake_candles)
+        resp = await system.export_history(
+            self._req(FakeDB()), days=1095, assets="EURUSD,GBPUSD")
+        assert getattr(resp, "status_code", 200) == 200
+        body = await self._body(resp)
+        lines = body.splitlines()
+        assert lines[0] == "asset,bar_index,open,high,low,close"
+        assert lines[1] == "EURUSD,0,1.0,1.1,0.9,1.05"
+        assert lines[3] == "EURUSD,2,3.0,3.1,2.9,3.05"
+        assert lines[4] == "GBPUSD,0,1.0,1.1,0.9,1.05"
+        assert len(lines) == 1 + 2 * 3
+        cd = resp.headers.get("content-disposition", "")
+        assert "history-1095d.csv" in cd
+
+    @pytest.mark.asyncio
+    async def test_days_is_clamped_not_rejected(self, monkeypatch):
+        from app.api.routes import system
+        from tests.test_simulation import FakeDB
+
+        seen = {}
+
+        async def fake_candles(asset, client, days=365):
+            seen["days"] = days
+            return []
+
+        monkeypatch.setattr("app.integrations.quotes.fetch_candles",
+                            fake_candles)
+        resp = await system.export_history(
+            self._req(FakeDB()), days=10, assets="EURUSD")
+        # the generator is lazy — nothing runs until the body is consumed
+        await self._body(resp)
+        assert seen["days"] == 30, "below-minimum days must clamp, not fail"
+        assert "history-30d.csv" in resp.headers.get("content-disposition", "")
+
+    @pytest.mark.asyncio
+    async def test_unavailable_feed_pair_is_skipped_not_fatal(self, monkeypatch):
+        from app.api.routes import system
+        from app.integrations.quotes import Candle
+        from tests.test_simulation import FakeDB
+
+        async def fake_candles(asset, client, days=365):
+            if asset == "BAD":
+                raise RuntimeError("yahoo down")
+            return [Candle(o=1.0, h=1.1, l=0.9, c=1.0)]
+
+        monkeypatch.setattr("app.integrations.quotes.fetch_candles",
+                            fake_candles)
+        resp = await system.export_history(
+            self._req(FakeDB()), days=1095, assets="BAD,EURUSD")
+        body = await self._body(resp)
+        assert "EURUSD,0,1.0,1.1,0.9,1.0" in body
+        assert "BAD" not in body
+
+    @pytest.mark.asyncio
+    async def test_db_down_returns_503(self):
+        from app.api.routes import system
+        from tests.test_simulation import FakeDB
+
+        db = FakeDB()
+        db.available = False
+        resp = await system.export_history(self._req(db))
+        assert resp.status_code == 503
+
     def test_log_maintenance_runs_it(self):
         """Wiring matters as much as the function — a purge nobody calls is
         the exact gap this worker was written to close."""
