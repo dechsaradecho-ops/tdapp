@@ -175,6 +175,62 @@ class TestCsvExport:
         assert simulation.export_csv(FakeDB(), "nope").strip() == \
             ",".join(simulation.SIM_EXPORT_COLUMNS)
 
+    def test_flush_drops_not_yet_migrated_columns_and_retries(self):
+        """A run started after this code deploys but before migration 059
+        runs would otherwise lose EVERY event batch on the unknown feature
+        columns. The labels must survive; only the features wait."""
+        from tests.test_simulation import FakeDB
+
+        db = FakeDB()
+        calls = []
+
+        class FlakyTable:
+            def insert(self, rows):
+                calls.append([dict(r) for r in rows])
+                if any("adx" in r for r in rows):
+                    raise RuntimeError(
+                        "Could not find the 'adx' column of "
+                        "'simulation_events' in the schema cache (PGRST204)")
+                db.inserted.extend(rows)
+                return self
+
+            def execute(self):
+                from tests.test_settings import SimpleResult
+                return SimpleResult([{}])
+
+        class FlakyClient:
+            def table(self, _name):
+                return FlakyTable()
+
+        db._client = FlakyClient()
+        rows = [{"seq": 1, "asset": "EURUSD", "label": "tp",
+                 "r_multiple": 1.5, "adx": 20.0, "rsi": 55.0}]
+        simulation._flush(db, rows)
+        assert len(calls) == 2, "expected failed attempt + retry"
+        assert "adx" in calls[0][0] and "adx" not in calls[1][0]
+        assert calls[1][0]["label"] == "tp"
+        assert len(db.inserted) == 1
+
+    def test_flush_gives_up_on_unrelated_errors(self):
+        from tests.test_simulation import FakeDB
+
+        db = FakeDB()
+
+        class DeadTable:
+            def insert(self, rows):
+                raise RuntimeError("connection reset")
+
+            def execute(self):
+                raise AssertionError("unreachable")
+
+        class DeadClient:
+            def table(self, _name):
+                return DeadTable()
+
+        db._client = DeadClient()
+        simulation._flush(db, [{"seq": 1}])  # must not raise
+        assert db.inserted == []
+
     @pytest.mark.asyncio
     async def test_route_streams_the_file(self):
         from app.api.routes import system

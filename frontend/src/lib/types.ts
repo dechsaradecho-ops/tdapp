@@ -568,6 +568,16 @@ export interface SimEvent {
   asset: string;
   /** ตำแหน่งแท่งบนไทม์ไลน์ของคู่นั้น — join key กับไฟล์ราคาย้อนหลัง */
   bar_index?: number | null;
+  /** ฟีเจอร์ตอนเข้าไม้ (migration 059) — รันเก่าเป็น null */
+  adx?: number | null;
+  rsi?: number | null;
+  macd_hist?: number | null;
+  volatility_index?: number | null;
+  chg20?: number | null;
+  ema_gap_atr?: number | null;
+  st_agree?: number | null;
+  ema_agree?: number | null;
+  macd_agree?: number | null;
   direction: string;
   entry: number | null;
   atr_pct: number | null;

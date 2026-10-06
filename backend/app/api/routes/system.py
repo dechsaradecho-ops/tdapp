@@ -1210,13 +1210,26 @@ async def simulation_events(request: Request, run_id: str,
         out["hint"] = _SIM_SETUP_HINT
         out["events"] = []
         return out
+    base_cols = ("seq, asset, direction, entry, atr_pct, opportunity, "
+                 "confidence, sl_mult, tp_r, max_bars, label, r_multiple, "
+                 "bars_held, exit_price, ambiguous, mfe_r, mae_r, bar_index")
+    full_cols = (base_cols + ", adx, rsi, macd_hist, volatility_index, "
+                 "chg20, ema_gap_atr, st_agree, ema_agree, macd_agree")
     try:
-        rows = db._client.table(simulation.EVENTS_TABLE).select(
-            "seq, asset, direction, entry, atr_pct, opportunity, confidence, "
-            "sl_mult, tp_r, max_bars, label, r_multiple, bars_held, "
-            "exit_price, ambiguous, mfe_r, mae_r, bar_index"
-        ).eq("run_id", run_id).gt("seq", max(0, after)) \
-            .order("seq").limit(page).execute()
+        try:
+            rows = db._client.table(simulation.EVENTS_TABLE).select(
+                full_cols
+            ).eq("run_id", run_id).gt("seq", max(0, after)) \
+                .order("seq").limit(page).execute()
+        except Exception as first:
+            # Migration 059 not applied yet: the feature columns do not exist.
+            # Serve the base columns instead of failing the whole trace.
+            if "PGRST204" not in str(first) and "column" not in str(first):
+                raise
+            rows = db._client.table(simulation.EVENTS_TABLE).select(
+                base_cols
+            ).eq("run_id", run_id).gt("seq", max(0, after)) \
+                .order("seq").limit(page).execute()
     except Exception as exc:
         out["verdict"] = "fail"
         out["error"] = str(exc)
@@ -1233,6 +1246,13 @@ async def simulation_events(request: Request, run_id: str,
             "bars_held": r.get("bars_held"), "exit_price": r.get("exit_price"),
             "ambiguous": bool(r.get("ambiguous")), "mfe_r": r.get("mfe_r"),
             "mae_r": r.get("mae_r"),
+            "bar_index": r.get("bar_index"),
+            "adx": r.get("adx"), "rsi": r.get("rsi"),
+            "macd_hist": r.get("macd_hist"),
+            "volatility_index": r.get("volatility_index"),
+            "chg20": r.get("chg20"), "ema_gap_atr": r.get("ema_gap_atr"),
+            "st_agree": r.get("st_agree"), "ema_agree": r.get("ema_agree"),
+            "macd_agree": r.get("macd_agree"),
         }
         for r in (rows.data or [])
     ]

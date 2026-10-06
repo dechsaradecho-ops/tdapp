@@ -86,6 +86,10 @@ SIM_EXPORT_COLUMNS = (
     # (asset + bar_index), and appending keeps every existing column position
     # stable for readers of older files.
     "bar_index",
+    # Meta-filter features (migration 059) trail after that, same rule:
+    # append-only, never reorder.
+    "adx", "rsi", "macd_hist", "volatility_index", "chg20",
+    "ema_gap_atr", "st_agree", "ema_agree", "macd_agree",
 )
 
 
@@ -471,6 +475,10 @@ def _persist_events(db, run_id: str, events: list, cfg: dict[str, Any],
             "gap_fill": bool(res.gap_fill),
             "mfe_r": round(res.mfe_r, 4),
             "mae_r": round(res.mae_r, 4),
+            # Meta-filter features (migration 059): the entry-time values the
+            # model trains on. Rounded for storage; the trainer standardizes
+            # anyway. Missing (old replays) -> NULL -> row skipped in training.
+            **{k: _feat(ev, k) for k in META_FEATURES},
         })
         # label the full grid too — cheap relative to the replay, and it
         # means the final sweep never has to re-walk history
@@ -496,9 +504,49 @@ def _spec(sl_w: float, tp_w: float, mb: int):
     return BarrierSpec(sl_w, tp_w, mb)
 
 
+#: Entry-time features persisted per event for the meta-filter (owner
+#: 2026-10-06, migration 059). Must match strategy_replay.event_features
+#: keys; `regime` is a string and stays out (models read numbers only).
+META_FEATURES = ("adx", "rsi", "macd_hist", "volatility_index", "chg20",
+                 "ema_gap_atr", "st_agree", "ema_agree", "macd_agree")
+
+
+def _feat(ev, key: str):
+    """One feature value or None. Never raises; unparseable -> NULL so the
+    trainer skips the row instead of the run dying on one bad value."""
+    try:
+        v = (ev.features or {}).get(key)
+        f = float(v)
+        if f != f or f in (float("inf"), float("-inf")):
+            return None
+        return round(f, 4)
+    except (TypeError, ValueError):
+        return None
+
+
 def _flush(db, rows: list[dict]) -> None:
     if not rows:
         return
+    try:
+        db._client.table(EVENTS_TABLE).insert(rows).execute()
+        return
+    except Exception as exc:
+        # Migration 059 adds feature columns AFTER this code deploys. A run
+        # started in between would fail EVERY batch on the unknown column and
+        # lose all its events. Drop not-yet-migrated columns and retry — the
+        # same posture as the settings upsert. Labels survive; only the
+        # training features wait for the migration.
+        import re
+        m = re.search(r"Could not find the '([^']+)' column", str(exc))
+        missing = m.group(1) if m else None
+        if not missing or not any(missing in r for r in rows):
+            log.error("simulate: event batch insert failed (%d rows): %s",
+                      len(rows), exc)
+            return
+        log.warning("simulate: dropping not-yet-migrated column %s "
+                    "(run migration 059) — labels still stored", missing)
+        for r in rows:
+            r.pop(missing, None)
     try:
         db._client.table(EVENTS_TABLE).insert(rows).execute()
     except Exception as exc:
