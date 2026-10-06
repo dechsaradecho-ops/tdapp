@@ -250,14 +250,14 @@ export default function SimulateTab() {
           ? { optimizer: { enabled: true, max_rounds: maxRounds } }
           : {}),
       });
-      if (!res.ok) {
-        setErr(res.error || "เริ่มไม่สำเร็จ");
+      if (!res.ok || !res.run_id) {
+        setErr(res.error || "เริ่มไม่สำเร็จ (ไม่ได้ run_id กลับมา)");
         return;
       }
       seqRef.current = 0;
       setEvents([]);
       setRun(null);
-      setRunId(res.run_id!);
+      setRunId(res.run_id);
       await loadRuns();
     } catch (e) {
       setErr(String(e));
@@ -308,7 +308,7 @@ export default function SimulateTab() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `simulation-${runId.slice(0, 8)}.csv`;
+      a.download = `simulation-${String(runId || "").slice(0, 8)}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -333,11 +333,11 @@ export default function SimulateTab() {
         days: run?.config?.days ?? days,
         ...next,
       });
-      if (!res.ok) {
-        setErr(res.error || "เริ่มไม่สำเร็จ");
+      if (!res.ok || !res.run_id) {
+        setErr(res.error || "เริ่มไม่สำเร็จ (ไม่ได้ run_id กลับมา)");
         return;
       }
-      selectRun(res.run_id!);
+      selectRun(res.run_id);
       await loadRuns();
     } catch (e) {
       setErr(String(e));
@@ -425,10 +425,10 @@ export default function SimulateTab() {
               {runs.length > 1 && runId !== runs[0]?.id
                 ? `กำลังดูผลรันเก่า (${run.created_at
                     ? String(run.created_at).slice(5, 16).replace("T", " ")
-                    : run.id.slice(0, 8)}) — ไม่ใช่งานล่าสุด`
+                    : String(run.id || "").slice(0, 8) || "—"}) — ไม่ใช่งานล่าสุด`
                 : `ผลรัน (${run.created_at
                     ? String(run.created_at).slice(5, 16).replace("T", " ")
-                    : run.id.slice(0, 8)})`}
+                    : String(run.id || "").slice(0, 8) || "—"})`}
             </span>
             <div className="flex gap-2">
               <button onClick={downloadCsv} disabled={exporting || !runId}
@@ -655,7 +655,7 @@ function HistoryLine({ history }: { history: SimHistoryReport }) {
   if (history.error) {
     return (
       <p className="text-[10px] text-slate-500 mt-1">
-        ราคา: ใช้ฟีดสดทั้งชุด ({history.error.slice(0, 60)})
+        ราคา: ใช้ฟีดสดทั้งชุด ({String(history.error || "").slice(0, 60)})
       </p>
     );
   }
@@ -987,7 +987,7 @@ function Verdict({ res, status, busy, starting, onApply }: {
                       </td>
                       <td className="py-1 pr-3">{int(r.grid_cells)}</td>
                       <td className="py-1 pr-3">
-                        {r.winner.sl_mult !== null && r.winner.sl_mult !== undefined
+                        {r.winner && r.winner.sl_mult !== null && r.winner.sl_mult !== undefined
                           ? `${num(r.winner.sl_mult, 2)}×/${num(r.winner.tp_r, 2)}R`
                           : "—"}
                       </td>
@@ -1219,9 +1219,11 @@ function HeadToHead({ wf, pb }: { wf: SimWalkForward; pb?: SimBenchmark }) {
           <tbody>
             <tr className="border-b border-slate-800/50">
               <td className="py-1.5 pr-3 font-bold text-accent">SIM ตัวเต็ง</td>
-              <td className="py-1.5 pr-3">{num(w.sl_mult, 2)}×ATR</td>
+              <td className="py-1.5 pr-3">
+                {w.sl_mult ?? "—"}{w.sl_mult != null ? "×ATR" : ""}
+              </td>
               <td className="py-1.5 pr-3" title={tpMeaning(w.tp_r)}>
-                {num(w.tp_r, 2)}R
+                {w.tp_r ?? "—"}{w.tp_r != null ? "R" : ""}
               </td>
               <td className="py-1.5 pr-3">
                 {gate ? `opp≥${num(gate.min_opp, 0)} conf≥${num(gate.min_conf, 0)}` : "—"}

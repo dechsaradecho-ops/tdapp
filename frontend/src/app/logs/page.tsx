@@ -25,13 +25,15 @@ import {
   SignalLogsResponse,
 } from "@/lib/types";
 
-/** ป้ายชื่อช่องทางที่เปลี่ยน Settings */
-function settingsSourceLabel(s: string): string {
-  if (s === "ui") return "หน้า Settings";
-  if (s === "reset") return "รีเซ็ตค่าเริ่มต้น";
-  if (s === "limit_expand") return "ขยายลิมิต (approve)";
-  if (s.startsWith("preset:")) return `พรีเซ็ต ${s.slice(7)}`;
-  return s;
+/** ป้ายชื่อช่องทางที่เปลี่ยน Settings — รับ unknown เพราะแถวจาก API
+ * อาจขาดฟิลด์ แล้วค่อย coerce (เคยล้มทั้งแท็บจาก .startsWith ของ undefined) */
+function settingsSourceLabel(s: unknown): string {
+  const t = typeof s === "string" ? s : "";
+  if (t === "ui") return "หน้า Settings";
+  if (t === "reset") return "รีเซ็ตค่าเริ่มต้น";
+  if (t === "limit_expand") return "ขยายลิมิต (approve)";
+  if (t.startsWith("preset:")) return `พรีเซ็ต ${t.slice(7)}`;
+  return t || "—";
 }
 
 /** แสดงค่าเก่า/ใหม่ทุกชนิด (number/bool/string/null/array/object) */
