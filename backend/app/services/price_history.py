@@ -268,6 +268,128 @@ def _insert(db, asset: str, d: str, o: float, h: float,
         return False
 
 
+def _fetch_fallback(asset: str, days: int):
+    """Close-only fallback feed (Frankfurter ECB closes for FX).
+
+    Used ONLY to fill dates the primary feed printed badly — never as a
+    first choice, because synthesized bars carry no real high/low. Raises
+    QuotesUnavailable for assets without a mapping (e.g. gold).
+    """
+    import httpx
+
+    from app.integrations import quotes
+
+    async def _go():
+        async with httpx.AsyncClient() as client:
+            return await quotes._fetch_fx(asset, client, days=days)
+
+    return asyncio.run(_go())
+
+
+def fill_gaps(db, asset: str, days: int = 1095, fetch=None,
+              _today: Optional[str] = None) -> dict[str, Any]:
+    """Fill dates the primary feed quarantined, from the fallback feed.
+
+    Only dates MISSING from the table are written — stored bars are never
+    touched, so this cannot rewrite history, only complete it. Each filled
+    bar is anchored to the stored series (open = nearest earlier stored
+    close) and validated like any other bar; spike suspects are quarantined
+    again, not forced in. Filled rows carry source='frankfurter-fill' so any
+    consumer can tell constructed bars from real OHLC.
+
+    Returns {asset, fetched, filled, skipped_existing, invalid: [...],
+    error?: str}. Never raises.
+    """
+    asset = str(asset or "").upper()
+    rep: dict[str, Any] = {"asset": asset, "fetched": 0, "filled": 0,
+                           "skipped_existing": 0, "invalid": []}
+    try:
+        if not db or not db.available:
+            rep["error"] = "DB unavailable"
+            return rep
+        stored = db.select(TABLE, filters={"asset": asset},
+                           order="bar_date", desc=False, limit=5000) or []
+    except Exception as exc:
+        rep["error"] = f"read failed: {exc}"[:160]
+        return rep
+
+    have = {str(r.get("bar_date")): r for r in stored if r.get("bar_date")}
+    if not have:
+        rep["error"] = "no stored history — run a normal sync first"
+        return rep
+    # Fill HOLES only: never extend beyond the stored range. Extending looks
+    # harmless but it silently changes what every future replay sees (a run
+    # that once started in 2024 would start in 2023), and constructed bars
+    # are lower quality than real OHLC — their share of history must stay
+    # small by construction, not by luck.
+    lo, hi = min(have), max(have)
+    today = _today or today_utc()
+    try:
+        span = (datetime.fromisoformat(today).date()
+                - datetime.fromisoformat(min(have)).date()).days + 10
+    except ValueError:
+        span = int(days)
+    span = max(30, min(int(days), span))
+
+    try:
+        candles = (fetch or _fetch_fallback)(asset, span)
+    except Exception as exc:
+        rep["error"] = f"fallback fetch failed: {exc}"[:160]
+        return rep
+
+    closes: dict[str, float] = {}
+    for cnd in candles or []:
+        d = bar_date_of(getattr(cnd, "t", 0))
+        if not d:
+            continue
+        try:
+            closes[d] = float(getattr(cnd, "c", 0))
+        except (TypeError, ValueError):
+            continue
+    rep["fetched"] = len(closes)
+
+    for d in sorted(closes):
+        if d > today:
+            continue  # not a hole, just a feed ahead of the clock
+        if d < lo or d > hi:
+            continue  # outside the stored range — extension is not filling
+        if d in have:
+            rep["skipped_existing"] += 1
+            continue
+        c = closes[d]
+        # Anchor: open = nearest earlier STORED close, so the filled bar
+        # continues the stored series instead of the fallback's own drift.
+        earlier = sorted(x for x in have if x < d)
+        if earlier:
+            try:
+                o = float(have[earlier[-1]].get("close") or 0)
+            except (TypeError, ValueError):
+                o = c
+        else:
+            o = c
+        h, l = (max(o, c), min(o, c))
+        errs = validate_bar(asset, d, o, h, l, c,
+                            prev_close=o if o > 0 else None, today=today)
+        if errs:
+            rep["invalid"].append({"bar_date": d, "reasons": errs})
+            continue
+        try:
+            ok = bool(db.insert(TABLE, {
+                "asset": asset, "bar_date": d,
+                "open": round(o, 6), "high": round(h, 6),
+                "low": round(l, 6), "close": round(c, 6),
+                "source": "frankfurter-fill",
+            }))
+        except Exception:
+            ok = False
+        if ok:
+            rep["filled"] += 1
+            have[d] = {"bar_date": d, "close": c}
+        else:
+            rep["invalid"].append({"bar_date": d, "reasons": ["write_failed"]})
+    return rep
+
+
 def load_series(db, assets, days: int = 1095) -> tuple[dict, dict]:
     """Sync every asset, then read back full series oldest-first.
 

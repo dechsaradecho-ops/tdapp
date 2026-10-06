@@ -291,6 +291,101 @@ class TestLoadSeries:
         assert report["source"].startswith("price_history_daily")
 
 
+class TestFillGaps:
+    def _db(self):
+        db = HistDB()
+        for d, c in (("2026-09-28", 1.10), ("2026-09-30", 1.12)):
+            # 2026-09-29 is the hole (quarantined primary print)
+            b = bar(d, o=c, h=c + 0.001, l=c - 0.001, c=c)
+            db.insert(price_history.TABLE, b)
+        return db
+
+    def _fallback(self, asset, span):
+        return [_candle("2026-09-28", c=1.10),
+                _candle("2026-09-29", c=1.11),
+                _candle("2026-09-30", c=1.12)]
+
+    def test_fills_only_the_missing_date(self):
+        db = self._db()
+        rep = price_history.fill_gaps(db, "EURUSD", fetch=self._fallback,
+                                      _today=TODAY)
+        assert rep["filled"] == 1
+        assert rep["skipped_existing"] == 2
+        assert rep["invalid"] == []
+        rows = db.select(price_history.TABLE,
+                         filters={"asset": "EURUSD", "bar_date": "2026-09-29"})
+        assert rows and rows[0]["source"] == "frankfurter-fill"
+
+    def test_filled_bar_is_anchored_to_stored_history(self):
+        """Open = the stored previous close, not the fallback's drift — the
+        fill continues our series instead of importing someone else's."""
+        db = self._db()
+        price_history.fill_gaps(db, "EURUSD", fetch=self._fallback,
+                                _today=TODAY)
+        rows = db.select(price_history.TABLE,
+                         filters={"asset": "EURUSD", "bar_date": "2026-09-29"})
+        assert float(rows[0]["open"]) == 1.10   # stored 09-28 close...
+        assert float(rows[0]["close"]) == 1.11  # ...to fallback 09-29 close
+        assert float(rows[0]["high"]) == 1.11
+        assert float(rows[0]["low"]) == 1.10
+
+    def test_never_touches_stored_bars(self):
+        db = self._db()
+
+        def drift(asset, span):
+            return [_candle("2026-09-28", c=1.50),
+                    _candle("2026-09-30", c=1.60)]
+
+        rep = price_history.fill_gaps(db, "EURUSD", fetch=drift, _today=TODAY)
+        assert rep["filled"] == 0
+        rows = db.select(price_history.TABLE,
+                         filters={"asset": "EURUSD", "bar_date": "2026-09-28"})
+        assert float(rows[0]["close"]) == 1.10
+
+    def test_spike_in_the_fallback_is_quarantined_too(self):
+        db = self._db()
+
+        def spike(asset, span):
+            return [_candle("2026-09-29", c=1.50)]
+
+        rep = price_history.fill_gaps(db, "EURUSD", fetch=spike, _today=TODAY)
+        assert rep["filled"] == 0
+        assert rep["invalid"][0]["reasons"] == ["spike_suspect"]
+        assert db.select(price_history.TABLE, filters={
+            "asset": "EURUSD", "bar_date": "2026-09-29"}) == []
+
+    def test_never_extends_beyond_the_stored_range(self):
+        """Filling must not silently rewrite what future replays see: a run
+        that once started in 2024 must not start in 2023 because a fill
+        extended history. Dates outside [min, max] stored are left alone."""
+        db = self._db()
+
+        def older(asset, span):
+            return [_candle("2026-09-20", c=1.09),
+                    _candle("2026-09-29", c=1.11),   # the hole
+                    _candle("2026-10-10", c=1.13)]   # past the stored end
+
+        rep = price_history.fill_gaps(db, "EURUSD", fetch=older, _today=TODAY)
+        assert rep["filled"] == 1
+        assert db.select(price_history.TABLE, filters={
+            "asset": "EURUSD", "bar_date": "2026-09-20"}) == []
+        assert db.select(price_history.TABLE, filters={
+            "asset": "EURUSD", "bar_date": "2026-10-10"}) == []
+
+    def test_no_history_means_nothing_to_anchor_to(self):
+        rep = price_history.fill_gaps(HistDB(), "EURUSD",
+                                      fetch=self._fallback, _today=TODAY)
+        assert "error" in rep and rep["filled"] == 0
+
+    def test_unmapped_asset_reports_instead_of_crashing(self):
+        def boom(asset, span):
+            raise RuntimeError("no FX pair mapping")
+
+        rep = price_history.fill_gaps(self._db(), "XAUUSD", fetch=boom,
+                                      _today=TODAY)
+        assert "error" in rep and rep["filled"] == 0
+
+
 class TestSimulationFallback:
     def test_history_failure_degrades_to_direct_fetch(self, monkeypatch):
         from app.services import simulation
