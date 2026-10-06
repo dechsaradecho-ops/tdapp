@@ -390,6 +390,27 @@ export interface SimWalkForwardCheck {
   test_n: number;
 }
 
+/** หนึ่งรอบของการค้นหลายรอบ — ผู้ชนะรอบนั้นวัดนอกตัวอย่าง */
+export interface SimRound {
+  round: number;
+  grid_cells?: number;
+  winner: { sl_mult: number | null; tp_r: number | null; max_bars: number | null };
+  train_mean_r?: number | null;
+  test_mean_r?: number | null;
+  test_n?: number | null;
+  holds_out?: boolean;
+  survivors?: number | null;
+  live_suggested?: boolean;
+}
+
+export interface SimOptimizerState {
+  status: string;
+  rounds_run: number;
+  best_round: number;
+  max_rounds: number;
+  note?: string;
+}
+
 export interface SimWalkForward {
   train_n?: number;
   test_n?: number;
@@ -512,6 +533,9 @@ export interface SimResult {
   };
   walk_forward?: SimWalkForward;
   production_benchmark?: SimBenchmark;
+  /** หลายรอบ (มีเฉพาะรันที่เปิดค้นต่อ) + สถานะการค้น */
+  rounds?: SimRound[];
+  optimizer?: SimOptimizerState;
   /** ข้อเสนอรอบหน้า (จาก → เป็น) + ปุ่มใช้ค่ารันรอบหน้า */
   recommendation?: SimRecommendation;
   per_asset?: SimPerAsset[];

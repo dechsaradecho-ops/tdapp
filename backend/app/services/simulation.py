@@ -231,7 +231,8 @@ def start_run(db, *, target_events: int = DEFAULT_TARGET,
               days: int = 1095,
               sl_multiples=SL_MULTIPLES, tp_rs=TP_RS,
               max_bars=MAX_BARS,
-              gate_opps=GATE_OPPS, gate_confs=GATE_CONFS) -> dict[str, Any]:
+              gate_opps=GATE_OPPS, gate_confs=GATE_CONFS,
+              optimizer: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Register a run and hand it to the worker. Returns immediately.
 
     ``gate_opps`` / ``gate_confs`` are the SIMULATION's own thresholds. They
@@ -259,6 +260,11 @@ def start_run(db, *, target_events: int = DEFAULT_TARGET,
             "gate_confs": [float(x) for x in (gate_confs or GATE_CONFS)],
             # captured once, at start, so the benchmark cannot drift mid-run
             "live_baseline": live_baseline(db),
+            # owner 2026-10-06: keep searching rounds until something holds.
+            # {} / None = single round (previous behaviour, unchanged).
+            "optimizer": ({"max_rounds": max(
+                1, min(int((optimizer or {}).get("max_rounds") or 4), 8))}
+                if (optimizer or {}).get("enabled") else None),
         }
         db.insert(RUNS_TABLE, {
             "id": run_id,
@@ -330,7 +336,10 @@ def _run_job(db, run_id: str, cfg: dict[str, Any]) -> None:
             return _finish(db, run_id, "cancelled", cancel, t0)
 
         _patch(db, run_id, stage="analysing", processed=total)
-        verdict = _analyse(events, cfg)
+        if cfg.get("optimizer"):
+            verdict = _optimize(db, run_id, cfg, events, cancel)
+        else:
+            verdict = _analyse(events, cfg)
         # The history validation report was written at the replaying stage,
         # but _finish REPLACES the whole result JSON — without this line the
         # verdict (and the tab's history line) silently loses it — same class
@@ -598,6 +607,131 @@ def _finish(db, run_id: str, status: str, cancel: threading.Event,
             t0: float, result: Optional[dict] = None) -> None:
     _patch(db, run_id, status=status, stage=status, finished_at=_now(),
            result=result or {}, error=None if status == "done" else status)
+
+
+# ---------------------------------------------------------------------------
+# Optimizer — keep searching until something holds, then stop and propose
+# ---------------------------------------------------------------------------
+# Owner 2026-10-06: "run sim until the best result, then tell me what to
+# change". One run row, several rounds: round 1 races the full grid; each
+# later round searches FINER values around the previous winner (midpoints, not
+# the same cells again — re-ranking identical cells would be theater). The
+# same events serve every round, so later rounds cost seconds, not minutes.
+#
+# HONESTY CONSTRAINTS (non-negotiable):
+# * every round is selected on TRAIN and scored once on the SAME test period,
+#   so the final answer is picked after N looks at one test set. The verdict
+#   therefore reports rounds_run and requires the usual margin PLUS a
+#   forward-test note — a multi-round winner is a hypothesis, not a proof.
+# * stall detection: two rounds without improvement stop the loop. Without it
+#   the optimizer burns time re-measuring noise.
+# * cancel is checked every round; a cancelled loop keeps every round so far.
+def _refine_grid(win_sl: float, win_tp: float, win_mb: int
+                 ) -> tuple[list[float], list[float], list[int]]:
+    """±12.5% around the winner. New coordinates (not a subset re-rank), each
+    rounded so the grid key stays stable between label and sweep."""
+    def around(w: float, lo: float = 0.25) -> list[float]:
+        w = float(w)
+        return sorted({v for v in (round(w * 0.875, 4), round(w, 4),
+                                   round(w * 1.125, 4)) if v >= lo})
+
+    return around(win_sl), around(win_tp), [int(win_mb)]
+
+
+def _round_summary(k: int, verdict: dict[str, Any]) -> dict[str, Any]:
+    wf = verdict.get("walk_forward") or {}
+    win = wf.get("winner") or {}
+    return {
+        "round": k,
+        "grid_cells": verdict.get("grid_cells"),
+        "winner": {"sl_mult": win.get("sl_mult"), "tp_r": win.get("tp_r"),
+                   "max_bars": win.get("max_bars")},
+        "train_mean_r": win.get("train_mean_r"),
+        "test_mean_r": wf.get("test_mean_r"),
+        "test_n": wf.get("test_n"),
+        "holds_out": bool(wf.get("holds_out")),
+        "survivors": wf.get("survivors"),
+        "live_suggested": bool((verdict.get("recommendation") or {})
+                               .get("live_suggestion")),
+    }
+
+
+def _optimize(db, run_id: str, cfg: dict[str, Any], events: list,
+              cancel) -> dict[str, Any]:
+    """Run the multi-round search. Returns the BEST round's verdict, with
+    `rounds` (every round's summary) and `optimizer` (how it ended) attached.
+    Never raises — a failed round ends the loop, it never kills the run."""
+    from app.engine.triple_barrier import label_grid
+
+    opt = cfg.get("optimizer") or {}
+    max_rounds = max(1, min(int(opt.get("max_rounds") or 4), 8))
+    rounds: list[dict] = []
+    verdicts: list[dict] = []
+    best_idx = 0
+    best_test = float("-inf")
+    stalled = 0
+    status = "no_config"
+    try:
+        for k in range(1, max_rounds + 1):
+            if cancel.is_set():
+                status = "cancelled"
+                break
+            _patch(db, run_id, stage=f"optimizing round {k}/{max_rounds}")
+            if k == 1:
+                verdict = _analyse(events, cfg)
+            else:
+                prev = (verdicts[-1].get("walk_forward") or {}).get("winner")
+                if not prev or prev.get("sl_mult") is None:
+                    break
+                nsl, ntp, nmb = _refine_grid(prev["sl_mult"], prev["tp_r"],
+                                             prev["max_bars"])
+                for ev in events:
+                    if cancel.is_set():
+                        break
+                    try:
+                        label_grid(ev, nsl, ntp, nmb)
+                    except Exception:
+                        continue
+                if cancel.is_set():
+                    status = "cancelled"
+                    break
+                cfg_k = dict(cfg, sl_multiples=nsl, tp_rs=ntp, max_bars=nmb)
+                verdict = _analyse(events, cfg_k)
+            verdicts.append(verdict)
+            rounds.append(_round_summary(k, verdict))
+            test_r = (verdict.get("walk_forward") or {}).get("test_mean_r")
+            test_r = float(test_r) if test_r is not None else float("-inf")
+            if test_r > best_test + 1e-12:
+                best_test, best_idx, stalled = test_r, len(verdicts) - 1, 0
+            else:
+                stalled += 1
+            if (verdict.get("recommendation") or {}).get("live_suggestion"):
+                status = "found"
+                break
+            if stalled >= 2:
+                status = "stalled"
+                break
+        else:
+            status = "exhausted"
+    except Exception as exc:
+        log.exception("optimizer round failed (keeping rounds so far)")
+        if not verdicts:
+            return {"error": f"optimizer failed before round 1: {exc}"[:200],
+                    "rounds": [], "optimizer": {"status": "failed"}}
+        status = "round_failed"
+    best = verdicts[best_idx]
+    best = dict(best)
+    best["rounds"] = rounds
+    best["optimizer"] = {
+        "status": "cancelled" if cancel.is_set() else status,
+        "rounds_run": len(rounds),
+        "best_round": best_idx + 1,
+        "max_rounds": max_rounds,
+        "note": ("ผู้ชนะผ่านหลายรอบบนช่วง test ชุดเดียว — "
+                 "ถือเป็นสมมติฐาน ต้อง forward-test ก่อนเชื่อ")
+        if len(rounds) > 1 else "",
+    }
+    return best
 
 
 # ---------------------------------------------------------------------------

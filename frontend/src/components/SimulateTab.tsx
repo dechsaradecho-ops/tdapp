@@ -26,6 +26,19 @@ import Icon from "@/components/Icon";
 import { api } from "@/lib/api";
 import type { SimBenchmark, SimCellRow, SimEvent, SimHistoryReport, SimLabel, SimRecommendation, SimResult, SimRun, SimWalkForward } from "@/lib/types";
 
+/** สถานะการค้นหลายรอบเป็นภาษาคน */
+const optStatusTh = (s: string): string => {
+  const m: Record<string, string> = {
+    found: "เจอค่าที่รอดแล้ว",
+    exhausted: "ครบทุกรอบ ยังไม่เจอ",
+    stalled: "นิ่ง 2 รอบติด หยุดเอง",
+    cancelled: "หยุดกลางคัน",
+    no_config: "ไม่มีผู้ชนะให้ค้นต่อ",
+    round_failed: "รอบพังกลางทาง",
+  };
+  return m[s] ?? s;
+};
+
 /** แสดงค่า from → to ของข้อเสนอรอบหน้า (array ย่อให้อ่านง่าย) */
 const fmtVal = (v: unknown): string => {
   if (Array.isArray(v)) {
@@ -109,6 +122,8 @@ export default function SimulateTab() {
   const [target, setTarget] = useState(5000);
   const [cooldown, setCooldown] = useState(1);
   const [days, setDays] = useState(1095);
+  const [optSearch, setOptSearch] = useState(false);
+  const [maxRounds, setMaxRounds] = useState(4);
   const [follow, setFollow] = useState(true);
   const [exporting, setExporting] = useState(false);
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -231,6 +246,9 @@ export default function SimulateTab() {
         target_events: target,
         cooldown,
         days,
+        ...(optSearch
+          ? { optimizer: { enabled: true, max_rounds: maxRounds } }
+          : {}),
       });
       if (!res.ok) {
         setErr(res.error || "เริ่มไม่สำเร็จ");
@@ -367,6 +385,19 @@ export default function SimulateTab() {
             </button>
           </div>
         </div>
+        <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer mb-1">
+          <input type="checkbox" checked={optSearch}
+                 onChange={(e) => setOptSearch(e.target.checked)}
+                 disabled={starting || !!busy} />
+          ค้นต่อจนเจอ — จบรอบแล้วยังไม่รอด ให้ซูมรอบผู้ชนะแล้วรันรอบถัดไปเอง
+          (หยุดเมื่อเจอค่าที่รอด / นิ่ง 2 รอบ / ครบรอบสูงสุด)
+        </label>
+        {optSearch && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <Field label="รอบสูงสุด" value={maxRounds} min={1} max={8}
+                   onChange={setMaxRounds} />
+          </div>
+        )}
         {busy && (
           <button onClick={cancel}
             className="px-3 py-1.5 rounded border border-loss text-loss text-xs min-h-[36px]">
@@ -922,6 +953,62 @@ function Verdict({ res, status, busy, starting, onApply }: {
                 run: a single table that answers "should anything change". -- */}
         {wf && !wf.error && wf.winner && (
           <HeadToHead wf={wf} pb={pb} />
+        )}
+
+        {/* ---- optimizer rounds: every round searched, best last. Only runs
+                started with "ค้นต่อ" have more than one row. ---- */}
+        {res.rounds && res.rounds.length > 0 && (
+          <>
+            <h4 className="text-xs font-bold text-slate-300 mb-1">
+              ทุกรอบที่ค้น ({res.rounds.length} รอบ
+              {res.optimizer ? ` — ${optStatusTh(res.optimizer.status)}` : ""})
+            </h4>
+            <div className="overflow-x-auto scroll-x-thin mb-3">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-slate-500 border-b border-slate-800">
+                    <th className="py-1.5 pr-3">รอบ</th>
+                    <th className="py-1.5 pr-3">ช่องค้น</th>
+                    <th className="py-1.5 pr-3">ผู้ชนะรอบ</th>
+                    <th className="py-1.5 pr-3">R นอกตัว</th>
+                    <th className="py-1.5">ผล</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {res.rounds.map((r) => (
+                    <tr key={r.round}
+                        className={`border-b border-slate-800/50 ${
+                          res.optimizer && r.round === res.optimizer.best_round
+                            ? "bg-white/[0.05]" : ""}`}>
+                      <td className="py-1 pr-3">
+                        {r.round}
+                        {res.optimizer && r.round === res.optimizer.best_round &&
+                          <span className="text-accent"> ●</span>}
+                      </td>
+                      <td className="py-1 pr-3">{int(r.grid_cells)}</td>
+                      <td className="py-1 pr-3">
+                        {r.winner.sl_mult !== null && r.winner.sl_mult !== undefined
+                          ? `${num(r.winner.sl_mult, 2)}×/${num(r.winner.tp_r, 2)}R`
+                          : "—"}
+                      </td>
+                      <td className={`py-1 pr-3 font-bold ${
+                        (r.test_mean_r ?? 0) > 0 ? "text-profit" : "text-loss"}`}>
+                        {signed(r.test_mean_r ?? 0, 3)}
+                      </td>
+                      <td className="py-1">
+                        {r.holds_out
+                          ? <span className="text-profit">รอด</span>
+                          : <span className="text-loss">พัง</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {res.optimizer?.note && (
+              <p className="text-[10px] text-slate-500 mb-3">{res.optimizer.note}</p>
+            )}
+          </>
         )}
 
         {/* ---- gate sweep: the simulation's own thresholds, never inherited

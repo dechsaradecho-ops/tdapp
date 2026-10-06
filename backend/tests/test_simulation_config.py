@@ -212,6 +212,124 @@ class TestSelectionDiscipline:
         assert "gate_sweep" not in v
 
 
+class TestOptimizer:
+    """One run row, several rounds: refine around the winner until something
+    holds, then stop and propose. Stubbed analyses — the math underneath is
+    tested elsewhere; what matters here is the loop's stopping honesty."""
+
+    def _v(self, test_r, holds=False, live=None,
+           winner=(2.0, 0.75, 20), train_r=0.10):
+        return {
+            "walk_forward": {
+                "holds_out": holds, "test_mean_r": test_r, "test_n": 100,
+                "test_win_rate_pct": 50.0,
+                "survivors": 1 if holds else 0, "candidates_checked": 8,
+                "winner": {"sl_mult": winner[0], "tp_r": winner[1],
+                           "max_bars": winner[2], "train_mean_r": train_r}},
+            "recommendation": {"live_suggestion": live},
+            "grid_cells": 144,
+        }
+
+    def _cfg(self, max_rounds=4):
+        return {"optimizer": {"max_rounds": max_rounds},
+                "sl_multiples": [1.0, 2.0], "tp_rs": [0.5, 1.0],
+                "max_bars": [20], "cooldown": 1}
+
+    def test_stops_at_first_live_suggestion(self, monkeypatch):
+        import threading
+        monkeypatch.setattr(
+            simulation, "_analyse",
+            lambda ev, cfg: self._v(0.12, holds=True, live={"changes": []}))
+        out = simulation._optimize(
+            FakeDB(), "r", self._cfg(), [object()], threading.Event())
+        assert out["optimizer"]["status"] == "found"
+        assert out["optimizer"]["rounds_run"] == 1
+        assert out["optimizer"]["best_round"] == 1
+        assert len(out["rounds"]) == 1
+
+    def test_exhausts_rounds_and_reports_the_best(self, monkeypatch):
+        import threading
+        seq = [self._v(-0.10), self._v(-0.05), self._v(-0.08), self._v(-0.02)]
+        monkeypatch.setattr(
+            simulation, "_analyse", lambda ev, cfg: seq.pop(0))
+        out = simulation._optimize(
+            FakeDB(), "r", self._cfg(), [object()], threading.Event())
+        assert out["optimizer"]["status"] == "exhausted"
+        assert out["optimizer"]["rounds_run"] == 4
+        assert out["optimizer"]["best_round"] == 4  # -0.02 is the best test
+        assert out["walk_forward"]["test_mean_r"] == -0.02
+
+    def test_stall_stops_the_loop_early(self, monkeypatch):
+        import threading
+        seq = [self._v(-0.10), self._v(-0.12), self._v(-0.11),
+               self._v(0.50)]
+        monkeypatch.setattr(
+            simulation, "_analyse", lambda ev, cfg: seq.pop(0))
+        out = simulation._optimize(
+            FakeDB(), "r", self._cfg(), [object()], threading.Event())
+        # round 2 and 3 both fail to improve -> stop before round 4,
+        # even though round 4 "would have" held
+        assert out["optimizer"]["status"] == "stalled"
+        assert out["optimizer"]["rounds_run"] == 3
+
+    def test_cancel_keeps_finished_rounds(self, monkeypatch):
+        import threading
+        seq = [self._v(-0.10), self._v(-0.05)]
+        cancel = threading.Event()
+
+        def analyse(ev, cfg):
+            cancel.set()  # user hits stop during round 2's analysis
+            return seq.pop(0)
+
+        monkeypatch.setattr(simulation, "_analyse", analyse)
+        out = simulation._optimize(
+            FakeDB(), "r", self._cfg(), [object()], cancel)
+        assert out["optimizer"]["status"] == "cancelled"
+        assert len(out["rounds"]) >= 1
+
+    def test_no_winner_breaks_without_crashing(self, monkeypatch):
+        import threading
+        monkeypatch.setattr(simulation, "_analyse",
+                            lambda ev, cfg: {"walk_forward": {}})
+        out = simulation._optimize(
+            FakeDB(), "r", self._cfg(), [object()], threading.Event())
+        assert out["optimizer"]["rounds_run"] == 1
+        assert out["rounds"][0]["winner"] == {"sl_mult": None, "tp_r": None,
+                                             "max_bars": None}
+
+    def test_refine_searches_new_coords_not_a_rerank(self):
+        sl, tp, mb = simulation._refine_grid(2.0, 0.75, 20)
+        assert sl == [1.75, 2.0, 2.25]
+        assert tp == [0.6562, 0.75, 0.8438]
+        assert mb == [20]
+        # every refined value must be a NEW coordinate the full grid never had
+        for v in sl:
+            assert v not in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0) \
+                or v == 2.0
+
+    def test_optimizer_config_defaults_to_single_round(self, monkeypatch):
+        """No optimizer key = previous behaviour, byte for byte."""
+        from tests.test_simulation import FakeDB as SimDB
+
+        submitted = []
+        monkeypatch.setattr(simulation._POOL, "submit",
+                            lambda fn, *a: submitted.append((fn, a)))
+        db = SimDB()
+        res = simulation.start_run(db)
+        assert res["ok"] is True
+        assert db.rows[res["run_id"]]["config"]["optimizer"] is None
+
+    def test_optimizer_config_is_capped(self, monkeypatch):
+        from tests.test_simulation import FakeDB as SimDB
+
+        monkeypatch.setattr(simulation._POOL, "submit", lambda fn, *a: None)
+        db = SimDB()
+        res = simulation.start_run(
+            db, optimizer={"enabled": True, "max_rounds": 99})
+        assert db.rows[res["run_id"]]["config"]["optimizer"] == {
+            "max_rounds": 8}
+
+
 class TestDefaultGrid:
     def test_unreachable_targets_are_not_in_the_default_grid(self):
         """Owner 2026-10-06: 2.5R/3.0R out — the 5,000-sample run showed ~2%

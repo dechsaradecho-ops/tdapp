@@ -1098,6 +1098,15 @@ async def start_simulation(request: Request,
         max_bars = _num_list("max_bars", 1, 60, 6, as_int=True)
         gate_opps = _num_list("gate_opps", 0, 100, 8)
         gate_confs = _num_list("gate_confs", 0, 100, 8)
+        optimizer = body.get("optimizer")
+        if optimizer is not None:
+            if not isinstance(optimizer, dict):
+                raise ValueError("optimizer")
+            optimizer = {
+                "enabled": bool(optimizer.get("enabled")),
+                "max_rounds": max(1, min(
+                    int(optimizer.get("max_rounds") or 4), 8)),
+            }
     except (TypeError, ValueError):
         return {"ok": False, "error": "ค่าที่ส่งมาไม่ถูกต้อง"}
 
@@ -1107,7 +1116,8 @@ async def start_simulation(request: Request,
                                tp_rs=tp_rs or simulation.TP_RS,
                                max_bars=max_bars or simulation.MAX_BARS,
                                gate_opps=gate_opps or simulation.GATE_OPPS,
-                               gate_confs=gate_confs or simulation.GATE_CONFS)
+                               gate_confs=gate_confs or simulation.GATE_CONFS,
+                               optimizer=optimizer)
     if not res.get("ok"):
         return res
     res["verdict"] = "ok"

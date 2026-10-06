@@ -351,6 +351,7 @@ export const api = {
     target_events?: number; cooldown?: number; days?: number; assets?: string[];
     sl_multiples?: number[]; tp_rs?: number[]; max_bars?: number[];
     gate_opps?: number[]; gate_confs?: number[];
+    optimizer?: { enabled: boolean; max_rounds: number };
   }) =>
     post<{ ok: boolean; run_id?: string; error?: string; config?: unknown }>(
       "/api/system/simulate", input ?? {}),
