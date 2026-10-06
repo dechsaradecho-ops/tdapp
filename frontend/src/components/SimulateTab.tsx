@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import Icon from "@/components/Icon";
 import { api } from "@/lib/api";
-import type { SimCellRow, SimEvent, SimHistoryReport, SimLabel, SimRecommendation, SimResult, SimRun } from "@/lib/types";
+import type { SimBenchmark, SimCellRow, SimEvent, SimHistoryReport, SimLabel, SimRecommendation, SimResult, SimRun, SimWalkForward } from "@/lib/types";
 
 /** แสดงค่า from → to ของข้อเสนอรอบหน้า (array ย่อให้อ่านง่าย) */
 const fmtVal = (v: unknown): string => {
@@ -917,6 +917,13 @@ function Verdict({ res, status, busy, starting, onApply }: {
           </p>
         )}
 
+        {/* ---- head-to-head: the best sim values vs the live settings, both
+                scored on the SAME later period. This is the whole point of the
+                run: a single table that answers "should anything change". -- */}
+        {wf && !wf.error && wf.winner && (
+          <HeadToHead wf={wf} pb={pb} />
+        )}
+
         {/* ---- gate sweep: the simulation's own thresholds, never inherited
                 from production ---- */}
         {gate && gate.length > 0 && (
@@ -1079,6 +1086,111 @@ function Kv({ k, v }: { k: string; v: React.ReactNode }) {
     <div className="flex justify-between gap-2">
       <span className="text-slate-500">{k}</span>
       <span className="font-semibold text-slate-200">{v}</span>
+    </div>
+  );
+}
+
+/**
+ * ตัวเต็ง sim เทียบ setting จริง — วัดบนช่วงหลังชุดเดียวกันทั้งคู่
+ *
+ * This is the table that guides a live change: the sim winner mapped onto
+ * the live field names (mode / RR / gates), next to what production scored
+ * on the same data. It only ever ADVISES — applying stays a manual act in
+ * Settings, and when the gap is noise it says so instead of proposing.
+ */
+function HeadToHead({ wf, pb }: { wf: SimWalkForward; pb?: SimBenchmark }) {
+  const w = wf.winner;
+  if (!w) return null;
+  const simR = wf.test_mean_r ?? 0;
+  const live = pb?.available && pb.test ? pb.test : null;
+  const diff = live ? simR - live.mean_r : null;
+  // Same nearest-mode mapping the backend uses for its text suggestion, so
+  // the tab and the API can never name different modes for one cell.
+  const mode = w.sl_mult <= 1.25 ? "short" : w.sl_mult <= 1.75 ? "medium" : "long";
+  const good = simR > 0 && diff !== null && diff > 0.05;
+  const gate = wf.gate;
+
+  return (
+    <div className={`rounded border p-3 mb-3 text-[11px] ${
+      good ? "border-amber-400/25 bg-amber-400/10"
+        : "border-slate-700/60 bg-surface/40"}`}>
+      <div className="text-xs font-bold text-slate-200 mb-2">
+        ตัวเต็ง sim เทียบ setting จริง (วัดช่วงหลังชุดเดียวกัน)
+      </div>
+      <div className="overflow-x-auto scroll-x-thin">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-slate-500 border-b border-slate-800">
+              <th className="py-1.5 pr-3">ฝั่ง</th>
+              <th className="py-1.5 pr-3">SL</th>
+              <th className="py-1.5 pr-3">เป้า</th>
+              <th className="py-1.5 pr-3">เกณฑ์</th>
+              <th className="py-1.5 pr-3">R ช่วงหลัง</th>
+              <th className="py-1.5">WR ช่วงหลัง</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-slate-800/50">
+              <td className="py-1.5 pr-3 font-bold text-accent">SIM ตัวเต็ง</td>
+              <td className="py-1.5 pr-3">{num(w.sl_mult, 2)}×ATR</td>
+              <td className="py-1.5 pr-3" title={tpMeaning(w.tp_r)}>
+                {num(w.tp_r, 2)}R
+              </td>
+              <td className="py-1.5 pr-3">
+                {gate ? `opp≥${num(gate.min_opp, 0)} conf≥${num(gate.min_conf, 0)}` : "—"}
+              </td>
+              <td className={`py-1.5 pr-3 font-bold ${simR > 0 ? "text-profit" : "text-loss"}`}>
+                {signed(simR, 3)}R
+              </td>
+              <td className="py-1.5">{num(wf.test_win_rate_pct, 1)}%</td>
+            </tr>
+            <tr className="border-b border-slate-800/50">
+              <td className="py-1.5 pr-3 font-bold text-slate-200">ของจริงตอนนี้</td>
+              <td className="py-1.5 pr-3">
+                {pb?.config
+                  ? `${pb.config.sl_distance_mode} (${num(pb.config.sl_atr_mult, 2)}×ATR)`
+                  : "—"}
+              </td>
+              <td className="py-1.5 pr-3">
+                {pb?.config ? `${num(pb.config.rr_target, 2)}R` : "—"}
+              </td>
+              <td className="py-1.5 pr-3">
+                {pb?.config
+                  ? `opp≥${num(pb.config.min_opportunity, 0)} conf≥${num(pb.config.min_confidence, 0)}`
+                  : "—"}
+              </td>
+              <td className={`py-1.5 pr-3 font-bold ${
+                live && live.mean_r > 0 ? "text-profit" : "text-loss"}`}>
+                {live ? `${signed(live.mean_r, 3)}R` : "—"}
+              </td>
+              <td className="py-1.5">
+                {live ? `${num(live.win_rate_pct, 1)}%` : "—"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {diff !== null ? (
+        <p className="text-slate-400 mt-2">
+          ห่างกัน {signed(diff, 3)}R (sim ลบของจริง) —{" "}
+          {good ? (
+            <span className="text-amber-200 font-semibold">
+              ตัวเต็งดีกว่าเกิน margin แนวทางเปลี่ยน: โหมด SL → {mode},
+              เป้า RR → {num(w.tp_r, 2)}
+              {gate ? `, เกณฑ์ → opp≥${num(gate.min_opp, 0)} conf≥${num(gate.min_conf, 0)}` : ""}
+              {" "}— เปลี่ยนเองที่หน้า Settings ระบบไม่เปลี่ยนให้
+            </span>
+          ) : (
+            <span>
+              ไม่พอจะเปลี่ยน setting จริง (ต้องบวกเองและห่างเกิน 0.05R)
+            </span>
+          )}
+        </p>
+      ) : (
+        <p className="text-slate-500 mt-2">
+          อ่านค่าของจริงไม่ได้ — เทียบได้แค่ฝั่ง sim อย่างเดียว
+        </p>
+      )}
     </div>
   );
 }
