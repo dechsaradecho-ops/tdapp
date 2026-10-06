@@ -223,6 +223,64 @@ class TestMfeMae:
         assert out["mae_p25"] == -1.0
 
 
+class TestMissingMigrationIsVisible:
+    """Migration 057 not applied must SAY SO.
+
+    Database.select swallows read errors and returns [], so a probe through it
+    makes a missing table indistinguishable from "no runs yet" — the tab would
+    sit there silently broken. These tests pin the explicit signal.
+    """
+
+    def _client_that_raises(self):
+        class Boom:
+            def table(self, _n):
+                raise RuntimeError(
+                    "{'code':'PGRST205','message':\"Could not find the table "
+                    "'public.simulation_runs'\"}")
+
+        db = FakeDB()
+        db._client = Boom()
+        return db
+
+    def test_probe_reports_the_table_as_missing(self):
+        from app.api.routes import system
+        assert system._sim_tables_missing(self._client_that_raises()) is True
+
+    def test_probe_reports_present_when_the_query_works(self):
+        from app.api.routes import system
+        assert system._sim_tables_missing(FakeDB()) is False
+
+    def test_list_endpoint_returns_setup_required_not_an_empty_list(self):
+        import asyncio
+        from app.api.routes import system
+
+        class Req:
+            class app:
+                class state:
+                    db = None
+        Req.app.state.db = self._client_that_raises()
+
+        res = asyncio.run(system.list_simulations(Req()))
+        assert res["verdict"] == "fail"
+        assert res["setup_required"] is True
+        assert "057" in res["hint"]
+        assert res["runs"] == []
+
+    def test_start_endpoint_refuses_before_the_tables_exist(self):
+        import asyncio
+        from app.api.routes import system
+
+        class Req:
+            class app:
+                class state:
+                    db = None
+        Req.app.state.db = self._client_that_raises()
+
+        res = asyncio.run(system.start_simulation(Req(), {}))
+        assert res["ok"] is False
+        assert "057" in res["hint"]
+
+
 class TestRunLifecycle:
     """End-to-end through the real worker, with only the network stubbed."""
 

@@ -1054,6 +1054,9 @@ async def start_simulation(request: Request,
     from app.services import simulation
 
     db: Database = request.app.state.db
+    if db and db.available and _sim_tables_missing(db):
+        return {"ok": False, "error": "ยังไม่มีตารางจำลอง",
+                "hint": _SIM_SETUP_HINT}
     body = payload or {}
     try:
         target = max(50, min(int(body.get("target_events")
@@ -1076,6 +1079,25 @@ async def start_simulation(request: Request,
     return res
 
 
+def _sim_tables_missing(db) -> bool:
+    """True when migration 057 has not been applied.
+
+    ``Database.select`` swallows read errors BY DESIGN and returns ``[]``, so
+    probing through it would make a missing table look exactly like "no runs
+    yet" — the tab would sit there silently broken and the owner would never
+    learn a migration was pending. Query the client directly, which raises.
+    """
+    try:
+        db._client.table("simulation_runs").select("id").limit(1).execute()
+        return False
+    except Exception:
+        return True
+
+
+_SIM_SETUP_HINT = ("ยังไม่มีตาราง simulation_runs — รัน "
+                   "database/057_simulation_runs.sql ใน Supabase SQL Editor")
+
+
 @router.get("/simulate")
 async def list_simulations(request: Request, limit: int = 20) -> dict:
     """Recent runs, newest first. Also reports which run is live."""
@@ -1088,17 +1110,14 @@ async def list_simulations(request: Request, limit: int = 20) -> dict:
         out["error"] = db.init_error or "client unavailable"
         out["runs"] = []
         return out
-    try:
-        rows = db.select(simulation.RUNS_TABLE, order="created_at", desc=True,
-                         limit=max(1, min(limit, 100)))
-    except Exception as exc:
+    if _sim_tables_missing(db):
         out["verdict"] = "fail"
         out["setup_required"] = True
-        out["error"] = str(exc)
-        out["hint"] = ("ยังไม่มีตาราง simulation_runs — รัน "
-                       "database/057_simulation_runs.sql ใน Supabase SQL Editor")
+        out["hint"] = _SIM_SETUP_HINT
         out["runs"] = []
         return out
+    rows = db.select(simulation.RUNS_TABLE, order="created_at", desc=True,
+                     limit=max(1, min(limit, 100)))
     out["runs"] = [_sim_run_row(r) for r in rows]
     out["active_run_id"] = simulation.active_run_id()
     out["verdict"] = "ok"
@@ -1116,12 +1135,12 @@ async def simulation_status(request: Request, run_id: str) -> dict:
         out["verdict"] = "fail"
         out["error"] = db.init_error or "client unavailable"
         return out
-    try:
-        rows = db.select(simulation.RUNS_TABLE, filters={"id": run_id}, limit=1)
-    except Exception as exc:
+    if _sim_tables_missing(db):
         out["verdict"] = "fail"
-        out["error"] = str(exc)
+        out["setup_required"] = True
+        out["hint"] = _SIM_SETUP_HINT
         return out
+    rows = db.select(simulation.RUNS_TABLE, filters={"id": run_id}, limit=1)
     if not rows:
         out["verdict"] = "fail"
         out["error"] = "ไม่พบงานรันนี้"
@@ -1150,6 +1169,12 @@ async def simulation_events(request: Request, run_id: str,
         out["events"] = []
         return out
     page = max(1, min(limit, 2000))
+    if _sim_tables_missing(db):
+        out["verdict"] = "fail"
+        out["setup_required"] = True
+        out["hint"] = _SIM_SETUP_HINT
+        out["events"] = []
+        return out
     try:
         rows = db._client.table(simulation.EVENTS_TABLE).select(
             "seq, asset, direction, entry, atr_pct, opportunity, confidence, "
