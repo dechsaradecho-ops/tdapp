@@ -406,6 +406,15 @@ class TestRunLifecycle:
                "max_bars": [5, 10, 20]}
         monkeypatch.setattr(simulation, "_fetch_series",
                             lambda c: {"EURUSD": self._bars(), "GBPUSD": self._bars(up=False)})
+        # History first: load_series would hit the REAL network through its
+        # default fetch AND collapse rows in this id-keyed fake (history rows
+        # carry no id). Force the direct-fetch fallback so this class stays
+        # hermetic; the history path has its own tests.
+        def _no_history(*a, **k):
+            raise RuntimeError("PGRST205 no table")
+
+        monkeypatch.setattr("app.services.price_history.load_series",
+                            _no_history)
         monkeypatch.setattr(simulation, "_CANCEL", {})
         db.insert(simulation.RUNS_TABLE, {"id": "run1", "status": "pending",
                                           "target_events": target})

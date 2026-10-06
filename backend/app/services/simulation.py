@@ -286,14 +286,15 @@ def _run_job(db, run_id: str, cfg: dict[str, Any]) -> None:
     t0 = time.time()
     try:
         _patch(db, run_id, status="running", stage="fetching", started_at=_now())
-        series = _fetch_series(cfg)
+        series, history_report = _load_history(db, cfg)
         if cancel.is_set():
             return _finish(db, run_id, "cancelled", cancel, t0)
 
         assets_ok = sorted(series)
         _patch(db, run_id, stage="replaying",
                result={"assets": assets_ok,
-                       "bars": {a: len(c) for a, c in series.items()}})
+                       "bars": {a: len(c) for a, c in series.items()},
+                       "history": history_report})
 
         from app.engine.strategy_replay import replay
         events = replay(series, cooldown_bars=cfg["cooldown"])
@@ -353,6 +354,27 @@ def _thin(events: list, target: int) -> list:
         return events
     step = n / float(target)
     return [events[int(i * step)] for i in range(target)]
+
+
+def _load_history(db, cfg: dict[str, Any]) -> tuple[dict, dict]:
+    """History for a run: stored bars first, fetching only the missing ones.
+
+    Falls back to a direct fetch when the history table is unavailable
+    (migration 058 not applied, DB hiccup) — a missing cache must degrade the
+    run, never kill it. The report says which path was taken so the verdict
+    can be judged accordingly.
+    """
+    try:
+        from app.services import price_history
+        series, report = price_history.load_series(
+            db, cfg.get("assets") or [], int(cfg.get("days") or 1095))
+        if series:
+            return series, report
+        raise RuntimeError("history empty after sync")
+    except Exception as exc:
+        series = _fetch_series(cfg)
+        return series, {"source": "direct fetch (history unavailable)",
+                        "error": str(exc)[:160]}
 
 
 def _fetch_series(cfg: dict[str, Any]) -> dict[str, list]:

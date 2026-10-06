@@ -525,6 +525,20 @@ export interface SimResult {
   error?: string;
 }
 
+/** สรุปการตรวจราคาย้อนหลังของรัน — ดึงใหม่แค่ที่ขาด, แท่งผิดไม่เข้าตาราง */
+export interface SimHistoryReport {
+  source?: string;
+  totals?: {
+    fetched?: number;
+    inserted?: number;
+    refreshed?: number;
+    skipped?: number;
+    invalid?: number;
+    conflicts?: number;
+  };
+  error?: string;
+}
+
 export interface SimRun {
   id: string;
   status: "pending" | "running" | "done" | "failed" | "cancelled";
@@ -542,7 +556,7 @@ export interface SimRun {
     tp_rs?: number[];
     max_bars?: number[];
   };
-  result: SimResult;
+  result: SimResult & { history?: SimHistoryReport };
   error: string | null;
   started_at: string | null;
   finished_at: string | null;

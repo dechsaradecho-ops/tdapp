@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import Icon from "@/components/Icon";
 import { api } from "@/lib/api";
-import type { SimCellRow, SimEvent, SimLabel, SimRecommendation, SimResult, SimRun } from "@/lib/types";
+import type { SimCellRow, SimEvent, SimHistoryReport, SimLabel, SimRecommendation, SimResult, SimRun } from "@/lib/types";
 
 /** แสดงค่า from → to ของข้อเสนอรอบหน้า (array ย่อให้อ่านง่าย) */
 const fmtVal = (v: unknown): string => {
@@ -460,6 +460,9 @@ export default function SimulateTab() {
             {" · "}เป้า {num(run.config?.tp_rs?.[0] ?? 1.5, 2)}R
             {" · "}ถือสูงสุด {int(run.config?.max_bars?.[2] ?? 20)} แท่ง
           </p>
+          {run.result?.history && (
+            <HistoryLine history={run.result.history} />
+          )}
         </section>
       )}
 
@@ -606,6 +609,33 @@ function Field({ label, value, min, max, onChange }: {
         className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2"
       />
     </label>
+  );
+}
+
+/**
+ * แถวสรุปการตรวจราคาย้อนหลังของรัน — ดึงใหม่แค่ที่ขาด (inserted+refreshed),
+ * แท่งที่ตรวจไม่ผ่านไม่เข้าตาราง (invalid) และฟีดที่เถียงกับแท่งเก่า
+ * ถูกปัดทิ้งไม่ใช่เขียนทับ (conflicts). ถ้ามี invalid/conflicts ขึ้นสีเหลือง
+ * เพราะตัวเลขรันนั้นตั้งอยู่บนประเด็นที่ต้องดู.
+ */
+function HistoryLine({ history }: { history: SimHistoryReport }) {
+  const t = history.totals || {};
+  const bad = (t.invalid || 0) + (t.conflicts || 0);
+  if (history.error) {
+    return (
+      <p className="text-[10px] text-slate-500 mt-1">
+        ราคา: ใช้ฟีดสดทั้งชุด ({history.error.slice(0, 60)})
+      </p>
+    );
+  }
+  return (
+    <p className={`text-[10px] mt-1 ${bad > 0 ? "text-amber-400" : "text-slate-500"}`}>
+      ราคา: จากตาราง {int((t.skipped || 0) + (t.refreshed || 0))} แท่ง
+      {" · "}ดึงใหม่ {int(t.inserted || 0)} แท่ง
+      {bad > 0 && (
+        <>{" · "}⚠ ตรวจตก {int(t.invalid || 0)} + ขัดกับของเก่า {int(t.conflicts || 0)} (ไม่เขียนทับ)</>
+      )}
+    </p>
   );
 }
 

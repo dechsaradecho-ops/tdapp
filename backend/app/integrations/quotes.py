@@ -18,7 +18,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
@@ -292,6 +292,11 @@ class Candle:
     h: float
     l: float
     c: float
+    # Unix timestamp (UTC seconds) of the bar. 0 = unknown: older callers and
+    # unit tests build Candles without time, and the snapshot math never reads
+    # it. Price-history storage REQUIRES it — a dateless bar is skipped rather
+    # than stored under a guessed date.
+    t: int = 0
 
 
 # Yahoo /chart 1d candles: requested calendar span per `days` of bars.
@@ -347,14 +352,24 @@ async def _fetch_yahoo_candles(asset: str, client: httpx.AsyncClient,
             http_status=resp.status_code, error=err, duration_ms=dur)
         raise QuotesUnavailable(f"{asset}: yahoo chart payload unusable ({err})")
 
+    # Yahoo dates its bars (result.timestamp, UTC seconds). Attach by index —
+    # but a bar WITHOUT a usable timestamp still enters with t=0, because the
+    # live snapshot math never reads time. Price-history storage is the place
+    # that requires dates, and it skips t=0 bars there rather than guessing.
+    stamps = (result or {}).get("timestamp") or []
     candles: list[Candle] = []
-    for o, h, l, c in zip(quote_block.get("open") or [],
-                          quote_block.get("high") or [],
-                          quote_block.get("low") or [],
-                          quote_block.get("close") or []):
+    for i, (o, h, l, c) in enumerate(zip(quote_block.get("open") or [],
+                                         quote_block.get("high") or [],
+                                         quote_block.get("low") or [],
+                                         quote_block.get("close") or [])):
         if o is None or h is None or l is None or c is None:
             continue  # holiday / half-session bar
-        candles.append(Candle(o=float(o), h=float(h), l=float(l), c=float(c)))
+        try:
+            t = int(stamps[i]) if i < len(stamps) else 0
+        except (TypeError, ValueError):
+            t = 0
+        candles.append(Candle(o=float(o), h=float(h), l=float(l), c=float(c),
+                              t=t if t > 0 else 0))
 
     quote_log.log_call(
         asset=asset, category=quote_log.category_for(asset),
@@ -432,9 +447,14 @@ async def _fetch_fx(asset: str, client: httpx.AsyncClient,
     # and keeps TR/DM math (hence ATR/ADX) meaningful.
     candles: list[Candle] = []
     prev: float | None = None
-    for c in closes:
+    for day, c in zip(sorted(rates), closes):
         o = prev if prev is not None else c
-        candles.append(Candle(o=o, h=max(o, c), l=min(o, c), c=c))
+        try:
+            t = int(datetime.fromisoformat(str(day)).replace(
+                tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            t = 0
+        candles.append(Candle(o=o, h=max(o, c), l=min(o, c), c=c, t=t))
         prev = c
     return candles
 
@@ -481,7 +501,13 @@ async def _fetch_gold(client: httpx.AsyncClient, days: int) -> list[Candle]:
             c = float(row["close"])
         except (KeyError, TypeError, ValueError):
             continue
-        candles.append(Candle(o=o, h=h, l=l, c=c))
+        try:
+            t = int(datetime.fromisoformat(
+                str(row.get("datetime") or "")[:10]).replace(
+                    tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            t = 0
+        candles.append(Candle(o=o, h=h, l=l, c=c, t=t))
 
     quote_log.log_call(
         asset="XAUUSD", category="gold", provider="twelvedata",
