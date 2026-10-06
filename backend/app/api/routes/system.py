@@ -1255,6 +1255,43 @@ async def cancel_simulation(request: Request, run_id: str) -> dict:
     return {"ok": False, "error": "งานนี้ไม่ได้รันอยู่แล้ว หรือหยุดไปแล้ว"}
 
 
+@router.get("/simulate/{run_id}/export")
+async def export_simulation(request: Request, run_id: str):
+    """Download a run's labelled events as CSV.
+
+    Same rows the tab streams live, oldest-first, one row per sample — so the
+    file and the on-screen trace always agree. Streams in seq pages instead of
+    building the whole file in memory.
+    """
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    from app.services import simulation
+
+    db: Database = request.app.state.db
+    if not db.available:
+        return JSONResponse(status_code=503, content={
+            "ok": False, "error": db.init_error or "client unavailable"})
+    if _sim_tables_missing(db):
+        return JSONResponse(status_code=404, content={
+            "ok": False, "error": "ยังไม่มีตารางจำลอง", "hint": _SIM_SETUP_HINT})
+    rows = db.select(simulation.RUNS_TABLE, filters={"id": run_id}, limit=1)
+    if not rows:
+        return JSONResponse(status_code=404, content={
+            "ok": False, "error": "ไม่พบงานรันนี้"})
+
+    def gen():
+        # BOM so Excel opens the UTF-8 file correctly; harmless elsewhere.
+        yield "﻿" + ",".join(simulation.SIM_EXPORT_COLUMNS) + "\n"
+        for r in simulation.iter_export_rows(db, run_id):
+            yield ",".join(simulation._csv_cell(r.get(c))
+                           for c in simulation.SIM_EXPORT_COLUMNS) + "\n"
+
+    return StreamingResponse(
+        gen(), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="simulation-{run_id[:8]}.csv"'})
+
+
 def _sim_run_row(r: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": r.get("id"),

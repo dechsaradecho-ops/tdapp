@@ -365,6 +365,16 @@ export const api = {
     post<{ ok: boolean; message?: string; error?: string }>(
       `/api/system/simulate/${encodeURIComponent(id)}/cancel`, {}),
 
+  // ---------- CSV export: same rows the tab streams, as a file ----------
+  // Blob via the authed client (a plain <a href> would carry no token).
+  simExport: async (id: string): Promise<Blob> => {
+    const res = await fetch(
+      `${API_BASE}/api/system/simulate/${encodeURIComponent(id)}/export`,
+      { cache: "no-store", headers: headers() });
+    if (!res.ok) handle401(res, "simulate/export");
+    return res.blob();
+  },
+
   // ---------- LINE: notification targets + test button ----------
   lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),
   lineAddTarget: (target_id: string, target_type = "group") =>

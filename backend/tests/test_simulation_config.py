@@ -212,6 +212,15 @@ class TestSelectionDiscipline:
         assert "gate_sweep" not in v
 
 
+class TestDefaultGrid:
+    def test_unreachable_targets_are_not_in_the_default_grid(self):
+        """Owner 2026-10-06: 2.5R/3.0R out — the 5,000-sample run showed ~2%
+        of signals ever reaching +2R. The default grid must reflect that."""
+        assert list(simulation.TP_RS) == [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        assert len(simulation.SL_MULTIPLES) * len(simulation.TP_RS) \
+            * len(simulation.MAX_BARS) == 8 * 6 * 3
+
+
 class TestRecommendation:
     """After a run: what changes next round (from -> to), and nothing else."""
 

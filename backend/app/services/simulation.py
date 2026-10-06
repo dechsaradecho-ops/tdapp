@@ -69,8 +69,67 @@ DEFAULT_ASSETS = [
 ]
 
 SL_MULTIPLES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
-TP_RS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+#: TP grid the sweep explores. 2.5R/3.0R were REMOVED (owner 2026-10-06): the
+#: 5,000-sample run showed only ~2% of signals ever offered +2R, so those two
+#: cells spent resolution on targets the market practically never prints.
+#: Full grid is now 8 x 6 x 3 = 144 cells.
+TP_RS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 MAX_BARS = (5, 10, 20)
+
+#: CSV export columns — the same fields the tab streams live, in a stable
+#: order, so a downloaded file and the on-screen trace always agree.
+SIM_EXPORT_COLUMNS = (
+    "seq", "asset", "direction", "entry", "atr_pct", "opportunity",
+    "confidence", "sl_mult", "tp_r", "max_bars", "label", "r_multiple",
+    "bars_held", "exit_price", "ambiguous", "gap_fill", "mfe_r", "mae_r",
+)
+
+
+def _csv_cell(v: Any) -> str:
+    """One CSV cell. None -> empty; quoting only when the value needs it, so
+    numeric columns stay clean for spreadsheets."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    s = str(v)
+    if any(c in s for c in (",", '"', "\n", "\r")):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def iter_export_rows(db, run_id: str, page: int = 1000):
+    """Yield a run's labelled events oldest-first, in seq pages.
+
+    Sorted defensively: the live query orders by seq, but the generator must
+    not depend on it — and it must terminate even against a client that
+    ignores the cursor (the `top <= after` guard).
+    """
+    after = -1
+    while True:
+        res = db._client.table(EVENTS_TABLE).select(
+            ",".join(SIM_EXPORT_COLUMNS)
+        ).eq("run_id", run_id).gt("seq", after).order("seq") \
+            .limit(max(1, page)).execute()
+        rows = sorted(list(res.data or []),
+                      key=lambda r: int(r.get("seq") or 0))
+        if not rows:
+            return
+        top = int(rows[-1].get("seq") or 0)
+        if top <= after:
+            return
+        after = top
+        for r in rows:
+            yield r
+
+
+def export_csv(db, run_id: str):
+    """Whole run as CSV text. Small wrapper over the iterator for tests and
+    the route; the route streams instead of building the string."""
+    lines = [",".join(SIM_EXPORT_COLUMNS)]
+    for r in iter_export_rows(db, run_id):
+        lines.append(",".join(_csv_cell(r.get(c)) for c in SIM_EXPORT_COLUMNS))
+    return "\n".join(lines) + "\n"
 
 #: Signal-gate thresholds the sweep explores. The simulation NEVER reads these
 #: from production — a candidate config that inherited the live gate could
@@ -333,8 +392,8 @@ def _persist_events(db, run_id: str, events: list, cfg: dict[str, Any],
     max_bars = cfg.get("max_bars") or list(MAX_BARS)
 
     # One cell is labelled per event (the "primary" cell) so the live trace
-    # shows a single coherent equity curve instead of 192 interleaved ones.
-    # The full grid is still swept at the end.
+    # shows a single coherent equity curve instead of a hundred interleaved
+    # ones. The full grid is still swept at the end.
     primary = (1.5, 1.5, 20)
     rows: list[dict] = []
     seq = 0
@@ -519,11 +578,12 @@ def _score(events, sl_mult: float, tp_r: float, max_bars: int,
 def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     """Sweep the grid, then hold every ranking to a chronological test split.
 
-    The split is not optional decoration. Ranking 192 cells on one sample is a
-    192-way race, and the winner of such a race is positive even with no edge
-    at all — that is exactly what the first run of this study showed (+0.101R
-    in-sample collapsing to -0.061R out). Anything reported without the
-    out-of-sample number is a number that has not been tested.
+    The split is not optional decoration. Ranking the whole grid on one sample
+    is a multi-hundred-way race, and the winner of such a race is positive
+    even with no edge at all — that is exactly what the first run of this
+    study showed (+0.101R in-sample collapsing to -0.061R out). Anything
+    reported without the out-of-sample number is a number that has not been
+    tested.
 
     SELECTION DISCIPLINE (owner 2026-10-06: "แยกค่า setting sim กับของจริง"):
     every choice below is made on the TRAIN period only, then scored once on
@@ -531,9 +591,9 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
       1. the gate (min_opportunity x min_confidence),
       2. the barrier cell (SL x ATR, target R, clock).
     Two independent selections rather than one search over the product,
-    because the product is 192 x 16 = 3,072 candidates and the winner of a
-    3,072-way race tells you nothing. Production is then scored the same way
-    as a benchmark, not as a candidate.
+    because the product (grid cells x gate pairs, in the thousands) raced at
+    once tells you nothing about its winner. Production is then scored the
+    same way as a benchmark, not as a candidate.
     """
     from app.engine.triple_barrier import summarise_cell, sweep_grid
 
@@ -574,9 +634,9 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     # ---- stage 1: pick the gate on TRAIN only -----------------------------
     # Averaged across a representative subset of the grid (3 SL x 3 TP at the
     # longest clock), so the gate is chosen for how the signal behaves overall
-    # rather than for one lucky cell. Averaging across the FULL grid would be
-    # 192 cells x 16 gates on every run; the 9-cell subset keeps the cost flat
-    # while covering tight/typical/wide stops against 1R/1.5R/2R targets.
+    # rather than for one lucky cell. Averaging across the FULL grid on every
+    # run would multiply the cost by the cell count; the 9-cell subset keeps it
+    # flat while covering tight/typical/wide stops against 1R/1.5R/2R targets.
     # The subset is fixed below so the number stays comparable run to run.
     ref_cells = [(m, r, max_bars[-1])
                  for m in (1.0, 1.5, 2.0) for r in (1.0, 1.5, 2.0)]

@@ -114,6 +114,103 @@ class TestPurge:
 
         assert simulation.purge_old_runs(Boom(), force=True) == 0
 
+
+class TestCsvExport:
+    """The downloaded file must match the on-screen trace, row for row."""
+
+    def _db_with_events(self):
+        from tests.test_simulation import FakeDB
+        db = FakeDB()
+        db.rows["e3"] = {"seq": 3, "asset": "EURUSD", "direction": "BUY",
+                         "entry": 1.1, "atr_pct": 0.5, "opportunity": 60.0,
+                         "confidence": 70.0, "sl_mult": 1.5, "tp_r": 1.5,
+                         "max_bars": 20, "label": "tp", "r_multiple": 1.5,
+                         "bars_held": 7, "exit_price": 1.12,
+                         "ambiguous": False, "gap_fill": None,
+                         "mfe_r": 1.6, "mae_r": -0.4}
+        db.rows["e1"] = {"seq": 1, "asset": "GBPUSD", "direction": "SELL",
+                         "entry": 1.27, "atr_pct": 0.6, "opportunity": 55.0,
+                         "confidence": 65.0, "sl_mult": 1.5, "tp_r": 1.5,
+                         "max_bars": 20, "label": "sl", "r_multiple": -1.0,
+                         "bars_held": 3, "exit_price": 1.28,
+                         "ambiguous": True, "gap_fill": False,
+                         "mfe_r": 0.2, "mae_r": -1.0}
+        db.rows["e2"] = {"seq": 2, "asset": "XAU,USD", "direction": "BUY",
+                         "entry": 2000.0, "atr_pct": 0.4, "opportunity": 70.0,
+                         "confidence": 80.0, "sl_mult": 1.5, "tp_r": 1.5,
+                         "max_bars": 20, "label": "expired", "r_multiple": 0.2,
+                         "bars_held": 20, "exit_price": 2001.0,
+                         "ambiguous": False, "gap_fill": False,
+                         "mfe_r": 0.5, "mae_r": -0.3}
+        return db
+
+    def test_header_matches_the_streamed_columns(self):
+        text = simulation.export_csv(self._db_with_events(), "run1")
+        assert text.splitlines()[0] == ",".join(simulation.SIM_EXPORT_COLUMNS)
+
+    def test_rows_come_out_in_seq_order_despite_storage_order(self):
+        text = simulation.export_csv(self._db_with_events(), "run1")
+        seqs = [l.split(",")[0] for l in text.splitlines()[1:]]
+        assert seqs == ["1", "2", "3"]
+
+    def test_cells_are_spreadsheet_clean(self):
+        text = simulation.export_csv(self._db_with_events(), "run1")
+        lines = text.splitlines()
+        # None -> empty (gap_fill of seq 3), bool -> true/false
+        assert lines[3].split(",")[15] == "", "None must be empty, not 'None'"
+        assert lines[1].split(",")[14] == "true"
+        assert lines[3].split(",")[14] == "false"
+        # a comma inside a value must be quoted, not split the row
+        assert '"XAU,USD"' in lines[2]
+        assert len(lines[2].split('","')) >= 1
+
+    def test_terminates_when_the_client_ignores_the_cursor(self):
+        """FakeTable.execute ignores gt/order — the generator must still stop
+        instead of paging forever."""
+        text = simulation.export_csv(self._db_with_events(), "run1")
+        assert len(text.splitlines()) == 4  # header + 3 rows, exactly once
+
+    def test_empty_run_exports_header_only(self):
+        from tests.test_simulation import FakeDB
+        assert simulation.export_csv(FakeDB(), "nope").strip() == \
+            ",".join(simulation.SIM_EXPORT_COLUMNS)
+
+    @pytest.mark.asyncio
+    async def test_route_streams_the_file(self):
+        from app.api.routes import system
+
+        class Req:
+            class app:
+                class state:
+                    db = None
+        Req.app.state.db = self._db_with_events()
+        # the route checks the run row first
+        Req.app.state.db.rows["run1"] = {"id": "run1", "status": "done"}
+
+        resp = await system.export_simulation(Req(), "run1")
+        assert getattr(resp, "status_code", 200) == 200
+        chunks = [c async for c in resp.body_iterator]
+        body = b"".join(
+            c.encode("utf-8") if isinstance(c, str) else c for c in chunks
+        ).decode("utf-8-sig")
+        assert body.splitlines()[0].endswith(",".join(simulation.SIM_EXPORT_COLUMNS))
+        assert "GBPUSD" in body and "EURUSD" in body
+        cd = resp.headers.get("content-disposition", "")
+        assert cd.startswith("attachment") and "simulation-run1" in cd
+
+    @pytest.mark.asyncio
+    async def test_route_404s_an_unknown_run(self):
+        from app.api.routes import system
+        from tests.test_simulation import FakeDB
+
+        class Req:
+            class app:
+                class state:
+                    db = None
+        Req.app.state.db = FakeDB()
+        resp = await system.export_simulation(Req(), "nope")
+        assert resp.status_code == 404
+
     def test_log_maintenance_runs_it(self):
         """Wiring matters as much as the function — a purge nobody calls is
         the exact gap this worker was written to close."""

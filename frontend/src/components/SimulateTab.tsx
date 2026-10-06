@@ -14,11 +14,11 @@
  * THE HONESTY RULE BAKED IN
  * -------------------------
  * The panel never shows an in-sample number without the out-of-sample one
- * next to it. Ranking 192 grid cells on a single sample is a 192-way race and
- * its winner is positive even with no edge at all — the first run of this
- * study produced +0.101R in-sample that collapsed to −0.061R out. When the
- * walk-forward says the ranking was noise, the panel says so in the verdict
- * box instead of burying it under a green number.
+ * next to it. Ranking the whole grid on a single sample is a multi-hundred-way
+ * race and its winner is positive even with no edge at all — the first run of
+ * this study produced +0.101R in-sample that collapsed to −0.061R out. When
+ * the walk-forward says the ranking was noise, the panel says so in the
+ * verdict box instead of burying it under a green number.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -35,6 +35,25 @@ const fmtVal = (v: unknown): string => {
   if (v === null || v === undefined) return "—";
   return String(v);
 };
+
+/**
+ * เป้าหมาย (R) แต่ละค่าคืออะไร — R คือกำไรเป็นเท่าของความเสี่ยงต่อไม้
+ * (เช่น 1.5R = ได้ 1.5 เท่าของที่ยอมเสีย). 2.5R/3.0R ถูกตัดออกจากกริดตั้งต้น
+ * เพราะข้อมูล 5,000 ตัวอย่างบอกว่ามีไม่ถึง ~2% ของสัญญาณที่ไปถึง +2R
+ */
+const TP_R_MEANING: Record<string, string> = {
+  "0.5": "เป้าสั้นครึ่งความเสี่ยง — ถึงง่ายสุด แต่ได้ครึ่งเดียวของที่ยอมเสีย",
+  "0.75": "เป้าสั้น — ถึงง่าย ได้ 0.75 เท่าของความเสี่ยง",
+  "1": "เท่าทุนความเสี่ยง — กำไรเท่าที่เสียได้ (1:1)",
+  "1.25": "เป้ากลาง — กำไร 1.25 เท่าของความเสี่ยง",
+  "1.5": "เป้ากลาง (ค่าที่ระบบจริงใช้อยู่) — ต้องชนะ ~40% ถึงคุ้มทุน",
+  "2": "เป้าไกล — กำไร 2 เท่า แต่มีแค่ ~2% ของสัญญาณที่ไปถึง",
+  "2.5": "เป้าไกลมาก — ตัดออกจากกริดตั้งต้น: ไปถึงน้อยมาก",
+  "3": "เป้าไกลสุด — ตัดออกจากกริดตั้งต้น: ไปถึงน้อยมาก",
+};
+
+const tpMeaning = (v: unknown): string =>
+  TP_R_MEANING[String(v)] ?? "";
 
 const POLL_MS = 1000;
 const PAGE = 500;
@@ -91,6 +110,7 @@ export default function SimulateTab() {
   const [cooldown, setCooldown] = useState(1);
   const [days, setDays] = useState(1095);
   const [follow, setFollow] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   const seqRef = useRef(0);
@@ -238,6 +258,28 @@ export default function SimulateTab() {
     }
   };
 
+  // Download this run's samples as CSV — the same rows the chart streams.
+  const downloadCsv = async () => {
+    if (!runId) return;
+    setExporting(true);
+    setErr("");
+    try {
+      const blob = await api.simExport(runId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `simulation-${runId.slice(0, 8)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Apply the run's own proposal to the NEXT simulation run. The payload
   // carries only simulation parameters (grid / gate / assets) — there is no
   // code path here that can reach live trading settings.
@@ -335,12 +377,19 @@ export default function SimulateTab() {
                     ? String(run.created_at).slice(5, 16).replace("T", " ")
                     : run.id.slice(0, 8)})`}
             </span>
-            {runs.length > 1 && runId !== runs[0]?.id && (
-              <button onClick={() => selectRun(runs[0].id)}
-                className="text-[11px] px-2 py-1 rounded border border-slate-700 text-slate-300 min-h-[32px]">
-                ← กลับไปงานล่าสุด
+            <div className="flex gap-2">
+              <button onClick={downloadCsv} disabled={exporting || !runId}
+                title="ดาวน์โหลดตัวอย่างทั้งหมดของรันนี้เป็น CSV (แถวเดียวกับที่เห็นในกราฟ)"
+                className="text-[11px] px-2 py-1 rounded border border-slate-700 text-slate-300 disabled:opacity-50 min-h-[32px]">
+                {exporting ? "กำลังเตรียม..." : "ดาวน์โหลด CSV"}
               </button>
-            )}
+              {runs.length > 1 && runId !== runs[0]?.id && (
+                <button onClick={() => selectRun(runs[0].id)}
+                  className="text-[11px] px-2 py-1 rounded border border-slate-700 text-slate-300 min-h-[32px]">
+                  ← กลับไปงานล่าสุด
+                </button>
+              )}
+            </div>
           </div>
           <div className="flex items-center justify-between text-xs mb-1">
             <span className="text-slate-300">
@@ -689,13 +738,35 @@ function Verdict({ res, status, busy, starting, onApply }: {
               รอบหน้า: ปรับอะไร (เฉพาะการจำลอง — ไม่แตะเทรดจริง)
             </div>
             {rec.changes.map((c, i) => (
-              <div key={i} className="text-[11px] text-slate-300 mb-1">
+              <div key={i} className="text-[11px] text-slate-300 mb-2">
                 <span className="font-semibold text-white">{c.field_th}</span>
                 {": "}
                 <span className="line-through text-loss/80">{fmtVal(c.from)}</span>
                 {" → "}
                 <span className="font-bold text-profit">{fmtVal(c.to)}</span>
                 <div className="text-slate-500">{c.reason}</div>
+                {c.field === "tp_rs" && Array.isArray(c.to) && (
+                  <ul className="mt-1 space-y-0.5">
+                    {c.to.map((v) => (
+                      <li key={String(v)} className="text-slate-400">
+                        <span className="font-semibold text-slate-200">
+                          {String(v)}R
+                        </span>
+                        {tpMeaning(v) ? ` — ${tpMeaning(v)}` : ""}
+                      </li>
+                    ))}
+                    {Array.isArray(c.from) &&
+                      c.from.filter((v) => !(c.to as unknown[]).includes(v))
+                        .map((v) => (
+                          <li key={String(v)} className="text-slate-500">
+                            <span className="line-through">
+                              {String(v)}R — ตัดออก
+                            </span>
+                            {tpMeaning(v) ? ` (${tpMeaning(v)})` : ""}
+                          </li>
+                        ))}
+                  </ul>
+                )}
               </div>
             ))}
             {rec.note && !rec.has_plan && (
@@ -847,12 +918,24 @@ function Verdict({ res, status, busy, starting, onApply }: {
         <h4 className="text-xs font-bold text-slate-300 mb-1">
           10 ช่องที่จ่ายดีที่สุด (ในตัวอย่าง)
         </h4>
+        {/* เป้า (R) แต่ละค่าคืออะไร — R คือกำไรเป็นเท่าของความเสี่ยงต่อไม้ */}
+        <ul className="text-[10px] text-slate-500 mb-2 space-y-0.5">
+          {["0.5", "0.75", "1", "1.25", "1.5", "2"].map((v) => (
+            <li key={v}>
+              <span className="font-semibold text-slate-300">{v}R</span>
+              {` — ${TP_R_MEANING[v]}`}
+            </li>
+          ))}
+        </ul>
         <div className="overflow-x-auto scroll-x-thin">
           <table className="w-full text-xs">
             <thead>
               <tr className="text-left text-slate-500 border-b border-slate-800">
                 <th className="py-1.5 pr-3">SL×ATR</th>
-                <th className="py-1.5 pr-3">เป้า</th>
+                <th className="py-1.5 pr-3"
+                    title="เป้าหมายกำไรเป็นเท่าของความเสี่ยง (R) — ดูความหมายแต่ละค่าด้านบน">
+                  เป้า
+                </th>
                 <th className="py-1.5 pr-3">นาฬิกา</th>
                 <th className="py-1.5 pr-3">n</th>
                 <th className="py-1.5 pr-3">WR%</th>
@@ -866,7 +949,9 @@ function Verdict({ res, status, busy, starting, onApply }: {
               {top.map((r, i) => (
                 <tr key={i} className="border-b border-slate-800/50">
                   <td className="py-1 pr-3">{num(r.sl_pct, 2)}</td>
-                  <td className="py-1 pr-3">{num(r.tp_r, 2)}R</td>
+                  <td className="py-1 pr-3" title={tpMeaning(r.tp_r)}>
+                    {num(r.tp_r, 2)}R
+                  </td>
                   <td className="py-1 pr-3">{int(r.n)}</td>
                   <td className="py-1 pr-3">{int(r.n)}</td>
                   <td className="py-1 pr-3">{num(r.win_rate_pct, 1)}</td>
