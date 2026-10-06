@@ -258,6 +258,41 @@ class TestStartRun:
         assert cfg["sl_multiples"] and cfg["tp_rs"] and cfg["max_bars"]
         assert submitted, "the job was never handed to the pool"
 
+    def test_reap_orphans_cancels_runs_dead_with_their_process(self):
+        from tests.test_simulation import FakeDB as SimFakeDB
+
+        class RowsDB(SimFakeDB):
+            def select(self, table, filters=None, order=None, desc=True,
+                       limit=50, offset=0, **kw):
+                return [
+                    {"id": "dead1", "status": "running", "processed": 600},
+                    {"id": "dead2", "status": "pending", "processed": 0},
+                    {"id": "ok1", "status": "done", "processed": 5000},
+                    {"id": "ok2", "status": "cancelled", "processed": 10},
+                ]
+
+            def update(self, table, row_id, changes):
+                self.updates.append({"id": row_id, **changes})
+                return True
+
+        db = RowsDB()
+        assert simulation.reap_orphans(db) == 2
+        by_id = {u["id"]: u for u in db.updates}
+        assert set(by_id) == {"dead1", "dead2"}
+        assert by_id["dead1"]["status"] == "cancelled"
+        assert "600" in by_id["dead1"]["error"]
+        assert by_id["dead1"]["finished_at"]
+
+    def test_reap_orphans_never_raises(self):
+        class Boom:
+            available = True
+
+            def select(self, *a, **k):
+                raise RuntimeError("connection reset")
+
+        assert simulation.reap_orphans(Boom()) == 0
+        assert simulation.reap_orphans(None) == 0
+
     def test_reports_a_missing_table_instead_of_crashing(self, monkeypatch):
         monkeypatch.setattr(simulation._POOL, "submit",
                             lambda fn, *a: None)

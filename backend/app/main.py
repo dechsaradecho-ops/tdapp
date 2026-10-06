@@ -247,6 +247,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("order-sequence seed failed (continuing)")
 
+    # Simulation runs are a single in-process worker: a deploy/restart kills the
+    # thread while its row still says "running" (prod 2026-10-06: a run froze
+    # at 600/5000 for an hour across a deploy, and /cancel could not reach it
+    # because the cancel flag died with the old process). Reap them at boot —
+    # a run cannot survive its process, so "running" after a restart is always
+    # a lie. Partial events stay queryable; only the status is corrected.
+    try:
+        from app.services import simulation as _sim
+        _n_reaped = _sim.reap_orphans(app.state.db)
+        if _n_reaped:
+            log.info("simulation: reaped %d orphaned run(s)", _n_reaped)
+    except Exception:
+        log.exception("simulation orphan reap failed (continuing)")
+
     # P0-5 refinement deploy cleanup: pending signals created before migration
     # 045 carry no Supertrend/MACD baseline, so the thesis gate cannot tell a
     # from-the-start conflict from a later flip for them. Expire them once on

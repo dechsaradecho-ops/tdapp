@@ -561,6 +561,39 @@ def _patch(db, run_id: str, **changes) -> None:
         log.debug("simulate: run patch failed: %s", exc)
 
 
+def reap_orphans(db) -> int:
+    """Mark runs that died with their process as cancelled. Never raises.
+
+    The worker is one thread in this process: any restart (deploy, crash,
+    OOM) kills it while the row still says pending/running, and the cancel
+    flag dies with the process so /cancel can never reach it either. Called
+    once at boot, where "still running" unambiguously means orphaned —
+    nothing else could have started a run yet.
+    """
+    try:
+        if not db or not db.available:
+            return 0
+        rows = db.select(RUNS_TABLE, order="created_at", desc=True,
+                         limit=50) or []
+    except Exception as exc:
+        log.debug("simulate reap read failed: %s", exc)
+        return 0
+    n = 0
+    for r in rows:
+        if str(r.get("status")) not in ("pending", "running"):
+            continue
+        try:
+            if db.update(RUNS_TABLE, str(r.get("id") or ""), {
+                    "status": "cancelled", "stage": "cancelled",
+                    "finished_at": _now(),
+                    "error": "โปรเซสจบก่อนงานเสร็จ (restart/deploy) — "
+                             "หยุดที่ processed=%s" % r.get("processed")}):
+                n += 1
+        except Exception as exc:
+            log.debug("simulate reap %s failed: %s", r.get("id"), exc)
+    return n
+
+
 def _finish(db, run_id: str, status: str, cancel: threading.Event,
             t0: float, result: Optional[dict] = None) -> None:
     _patch(db, run_id, status=status, stage=status, finished_at=_now(),
