@@ -41,7 +41,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 log = logging.getLogger("tdapp.simulation")
@@ -71,6 +71,17 @@ DEFAULT_ASSETS = [
 SL_MULTIPLES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 TP_RS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 MAX_BARS = (5, 10, 20)
+
+#: How long a run and its events are kept. 14 days, not 7: a simulation is
+#: something the owner comes back to compare ("the last run said the opposite
+#: — which is right?"), so a week is barely enough to notice the difference.
+SIMULATION_TTL_DAYS = 14
+#: Keep this many finished runs even when they are older than the TTL, so the
+#: history panel never goes blank and there is always something to re-open.
+SIMULATION_KEEP_RUNS = 20
+_purge_lock = threading.Lock()
+_last_purge = 0.0
+PURGE_INTERVAL_S = 3600.0
 
 
 def _now() -> str:
@@ -351,6 +362,63 @@ def _finish(db, run_id: str, status: str, cancel: threading.Event,
             t0: float, result: Optional[dict] = None) -> None:
     _patch(db, run_id, status=status, stage=status, finished_at=_now(),
            result=result or {}, error=None if status == "done" else status)
+
+
+# ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+def purge_old_runs(db, force: bool = False) -> int:
+    """Drop runs past the TTL (and their events). Never raises.
+
+    POLICY: the newest ``SIMULATION_KEEP_RUNS`` runs are kept regardless of
+    age; everything older than the TTL beyond that is removed. The two rules
+    together BOUND the table at ~KEEP runs — a small table is never pruned
+    below the floor, which is intentional: an owner comparing "the last run
+    said the opposite" should still find it there. Unbounded growth is
+    prevented by the floor, not by the TTL alone.
+
+    A run that is still pending/running is never touched — losing the run
+    whose progress bar is on screen is worse than any table size.
+
+    Throttled unless forced, matching the other log purges. Events are swept
+    explicitly as well as via the cascade, in case a row predates the
+    constraint. Returns the number of RUNS removed.
+    """
+    global _last_purge
+    with _purge_lock:
+        now = time.time()
+        if not force and now - _last_purge < PURGE_INTERVAL_S:
+            return 0
+        _last_purge = now
+    try:
+        if not db or not db.available:
+            return 0
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=SIMULATION_TTL_DAYS)).isoformat()
+        # Newest first, then drop the protected head, then apply the TTL.
+        newest_first = db.select(RUNS_TABLE, order="created_at", desc=True,
+                                 limit=500)
+        doomed = [r for r in newest_first[SIMULATION_KEEP_RUNS:]
+                  if str(r.get("created_at") or "") < cutoff
+                  and str(r.get("status")) not in ("pending", "running")]
+        removed = 0
+        for r in doomed:
+            rid = str(r.get("id") or "")
+            if not rid:
+                continue
+            try:
+                db._client.table(EVENTS_TABLE).delete().eq("run_id", rid).execute()
+            except Exception as exc:
+                log.debug("simulate event purge %s failed: %s", rid, exc)
+            try:
+                db._client.table(RUNS_TABLE).delete().eq("id", rid).execute()
+                removed += 1
+            except Exception as exc:
+                log.debug("simulate run purge %s failed: %s", rid, exc)
+        return removed
+    except Exception as exc:
+        log.debug("simulation purge failed: %s", exc)
+        return 0
 
 
 # ---------------------------------------------------------------------------

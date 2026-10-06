@@ -23,22 +23,31 @@ class FakeResult:
 
 
 class FakeTable:
-    def __init__(self, db):
+    def __init__(self, db, name="simulation_runs"):
         self.db = db
+        self.name = name
+        self._filters: dict = {}
+        self._delete = False
 
     def select(self, *a, **k):
         return self
 
-    def eq(self, *a, **k):
+    def eq(self, col, val):
+        self._filters[col] = val
         return self
 
-    def gt(self, *a, **k):
+    def gt(self, col, val):
+        self._filters[col] = val
         return self
 
     def order(self, *a, **k):
         return self
 
     def limit(self, *a, **k):
+        return self
+
+    def delete(self):
+        self._delete = True
         return self
 
     def insert(self, rows):
@@ -50,6 +59,13 @@ class FakeTable:
         return self
 
     def execute(self):
+        if self._delete:
+            gone = [k for k, v in self.db.rows.items()
+                    if all(v.get(c) == val for c, val in self._filters.items())]
+            for k in gone:
+                self.db.rows.pop(k, None)
+            self.db.deleted.extend(gone)
+            return FakeResult([{"id": k} for k in gone])
         return FakeResult(list(self.db.rows.values()))
 
 
@@ -57,8 +73,8 @@ class FakeClient:
     def __init__(self, db):
         self.db = db
 
-    def table(self, _name):
-        return FakeTable(self.db)
+    def table(self, name):
+        return FakeTable(self.db, name)
 
 
 class FakeDB:
@@ -72,6 +88,7 @@ class FakeDB:
         self.inserted: list[dict] = []
         self.updates: list[dict] = []
         self.counts: list[tuple] = []
+        self.deleted: list[str] = []
         self._client = FakeClient(self)
 
     def insert(self, table, row):
