@@ -32,3 +32,5 @@ build/
 *.tsbuildinfo
 coverage/
 backend/scripts/prod_*_dump.json
+# SDD scratch (ledger/briefs/reports/review packages — git-ignored work files)
+.superpowers/
