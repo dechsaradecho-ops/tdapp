@@ -1448,8 +1448,12 @@ async def guard_once(db, broker, notifier: NotificationService,
                             except Exception:
                                 _rdist = None
                             if _rdist is None:
-                                _rdist = abs(_entry - float(_stop))
-                            if _rdist and _rdist > 0:
+                                log.info(
+                                    "time-stop locked-profit check skipped "
+                                    "for %s: initial_stop_loss missing — "
+                                    "falling through to close behavior",
+                                    pos.ticket)
+                            elif _rdist and _rdist > 0:
                                 _locked = (float(_stop) - _entry) * _sign / _rdist
                                 if _locked >= 0.25:
                                     skip_assets.append(f"{pos.asset}:time_deferred")

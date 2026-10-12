@@ -1315,10 +1315,14 @@ def meta_filter_block(db, settings, asset: str, direction: str,
                          asset_u, name)
                 return ""
             if not std > 0:
+                log.info("meta_filter pass-open %s: non-positive train std "
+                         "for %s", asset_u, name)
                 return ""
             value = derived[name]
             if not isinstance(value, (int, float)) or value != value \
                     or value in (float("inf"), float("-inf")):
+                log.info("meta_filter pass-open %s: non-finite live value "
+                         "for %s", asset_u, name)
                 return ""
             # Standardize with TRAIN stats — never refit on live data.
             xs.append((float(value) - mean) / std)
@@ -1326,11 +1330,14 @@ def meta_filter_block(db, settings, asset: str, direction: str,
             sum(w * x for w, x in zip(weights, xs)) + bias)
         if proba < threshold:
             run = str(artifact.get("run_id") or "")[:8]
-            test_r = (evaluation.get("picked") or {}).get("test_mean_r")
+            try:
+                test_r_s = (f"{float((evaluation.get('picked') or {}).get('test_mean_r')):+.2f}R")
+            except (TypeError, ValueError):
+                test_r_s = "n/a"
             return (
                 f"meta_filter skip: P(profitable) {proba:.2f} < take "
                 f"{threshold:.2f} for {asset_u} {direction} "
-                f"(artifact {run}, test {test_r:+.2f}R) — "
+                f"(artifact {run}, test {test_r_s}) — "
                 f"setup นี้มีแนวโน้มไปไม่ถึงเป้า ไม่เปิดออเดอร์")
         return ""
     except Exception as exc:
@@ -2085,7 +2092,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # the signal row (manual approve / auto-trader); extended-open passes no
     # row, so both gates stand down (meta fails open, thesis is skipped).
     _meta_snapshot: Optional[dict] = None
-    if signal_row is not None:
+    if signal_row:
         _meta_snapshot = await _fresh_thesis_snapshot(db, asset)
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
                            entry=entry, stop_loss=stop_loss,

@@ -259,3 +259,88 @@ async def test_time_stop_still_closes_untrailed_control(monkeypatch):
     row = db.rows["paper_trades"][0]
     assert row["status"] == "closed"
     assert row["close_reason"] == "time"
+
+
+@pytest.mark.asyncio
+async def test_time_stop_defers_sell_mirror(monkeypatch):
+    """SELL mirror: age > max_hold, SL trailed below entry → defers.
+
+    entry 1.1000 / initial SL 1.1100 → R = 0.0100; trailed SL 1.0950 locks
+    (1.1000 − 1.0950) / 0.0100 = +0.50R ≥ 0.25 → no close this cycle.
+    The mark (1.0900) sits below the trailed SL so no hard stop fires
+    first — SELL hits its SL only when price rises to/above it.
+    """
+    from app.services import execution
+    monkeypatch.setattr(execution,
+                        "market_closed_discretionary_close_block",
+                        lambda: "")
+
+    async def fake_spot(assets, **_kw):
+        return {"EURUSD": 1.0900}, {}
+    monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices",
+                        fake_spot)
+    closed: list[str] = []
+    broker = _broker(entry=1.1000, sl=1.0950, direction="SELL")
+    broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+    db = _aged_db(stop_loss=1.0950, initial_stop_loss=1.1100,
+                  direction="sell")
+    summary = await position_guard.guard_once(
+        db, broker, _SilentNotifier(), settings=_settings())
+    assert summary["closed"] == 0
+    assert closed == []
+    assert db.rows["paper_trades"][0]["status"] == "open"
+    assert "deferred" in (summary.get("skip_assets") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_time_stop_defers_at_exact_boundary(monkeypatch):
+    """Exact +0.25R locked → defers (>= is inclusive).
+
+    entry 100.0 / initial SL 99.0 → R = 1.0; trailed SL 100.25 locks
+    exactly +0.25R (round numbers keep the float math exact — EURUSD
+    scale cannot represent 0.25 exactly). The mark (100.50) sits above
+    the trailed SL so no hard stop fires first.
+    """
+    from app.services import execution
+    monkeypatch.setattr(execution,
+                        "market_closed_discretionary_close_block",
+                        lambda: "")
+
+    async def fake_spot(assets, **_kw):
+        return {"EURUSD": 100.50}, {}
+    monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices",
+                        fake_spot)
+    closed: list[str] = []
+    broker = _broker(entry=100.0, sl=100.25)
+    broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+    db = _aged_db(stop_loss=100.25, initial_stop_loss=99.0,
+                  entry_price=100.0)
+    summary = await position_guard.guard_once(
+        db, broker, _SilentNotifier(), settings=_settings())
+    assert summary["closed"] == 0
+    assert closed == []
+    assert db.rows["paper_trades"][0]["status"] == "open"
+    assert "deferred" in (summary.get("skip_assets") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_time_stop_closes_when_initial_sl_missing(monkeypatch):
+    """No initial_stop_loss → NO exemption (falls through to close).
+
+    Without the original SL distance the locked-R denominator would be
+    |entry − trailed_stop|, which inflates locked-R (0.005/0.005 = 1.0R
+    here) and would wrongly defer. Missing history must close as before.
+    """
+    from app.services import execution
+    monkeypatch.setattr(execution,
+                        "market_closed_discretionary_close_block",
+                        lambda: "")
+    closed: list[str] = []
+    broker = _broker(sl=1.1050)  # trailed above entry
+    broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+    db = _aged_db(stop_loss=1.1050, initial_stop_loss=None)
+    summary = await position_guard.guard_once(
+        db, broker, _SilentNotifier(), settings=_settings())
+    assert closed == ["T1"]
+    assert summary["closed"] == 1
+    assert db.rows["paper_trades"][0]["status"] == "closed"
