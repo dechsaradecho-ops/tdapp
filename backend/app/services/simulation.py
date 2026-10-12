@@ -76,6 +76,32 @@ SL_MULTIPLES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 TP_RS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 MAX_BARS = (5, 10, 20)
 
+#: Mandatory per-trade cost deducted from every sim score, in R.
+#: Source: ~= round-trip spread + $7/lot commission measured against a
+#: 1.5xATR stop. Sim evidence (Oct 2026, 4,984 trades): gross +0.054R/trade
+#: vs true cost ~0.10-0.15R/trade, i.e. net negative — past verdicts scored
+#: gross and overstated the edge. Every mean below is NET of this unless a
+#: run opts out explicitly with cfg {"cost_r": 0.0}. Per-asset spread
+#: refinement is an explicit non-goal (follow-up).
+SIM_COST_R_DEFAULT = 0.10
+
+
+def _cost_of(cfg: Optional[dict[str, Any]]) -> float:
+    """Per-trade cost for a run. Missing key (or None) -> the default; only
+    an explicit ``{"cost_r": 0.0}`` opts out, so a forgotten deduction can
+    never pass silently as zero. Deliberately NOT ``cfg.get(...) or ...`` —
+    ``or`` would map the explicit 0.0 back to the default."""
+    try:
+        cost = (cfg or {}).get("cost_r", SIM_COST_R_DEFAULT)
+    except AttributeError:
+        return SIM_COST_R_DEFAULT
+    if cost is None:
+        return SIM_COST_R_DEFAULT
+    try:
+        return float(cost)
+    except (TypeError, ValueError):
+        return SIM_COST_R_DEFAULT
+
 #: CSV export columns — the same fields the tab streams live, in a stable
 #: order, so a downloaded file and the on-screen trace always agree.
 SIM_EXPORT_COLUMNS = (
@@ -90,6 +116,11 @@ SIM_EXPORT_COLUMNS = (
     # append-only, never reorder.
     "adx", "rsi", "macd_hist", "volatility_index", "chg20",
     "ema_gap_atr", "st_agree", "ema_agree", "macd_agree",
+    # Net R per trade (r_multiple minus the run's cost_r). Derived at export,
+    # never stored, so runs written before this column still export: old rows
+    # carry gross r_multiple and get the backfilled net; rows without any
+    # r_multiple export blank instead of erroring. Appended last — same rule.
+    "r_net",
 )
 
 
@@ -106,17 +137,60 @@ def _csv_cell(v: Any) -> str:
     return s
 
 
-def iter_export_rows(db, run_id: str, page: int = 1000):
+def _export_cost_of(db, run_id: str,
+                     override: Optional[float] = None) -> float:
+    """Cost to net each exported row with. Explicit override wins; otherwise
+    the run's own config (old runs predate the key -> the default, i.e. the
+    backfill). Never raises — an export must not die on a config read."""
+    if override is not None:
+        try:
+            return float(override)
+        except (TypeError, ValueError):
+            return SIM_COST_R_DEFAULT
+    try:
+        rows = db.select(RUNS_TABLE, filters={"id": run_id}, limit=1) or []
+        cfg = (rows[0].get("config") or {}) if rows else {}
+        return _cost_of(cfg)
+    except Exception:
+        return SIM_COST_R_DEFAULT
+
+
+def _with_r_net(row: dict[str, Any], cost: float) -> dict[str, Any]:
+    """Attach the derived ``r_net`` cell. Gross lives in ``r_multiple`` (every
+    stored row has it); net is computed here so pre-column runs backfill
+    instead of breaking. Unparseable/missing gross -> blank, never an error."""
+    out = dict(row)
+    if out.get("r_net") is not None:
+        return out
+    raw = out.get("r_multiple")
+    if raw is None:
+        out["r_net"] = None
+        return out
+    try:
+        out["r_net"] = round(float(raw) - float(cost), 4)
+    except (TypeError, ValueError):
+        out["r_net"] = None
+    return out
+
+
+def iter_export_rows(db, run_id: str, page: int = 1000,
+                     cost_r: Optional[float] = None):
     """Yield a run's labelled events oldest-first, in seq pages.
 
     Sorted defensively: the live query orders by seq, but the generator must
     not depend on it — and it must terminate even against a client that
     ignores the cursor (the `top <= after` guard).
+
+    ``r_net`` is derived, not selected: no stored column exists (and old DBs
+    predate it), so selecting it would fail the whole export the way an
+    unmigrated column does — it is computed per row from gross instead.
     """
+    cost = _export_cost_of(db, run_id, cost_r)
+    stored = tuple(c for c in SIM_EXPORT_COLUMNS if c != "r_net")
     after = -1
     while True:
         res = db._client.table(EVENTS_TABLE).select(
-            ",".join(SIM_EXPORT_COLUMNS)
+            ",".join(stored)
         ).eq("run_id", run_id).gt("seq", after).order("seq") \
             .limit(max(1, page)).execute()
         rows = sorted(list(res.data or []),
@@ -128,14 +202,14 @@ def iter_export_rows(db, run_id: str, page: int = 1000):
             return
         after = top
         for r in rows:
-            yield r
+            yield _with_r_net(r, cost)
 
 
-def export_csv(db, run_id: str):
+def export_csv(db, run_id: str, cost_r: Optional[float] = None):
     """Whole run as CSV text. Small wrapper over the iterator for tests and
     the route; the route streams instead of building the string."""
     lines = [",".join(SIM_EXPORT_COLUMNS)]
-    for r in iter_export_rows(db, run_id):
+    for r in iter_export_rows(db, run_id, cost_r=cost_r):
         lines.append(",".join(_csv_cell(r.get(c)) for c in SIM_EXPORT_COLUMNS))
     return "\n".join(lines) + "\n"
 
@@ -799,11 +873,41 @@ def _gate_pass(ev, min_opp: float, min_conf: float) -> bool:
             and float(ev.confidence or 0) >= min_conf)
 
 
+def _net_sweep_row(row, cost: float):
+    """Net-of-cost copy of a BarrierSweepRow. The cost is per trade, so the
+    sum drops by n * cost and both means (all trades and resolved-only) drop
+    by cost; counts, win rate and payoff are untouched. Ranking on net is the
+    same order as ranking on gross while the cost is uniform — it is still
+    done explicitly on net so a future per-cell cost cannot silently revert
+    the selection to gross."""
+    import dataclasses
+    n = int(getattr(row, "n", 0) or 0)
+    net_sum = float(getattr(row, "sum_r", 0.0) or 0.0) - n * cost
+    return dataclasses.replace(
+        row,
+        sum_r=net_sum,
+        mean_r=(net_sum / n if n else 0.0),
+        mean_r_resolved=(float(getattr(row, "mean_r_resolved", 0.0) or 0.0)
+                         - cost if n else 0.0),
+    )
+
+
 def _score(events, sl_mult: float, tp_r: float, max_bars: int,
-           min_opp: float, min_conf: float) -> dict[str, Any]:
-    """Mean R / win rate for one (barrier cell, gate) pair."""
+           min_opp: float, min_conf: float,
+           cost_r: Optional[float] = None) -> dict[str, Any]:
+    """Mean R / win rate for one (barrier cell, gate) pair, NET of cost.
+
+    ``mean_r`` is the net number (gross - cost); ``gross_mean_r`` keeps the
+    pre-cost value for audit. The trailing optional arg keeps every existing
+    positional caller working — it defaults to the mandatory sim cost, and
+    only an explicit 0.0 reports gross. No trades -> all zeros (there is
+    nothing to deduct from).
+    """
     from app.engine.triple_barrier import grid_key, summarise_cell, BarrierSpec, label_event
 
+    if cost_r is None:
+        cost_r = SIM_COST_R_DEFAULT
+    cost = float(cost_r)
     keep = [e for e in events if _gate_pass(e, min_opp, min_conf)]
     rs: list[float] = []
     for e in keep:
@@ -815,10 +919,18 @@ def _score(events, sl_mult: float, tp_r: float, max_bars: int,
         sp = BarrierSpec(sl_mult * atr, sl_mult * atr * tp_r, int(max_bars))
         rs.append(label_event(e.direction, e.entry, sp, e.future).r_multiple)
     n = len(rs)
+    if not n:
+        return {"n": 0, "mean_r": 0.0, "win_rate_pct": 0.0,
+                "gross_mean_r": 0.0, "net_mean_r": 0.0, "cost_r": cost}
+    gross = sum(rs) / n
+    net = gross - cost
     return {
         "n": n,
-        "mean_r": round(sum(rs) / n, 4) if n else 0.0,
-        "win_rate_pct": round(100.0 * sum(1 for x in rs if x > 0) / n, 1) if n else 0.0,
+        "mean_r": round(net, 4),
+        "win_rate_pct": round(100.0 * sum(1 for x in rs if x > 0) / n, 1),
+        "gross_mean_r": round(gross, 4),
+        "net_mean_r": round(net, 4),
+        "cost_r": cost,
     }
 
 
@@ -850,6 +962,9 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     gate_opps = cfg.get("gate_opps") or list(GATE_OPPS)
     gate_confs = cfg.get("gate_confs") or list(GATE_CONFS)
     base = cfg.get("live_baseline") or {}
+    # Mandatory sim cost (Ruling P2): read WITHOUT `or`, so only an explicit
+    # {"cost_r": 0.0} opts out — a missing key or None still pays the default.
+    cost = _cost_of(cfg)
 
     min_n = max(30, len(events) // 20)
     ordered = sorted(events, key=lambda e: (e.bar_index, e.asset))
@@ -858,9 +973,13 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     enough = len(train) >= 60 and len(test) >= 30
 
     # ---- ungated views (what the whole grid looks like) ------------------
-    by_paid = sweep_grid(events, sl_mults, tp_rs, max_bars, min_n=min_n)
-    by_worth = sweep_grid(events, sl_mults, tp_rs, max_bars, min_n=min_n,
-                          rank_by_resolved=True)
+    # Netted like everything else: a gross grid next to a net verdict would
+    # keep the exact overstatement this cost exists to kill.
+    by_paid = [_net_sweep_row(r, cost) for r in
+               sweep_grid(events, sl_mults, tp_rs, max_bars, min_n=min_n)]
+    by_worth = [_net_sweep_row(r, cost) for r in
+                sweep_grid(events, sl_mults, tp_rs, max_bars, min_n=min_n,
+                           rank_by_resolved=True)]
     verdict: dict[str, Any] = {
         "n_events": len(events),
         "min_n": min_n,
@@ -869,6 +988,7 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
         "cooldown": cfg.get("cooldown"),
         "grid_cells": len(sl_mults) * len(tp_rs) * len(max_bars),
         "gate_candidates": len(gate_opps) * len(gate_confs),
+        "cost_r": cost,
         "top_paid": [r.as_row() for r in by_paid[:12]],
         "top_worth": [r.as_row() for r in by_worth[:12]],
     }
@@ -891,7 +1011,7 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     def _gate_avg(evts, mo, mc):
         rs, ns = [], []
         for sm, tr_, mb in ref_cells:
-            s = _score(evts, sm, tr_, mb, mo, mc)
+            s = _score(evts, sm, tr_, mb, mo, mc, cost)
             if s["n"] >= 40:
                 rs.append(s["mean_r"])
                 ns.append(s["n"])
@@ -905,7 +1025,8 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
             if tr_n < 40:
                 continue
             te_mean, te_n = _gate_avg(test, mo, mc)
-            te_wr = _score(test, 1.5, 1.5, max_bars[-1], mo, mc)["win_rate_pct"]
+            te_wr = _score(test, 1.5, 1.5, max_bars[-1], mo, mc,
+                           cost)["win_rate_pct"]
             gate_rows.append({"min_opp": mo, "min_conf": mc,
                               "train_n": tr_n, "train_mean_r": round(tr_mean, 4),
                               "test_n": te_n, "test_mean_r": round(te_mean, 4),
@@ -924,11 +1045,16 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     # ---- stage 2: pick the barrier cell on TRAIN only, gate fixed ---------
     tr_events = [e for e in train if _gate_pass(e, *best_gate)]
     te_events = [e for e in test if _gate_pass(e, *best_gate)]
-    tr_rows = sweep_grid(tr_events, sl_mults, tp_rs, max_bars,
-                         min_n=max(20, len(tr_events) // 20)) if tr_events else []
+    tr_gross = sweep_grid(tr_events, sl_mults, tp_rs, max_bars,
+                          min_n=max(20, len(tr_events) // 20)) if tr_events else []
+    # Winner selection on NET: ranked explicitly after netting (a uniform
+    # shift keeps the order today, but the selection must not depend on that).
+    tr_rows = sorted((_net_sweep_row(r, cost) for r in tr_gross),
+                     key=lambda r: (-r.mean_r, -r.n))
     checks = []
     for r in tr_rows[:8]:
-        te = summarise_cell(te_events, r.sl_width, r.tp_r, r.max_bars)
+        te = _net_sweep_row(
+            summarise_cell(te_events, r.sl_width, r.tp_r, r.max_bars), cost)
         d = te.as_row()
         checks.append({"sl_mult": r.sl_width, "tp_r": r.tp_r,
                        "max_bars": r.max_bars,
@@ -945,7 +1071,8 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     if tr_rows:
         win = tr_rows[0]
         tst = summarise_cell(te_events, win.sl_width, win.tp_r, win.max_bars)
-        td = tst.as_row()
+        gross_test = round(tst.mean_r, 4)
+        td = _net_sweep_row(tst, cost).as_row()
         verdict["walk_forward"].update({
             "winner": {"sl_mult": win.sl_width, "tp_r": win.tp_r,
                        "max_bars": win.max_bars,
@@ -957,9 +1084,17 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
             "survivors": sum(1 for c in checks if c["test_mean_r"] > 0),
             "candidates_checked": len(checks),
         })
+        # The decision number (net) plus its gross for audit: past verdicts
+        # reported gross only, which is what overstated the edge.
+        verdict["gross_mean_r"] = gross_test
+        verdict["net_mean_r"] = td["mean_r"]
+    else:
+        verdict["gross_mean_r"] = 0.0
+        verdict["net_mean_r"] = 0.0
 
     # ---- the benchmark: production, scored identically -------------------
-    verdict["production_benchmark"] = _score_production(train, test, base)
+    verdict["production_benchmark"] = _score_production(train, test, base,
+                                                       cost)
 
     # ---- per asset at the train-selected cell ----------------------------
     best = tr_rows[0] if tr_rows else (by_paid[0] if by_paid else None)
@@ -968,8 +1103,12 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
         for asset in sorted({e.asset for e in events}):
             a = [e for e in tr_events if e.asset == asset]
             b = [e for e in te_events if e.asset == asset]
-            ra = summarise_cell(a, best.sl_width, best.tp_r, best.max_bars)
-            rb = summarise_cell(b, best.sl_width, best.tp_r, best.max_bars)
+            ra = _net_sweep_row(
+                summarise_cell(a, best.sl_width, best.tp_r, best.max_bars),
+                cost)
+            rb = _net_sweep_row(
+                summarise_cell(b, best.sl_width, best.tp_r, best.max_bars),
+                cost)
             if not ra.n:
                 continue
             per.append({"asset": asset, "train_n": ra.n,
@@ -993,13 +1132,19 @@ def _analyse(events: list, cfg: dict[str, Any]) -> dict[str, Any]:
     return verdict
 
 
-def _score_production(train: list, test: list, base: dict[str, Any]) -> dict[str, Any]:
+def _score_production(train: list, test: list, base: dict[str, Any],
+                      cost_r: Optional[float] = None) -> dict[str, Any]:
     """Score the LIVE config on the same data, same split.
 
     The production stop is a percentage of price clamped to a band, so it is
     not one ATR multiple — it is re-derived per event the way
     ``effective_sl_tp`` does. Skipping this would leave the report comparing
     candidates against nothing.
+
+    Netted with the same sim cost as every candidate: the benchmark is a sim
+    verdict score, and a net candidate against a gross benchmark would punish
+    the candidate for a cost production also pays live. This changes no live
+    code — paper-trading costs are untouched (sim-only).
     """
     if not base or base.get("source") != "db":
         return {"available": False,
@@ -1015,6 +1160,8 @@ def _score_production(train: list, test: list, base: dict[str, Any]) -> dict[str
         return {"available": False, "reason": "rr_target not readable"}
 
     from app.engine.triple_barrier import BarrierSpec, label_event
+
+    cost = SIM_COST_R_DEFAULT if cost_r is None else float(cost_r)
 
     def run(events):
         rs, n = [], 0
@@ -1032,14 +1179,21 @@ def _score_production(train: list, test: list, base: dict[str, Any]) -> dict[str
                 continue
             rs.append(res.r_multiple)
             n += 1
+        if not n:
+            return {"n": 0, "mean_r": 0.0, "win_rate_pct": 0.0,
+                    "gross_mean_r": 0.0, "net_mean_r": 0.0}
+        gross = sum(rs) / n
+        net = gross - cost
         return {"n": n,
-                "mean_r": round(sum(rs) / n, 4) if n else 0.0,
-                "win_rate_pct": round(100.0 * sum(1 for x in rs if x > 0) / n, 1)
-                if n else 0.0}
+                "mean_r": round(net, 4),
+                "gross_mean_r": round(gross, 4),
+                "net_mean_r": round(net, 4),
+                "win_rate_pct": round(100.0 * sum(1 for x in rs if x > 0) / n, 1)}
 
     tr, te = run(train), run(test)
     return {
         "available": True,
+        "cost_r": cost,
         "config": {k: base.get(k) for k in (
             "sl_distance_mode", "sl_atr_mult", "sl_min_pct", "sl_max_pct",
             "rr_target", "min_opportunity", "min_confidence")},

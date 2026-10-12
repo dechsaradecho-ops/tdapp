@@ -456,3 +456,113 @@ class TestRecommendation:
         out = simulation._mfe_mae([Ev() for _ in range(10)])
         assert "reached_1_5r_pct" in out
         assert "reached_1.5r_pct" not in out
+
+
+class TestSimCost:
+    """Task 5: sim deducts a mandatory per-trade cost on every run.
+
+    Evidence (Oct 2026, 4,984 trades): gross +0.054R/trade vs true cost
+    ~0.10-0.15R/trade — past verdicts scored gross and overstated the edge.
+    """
+
+    def _ev(self, r, bar_index=0):
+        from types import SimpleNamespace
+
+        from app.engine.triple_barrier import LabelledEvent
+        ev = LabelledEvent(asset="EURUSD", direction="BUY",
+                           bar_index=bar_index, entry=1.10, atr_pct=0.5,
+                           opportunity=60.0, confidence=70.0, future=[])
+        ev.outcomes["1.5000|1.5000|20"] = SimpleNamespace(r_multiple=r)
+        return ev
+
+    def _labelled(self, n=200):
+        from app.engine.triple_barrier import (
+            BarrierSpec, LabelledEvent, label_event)
+        from app.integrations.quotes import Candle
+        evs = []
+        for i in range(n):
+            up = (i % 3) != 0
+            bars = [Candle(o=1.10, h=1.10 + (0.005 if up else 0.0002),
+                           l=1.10 - (0.0002 if up else 0.005), c=1.10),
+                    Candle(o=1.10, h=1.10 + (0.008 if up else 0.0003),
+                           l=1.10 - (0.0003 if up else 0.008), c=1.10),
+                    Candle(o=1.10, h=1.10 + (0.010 if up else 0.0004),
+                           l=1.10 - (0.0004 if up else 0.010), c=1.10)]
+            ev = LabelledEvent(asset="EURUSD", direction="BUY", bar_index=i,
+                               entry=1.10, atr_pct=0.5,
+                               opportunity=40.0 + (i % 60),
+                               confidence=50.0 + (i % 45), future=bars)
+            for m in (1.0, 1.5):
+                for r in (1.0, 1.5):
+                    for mb in (10, 20):
+                        atr = ev.entry * ev.atr_pct / 100.0
+                        ev.outcomes[f"{m:.4f}|{r:.4f}|{mb}"] = label_event(
+                            "BUY", ev.entry, BarrierSpec(m * atr, m * atr * r, mb),
+                            bars)
+            evs.append(ev)
+        return evs
+
+    def _cfg(self, **kw):
+        cfg = {"sl_multiples": [1.0, 1.5], "tp_rs": [1.0, 1.5],
+               "max_bars": [10, 20], "gate_opps": [0, 60],
+               "gate_confs": [0, 70], "days": 1095, "cooldown": 1,
+               "live_baseline": {"source": "db", "sl_atr_mult": 1.5,
+                                 "sl_min_pct": 0.65, "sl_max_pct": 1.2,
+                                 "rr_target": 1.5, "min_opportunity": 60.0,
+                                 "min_confidence": 70.0}}
+        cfg.update(kw)
+        return cfg
+
+    def test_score_applies_default_cost(self):
+        assert simulation.SIM_COST_R_DEFAULT == pytest.approx(0.10)
+        evs = [self._ev(0.5, 0), self._ev(-1.0, 1)]
+        # gross mean = (0.5 + -1.0) / 2 = -0.25 -> net = gross - 0.10
+        out = simulation._score(evs, 1.5, 1.5, 20, 0.0, 0.0)
+        assert out["n"] == 2
+        assert out["gross_mean_r"] == pytest.approx(-0.25)
+        assert out["net_mean_r"] == pytest.approx(-0.35)
+        assert out["mean_r"] == pytest.approx(-0.35)
+
+    def test_export_csv_has_r_net(self):
+        from tests.test_simulation import FakeDB
+        assert "r_net" in simulation.SIM_EXPORT_COLUMNS
+        # append-only: existing column positions must not shift
+        assert simulation.SIM_EXPORT_COLUMNS[-1] == "r_net"
+        db = FakeDB()
+        db.rows["e1"] = {"seq": 1, "asset": "EURUSD", "r_multiple": 1.5}
+        text = simulation.export_csv(db, "run1")
+        header = text.splitlines()[0].split(",")
+        idx = header.index("r_net")
+        assert float(text.splitlines()[1].split(",")[idx]) == \
+            pytest.approx(1.5 - simulation.SIM_COST_R_DEFAULT)
+        # an old row without r_multiple exports blank, not an error
+        db2 = FakeDB()
+        db2.rows["e9"] = {"seq": 1, "asset": "EURUSD"}
+        line = simulation.export_csv(db2, "r").splitlines()[1]
+        assert line.split(",")[idx] == ""
+
+    def test_zero_cost_is_explicit_opt_out(self):
+        evs = [self._ev(0.5, 0), self._ev(-1.0, 1)]
+        out = simulation._score(evs, 1.5, 1.5, 20, 0.0, 0.0, 0.0)
+        assert out["mean_r"] == pytest.approx(out["gross_mean_r"])
+        labelled = self._labelled()
+        v0 = simulation._analyse(labelled, self._cfg(cost_r=0.0))
+        assert v0["cost_r"] == 0.0
+        assert v0["gross_mean_r"] == pytest.approx(v0["net_mean_r"])
+        # missing key (or None) is NOT an opt-out — the default applies
+        v1 = simulation._analyse(labelled, self._cfg())
+        assert v1["cost_r"] == pytest.approx(simulation.SIM_COST_R_DEFAULT)
+        assert v1["net_mean_r"] == \
+            pytest.approx(v1["gross_mean_r"] - simulation.SIM_COST_R_DEFAULT)
+        v2 = simulation._analyse(labelled, self._cfg(cost_r=None))
+        assert v2["cost_r"] == pytest.approx(simulation.SIM_COST_R_DEFAULT)
+
+    def test_analyse_reports_cost_trio_and_nets_the_winner(self):
+        labelled = self._labelled()
+        v = simulation._analyse(labelled, self._cfg())
+        wf = v["walk_forward"]
+        assert "error" not in wf, "fixture must produce a real split"
+        assert v["cost_r"] == pytest.approx(simulation.SIM_COST_R_DEFAULT)
+        assert wf["test_mean_r"] == pytest.approx(v["net_mean_r"])
+        # the verdict acts on net: the hold-out flag follows the net number
+        assert wf["holds_out"] == (v["net_mean_r"] > 0)
