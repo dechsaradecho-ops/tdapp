@@ -13,9 +13,12 @@ refused, not waved through.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -1125,6 +1128,227 @@ def reentry_cooldown_block(db, s: AppSettings, asset: str,
 
 
 # ---------------------------------------------------------------------------
+# Meta-filter take/skip gate (trade-profitability Task 3, owner 2026-10-12)
+# ---------------------------------------------------------------------------
+# Offline-trained logistic take/skip gate on entry-time features (see
+# app/engine/meta_filter.py + scripts/train_meta_filter.py). The model trains
+# offline and lands as backend/artifacts/meta-filter-<run>.json; this gate
+# only JUDGES — it never trains, never refits, never touches settings.
+#
+# Fail-open everywhere: a missing / unreadable / collapsed / stale artifact,
+# or a snapshot that cannot supply every artifact feature, returns "" (take).
+# A model that cannot prove edge must never halt trading — the evidence-first
+# rule from the plan. A block returns a reason containing "meta_filter".
+META_FILTER_ARTIFACTS_DIR = (
+    Path(__file__).resolve().parents[2] / "artifacts")
+META_FILTER_GLOB = "meta-filter-*.json"
+META_FILTER_STALE_DAYS = 90
+
+
+def _load_meta_filter_artifact() -> Optional[dict]:
+    """Newest parseable meta-filter artifact by trained_at, else None.
+
+    Newest = latest `trained_at` string (ISO Z, lexicographically ordered);
+    ties break by file mtime. Unparseable files are skipped, never fatal.
+    Never raises.
+    """
+    try:
+        paths = list(META_FILTER_ARTIFACTS_DIR.glob(META_FILTER_GLOB))
+    except Exception:
+        return None
+    best: Optional[dict] = None
+    best_key: Optional[tuple] = None
+    for path in paths:
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(artifact, dict):
+                continue
+            key = (str(artifact.get("trained_at") or ""),
+                   path.stat().st_mtime)
+            if best_key is None or key > best_key:
+                best, best_key = artifact, key
+        except Exception:
+            continue
+    return best
+
+
+def _meta_filter_features(snapshot: dict, direction: str) -> Optional[dict]:
+    """Indicator snapshot -> model feature dict. None when underivable.
+
+    The SAME math as strategy_replay.event_features (duplicated field-by-field
+    instead of imported: the replay module walks history and the gate must
+    never inherit that machinery — one dict in, one feature dict out). Any
+    missing / non-numeric raw input yields None so the caller fails open.
+    Never raises.
+    """
+    try:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return None
+
+        def _num(key: str) -> Optional[float]:
+            try:
+                value = float(snapshot.get(key))
+            except (TypeError, ValueError):
+                return None
+            if value != value or value in (float("inf"), float("-inf")):
+                return None
+            return value
+
+        raw_keys = ("price", "ema_fast", "ema_slow", "adx", "rsi",
+                    "macd_hist", "price_change_pct_20", "atr_pct",
+                    "volatility_index")
+        vals = {k: _num(k) for k in raw_keys}
+        if any(v is None for v in vals.values()):
+            return None
+        try:
+            st_raw = snapshot.get("supertrend_dir")
+            st_dir = int(float(st_raw)) if st_raw is not None else None
+        except (TypeError, ValueError):
+            return None
+        if st_dir is None:
+            return None
+        price = vals["price"]
+        atr_pct = vals["atr_pct"]
+        ema_slow = vals["ema_slow"]
+        atr_price = (price or 0) * (atr_pct or 0) / 100.0
+        gap_atr = round((price - ema_slow) / atr_price, 3) \
+            if atr_price > 0 and ema_slow else 0.0
+        want = 1 if str(direction or "").upper() == "BUY" else -1
+        return {
+            "adx": vals["adx"],
+            "rsi": vals["rsi"],
+            "macd_hist": vals["macd_hist"],
+            "atr_pct": atr_pct,
+            "volatility_index": vals["volatility_index"],
+            "chg20": vals["price_change_pct_20"],
+            "ema_gap_atr": gap_atr,
+            "st_agree": 1.0 if st_dir == want else -1.0,
+            "ema_agree": 1.0 if ((vals["ema_fast"] > ema_slow)
+                                 == (want > 0)) else -1.0,
+            "macd_agree": 1.0 if (((vals["macd_hist"] or 0) > 0)
+                                  == (want > 0)) else -1.0,
+        }
+    except Exception:
+        return None
+
+
+def _meta_sigmoid(z: float) -> float:
+    if z >= 0:
+        e = math.exp(-z)
+        return 1.0 / (1.0 + e)
+    e = math.exp(z)
+    return e / (1.0 + e)
+
+
+def meta_filter_block(db, settings, asset: str, direction: str,
+                      snapshot_dict: Optional[dict]) -> str:
+    """Take/skip verdict from the offline-trained meta-filter.
+
+    Returns "" (take / fail-open) or a block reason containing "meta_filter".
+    Engages ONLY when the newest artifact holds out (picked threshold beats
+    buy-and-hold out-of-sample), was trained within META_FILTER_STALE_DAYS,
+    and every artifact feature derives from `snapshot_dict` (an indicator
+    snapshot in the quotes.fetch_all_snapshots shape). Anything else —
+    missing/stale/collapsed artifact, partial snapshot, ANY error — returns
+    "" plus a log line, never a block. `db`/`settings` are accepted for seam
+    symmetry with the other gates (future audit logging); the verdict itself
+    needs neither. Never raises.
+    """
+    try:
+        asset_u = str(asset or "").upper()
+        artifact = _load_meta_filter_artifact()
+        if not artifact:
+            return ""
+        evaluation = artifact.get("evaluation") or {}
+        if evaluation.get("holds_out") is not True:
+            log.info("meta_filter pass-open %s: newest artifact holds_out=%r",
+                     asset_u, evaluation.get("holds_out"))
+            return ""
+        picked = evaluation.get("picked") or {}
+        try:
+            threshold = float(picked.get("threshold"))
+        except (TypeError, ValueError):
+            log.info("meta_filter pass-open %s: artifact has no threshold",
+                     asset_u)
+            return ""
+        trained_at = _parse_dt_for_meta(artifact.get("trained_at"))
+        if trained_at is None:
+            log.info("meta_filter pass-open %s: unparseable trained_at",
+                     asset_u)
+            return ""
+        age_days = (datetime.now(timezone.utc) - trained_at).total_seconds() \
+            / 86400.0
+        if age_days > META_FILTER_STALE_DAYS:
+            log.info("meta_filter pass-open %s: artifact %.0f days old "
+                     "(> %d)", asset_u, age_days, META_FILTER_STALE_DAYS)
+            return ""
+        features = artifact.get("features") or []
+        stats = artifact.get("stats") or {}
+        model = artifact.get("model") or {}
+        weights = model.get("weights")
+        if not features or not isinstance(weights, list) \
+                or len(weights) != len(features):
+            log.info("meta_filter pass-open %s: feature/weight mismatch",
+                     asset_u)
+            return ""
+        try:
+            bias = float(model.get("bias") or 0.0)
+        except (TypeError, ValueError):
+            bias = 0.0
+        derived = _meta_filter_features(snapshot_dict or {}, direction)
+        if derived is None:
+            log.info("meta_filter pass-open %s: snapshot lacks model inputs",
+                     asset_u)
+            return ""
+        xs: list[float] = []
+        for name in features:
+            if name not in derived:
+                log.info("meta_filter pass-open %s: feature %s not derivable",
+                         asset_u, name)
+                return ""
+            entry = stats.get(name) or {}
+            try:
+                mean = float(entry["mean"])
+                std = float(entry["std"])
+            except (TypeError, ValueError, KeyError):
+                log.info("meta_filter pass-open %s: no train stats for %s",
+                         asset_u, name)
+                return ""
+            if not std > 0:
+                return ""
+            value = derived[name]
+            if not isinstance(value, (int, float)) or value != value \
+                    or value in (float("inf"), float("-inf")):
+                return ""
+            # Standardize with TRAIN stats — never refit on live data.
+            xs.append((float(value) - mean) / std)
+        proba = _meta_sigmoid(
+            sum(w * x for w, x in zip(weights, xs)) + bias)
+        if proba < threshold:
+            run = str(artifact.get("run_id") or "")[:8]
+            test_r = (evaluation.get("picked") or {}).get("test_mean_r")
+            return (
+                f"meta_filter skip: P(profitable) {proba:.2f} < take "
+                f"{threshold:.2f} for {asset_u} {direction} "
+                f"(artifact {run}, test {test_r:+.2f}R) — "
+                f"setup นี้มีแนวโน้มไปไม่ถึงเป้า ไม่เปิดออเดอร์")
+        return ""
+    except Exception as exc:
+        log.warning("meta_filter pass-open on error: %s", exc)
+        return ""
+
+
+def _parse_dt_for_meta(raw: Any) -> Optional[datetime]:
+    """Parse artifact trained_at ("2026-10-12T03:54:34Z"). None when bad."""
+    dt = _parse_dt(raw)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# ---------------------------------------------------------------------------
 # The gate pipeline
 # ---------------------------------------------------------------------------
 def currency_exposure_block(db, s: AppSettings, asset: str,
@@ -1378,11 +1602,14 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                   entry: Optional[float] = None,
                   stop_loss: Optional[float] = None,
                   direction: str = "",
-                  volume: Optional[float] = None) -> GateReport:
+                  volume: Optional[float] = None,
+                  meta_snapshot: Optional[dict] = None) -> GateReport:
     """Run every safety gate. Returns GateReport with allowed=False on any block.
 
     size_lots is computed here too, so callers never place an un-sized order.
     entry/stop_loss feed Gate 6 (portfolio heat) with the FINAL order levels.
+    meta_snapshot (an indicator snapshot in the quotes.fetch_all_snapshots
+    shape, or None) feeds Gate 7 (meta-filter); None fails open.
     """
     rejects: list[str] = []
     checks: list[str] = []
@@ -1592,6 +1819,22 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     except Exception as exc:
         rejects.append(f"heat eval error: {exc}")
         checks.append("heat=error")
+
+    # ---- Gate 7: meta-filter take/skip (offline-trained, fail-open) ----
+    # The model predicts P(this setup ends profitable) from entry-time
+    # features; below the TRAIN-picked threshold the order is skipped. Runs
+    # LAST so every safety reason outranks a profitability skip, and fails OPEN:
+    # no/old/collapsed artifact or an underivable snapshot never blocks.
+    try:
+        _meta_reason = meta_filter_block(db, s, asset, direction,
+                                         meta_snapshot)
+    except Exception as exc:
+        _meta_reason = ""
+        checks.append(f"meta_filter=error {exc}")
+    else:
+        checks.append(f"meta_filter={'skip' if _meta_reason else 'take'}")
+    if _meta_reason:
+        rejects.append(_meta_reason)
 
     # ---- Position sizing: risk_to_lot replaces the hardcoded 0.01 ---------
     return GateReport(allowed=not rejects, rejects=rejects, checks=checks,
@@ -1836,9 +2079,18 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          direction, asset, stop_loss, cap_note)
         except Exception as exc:
             log.warning("effective_sl_tp failed for %s: %s", asset, exc)
+    # Fresh indicator snapshot, fetched ONCE and shared by the meta-filter
+    # (Gate 7 inside _gate_blocked) and the thesis re-validation below, so
+    # both gates judge the SAME market picture. Only when the caller passes
+    # the signal row (manual approve / auto-trader); extended-open passes no
+    # row, so both gates stand down (meta fails open, thesis is skipped).
+    _meta_snapshot: Optional[dict] = None
+    if signal_row is not None:
+        _meta_snapshot = await _fresh_thesis_snapshot(db, asset)
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
                            entry=entry, stop_loss=stop_loss,
-                           direction=direction, volume=volume)
+                           direction=direction, volume=volume,
+                           meta_snapshot=_meta_snapshot)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)
         # Lifecycle log: the gate said NO (pause/limits/news/correlation/...).
@@ -1942,7 +2194,9 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # when the caller passes the signal row (manual approve / auto-trader);
     # extended-open has its own reviewed plan and passes no row.
     if signal_row:
-        _thesis_snapshot = await _fresh_thesis_snapshot(db, asset)
+        # Reuses the snapshot fetched above (same picture the meta-filter
+        # judged) instead of refetching — one feed read per order attempt.
+        _thesis_snapshot = _meta_snapshot
         _thesis = thesis_validation.validate_thesis(
             signal_row, _thesis_snapshot, max_age_min=G(s, "signal_ttl_min"))
         # Non-blocking confirmations (Supertrend-only conflict/flip — P0-5
