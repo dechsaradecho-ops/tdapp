@@ -1422,6 +1422,43 @@ async def guard_once(db, broker, notifier: NotificationService,
                 # can't inflate it (see _r_multiple_at).
                 ts_min_r = float(G(s, "time_stop_min_r", zero_as_missing=False) or 0)
                 r_now = _r_multiple_at(pos, price, db) if ts_min_r > 0 else 0.0
+                # Locked-profit exemption (ข้อ 5): a trailed SL that already
+                # locks ≥ +0.25R profit means the downside is capped and the
+                # position is a winner-pending — the rigid time-stop must not
+                # cut it. Sim evidence: expired trades averaged +0.34R with
+                # MFE +0.84R. sl_locked_r uses the ORIGINAL SL distance (never
+                # the trailed stop); 0.25 is documented from that evidence,
+                # not tuned. Fail-closed: any error here falls through to the
+                # old time-stop behavior (close), never an accidental hold.
+                if age_days >= max_hold:
+                    try:
+                        _sign = (1 if str(getattr(pos, "direction", "") or "").upper() == "BUY"
+                                 else -1)
+                        _entry = float(getattr(pos, "entry_price", 0) or 0)
+                        _stop = getattr(pos, "stop_loss", None)
+                        _rdist = None
+                        if _entry > 0 and _stop is not None:
+                            try:
+                                _rows = db.select(
+                                    "paper_trades",
+                                    filters={"ticket": str(getattr(pos, "ticket", "") or "")},
+                                    limit=1)
+                                if _rows and _rows[0].get("initial_stop_loss") is not None:
+                                    _rdist = abs(_entry - float(_rows[0]["initial_stop_loss"]))
+                            except Exception:
+                                _rdist = None
+                            if _rdist is None:
+                                _rdist = abs(_entry - float(_stop))
+                            if _rdist and _rdist > 0:
+                                _locked = (float(_stop) - _entry) * _sign / _rdist
+                                if _locked >= 0.25:
+                                    skip_assets.append(f"{pos.asset}:time_deferred")
+                                    log.info("time-stop deferred — SL locks %+.2fR "
+                                             "on %s (age %.1f days ≥ %d)",
+                                             _locked, pos.ticket, age_days, max_hold)
+                                    continue
+                    except Exception as exc:
+                        log.debug("locked-profit exemption check failed: %s", exc)
                 if age_days >= max_hold and (ts_min_r <= 0 or r_now < ts_min_r):
                     age_txt = f"{age_days:.1f}"
                     result = await broker.close_position(pos.ticket)
