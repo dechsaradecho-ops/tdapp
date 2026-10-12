@@ -76,3 +76,23 @@ def _force_liquid_session(monkeypatch):
         )
 
     monkeypatch.setattr(SessionEngine, "active", classmethod(_liquid))
+
+
+@pytest.fixture(autouse=True)
+def _no_meta_filter_artifact(monkeypatch, tmp_path):
+    """Order-path tests run with NO meta-filter artifact (gate fails open).
+
+    The take/skip gate (`execution.meta_filter_block`) reads the newest
+    backend/artifacts/meta-filter-*.json from disk. That file is a training
+    product: retraining changes the picked threshold and selectivity, so
+    without this the order suite would pass or fail depending on the
+    developer's last training run (a HOLDS OUT artifact blocks the neutral
+    snapshots the order tests use — same wall-clock/disk-state class as the
+    market-open and liquid-session fixtures above). Tests for the gate
+    itself (test_meta_filter_gate.py) point
+    `execution.META_FILTER_ARTIFACTS_DIR` at their own tmp artifacts, which
+    overrides this fixture inside those tests.
+    """
+    from app.services import execution
+
+    monkeypatch.setattr(execution, "META_FILTER_ARTIFACTS_DIR", tmp_path)
