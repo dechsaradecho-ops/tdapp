@@ -170,7 +170,7 @@ async def counts(request: Request) -> dict:
     except Exception:
         pass
     signal_log.purge_old_logs(db)
-    for table in ("market_analysis", "signals", "news_analysis", "trades"):
+    for table in ("market_analysis", "signals", "news_analysis", "paper_trades"):
         try:
             out[table] = int(db.count(table) or 0)
         except Exception:
@@ -181,6 +181,9 @@ async def counts(request: Request) -> dict:
                 out[f"{table}_latest"] = latest[0]["created_at"]
         except Exception:
             pass
+    out["trades"] = out.get("paper_trades", 0)
+    if "paper_trades_latest" in out:
+        out["trades_latest"] = out.get("paper_trades_latest")
     out["verdict"] = "ok"
     return out
 

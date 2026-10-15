@@ -135,7 +135,7 @@ class TestSystemCounts:
     async def test_counts_reports_latest_row_timestamp(self):
         # FakeDatabase.select returns rows as stored (it does not sort), so
         # keep the newest row first to mimic `order=created_at&desc=true`.
-        db = FakeDatabase(rows={"trades": [
+        db = FakeDatabase(rows={"paper_trades": [
             {"id": "t2", "created_at": "2026-09-11T08:30:00+00:00"},
             {"id": "t1", "created_at": "2026-09-10T00:00:00+00:00"}]})
         set_state(db)
@@ -143,6 +143,19 @@ class TestSystemCounts:
         body = (await call("GET", "/api/system/counts")).json()
         assert body["trades"] == 2
         assert body["trades_latest"] == "2026-09-11T08:30:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_counts_reports_paper_trades(self):
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "t2", "created_at": "2026-09-11T08:30:00+00:00"},
+            {"id": "t1", "created_at": "2026-09-10T00:00:00+00:00"}]})
+        set_state(db)
+
+        body = (await call("GET", "/api/system/counts")).json()
+        assert body["paper_trades"] == 2
+        assert body["trades"] == body["paper_trades"]
+        assert body["paper_trades_latest"] == "2026-09-11T08:30:00+00:00"
+        assert body["trades_latest"] == body["paper_trades_latest"]
 
     @pytest.mark.asyncio
     async def test_counts_zero_rows_have_no_latest_key(self):
