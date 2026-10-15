@@ -307,7 +307,7 @@ async def lifespan(app: FastAPI):
             "interval", minutes=1, id="notifications", **common)
         scheduler.add_job(_safe(lambda:
             auto_trader.trade_once(db, app.state.broker, notifier),
-            db, "auto_trader"),
+            db, "auto_trader", timeout_s=50),
             "interval", minutes=1, id="auto_trader", **common)
         scheduler.add_job(_safe(lambda:
             position_guard.guard_once(db, app.state.broker, notifier),

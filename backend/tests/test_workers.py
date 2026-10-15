@@ -2558,3 +2558,19 @@ class TestDailyDigest:
 
         out = await daily_digest.send_digest_once(NoDb(), _SilentNotifier())
         assert out["sent"] is False
+
+
+# ---------------------------------------------------------------------------
+# Scheduler watchdog — auto_trader must carry timeout_s=50 (P0 prod unblock)
+# ---------------------------------------------------------------------------
+class TestSchedulerWatchdog:
+    def test_auto_trader_has_watchdog(self):
+        """auto_trader registration must carry timeout_s=50 (same as
+        position_guard) so an overrunning tick trips the watchdog instead of
+        piling up behind max_instances."""
+        import re
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent
+               / "app" / "main.py").read_text(encoding="utf-8")
+        assert re.search(r'"auto_trader"\s*,\s*timeout_s\s*=\s*50', src), (
+            'auto_trader _safe(...) registration must carry timeout_s=50')
