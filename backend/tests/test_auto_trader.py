@@ -1103,6 +1103,25 @@ class TestAutoTrader:
         assert "อ่านสถานะไม้เปิดไม่สำเร็จ" in blocks[0].get("reason", "")
 
     @pytest.mark.asyncio
+    async def test_open_positions_unreadable_surfaces_db_error(self, broker, notifier):
+        class BoomDB(FakeDatabase):
+            def select_ex(self, *a, **kw):
+                raise RuntimeError("boom")
+
+        db = BoomDB(rows={"signals": [
+            {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+             "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+             "take_profit": 2500.0, "approval": "pending",
+             "created_at": datetime.now(timezone.utc).isoformat()}]})
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["aborted"] == "open_positions_unreadable"
+        assert "boom" in out["detail"]
+        blocks = [r for (_t, r) in db.inserted
+                  if r.get("event") == "order_blocked"]
+        assert len(blocks) == 1
+        assert "boom" in blocks[0].get("reason", "")
+
+    @pytest.mark.asyncio
     async def test_settings_unreadable_aborts_cycle(self, broker, notifier, monkeypatch):
         """Fail-closed (prod 2026-09-24): unreadable settings aborts the
         cycle — sizing/gates on guessed limits is how sub-floor stops fired

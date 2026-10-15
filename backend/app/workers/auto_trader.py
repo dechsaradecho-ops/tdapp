@@ -66,6 +66,7 @@ async def trade_once(db, broker, notifier) -> dict:
                                   limit=200)
         }
     except Exception as exc:
+        short = f"{type(exc).__name__}: {exc}"[:200]
         log.error("auto-trader: cannot read open positions (%s) — aborting "
                   "cycle, %d pending signal(s) untouched", exc, len(pending))
         for sig in pending:
@@ -75,10 +76,11 @@ async def trade_once(db, broker, notifier) -> dict:
                 direction=str(sig.get("direction") or ""),
                 confidence=sig.get("confidence"), entry=sig.get("entry"),
                 source="auto",
-                reason="อ่านสถานะไม้เปิดไม่สำเร็จ — งดเทรดรอบนี้ (fail-safe กันเปิดซ้ำ)")
+                reason="อ่านสถานะไม้เปิดไม่สำเร็จ — งดเทรดรอบนี้ (fail-safe กันเปิดซ้ำ)"
+                f" (สาเหตุ: {short})")
         return {"mode": "auto", "picked": len(pending), "fired": 0,
                 "blocked": 0, "skipped": 0, "expired": expired,
-                "aborted": "open_positions_unreadable"}
+                "aborted": "open_positions_unreadable", "detail": short}
     broker_assets: set[str] = set()
     try:
         if broker is not None and hasattr(broker, "all_positions"):
