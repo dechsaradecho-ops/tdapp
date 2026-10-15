@@ -1272,7 +1272,8 @@ def meta_filter_block(db, settings, asset: str, direction: str,
                      asset_u)
             return ""
         try:
-            thr_setting = float(G(settings, "meta_filter_threshold") or 0)
+            thr_setting = float(G(settings, "meta_filter_threshold",
+                                   zero_as_missing=False) or 0)
         except (TypeError, ValueError):
             thr_setting = 0.0
         threshold = thr_setting if thr_setting > 0 else artifact_threshold

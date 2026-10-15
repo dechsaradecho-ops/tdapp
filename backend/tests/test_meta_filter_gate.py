@@ -156,6 +156,18 @@ def test_meta_threshold_override_half(monkeypatch, tmp_path):
     assert AppSettings().meta_filter_threshold == 0.5
 
 
+def test_meta_threshold_zero_uses_artifact(monkeypatch, tmp_path):
+    # Explicit 0 = "use artifact picked threshold": sigmoid(0.28) ~= 0.57
+    # < artifact 0.65 -> must BLOCK (no 0.5 override applied).
+    _point_at(monkeypatch, tmp_path)
+    _write_artifact(tmp_path, holds_out=True, threshold=0.65, bias=0.28)
+    reason = execution.meta_filter_block(
+        FakeDatabase(), _settings(meta_filter_threshold=0),
+        "EURUSD", "BUY", _snapshot())
+    assert "meta_filter" in reason
+    assert "take 0.65" in reason
+
+
 def test_gate_blocked_reports_meta_reject(monkeypatch, tmp_path):
     """The _gate_blocked seam surfaces the filter as one reject."""
     _point_at(monkeypatch, tmp_path)
