@@ -2902,6 +2902,8 @@ class AppSettings(BaseModel):
     signal_ttl_min: int = 30
     # Auto-trader batch: max pending signals evaluated per 1-min cycle.
     auto_trader_batch_limit: int = 10
+    # Meta-filter take-threshold override (execution gate); 0 = use artifact picked threshold.
+    meta_filter_threshold: float = 0.5
     # Limit expansion step (percentage POINTS added per approval).
     kill_expand_step_pct: float = 5.0
     # Re-prompt cooldowns (minutes) after cooldown / after reject.

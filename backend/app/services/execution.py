@@ -1266,11 +1266,19 @@ def meta_filter_block(db, settings, asset: str, direction: str,
             return ""
         picked = evaluation.get("picked") or {}
         try:
-            threshold = float(picked.get("threshold"))
+            artifact_threshold = float(picked.get("threshold"))
         except (TypeError, ValueError):
             log.info("meta_filter pass-open %s: artifact has no threshold",
                      asset_u)
             return ""
+        try:
+            thr_setting = float(G(settings, "meta_filter_threshold") or 0)
+        except (TypeError, ValueError):
+            thr_setting = 0.0
+        threshold = thr_setting if thr_setting > 0 else artifact_threshold
+        if thr_setting > 0:
+            log.info("meta_filter threshold override %.2f (artifact %.2f)",
+                     threshold, artifact_threshold)
         trained_at = _parse_dt_for_meta(artifact.get("trained_at"))
         if trained_at is None:
             log.info("meta_filter pass-open %s: unparseable trained_at",

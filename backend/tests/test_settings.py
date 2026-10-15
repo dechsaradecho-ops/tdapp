@@ -790,7 +790,11 @@ def test_risk_presets_moderate_mirrors_live_prod_profile():
                 "market_analysis_purge_interval_s",
                 "drawdown_approach_ratio",
                 "drawdown_approach_cooldown_min",
-                "spread_sl_floor_mult"}
+                "spread_sl_floor_mult",
+                # Meta-filter take-threshold override (migration 060):
+                # same rationale as the 053 knobs — user-owned gate tuning,
+                # a risk preset must never silently retune it.
+                "meta_filter_threshold"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded

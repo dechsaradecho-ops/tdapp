@@ -145,6 +145,17 @@ def test_collapsed_artifact_never_blocks(monkeypatch, tmp_path):
         _snapshot()) == ""
 
 
+def test_meta_threshold_override_half(monkeypatch, tmp_path):
+    # sigmoid(0.28) ~= 0.57 < artifact 0.65 -> would block, but the settings
+    # override (0.5) takes instead -> take ("").
+    _point_at(monkeypatch, tmp_path)
+    _write_artifact(tmp_path, holds_out=True, threshold=0.65, bias=0.28)
+    assert execution.meta_filter_block(
+        FakeDatabase(), _settings(meta_filter_threshold=0.5),
+        "EURUSD", "BUY", _snapshot()) == ""
+    assert AppSettings().meta_filter_threshold == 0.5
+
+
 def test_gate_blocked_reports_meta_reject(monkeypatch, tmp_path):
     """The _gate_blocked seam surfaces the filter as one reject."""
     _point_at(monkeypatch, tmp_path)
