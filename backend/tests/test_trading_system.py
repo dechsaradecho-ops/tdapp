@@ -541,7 +541,7 @@ def test_strong_signal_passes_quality_gate():
     assert d.allowed
 
 
-def test_gate_allows_chfjpy_with_rates_blocks_without():
+def test_gate_converts_chfjpy_risk_with_rates():
     """CHFJPY prod card (SELL 190.24/190.33, $500/2%): converted risk passes,
     legacy path still reads the ¥ figure as dollars.
 
