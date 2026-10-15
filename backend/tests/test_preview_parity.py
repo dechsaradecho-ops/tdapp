@@ -95,7 +95,9 @@ class TestPreviewParity:
         body = (await call("GET", "/api/signals/latest")).json()
         assert body[0]["order_blocked"] is not None, (
             "thesis flip must already show on the card")
-        assert "thesis_error" in body[0]["order_blocked"]
+        assert "thesis_error" not in body[0]["order_blocked"]
+        assert "regime_blocked" not in body[0]["order_blocked"]
+        assert "EMA" in body[0]["order_blocked"]
 
     @pytest.mark.asyncio
     async def test_preview_reports_min_lot_budget_breach(self, monkeypatch):

@@ -112,6 +112,24 @@ HOSTILE_REGIMES = frozenset({
 _BULLISH_REGIMES = frozenset({"bull_trend", "strong_bull_trend"})
 _BEARISH_REGIMES = frozenset({"bear_trend", "strong_bear_trend"})
 
+# Human-readable Thai names for regimes (user request 2026-10-15: cards and
+# logs showed the raw slug "sideway"/"bull_trend"). Machine codes stay in
+# ThesisIssue.code / error_codes — only display text uses these.
+REGIME_TH = {
+    "sideway": "ภาวะไซด์เวย์ (ตลาดไร้เทรนด์)",
+    "high_volatility": "ภาวะผันผวนสูง",
+    "news_driven_market": "ภาวะตลาดขับด้วยข่าว",
+    "bull_trend": "แนวโน้มขาขึ้น",
+    "strong_bull_trend": "แนวโน้มขาขึ้นแข็งแรง",
+    "bear_trend": "แนวโน้มขาลง",
+    "strong_bear_trend": "แนวโน้มขาลงแรง",
+}
+
+
+def regime_th(regime: str) -> str:
+    """Thai display name for a regime slug (falls back to the slug)."""
+    return REGIME_TH.get(str(regime or ""), str(regime or ""))
+
 
 @dataclass
 class ThesisIssue:
@@ -158,6 +176,17 @@ class ThesisValidation:
             if c != "signal_thesis_invalidated":
                 return c
         return codes[0] if codes else ""
+
+    @property
+    def user_message(self) -> str:
+        """Human-readable Thai reasons (no machine codes) for cards/logs.
+
+        User request (2026-10-15): cards showed "thesis_error:
+        regime_blocked". Joins the Thai ThesisIssue messages; machine codes
+        stay in ``reason``/``error_codes``/``summary`` for telemetry.
+        """
+        errs = [i.message for i in self.issues if i.severity == "error"]
+        return "; ".join(errs)
 
     def summary(self) -> str:
         """One-line status for logs / LINE / API."""
@@ -376,8 +405,8 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
     if regime in HOSTILE_REGIMES and (is_buy or is_sell):
         issues.append(ThesisIssue(
             code="regime_blocked",
-            message=(f"สภาวะตลาดล่าสุดเป็น '{regime}' — ไม่เหมาะกับ entry "
-                     f"ทิศทาง {direction} (ตลาดไร้เทรนด์/ผันผวน/ขับด้วยข่าว)"),
+            message=(f"สภาวะตลาดล่าสุดเป็น{regime_th(regime)} — ไม่เหมาะกับ "
+                     f"entry ทิศทาง {direction} (ตลาดไร้เทรนด์/ผันผวน/ขับด้วยข่าว)"),
         ))
     elif regime and (is_buy or is_sell):
         wants_bull = is_buy
@@ -386,8 +415,8 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
         if (wants_bull and regime_is_bear) or (not wants_bull and regime_is_bull):
             issues.append(ThesisIssue(
                 code="regime_blocked",
-                message=(f"สภาวะตลาดล่าสุดเป็น '{regime}' สวนทางกับทิศทาง "
-                         f"{direction}"),
+                message=(f"สภาวะตลาดล่าสุดเป็น{regime_th(regime)} สวนทางกับ"
+                         f"ทิศทาง {direction}"),
             ))
 
     # ---- XAUUSD Strategy-D breakout structure -----------------------------

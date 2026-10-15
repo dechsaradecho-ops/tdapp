@@ -1987,8 +1987,9 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
             return (f"ไม่ได้เปิดออเดอร์นี้เพราะ thesis_error: "
                     f"ตรวจ thesis ไม่ได้ ({exc})")
         if not _thesis.ok:
-            _thesis_reason = _thesis.reason or "signal_thesis_invalidated"
-            return f"ไม่ได้เปิดออเดอร์นี้เพราะ thesis_error: {_thesis_reason}"
+            _thesis_human = (_thesis.user_message
+                             or _thesis.reason or "signal_thesis_invalidated")
+            return f"ไม่ได้เปิดออเดอร์นี้เพราะ {_thesis_human}"
     return ""
 
 
@@ -2359,6 +2360,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          _warn.message)
         if not _thesis.ok:
             _thesis_reason = _thesis.reason or "signal_thesis_invalidated"
+            _thesis_human = _thesis.user_message or _thesis_reason
             report.allowed = False
             report.thesis_error = _thesis_reason
             report.rejects.append(f"thesis_error: {_thesis.summary()}")
@@ -2368,7 +2370,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                 db=db, event="order_blocked", signal_id=str(signal_id or ""),
                 asset=asset, direction=direction, confidence=confidence,
                 entry=entry, source=source,
-                reason=f"thesis_error: {_thesis_reason}")
+                reason=_thesis_human)
             return report
 
     # Paper realism: fill at entry ± spread/2. Spread resolves per symbol:

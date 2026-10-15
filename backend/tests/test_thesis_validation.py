@@ -227,6 +227,31 @@ class TestRegimeBlocked:
         assert "regime_blocked" in r.error_codes
 
 
+class TestHumanMessage:
+    """User request (2026-10-15): cards/logs showed the machine code
+    "thesis_error: regime_blocked" — a human must read Thai reasons."""
+
+    def test_regime_block_speaks_thai_not_code(self):
+        snap = _snapshot(adx=10.0)                # adx < 20 → sideway
+        r = tv.validate_thesis(_signal(direction="BUY"), snap)
+        assert r.ok is False
+        msg = r.user_message
+        assert "regime_blocked" not in msg
+        assert "thesis_error" not in msg
+        assert "sideway" not in msg
+        assert "ไซด์เวย์" in msg
+
+    def test_trend_flip_speaks_thai_not_code(self):
+        snap = _snapshot(ema_fast=1.0900, ema_slow=1.1050, adx=30.0,
+                         supertrend_dir=-1, macd_hist=-0.2)
+        r = tv.validate_thesis(_signal(direction="BUY"), snap)
+        assert r.ok is False
+        msg = r.user_message
+        assert "trend_flipped" not in msg
+        assert "thesis_error" not in msg
+        assert "EMA" in msg
+
+
 class TestBreakoutInvalidated:
     def test_gold_buy_without_breakout_structure_blocks(self):
         snap = _snapshot(asset="XAUUSD", breakout_state=0, breakout_level=2000.0)
