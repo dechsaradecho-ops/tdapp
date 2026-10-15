@@ -614,7 +614,7 @@ def quote_usd_rate(asset: str | None, price: float | None,
 
 
 def risk_usd_of_distance(stop_distance: float, lots: float, asset: Optional[str],
-                         price: Optional[float]) -> Optional[float]:
+                         price: Optional[float], rates: dict | None = None) -> Optional[float]:
     """USD risk of a stop ``stop_distance`` wide at ``lots`` for ``asset``.
 
     ``raw = dist × lots × contract`` is in the QUOTE currency; convert to USD
@@ -628,7 +628,7 @@ def risk_usd_of_distance(stop_distance: float, lots: float, asset: Optional[str]
     """
     contract = contract_value_for(str(asset or ""))
     raw = float(stop_distance or 0) * float(lots or 0) * contract
-    rate = usd_per_quote_unit(asset, price)
+    rate = quote_usd_rate(asset, price, rates) if rates is not None else usd_per_quote_unit(asset, price)
     if rate is None:
         return None
     return raw * rate
@@ -1368,7 +1368,8 @@ def risk_to_lot(equity: float, risk_pct: float, stop_distance: float,
 
 
 def risk_to_lot_for(equity: float, risk_pct: float, stop_distance: float,
-                    asset: str, price: Optional[float] = None) -> float:
+                    asset: str, price: Optional[float] = None,
+                    rates: dict | None = None) -> float:
     """risk_to_lot with the per-asset contract value (gold = 100 oz/lot).
 
     XAUUSD SL 50 pts, $100 risk → 100 / (50 × 100) = 0.02 lots (correct);
@@ -1381,7 +1382,7 @@ def risk_to_lot_for(equity: float, risk_pct: float, stop_distance: float,
     pairs (USDJPY/…H) get the correct factor even without it only when a
     price is available — so pass ``price`` whenever you have it.
     """
-    usd_per_quote = usd_per_quote_unit(asset, price)
+    usd_per_quote = quote_usd_rate(asset, price, rates) if rates is not None else usd_per_quote_unit(asset, price)
     return risk_to_lot(equity, risk_pct, stop_distance,
                        contract_value=contract_value_for(asset),
                        usd_per_quote=(1.0 if usd_per_quote is None else usd_per_quote))

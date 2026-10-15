@@ -1994,7 +1994,7 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
 
 
 def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
-                  asset: Optional[str] = None) -> float:
+                  asset: Optional[str] = None, rates: dict | None = None) -> float:
     """risk_per_trade_pct of settings.capital → lots (risk_to_lot).
 
     The result is floored at the effective min_lot (Settings page, default
@@ -2017,13 +2017,14 @@ def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
     # the product is in yen, so without this the size is ~157× too small and
     # the min-lot floor silently opens an over-risk trade).
     lots = risk_to_lot_for(s.capital, s.risk_per_trade_pct, stop_distance,
-                           asset or "", price=entry)
+                           asset or "", price=entry, rates=rates)
     return max(lots, effective_min_lot(s, asset))
 
 
 def min_lot_budget_breach(s: AppSettings, entry: float,
                           stop_loss: Optional[float],
-                          asset: Optional[str] = None) -> Optional[dict]:
+                          asset: Optional[str] = None,
+                          rates: dict | None = None) -> Optional[dict]:
     """Details when the MIN LOT alone risks more than the per-trade budget.
 
     P0-2 root cause: ``size_position`` floors at ``effective_min_lot``, so a
@@ -2056,12 +2057,12 @@ def min_lot_budget_breach(s: AppSettings, entry: float,
             return None
         risk_budget = capital * risk_pct / 100.0
         required_lot = risk_to_lot_for(capital, risk_pct, stop_distance,
-                                       asset or "", price=entry)
+                                       asset or "", price=entry, rates=rates)
         # Risk of the min-lot order in USD — the raw product is in the pair's
         # QUOTE currency, so convert through the asset's own price (USDJPY:
         # ¥13.52 is NOT $13.52; the breach test must see the converted figure).
         min_lot_risk = risk_usd_of_distance(stop_distance, min_lot,
-                                            asset or "", entry)
+                                            asset or "", entry, rates)
         if min_lot_risk is None:
             min_lot_risk = stop_distance * min_lot * contract
         # A tiny tolerance keeps a lot that is ALREADY at the floor (or the

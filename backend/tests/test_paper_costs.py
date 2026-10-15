@@ -16,8 +16,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models.schemas import AppSettings
-from app.services.execution import PaperBrokerPnl, paper_exit_cost
+from app.models.schemas import AppSettings, risk_to_lot_for, risk_usd_of_distance
+from app.services.execution import (
+    PaperBrokerPnl,
+    min_lot_budget_breach,
+    paper_exit_cost,
+)
 
 
 def _pos(direction="BUY", entry=1.0850, price=1.0950, volume=0.01, asset="EURUSD"):
@@ -106,3 +110,22 @@ class TestPaperBrokerPnlWithCosts:
                    asset="XAUUSD")
         assert PaperBrokerPnl.compute(pos, AppSettings(), asset="XAUUSD") \
             == pytest.approx(1078.0)  # +1100 gross − 22 cost
+
+
+def test_jpy_risk_converts_with_rates():
+    assert risk_usd_of_distance(
+        0.09, 0.01, "CHFJPY", 190.24, {"USDJPY": 157.9}
+    ) == pytest.approx(90 / 157.9, abs=0.01)
+
+
+def test_jpy_lot_sizes_to_budget_with_rates():
+    assert risk_to_lot_for(
+        500.0, 2.0, 0.09, "CHFJPY", price=190.24, rates={"USDJPY": 157.9}
+    ) == pytest.approx(0.18, abs=0.02)
+
+
+def test_jpy_no_breach_with_rates():
+    s = AppSettings(capital=500.0, risk_per_trade_pct=2.0)
+    assert min_lot_budget_breach(
+        s, 190.24, 190.33, asset="CHFJPY", rates={"USDJPY": 157.9}
+    ) is None
