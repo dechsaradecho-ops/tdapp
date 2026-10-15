@@ -2239,7 +2239,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             _eff_sl, _eff_tp, _eff_dist, _tiered, _capped = effective_sl_tp(
                 s, entry, float(stop_loss), float(take_profit or 0),
                 asset, direction,
-                apply_cap=not (volume and float(volume) > 0))
+                apply_cap=not (volume and float(volume) > 0),
+                rates=rates)
             if _tiered:
                 log.info("sl_distance_mode=%s → %s %s SL %.5f",
                          s.sl_distance_mode, direction, asset, _eff_sl)

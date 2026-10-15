@@ -156,6 +156,28 @@ class TestSlCapDistanceSpreadFloor:
         if capped:
             assert dist >= spread_sl_floor(s, "XAUUSD") - 1e-12
 
+    def test_jpy_cross_cap_converts_with_rates(self):
+        """Prod 2026-10-15 (PAPER-000154/156, CHFJPY SL x2): the legacy cap
+        solved the $10 budget in YEN (rate 1.0) → cap 0.09, crushing the
+        0.65% band floor (1.235) down to a noise stop. With rates the cap
+        solves in USD → 1.579, so the band holds."""
+        s = cfg(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.01)
+        assert sl_cap_distance(s, "CHFJPY", price=190.24) == pytest.approx(
+            0.09, rel=1e-9)
+        assert sl_cap_distance(s, "CHFJPY", price=190.24,
+                               rates={"USDJPY": 157.9}) == pytest.approx(
+            10.0 / (0.01 * 100_000.0 / 157.9), rel=1e-6)
+
+    def test_effective_keeps_band_floor_for_jpy_with_rates(self):
+        """End-to-end: with rates, the band floor survives the cap for a
+        JPY cross — the stop stays tradeable instead of collapsing to 0.09."""
+        s = cfg(capital=500.0, risk_per_trade_pct=2.0, min_lot=0.01,
+                sl_distance_min_pct=0.65, sl_distance_max_pct=1.2)
+        sl, tp, dist, tiered, capped = effective_sl_tp(
+            s, 190.24, 190.33, 190.105, "CHFJPY", "SELL",
+            rates={"USDJPY": 157.9})
+        assert dist >= 190.24 * 0.0065 - 1e-9
+
 
 # ---------------------------------------------------------------------------
 # 3. sl_cap_below_spread — the fail-closed detector

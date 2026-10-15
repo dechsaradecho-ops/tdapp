@@ -763,7 +763,8 @@ def spread_sl_floor(settings: "AppSettings", asset: Optional[str]) -> float:
 
 
 def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
-                    price: Optional[float] = None) -> float:
+                    price: Optional[float] = None,
+                    rates: dict | None = None) -> float:
     """Max SL distance (price units) that fits the risk budget at min lot.
 
     Even the SMALLEST allowed order (effective_min_lot) risks
@@ -798,7 +799,11 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
             return 0.0
         # USD per 1 quote unit — 1.0 for USD-quoted assets and for the
         # un-derivable (cross / no price) case (fail-soft to legacy math).
-        rate = usd_per_quote_unit(asset, price) or 1.0
+        if rates is not None:
+            rate = quote_usd_rate(asset, price, rates)
+        else:
+            rate = usd_per_quote_unit(asset, price)
+        rate = rate or 1.0
         cap = budget / (floor * contract * rate)
         spread_floor = spread_sl_floor(settings, asset)
         return max(cap, spread_floor) if spread_floor > 0 else cap
@@ -841,7 +846,8 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
 
 
 def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
-                 asset: Optional[str], direction: str = "BUY"
+                 asset: Optional[str], direction: str = "BUY",
+                 rates: dict | None = None
                  ) -> tuple[float, float, bool]:
     """Tighten a wide SL down to the risk-budget cap. Returns (sl, dist, capped).
 
@@ -861,7 +867,7 @@ def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
         if not entry or not stop_loss:
             return stop_loss, 0.0, False
         # ``entry`` is the price the cap converts through (USDJPY budget ¥10≠$10).
-        cap = sl_cap_distance(settings, asset, price=entry)
+        cap = sl_cap_distance(settings, asset, price=entry, rates=rates)
         dist = abs(float(entry) - float(stop_loss))
         if cap <= 0 or dist <= cap:
             return stop_loss, dist, False
@@ -879,7 +885,8 @@ SL_TIER_MULT: dict[str, float] = {"short": 1.0, "medium": 1.5, "long": 2.0}
 
 def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
                     take_profit: float, asset: Optional[str],
-                    direction: str = "BUY", apply_cap: bool = True
+                    direction: str = "BUY", apply_cap: bool = True,
+                    rates: dict | None = None
                     ) -> tuple[float, float, float, bool, bool]:
     """One shared math for tier + cap: card preview == real order.
 
@@ -960,7 +967,8 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
             # (equals the row RR — the tier preserves it — but recomputed
             # from the tier values so the two paths can never drift apart).
             new_sl, cap_dist, capped = apply_sl_cap(
-                settings, float(entry), sl, asset, direction)
+                settings, float(entry), sl, asset, direction,
+                rates=rates)
             if capped:
                 rr_keep = (abs(tp - float(entry)) / abs(float(entry) - sl)
                            if tp and abs(float(entry) - sl) > 0 else 0.0)

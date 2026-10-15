@@ -206,7 +206,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             _eff_asset = str(r.get("asset") or "").upper()
             _raw_dist = sl_distance
             _eff_sl, _eff_tp, _eff_dist, _tiered, _capped = effective_sl_tp(
-                s, entry, stop_loss, take_profit, _eff_asset, _eff_dir)
+                s, entry, stop_loss, take_profit, _eff_asset, _eff_dir,
+                rates=rates)
             # Commit whenever the helper CHANGED the distance, not only when the
             # tier/cap flags fired — the spread floor can widen with both False
             # (prod 2026-09-22 USDJPY SELL: sub-spread 0.005 stop slipped past
