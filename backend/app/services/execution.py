@@ -1818,7 +1818,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                     # leg reads as ~157× its real dollar risk and wrongly blows
                     # the heat budget — the same class as the 2026-09-22 cap).
                     _t_risk = risk_usd_of_distance(_t_dist, _t_lots, _t_asset,
-                                                   _t_entry, rates)
+                                                   _t_entry, rates=rates)
                     if _t_risk is None:
                         _t_risk = (_t_dist * _t_lots
                                    * contract_value_for(_t_asset))
@@ -1834,7 +1834,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                                           asset=asset, rates=rates)
                     _dist = abs(float(entry) - float(stop_loss))
                     _new_risk = risk_usd_of_distance(_dist, _lots, asset,
-                                                     float(entry), rates)
+                                                     float(entry),
+                                                     rates=rates)
                     if _new_risk is None:
                         _new_risk = (_dist * _lots
                                      * contract_value_for(asset))
@@ -2079,7 +2080,8 @@ def min_lot_budget_breach(s: AppSettings, entry: float,
         # QUOTE currency, so convert through the asset's own price (USDJPY:
         # ¥13.52 is NOT $13.52; the breach test must see the converted figure).
         min_lot_risk = risk_usd_of_distance(stop_distance, min_lot,
-                                            asset or "", entry, rates)
+                                            asset or "", entry,
+                                            rates=rates)
         if min_lot_risk is None:
             min_lot_risk = stop_distance * min_lot * contract
         # A tiny tolerance keeps a lot that is ALREADY at the floor (or the
@@ -2948,8 +2950,12 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                     _t_lots = float(_t.get("volume") or 0)
                     if _t_lots <= 0:
                         continue
+                    # Converted open risk (FX risk conversion I2): reuse the
+                    # pnl_rates map fetched above for unrealized PnL — no new
+                    # feed calls on this path. None/absent leg keeps the exact
+                    # legacy raw fallback below.
                     _t_r = risk_usd_of_distance(_t_dist, _t_lots, _t_asset,
-                                                _t_entry)
+                                                _t_entry, rates=pnl_rates)
                     if _t_r is None:
                         _t_r = _t_dist * _t_lots * contract_value_for(_t_asset)
                     _open_risk += _t_r

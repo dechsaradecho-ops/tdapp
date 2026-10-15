@@ -123,18 +123,26 @@ class TestPreviewParity:
     async def test_preview_allows_jpy_when_converted(self, monkeypatch):
         """CHFJPY SELL 190.24/190.33 on $500/2%: true risk ~$0.57 — the card
         must NOT trip the min-lot budget gate (legacy read the ¥90 quote
-        figure as $90 = 18% > 2%). Rates come from maps already held
-        (live USDJPY 157.9 spot); snapshots stay empty."""
+        figure as $90 = 18% > 2%). Prod-faithful: the spot mock echoes ONLY
+        requested assets (no unconditional USDJPY gift), so the card converts
+        only because the route asked for the USDJPY leg in the same batch.
+        Display math (suggested_lots + risk note) must use the same map."""
         import app.api.routes.signals as signals_route
 
-        async def _jpy_spot(assets, **_kw):
-            return {"USDJPY": 157.9}, {}
+        requested: list[str] = []
+        _TABLE = {"CHFJPY": 190.24, "USDJPY": 157.9}
+
+        async def _echo_spot(assets, **_kw):
+            requested.extend([str(a).upper() for a in (assets or [])])
+            return ({str(a).upper(): _TABLE[str(a).upper()]
+                     for a in (assets or [])
+                     if str(a).upper() in _TABLE}, {})
 
         async def _empty_snapshots(assets, **_kw):
             return {}
 
         monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
-                            _jpy_spot)
+                            _echo_spot)
         monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
                             _empty_snapshots)
         monkeypatch.setattr(execution, "is_market_closed",
@@ -151,7 +159,21 @@ class TestPreviewParity:
         })
         set_state(db)
         body = (await call("GET", "/api/signals/latest")).json()
+        assert "USDJPY" in requested, (
+            "route must request the USDJPY conversion leg for a lone-CHFJPY "
+            f"page (asked for: {sorted(set(requested))})")
         assert body[0]["order_blocked"] is None, (
             f"converted JPY risk must not block the card: "
             f"{body[0]['order_blocked']!r}")
         assert "งบต่อไม้" not in str(body[0]["order_blocked"] or "")
+        # I1: display math uses the same converted map (legacy sized 0.01
+        # lots / $90.00 risk on this card).
+        assert body[0]["suggested_lots"] == pytest.approx(0.18, abs=0.02), (
+            f"converted sizing must show ~0.18 lots: "
+            f"{body[0]['suggested_lots']!r}")
+        _notes = " ".join(body[0].get("calc_notes") or [])
+        assert "$10.26" in _notes, (
+            f"risk note must show the converted $10.26 (2.05%), not ¥-as-$: "
+            f"{_notes!r}")
+        assert "$90.00" not in _notes, (
+            f"legacy ¥-as-$ figure must be gone: {_notes!r}")

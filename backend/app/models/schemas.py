@@ -618,7 +618,8 @@ def risk_usd_of_distance(stop_distance: float, lots: float, asset: Optional[str]
     """USD risk of a stop ``stop_distance`` wide at ``lots`` for ``asset``.
 
     ``raw = dist × lots × contract`` is in the QUOTE currency; convert to USD
-    with ``usd_per_quote_unit``. Returns None when the conversion is not
+    with ``quote_usd_rate`` when ``rates`` is given (``usd_per_quote_unit``
+    legacy math when it is None). Returns None when the conversion is not
     derivable (a cross without its USD leg) so a caller can choose its own
     fallback instead of silently booking a 157×-wrong number.
 

@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from app.engine.strategy_engine import StrategyEngine
 from app.integrations import quotes
 from app.models.schemas import (FinalDecision, G, QuoteFeedStatus, S, SignalProposal,
-                                contract_value_for, effective_min_lot,
+                                asset_currencies, contract_value_for,
+                                effective_min_lot,
                                 effective_sl_tp, effective_spread,
                                 risk_to_lot_for, risk_usd_of_distance)
 from app.services import execution
@@ -74,8 +75,26 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     # non-fatal. live_price lets each card show the CURRENT market price
     # next to its entry, so a stale entry is visible at a glance instead of
     # silently looking like a fresh quote.
+    # Spot universe = row assets PLUS the USD<quote> conversion legs the
+    # rates map needs: quote_usd_rate prices a non-USD quote through the
+    # inverse 1/rates["USD<quote>"], so a lone-CHFJPY page that fetches only
+    # CHFJPY builds a legless map and falls back to legacy ¥-as-$ (C1).
+    # All G10 quotes have USD pairs; an underivable leg degrades to the
+    # exact legacy math (no invented precision). One batch, no extra calls.
+    pending_asset_set = sorted(
+        {str(r.get("asset") or "").upper() for r in rows
+         if (r.get("approval") or "pending") == "pending"})
+    _leg_assets: set[str] = set()
+    for _a in pending_asset_set:
+        try:
+            _parts = asset_currencies(_a)
+        except Exception:
+            _parts = None
+        if _parts and _parts[1] != "USD":
+            _leg_assets.add(f"USD{_parts[1]}")
     live_prices, feed = await _live_prices(
-        sorted({str(r.get("asset") or "").upper() for r in rows}))
+        sorted({str(r.get("asset") or "").upper() for r in rows}
+               | _leg_assets))
     # Fresh indicator snapshots for the snapshot gates (thesis + meta-filter)
     # in the card verdict below — one batch per request, same feed the
     # scanner and the execution gate read. Fail-soft {}: without a snapshot
@@ -160,7 +179,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     # currency (USDJPY → yen) — convert to USD or an open yen
                     # leg shows ~157× its real risk and the heat bar lies.
                     _t_risk = risk_usd_of_distance(_t_dist, _t_lots,
-                                                   _t_asset, _t_entry)
+                                                   _t_asset, _t_entry,
+                                                   rates=rates)
                     if _t_risk is None:
                         _t_risk = (_t_dist * _t_lots
                                    * contract_value_for(_t_asset))
@@ -233,14 +253,15 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                         f"(TP {take_profit:g})")
                     lots = risk_to_lot_for(
                         float(s.capital or 0), float(s.risk_per_trade_pct or 0),
-                        sl_distance, asset_u, price=entry)
+                        sl_distance, asset_u, price=entry, rates=rates)
                     floor = effective_min_lot(s, asset_u)
                     lots_used = max(lots, floor)
                     contract = contract_value_for(asset_u)
                     # FX-aware: the raw product is in the pair's QUOTE currency
                     # (USDJPY → yen), so convert to USD for the risk/cost lines.
                     _risk_usd = risk_usd_of_distance(sl_distance, lots_used,
-                                                     asset_u, entry)
+                                                     asset_u, entry,
+                                                     rates=rates)
                     risk_usd = (_risk_usd if _risk_usd is not None
                                 else sl_distance * lots_used * contract)
                     # Card lots = what the order will actually open (same
@@ -258,7 +279,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     spread = effective_spread(s, asset_u)
                     if spread > 0:
                         _cost_usd = risk_usd_of_distance(spread, lots_used,
-                                                         asset_u, entry)
+                                                         asset_u, entry,
+                                                         rates=rates)
                         cost = (_cost_usd if _cost_usd is not None
                                 else spread * lots_used * contract)
                         calc_notes.append(
@@ -266,7 +288,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                             f"${cost:,.2f} (fill ±สเปรด/2)")
                     if heat_cap > 0:
                         _h_usd = risk_usd_of_distance(sl_distance, lots_used,
-                                                      asset_u, entry)
+                                                      asset_u, entry,
+                                                      rates=rates)
                         if _h_usd is None:
                             _h_usd = sl_distance * lots_used * contract
                         _h_pct = _h_usd / heat_cap * 100.0
