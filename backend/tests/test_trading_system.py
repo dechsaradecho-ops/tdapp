@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.engine.strategy_engine import IndicatorSnapshot
 from app.models.schemas import (
+    AppSettings,
     BacktestConfig,
     CorrelationEngine,
     EconomicCalendarEngine,
@@ -33,6 +34,7 @@ from app.models.schemas import (
     walk_forward,
 )
 from app.integrations.quotes import Candle
+from app.services import execution
 from app.workers.market_scanner import scan_once
 from tests.test_workers import FakeDatabase, strong_snapshot
 
@@ -537,3 +539,38 @@ def test_strong_signal_passes_quality_gate():
     d = FrequencyEngine(RiskProfile.moderate).evaluate(
         confidence=85, regime=regime_of(ind), volatility_index=ind.volatility_index)
     assert d.allowed
+
+
+def test_gate_allows_chfjpy_with_rates_blocks_without():
+    """CHFJPY prod card (SELL 190.24/190.33, $500/2%): converted risk passes,
+    legacy path still reads the ¥ figure as dollars.
+
+    Gate-level note: the P0-2 min-lot budget block lives in
+    preview_order_blocked/execute_signal, NOT in _gate_blocked — so with
+    rates=None the gate itself allows (legacy heat ~18.00% < 60% kill
+    budget) and the block surfaces one layer up as the 18.00% > 2% breach
+    below. No unrelated gate fires under the suite fixtures (market forced
+    open, liquid session, empty meta dir), so no monkeypatch pin is needed.
+    """
+    s = AppSettings(capital=500.0, risk_per_trade_pct=2.0, kill_daily_loss_pct=60.0)
+    rep = execution._gate_blocked(FakeDatabase(), s, "demo", "CHFJPY", 89.0, 70.0,
+                                  entry=190.24, stop_loss=190.33, direction="SELL",
+                                  meta_snapshot=None, rates={"USDJPY": 157.9})
+    assert rep.allowed is True
+    # Converted heat judges the true ~$0.57 risk (sized to the 2% budget),
+    # not the raw ¥90 figure read as $90.
+    assert "heat=open 0.00%+new ~2.05%" in rep.checks
+    assert execution.min_lot_budget_breach(
+        s, 190.24, 190.33, asset="CHFJPY",
+        rates={"USDJPY": 157.9}) is None
+    rep2 = execution._gate_blocked(FakeDatabase(), s, "demo", "CHFJPY", 89.0, 70.0,
+                                   entry=190.24, stop_loss=190.33, direction="SELL",
+                                   meta_snapshot=None, rates=None)
+    # rates=None keeps byte-identical legacy behaviour: the gate reads ¥90
+    # as $90 (~18.00% heat) and allows against the 60% kill budget; the
+    # order still blocks one layer up via the min-lot budget breach.
+    assert "heat=open 0.00%+new ~18.00%" in rep2.checks
+    assert rep2.allowed is True
+    breach = execution.min_lot_budget_breach(
+        s, 190.24, 190.33, asset="CHFJPY", rates=None)
+    assert breach["minimum_lot_risk_pct"] == 18.0
