@@ -550,6 +550,69 @@ def usd_per_quote_unit(asset: Optional[str], price: Optional[float]) -> Optional
     return None
 
 
+def _finite_positive(value) -> float | None:
+    """value → float when finite and > 0, else None (fail-closed helper)."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (v > 0) or v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def quote_usd_rate(asset: str | None, price: float | None,
+                   rates: dict | None) -> float | None:
+    """USD value of ONE unit of ``asset``'s QUOTE currency, from a rate map.
+
+    Leg-aware sister of ``usd_per_quote_unit`` (which derives the rate from
+    the pair's OWN price only and returns None for crosses). The chain
+    mirrors ``app.services.execution.pnl_conversion_rate`` (same order,
+    same finite-positive guard) with one deliberate difference: a USD-base
+    pair (USDJPY) resolves from its OWN ``price`` (``1 / price``, matching
+    legacy ``usd_per_quote_unit`` to the cent — own price wins over any
+    ``rates`` entry) instead of from ``rates[asset]``:
+
+      • unparseable asset → None.
+      • quote IS USD (EURUSD, XAUUSD) → 1.0 (no lookup, even when ``rates``
+        is None).
+      • ``rates`` is None (or not a dict) → None.
+      • base IS USD → ``1 / price`` (price finite-positive, else None).
+      • else direct ``rates["<Q>USD"]``, inverse ``1 / rates["USD<Q>"]``,
+        cross ``rates["<B>USD"] / rates[asset]`` — every candidate via the
+        finite-positive guard (finite, >0); underivable leg → None.
+
+    Pure function — never imports execution (schemas is the base layer).
+    """
+    parts = asset_currencies(asset)
+    if parts is None:
+        return None
+    base, quote = parts
+    if quote in _USD_EQUIVALENT:
+        return 1.0
+    if not isinstance(rates, dict):
+        return None
+    if base in _USD_EQUIVALENT:
+        p = _finite_positive(price)
+        if p is None:
+            return None
+        return 1.0 / p
+    asset_u = str(asset or "").upper()
+    r = _finite_positive(rates.get(f"{quote}USD"))
+    if r is not None:
+        return r
+    inv = _finite_positive(rates.get(f"USD{quote}"))
+    if inv is not None:
+        return 1.0 / inv
+    base_usd = _finite_positive(rates.get(f"{base}USD"))
+    self_rate = _finite_positive(rates.get(asset_u))
+    if base_usd is not None and self_rate is not None:
+        return base_usd / self_rate
+    return None
+
+
 def risk_usd_of_distance(stop_distance: float, lots: float, asset: Optional[str],
                          price: Optional[float]) -> Optional[float]:
     """USD risk of a stop ``stop_distance`` wide at ``lots`` for ``asset``.

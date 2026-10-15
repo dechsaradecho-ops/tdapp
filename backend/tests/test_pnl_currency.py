@@ -20,6 +20,7 @@ from app.models.schemas import (
     convert_pnl_to_account,
     pnl_conversion_asset,
     quote_currency,
+    quote_usd_rate,
 )
 from app.services.execution import (
     PaperBrokerPnl,
@@ -374,3 +375,24 @@ class TestFetchPnlRates:
         assert out2["JPYUSD"] == pytest.approx(1 / 157.013)
         assert len(calls) == 1  # leg served from cache, no second fetch
         ex._conv_rates_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# quote_usd_rate — leg-aware rate chain (Task 1, FX risk conversion)
+# ---------------------------------------------------------------------------
+def test_quote_usd_rate_jpy_cross_via_inverse():
+    assert quote_usd_rate("CHFJPY", 190.24, {"USDJPY": 157.9}) == pytest.approx(1 / 157.9)
+
+
+def test_quote_usd_rate_usd_base_matches_legacy():
+    assert quote_usd_rate("USDJPY", 157.9, {"USDJPY": 999.0}) == pytest.approx(1 / 157.9)
+
+
+def test_quote_usd_rate_usd_quote_is_one():
+    assert quote_usd_rate("EURUSD", 1.1, {}) == 1.0
+    assert quote_usd_rate("XAUUSD", 2400.0, None) == 1.0
+
+
+def test_quote_usd_rate_missing_leg_is_none():
+    assert quote_usd_rate("CHFJPY", 190.24, {}) is None
+    assert quote_usd_rate("CHFJPY", 190.24, None) is None
