@@ -90,6 +90,29 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             snapshots = await quotes.fetch_all_snapshots(pending_assets) or {}
     except Exception:
         snapshots = {}
+    # Converted-USD risk map (FX risk conversion): upper-cased live spot
+    # prices plus snapshot marks the request already holds — NO new feed
+    # calls. Feeds preview_order_blocked so the card judges JPY-cross legs
+    # (CHFJPY via USDJPY) in USD instead of reading ¥ as $. Fail-soft {}:
+    # an empty map behaves exactly like the legacy path.
+    rates: dict[str, float] = {}
+    try:
+        for _rk, _rv in (live_prices or {}).items():
+            try:
+                _fv = float(_rv)
+            except (TypeError, ValueError):
+                continue
+            if _fv > 0:
+                rates[str(_rk).upper()] = _fv
+        for _rk, _rs in (snapshots or {}).items():
+            try:
+                _fv = float((_rs or {}).get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if _fv > 0:
+                rates.setdefault(str(_rk).upper(), _fv)
+    except Exception:
+        rates = {}
     # Pending signals past the TTL were already expired by the pass above;
     # approved rows always stay visible. Cards render NEWEST → OLDEST (the
     # user's requested order): approved cards first (newest approval first),
@@ -273,7 +296,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                                      if _opp is not None else None),
                         signal_row=r,
                         snapshot=snapshots.get(asset),
-                        open_assets=open_assets)
+                        open_assets=open_assets,
+                        rates=rates)
                 except Exception:
                     # Fail-safe (never fail-open): a preview bug must not
                     # restore the "พร้อมยิง forever" symptom — show that the

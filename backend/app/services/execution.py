@@ -1371,7 +1371,8 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
                             entry: Optional[float] = None,
                             stop_loss: Optional[float] = None,
                             volume: Optional[float] = None,
-                            direction: str = "") -> str:
+                            direction: str = "",
+                            rates: dict | None = None) -> str:
     """Thai block reason when the new order over-concentrates one currency.
 
     Gate 4b — the correlation cap (Gate 4) averages pairwise correlation, so
@@ -1382,9 +1383,11 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
 
     The candidate's own risk is sized with the SAME helper the order will use
     (size_position → min_lot floor), so the gate judges the trade that would
-    actually open. 0 / missing cap disables. Fail-open ("") when the book is
-    unreadable — the other gates still protect. The execution gate AND the
-    signal-card preview MUST both call this (no drift).
+    actually open. ``rates`` (a trusted spot map) converts JPY-cross legs to
+    USD in both the candidate sizing and the bucket math; None keeps the
+    exact legacy behaviour. 0 / missing cap disables. Fail-open ("") when
+    the book is unreadable — the other gates still protect. The execution
+    gate AND the signal-card preview MUST both call this (no drift).
     """
     try:
         cap = float(getattr(s, "max_currency_exposure_pct", 0.0) or 0.0)
@@ -1416,7 +1419,7 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
         try:
             lots = (round(float(volume), 2) if volume and float(volume) > 0
                     else size_position(s, float(entry), float(stop_loss),
-                                       asset=asset_u))
+                                       asset=asset_u, rates=rates))
             if lots > 0:
                 positions.append({
                     "asset": asset_u,
@@ -1430,7 +1433,8 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
     try:
         from app.models.schemas import ExposureEngine
         res = ExposureEngine.currency_risk(
-            positions, float(getattr(s, "capital", 0) or 0), cap)
+            positions, float(getattr(s, "capital", 0) or 0), cap,
+            rates=rates)
     except Exception:
         return ""
     if not res.get("over_cap"):
@@ -1628,13 +1632,18 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                   stop_loss: Optional[float] = None,
                   direction: str = "",
                   volume: Optional[float] = None,
-                  meta_snapshot: Optional[dict] = None) -> GateReport:
+                  meta_snapshot: Optional[dict] = None,
+                  rates: dict | None = None) -> GateReport:
     """Run every safety gate. Returns GateReport with allowed=False on any block.
 
     size_lots is computed here too, so callers never place an un-sized order.
     entry/stop_loss feed Gate 6 (portfolio heat) with the FINAL order levels.
     meta_snapshot (an indicator snapshot in the quotes.fetch_all_snapshots
     shape, or None) feeds Gate 7 (meta-filter); None fails open.
+    ``rates`` (a trusted spot map, never fetched in here — the gate stays
+    sync) converts JPY-cross legs to USD in the heat loop, the exposure
+    candidate sizing and the exposure buckets; None keeps byte-identical
+    legacy behaviour.
     """
     rejects: list[str] = []
     checks: list[str] = []
@@ -1761,7 +1770,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     try:
         _exp = currency_exposure_block(
             db, s, asset, entry=entry, stop_loss=stop_loss, volume=volume,
-            direction=direction)
+            direction=direction, rates=rates)
     except Exception as exc:
         _exp = ""
         checks.append(f"exposure=error {exc}")
@@ -1809,7 +1818,7 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                     # leg reads as ~157× its real dollar risk and wrongly blows
                     # the heat budget — the same class as the 2026-09-22 cap).
                     _t_risk = risk_usd_of_distance(_t_dist, _t_lots, _t_asset,
-                                                   _t_entry)
+                                                   _t_entry, rates)
                     if _t_risk is None:
                         _t_risk = (_t_dist * _t_lots
                                    * contract_value_for(_t_asset))
@@ -1822,10 +1831,10 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
             if entry and stop_loss:
                 try:
                     _lots = size_position(s, float(entry), float(stop_loss),
-                                          asset=asset)
+                                          asset=asset, rates=rates)
                     _dist = abs(float(entry) - float(stop_loss))
                     _new_risk = risk_usd_of_distance(_dist, _lots, asset,
-                                                     float(entry))
+                                                     float(entry), rates)
                     if _new_risk is None:
                         _new_risk = (_dist * _lots
                                      * contract_value_for(asset))
@@ -1873,7 +1882,8 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
                           opportunity: Optional[float] = None,
                           signal_row: Optional[dict] = None,
                           snapshot: Optional[dict] = None,
-                          open_assets: Optional[set[str]] = None) -> str:
+                          open_assets: Optional[set[str]] = None,
+                          rates: dict | None = None) -> str:
     """Card preview verdict — the SAME pipeline the real order runs.
 
     WHY (prod 2026-10-15): the /signals/latest preview hand-maintained a
@@ -1898,6 +1908,11 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
     spot before gating) is execution-only — the preview judges the stored
     effective levels. Both resolve at fire time in execution's favour
     (block), never by opening.
+    ``rates`` (a trusted spot map from the caller — the card builds it from
+    the live prices + snapshot prices it already holds, no new feed calls)
+    converts JPY-cross legs to USD in the gates, the sizing, the budget
+    breach and the spread-floor inputs; None keeps byte-identical legacy
+    behaviour.
     Never raises:
     an unreadable gate layer returns a fail-safe reason, never "".
     """
@@ -1933,7 +1948,8 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
     try:
         report = _gate_blocked(db, s, DEFAULT_USER, asset_u, confidence, opp,
                                entry=entry, stop_loss=stop_loss,
-                               direction=direction, meta_snapshot=snapshot)
+                               direction=direction, meta_snapshot=snapshot,
+                               rates=rates)
     except Exception as exc:
         return ("ไม่ได้เปิดออเดอร์นี้เพราะ ตรวจสอบเงื่อนไขเปิดออเดอร์ไม่ได้ "
                 f"— งดประมาณการ (fail-safe): {exc}")
@@ -1949,7 +1965,7 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
         return f"ไม่ได้เปิดออเดอร์นี้เพราะ {first}"
     # ---- sizing (same math as execute_signal) ----
     try:
-        lots = size_position(s, entry, stop_loss, asset=asset_u)
+        lots = size_position(s, entry, stop_loss, asset=asset_u, rates=rates)
     except Exception:
         lots = 0.0
     if lots <= 0:
@@ -1957,7 +1973,8 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
                 "Position sizing returned 0 lots (bad entry/SL)")
     # ---- P0-2 min-lot risk-budget guard (blocks, never forces a trade) ----
     try:
-        _breach = min_lot_budget_breach(s, entry, stop_loss, asset=asset_u)
+        _breach = min_lot_budget_breach(s, entry, stop_loss, asset=asset_u,
+                                          rates=rates)
     except Exception:
         _breach = None
     if _breach:
@@ -1970,7 +1987,7 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
         _spread_floor = spread_sl_floor(s, asset_u)
         _dist_now = abs(float(entry) - float(stop_loss or 0))
         _too_tight = (
-            sl_cap_below_spread(s, asset_u, price=entry)
+            sl_cap_below_spread(s, asset_u, price=entry, rates=rates)
             or (_spread_floor > 0 and _dist_now < _spread_floor - 1e-12))
         _spread = effective_spread(s, asset_u)
     except Exception:
@@ -2197,6 +2214,17 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                      direction, asset, entry, live_price)
             entry = live_price
 
+    # Converted-USD risk (FX risk conversion): ONE PnL-rate fetch per order
+    # attempt — the legs the heat / exposure / sizing / breach / spread
+    # gates need to price a JPY-cross leg in USD. Reuses the existing
+    # fetch_pnl_rates helper (no new feed); fail-soft None keeps the exact
+    # legacy behaviour when the feed is down.
+    try:
+        rates = await fetch_pnl_rates([asset])
+    except Exception as exc:
+        log.warning("rates fetch failed for %s: %s", asset, exc)
+        rates = None
+
     # Effective SL/TP (single shared math with the signal card): stored
     # rows carry กลาง (×1.5) prices — re-derive for sl_distance_mode, then
     # tighten to the risk-budget cap. Skipped for extended-open (explicit
@@ -2243,7 +2271,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
                            entry=entry, stop_loss=stop_loss,
                            direction=direction, volume=volume,
-                           meta_snapshot=_meta_snapshot)
+                           meta_snapshot=_meta_snapshot, rates=rates)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)
         # Lifecycle log: the gate said NO (pause/limits/news/correlation/...).
@@ -2254,7 +2282,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         return report
 
     lots = (round(float(volume), 2) if volume and float(volume) > 0
-            else size_position(s, entry, stop_loss, asset=asset))
+            else size_position(s, entry, stop_loss, asset=asset, rates=rates))
     if lots <= 0:
         report.allowed = False
         report.rejects.append("Position sizing returned 0 lots (bad entry/SL)")
@@ -2272,7 +2300,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # shrink the (structural) stop to force a min-lot fill. A caller-supplied
     # volume is a plan leg the user reviewed and confirmed, so it is exempt.
     if not (volume and float(volume) > 0):
-        _breach = min_lot_budget_breach(s, entry, stop_loss, asset=asset)
+        _breach = min_lot_budget_breach(s, entry, stop_loss, asset=asset,
+                                          rates=rates)
         if _breach:
             report.allowed = False
             report.rejects.append(
@@ -2311,7 +2340,7 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     if not (volume and float(volume) > 0) and stop_loss and entry:
         _spread_floor = spread_sl_floor(s, asset)
         _dist_now = abs(float(entry) - float(stop_loss))
-        if sl_cap_below_spread(s, asset, price=entry) or (
+        if sl_cap_below_spread(s, asset, price=entry, rates=rates) or (
                 _spread_floor > 0 and _dist_now < _spread_floor - 1e-12):
             _spread = effective_spread(s, asset)
             report.allowed = False

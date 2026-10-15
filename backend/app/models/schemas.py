@@ -806,7 +806,8 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
 
 
 def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
-                        price: Optional[float] = None) -> bool:
+                        price: Optional[float] = None,
+                        rates: dict | None = None) -> bool:
     """True when the risk budget cannot fund a stop wider than the spread.
 
     This is the fail-closed condition behind ``sl_narrower_than_spread``: the
@@ -818,6 +819,8 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
 
     ``price`` feeds the same quote→USD conversion as ``sl_cap_distance`` so
     both agree on what the budget can actually buy (USDJPY: ¥10 ≠ $10).
+    ``rates`` (a trusted spot map) lets the cross-through chain price a JPY
+    cross leg (CHFJPY via USDJPY); None keeps the exact legacy math.
     """
     try:
         spread_floor = spread_sl_floor(settings, asset)
@@ -829,7 +832,8 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
         contract = contract_value_for(str(asset or ""))
         if budget <= 0 or floor <= 0 or contract <= 0:
             return False
-        rate = usd_per_quote_unit(asset, price) or 1.0
+        rate = (quote_usd_rate(asset, price, rates)
+                if rates is not None else usd_per_quote_unit(asset, price)) or 1.0
         return (budget / (floor * contract * rate)) < spread_floor
     except Exception:
         return False
@@ -1630,7 +1634,7 @@ class ExposureEngine:
 
     @classmethod
     def currency_risk(cls, positions: list[dict], capital: float,
-                      cap_pct: float) -> dict:
+                      cap_pct: float, rates: dict | None = None) -> dict:
         """Currency-direction risk concentration vs a % of capital (Gate 4b).
 
         WHY this exists next to `analyze`: `analyze` weights by NOTIONAL
@@ -1648,6 +1652,8 @@ class ExposureEngine:
 
         positions: [{"asset", "direction", "volume"(lots), "entry_price",
                      "stop_loss"}] — rows without a usable SL are skipped.
+        ``rates`` (trusted spot map) converts cross-quote legs to USD;
+        None keeps the exact legacy math.
         Returns {currency, direction, risk_usd, pct, cap_pct, over_cap,
                  buckets: [{currency, direction, risk_usd, pct}]} — the largest
         bucket drives the verdict. Never raises (empty result on bad input).
@@ -1673,8 +1679,10 @@ class ExposureEngine:
                     # pair's QUOTE currency (USDJPY → yen), so convert before
                     # bucketing or a JPY leg shows ~157× its real risk and
                     # trips the currency cap on a trade that is actually fine.
+                    # ``rates`` (trusted spot map) prices cross legs through
+                    # the conversion chain; None keeps the exact legacy math.
                     risk = risk_usd_of_distance(abs(entry - sl), vol, asset,
-                                                entry)
+                                                entry, rates)
                     if risk is None:
                         risk = abs(entry - sl) * vol * contract_value_for(asset)
                     if risk <= 0:

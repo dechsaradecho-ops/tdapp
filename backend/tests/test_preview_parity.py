@@ -118,3 +118,40 @@ class TestPreviewParity:
         assert body[0]["order_blocked"] is not None, (
             "min-lot budget breach must already show on the card")
         assert "งบต่อไม้" in body[0]["order_blocked"]
+
+    @pytest.mark.asyncio
+    async def test_preview_allows_jpy_when_converted(self, monkeypatch):
+        """CHFJPY SELL 190.24/190.33 on $500/2%: true risk ~$0.57 — the card
+        must NOT trip the min-lot budget gate (legacy read the ¥90 quote
+        figure as $90 = 18% > 2%). Rates come from maps already held
+        (live USDJPY 157.9 spot); snapshots stay empty."""
+        import app.api.routes.signals as signals_route
+
+        async def _jpy_spot(assets, **_kw):
+            return {"USDJPY": 157.9}, {}
+
+        async def _empty_snapshots(assets, **_kw):
+            return {}
+
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+                            _jpy_spot)
+        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
+                            _empty_snapshots)
+        monkeypatch.setattr(execution, "is_market_closed",
+                            lambda *a, **k: False)
+        monkeypatch.setattr(execution, "session_filter_block",
+                            lambda s: "")
+        db = FakeDatabase(rows={
+            "signals": [_pending(asset="CHFJPY", direction="sell",
+                                 confidence=90.0, entry=190.24,
+                                 sl=190.33, tp=190.105)],
+            "trading_settings": [{"id": 1, "capital": 500.0,
+                                  "risk_per_trade_pct": 2.0,
+                                  "kill_daily_loss_pct": 60.0}],
+        })
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert body[0]["order_blocked"] is None, (
+            f"converted JPY risk must not block the card: "
+            f"{body[0]['order_blocked']!r}")
+        assert "งบต่อไม้" not in str(body[0]["order_blocked"] or "")
