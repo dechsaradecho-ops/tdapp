@@ -26,6 +26,7 @@ from app.models.schemas import (
     TradeLimits,
     effective_min_confidence,
     effective_min_opportunity,
+    effective_sl_tp,
     is_market_closed,
 )
 from app.services import signal_log
@@ -412,6 +413,25 @@ async def scan_once(db: Database) -> list[dict]:
                         getattr(settings, "sl_distance_max_pct", None))
             except Exception as exc:
                 log.debug("sub-floor tripwire failed: %s", exc)
+            # P1 clamp (prod 2026-10-15): never EMIT a sub-floor SL — run the
+            # (re-anchored) proposal legs through the shared effective_sl_tp
+            # math and persist the RETURNED sl/tp (RR preserved by the helper).
+            # apply_cap=False: the risk-budget cap is execution's gate (plus
+            # P0-2 refuses an unfundable floor with a clear reason) — the
+            # scanner guarantees the floor (dist >= max(band, floor) always),
+            # never silently tightens cards for small accounts. Fail-soft:
+            # on any error keep proposal values.
+            try:
+                if float(proposal.entry or 0) > 0 and proposal.stop_loss:
+                    _fx_sl, _fx_tp, _fx_d, _fx_t, _fx_c = effective_sl_tp(
+                        settings, float(proposal.entry),
+                        float(proposal.stop_loss),
+                        float(proposal.take_profit or 0),
+                        asset, proposal.direction, apply_cap=False)
+                    proposal = proposal.model_copy(update={
+                        "stop_loss": _fx_sl, "take_profit": _fx_tp})
+            except Exception as exc:
+                log.debug("scanner SL clamp failed for %s: %s", asset, exc)
             inserted = db.insert("signals", {
                 "asset": asset, "direction": proposal.direction.lower(),
                 "confidence": proposal.confidence, "opportunity_score": opp.score,

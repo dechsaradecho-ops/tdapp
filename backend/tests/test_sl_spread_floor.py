@@ -558,3 +558,68 @@ def test_spread_guard_uses_floored_distance_jpy():
         db, s, "CHFJPY", entry=190.148, stop_loss=190.238)
     assert "สเปรด" not in msg
 
+
+# ---------------------------------------------------------------------------
+# 8. Scanner never emits a sub-floor SL (P1 2026-10-15 — clamp before emit)
+# ---------------------------------------------------------------------------
+async def test_scanner_never_emits_sub_floor_sl(monkeypatch):
+    """The scanner must clamp the proposal SL to the floor BEFORE emit.
+
+    CHFJPY with a 0.09-wide proposal stop (== the 3x0.03 spread floor) under
+    an active 0.65% band (lo = 190 x 0.65% = 1.235): the inserted row must
+    carry dist >= the spread floor AND >= the band floor. Pre-fix the raw
+    0.09 proposal was inserted as-is (dist 0.09 < band 1.235).
+    """
+    from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
+    from app.workers import market_scanner
+    from tests.test_workers import FakeDatabase
+
+    s = cfg(allowed_assets=["CHFJPY"], min_confidence=50.0,
+            min_opportunity=50.0, sl_distance_min_pct=0.65,
+            sl_distance_max_pct=0.0, sl_cap_enabled=False)
+
+    async def snap(asset, news_sentiment=0.0):
+        return IndicatorSnapshot(
+            asset=asset, price=190.0, ema_fast=199.5, ema_slow=180.5,
+            adx=40.0, supertrend_dir=1, rsi=62.0, macd_hist=2.0,
+            atr_pct=0.8, volatility_index=12.0,
+            news_sentiment=news_sentiment,
+            high_impact_event=False, source="live",
+            breakout_state=2.0, breakout_level=189.0)
+
+    async def fake_spot(assets, **_kw):
+        return {a: 190.0 for a in assets}, {}
+
+    real = StrategyEngine.build_proposal
+
+    def thin(self, ind, opp, **kw):
+        p = real(self, ind, opp, **{**kw, "sl_min_pct": 0.0,
+                                    "sl_max_pct": 0.0})
+        entry = 190.0
+        sign = 1.0 if str(p.direction).upper() == "BUY" else -1.0
+        return p.model_copy(update={
+            "entry": entry,
+            "stop_loss": round(entry - sign * 0.09, 5),
+            "take_profit": round(entry + sign * 0.09 * 1.5, 5),
+        })
+
+    monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+    monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", fake_spot)
+    monkeypatch.setattr(market_scanner, "_market_closed",
+                        lambda now=None: False)
+    monkeypatch.setattr(market_scanner, "try_load_settings", lambda _db: s)
+    monkeypatch.setattr(StrategyEngine, "build_proposal", thin)
+
+    db = FakeDatabase()
+    await market_scanner.scan_once(db)
+    rows = [row for table, row in db.inserted
+            if table == "signals" and row.get("asset") == "CHFJPY"]
+    assert rows, "CHFJPY must emit a signal in this harness"
+    row = rows[0]
+    dist = abs(float(row["entry"]) - float(row["stop_loss"]))
+    assert dist >= spread_sl_floor(s, "CHFJPY") - 1e-9
+    band_lo = abs(float(row["entry"])) * 0.65 / 100.0
+    assert band_lo == pytest.approx(1.235, rel=1e-9)
+    assert dist >= band_lo - 1e-9, (
+        f"scanner emitted sub-band SL: dist {dist} < band {band_lo}")
+
