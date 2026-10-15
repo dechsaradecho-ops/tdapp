@@ -536,3 +536,25 @@ def test_monitor_open_risk_zero_volume_does_not_break_a_real_breach():
     assert out["breach"] is False
     assert out["new_trade_blocked"] is True
 
+
+# ---------------------------------------------------------------------------
+# 7. Spread guard measures AFTER the spread floor (P0 deadlock 2026-10-15)
+# ---------------------------------------------------------------------------
+def test_spread_guard_uses_floored_distance_jpy():
+    """CHFJPY spread 0.03 on raw dist 0.09 = 33% > 25% cap — but the floor is
+    also 0.09 (3x spread), so execution opens this stop AT the floor and the
+    guard must stand down instead of deadlocking (prod 2026-10-15: a
+    floor-implied 33% always exceeds the 25% cap, so every JPY stop sitting
+    exactly on the floor was blocked forever)."""
+    from tests.test_workers import FakeDatabase
+
+    from app.services import execution
+
+    s = cfg()
+    assert s.spread_guard_max_pct == 25.0
+    assert s.spread_sl_floor_mult == 3.0
+    db = FakeDatabase(rows={})
+    msg = execution.pre_open_block(
+        db, s, "CHFJPY", entry=190.148, stop_loss=190.238)
+    assert "สเปรด" not in msg
+

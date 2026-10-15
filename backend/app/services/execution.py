@@ -1569,7 +1569,16 @@ def pre_open_block(db, s: AppSettings, asset: str,
         try:
             dist = abs(float(entry) - float(stop_loss))
             spread = effective_spread(s, asset_u)
-            if dist > 0 and spread > 0:
+            floor = spread_sl_floor(s, asset_u)
+            # A stop that already clears the spread floor stands down: the
+            # floor (P0-6) is the binding sanity bound — execution opens at
+            # >= floor — so measuring the RAW signal SL against the cap
+            # deadlocks every JPY stop sitting on the floor (floor-implied
+            # 33% always exceeds a 25% cap). Sub-floor stops are still
+            # measured on the distance execution will actually use.
+            if dist > 0 and spread > 0 and not (floor > 0 and dist >= floor):
+                if floor > 0:
+                    dist = max(dist, floor)
                 pct = spread / dist * 100.0
                 if pct > cap:
                     return (f"สเปรด {spread:g} กินระยะ SL {pct:.0f}% "
