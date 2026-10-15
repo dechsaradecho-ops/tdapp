@@ -1,7 +1,7 @@
 """Signal generation + SEMI-AUTO approval endpoints."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -76,6 +76,20 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     # silently looking like a fresh quote.
     live_prices, feed = await _live_prices(
         sorted({str(r.get("asset") or "").upper() for r in rows}))
+    # Fresh indicator snapshots for the snapshot gates (thesis + meta-filter)
+    # in the card verdict below — one batch per request, same feed the
+    # scanner and the execution gate read. Fail-soft {}: without a snapshot
+    # the preview judges the deterministic gates only (execution re-checks
+    # thesis/meta at fire time).
+    snapshots: dict[str, dict] = {}
+    try:
+        pending_assets = sorted(
+            {str(r.get("asset") or "").upper() for r in rows
+             if (r.get("approval") or "pending") == "pending"})
+        if pending_assets:
+            snapshots = await quotes.fetch_all_snapshots(pending_assets) or {}
+    except Exception:
+        snapshots = {}
     # Pending signals past the TTL were already expired by the pass above;
     # approved rows always stay visible. Cards render NEWEST → OLDEST (the
     # user's requested order): approved cards first (newest approval first),
@@ -104,7 +118,6 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         # reason: "ไม่ได้เปิดออเดอร์เพราะถึง limit แล้ว".
         open_rows = db.select("paper_trades", filters={"status": "open"},
                               limit=100)
-        open_count = len(open_rows)
         # Assets that already hold an open position — the auto-trader skips
         # pending signals for these (duplicate-position gate), so the card
         # must say so instead of promising "~1 นาที" forever.
@@ -134,15 +147,6 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         heat_cap = float(G(s, "capital", zero_as_missing=False) or 0)
         heat_open_pct = (heat_open_usd / heat_cap * 100.0) if heat_cap > 0 else 0.0
         heat_limit = float(G(s, "kill_daily_loss_pct"))
-        today = datetime.now(timezone.utc).date().isoformat()
-        todays = db.select("paper_trades", limit=500)
-        today_count = len([r for r in todays
-                           if str(r.get("created_at", ""))[:10] == today
-                           and r.get("status") != "rejected"])
-        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()[:10]
-        week_count = len([r for r in todays
-                          if str(r.get("created_at", "")) >= week_ago
-                          and r.get("status") != "rejected"])
         for r in rows:
             entry = float(r["entry"] or 0)
             stop_loss = float(r["stop_loss"] or 0)
@@ -250,70 +254,33 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                             f"เทียบงบ daily {heat_limit:g}%")
             except Exception:
                 pass
-            # Why this pending signal cannot become an order right now —
-            # open-position-per-asset gate + limits (quality/regime throttles
-            # are scanner-side).
+            # Card verdict — SAME pipeline as the real order (single source of
+            # truth in execution.preview_order_blocked). The old code
+            # hand-maintained a SUBSET here and drifted: cards showed ready
+            # while execute_signal blocked on kill/meta/thesis/min-lot/....
             order_block = ""
             if (r.get("approval") or "pending") == "pending":
                 asset = str(r.get("asset") or "").upper()
+                _opp = r.get("opportunity_score")
                 try:
-                    _hl = risk_to_lot_for(float(s.capital or 0), float(s.risk_per_trade_pct or 0), sl_distance, asset, price=entry)
-                    _hl = max(_hl, effective_min_lot(s, asset))
-                    _hl_usd = risk_usd_of_distance(sl_distance, _hl, asset, entry)
-                    if _hl_usd is None:
-                        _hl_usd = sl_distance * _hl * contract_value_for(asset)
-                    _new_pct = (_hl_usd / heat_cap * 100.0) if (heat_cap > 0 and sl_distance > 0) else 0.0
+                    order_block = execution.preview_order_blocked(
+                        db, s, asset=asset,
+                        direction=str(r.get("direction") or ""),
+                        entry=entry, stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        confidence=float(r.get("confidence") or 0),
+                        opportunity=(float(_opp)
+                                     if _opp is not None else None),
+                        signal_row=r,
+                        snapshot=snapshots.get(asset),
+                        open_assets=open_assets)
                 except Exception:
-                    _new_pct = 0.0
-                if asset in open_assets:
-                    order_block = (f"ไม่ได้เปิดออเดอร์ใหม่เพราะ {asset} "
-                                   f"มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน")
-                else:
-                    # Re-entry cooldown preview — SAME shared helper as the
-                    # execution gate (Gate 2b), so the card explains the block
-                    # before it happens (no drift). Fail-open: "" = clear.
-                    try:
-                        _cool = execution.reentry_cooldown_block(db, s, asset)
-                    except Exception:
-                        _cool = ""
-                    if _cool:
-                        order_block = f"ไม่ได้เปิดออเดอร์นี้เพราะ {_cool}"
-                if not order_block and heat_cap > 0 and heat_open_pct + _new_pct > heat_limit:
-                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะ heat เต็ม "
-                                   f"(ไม้เปิด {heat_open_pct:.2f}% + ไม้นี้ ~{_new_pct:.2f}% "
-                                   f"เกินงบ daily {heat_limit:g}%) — รอปิดไม้เดิมก่อน")
-                elif open_count >= s.max_open_positions:
-                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
-                                   f"(open positions {open_count}/"
-                                   f"{s.max_open_positions})")
-                elif today_count >= s.max_trades_daily:
-                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
-                                   f"(วันนี้ {today_count}/"
-                                   f"{s.max_trades_daily})")
-                elif week_count >= s.max_trades_weekly:
-                    order_block = (f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว "
-                                   f"(สัปดาห์นี้ {week_count}/"
-                                   f"{s.max_trades_weekly})")
-                # Pre-open guards (Gate 3b) + currency exposure (Gate 4b) —
-                # SAME shared helpers as the execution gate, so the card
-                # explains the block before it happens (no drift). Fail-open.
-                if not order_block:
-                    try:
-                        _pre = execution.pre_open_block(
-                            db, s, asset, entry=entry, stop_loss=stop_loss)
-                    except Exception:
-                        _pre = ""
-                    if _pre:
-                        order_block = f"ไม่ได้เปิดออเดอร์นี้เพราะ {_pre}"
-                if not order_block:
-                    try:
-                        _exp = execution.currency_exposure_block(
-                            db, s, asset, entry=entry, stop_loss=stop_loss,
-                            direction=str(r.get("direction") or ""))
-                    except Exception:
-                        _exp = ""
-                    if _exp:
-                        order_block = f"ไม่ได้เปิดออเดอร์นี้เพราะ {_exp}"
+                    # Fail-safe (never fail-open): a preview bug must not
+                    # restore the "พร้อมยิง forever" symptom — show that the
+                    # check itself failed instead of showing ready.
+                    order_block = ("ไม่ได้เปิดออเดอร์นี้เพราะ "
+                                   "ตรวจสอบเงื่อนไขไม่สำเร็จ — "
+                                   "รอดูรอบถัดไป")
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,

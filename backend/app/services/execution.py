@@ -1866,6 +1866,132 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                       pause=pause)
 
 
+def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
+                          entry: float, stop_loss: Optional[float],
+                          take_profit: Optional[float] = None,
+                          confidence: float = 0.0,
+                          opportunity: Optional[float] = None,
+                          signal_row: Optional[dict] = None,
+                          snapshot: Optional[dict] = None,
+                          open_assets: Optional[set[str]] = None) -> str:
+    """Card preview verdict — the SAME pipeline the real order runs.
+
+    WHY (prod 2026-10-15): the /signals/latest preview hand-maintained a
+    SUBSET of the execution gates, so ~7 cards showed no order_blocked
+    ("พร้อมยิง") while execute_signal blocked every one (meta_filter /
+    thesis / kill / min-lot budget ...). This runs the full deterministic
+    pipeline in execution order and returns "" only when the order would
+    actually be allowed to proceed to the broker:
+
+      duplicate-position → config → Gates 0b,0,1,2,2b,3,3b,4,4b,5,6,7
+      → sizing → min-lot budget → spread floor → thesis
+
+    `opportunity` falls back to `confidence` exactly like the auto-trader
+    (a row without opportunity_score is judged on its confidence).
+    `snapshot` feeds Gate 7 (meta, fail-open on None) and the thesis
+    re-validation; None skips the thesis (the preview cannot judge what it
+    cannot fetch — execution re-checks at fire time).
+
+    Accepted parity exceptions (documented, not drift): (1) a missing
+    snapshot skips the thesis while execution fail-closes on it; (2) the
+    live-price re-anchor (execute_signal shifts entry/SL/TP to the trusted
+    spot before gating) is execution-only — the preview judges the stored
+    effective levels. Both resolve at fire time in execution's favour
+    (block), never by opening.
+    Never raises:
+    an unreadable gate layer returns a fail-safe reason, never "".
+    """
+    asset_u = str(asset or "").upper()
+    if not asset_u:
+        return ""
+    # ---- duplicate-position (auto-trader gate, outside _gate_blocked) ----
+    if open_assets is None:
+        try:
+            open_assets = {
+                str(r.get("asset") or "").upper()
+                for r in db.select("paper_trades", filters={"status": "open"},
+                                   limit=100)
+            }
+        except Exception:
+            open_assets = set()
+    if asset_u in open_assets:
+        return (f"ไม่ได้เปิดออเดอร์ใหม่เพราะ {asset_u} "
+                f"มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน")
+    # ---- P0-4 configuration validation (fail-closed, same as execute) ----
+    try:
+        _cfg = config_validation.validate_settings(s)
+    except Exception as exc:
+        return (f"ไม่ได้เปิดออเดอร์นี้เพราะ configuration_error: {exc}")
+    if not _cfg.ok:
+        _cfg_reason = _cfg.reason or "settings_unavailable"
+        return (f"ไม่ได้เปิดออเดอร์นี้เพราะ configuration_error: "
+                f"{_cfg_reason}")
+    opp = opportunity
+    if not opp:
+        opp = confidence or 0.0
+    # ---- full gate pipeline (Gates 0b,0,1,2,2b,3,3b,4,4b,5,6,7) ----
+    try:
+        report = _gate_blocked(db, s, DEFAULT_USER, asset_u, confidence, opp,
+                               entry=entry, stop_loss=stop_loss,
+                               direction=direction, meta_snapshot=snapshot)
+    except Exception as exc:
+        return ("ไม่ได้เปิดออเดอร์นี้เพราะ ตรวจสอบเงื่อนไขเปิดออเดอร์ไม่ได้ "
+                f"— งดประมาณการ (fail-safe): {exc}")
+    if not report.allowed:
+        first = (report.rejects or ["gate blocked"])[0]
+        # Preserve the card's Thai limit phrasing for Gate 2 (same verdict,
+        # friendlier message — and the asserted "limit" contract).
+        freq_check = next(
+            (c for c in report.checks if c.startswith("frequency=")), "")
+        if freq_check not in ("", "frequency=ok") and first == freq_check.split(
+                "=", 1)[1]:
+            return f"ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว ({first})"
+        return f"ไม่ได้เปิดออเดอร์นี้เพราะ {first}"
+    # ---- sizing (same math as execute_signal) ----
+    try:
+        lots = size_position(s, entry, stop_loss, asset=asset_u)
+    except Exception:
+        lots = 0.0
+    if lots <= 0:
+        return ("ไม่ได้เปิดออเดอร์นี้เพราะ "
+                "Position sizing returned 0 lots (bad entry/SL)")
+    # ---- P0-2 min-lot risk-budget guard (blocks, never forces a trade) ----
+    try:
+        _breach = min_lot_budget_breach(s, entry, stop_loss, asset=asset_u)
+    except Exception:
+        _breach = None
+    if _breach:
+        return (
+            "ไม่ได้เปิดออเดอร์นี้เพราะ ไม้เล็กสุดเสี่ยงเกินงบต่อไม้ "
+            f"({_breach['minimum_lot_risk_pct']:.2f}% > "
+            f"{float(getattr(s, 'risk_per_trade_pct', 0) or 0):g}%)")
+    # ---- P0-6 stop-inside-the-spread guard ----
+    try:
+        _spread_floor = spread_sl_floor(s, asset_u)
+        _dist_now = abs(float(entry) - float(stop_loss or 0))
+        _too_tight = (
+            sl_cap_below_spread(s, asset_u, price=entry)
+            or (_spread_floor > 0 and _dist_now < _spread_floor - 1e-12))
+        _spread = effective_spread(s, asset_u)
+    except Exception:
+        _too_tight, _spread, _dist_now = False, 0.0, 0.0
+    if _too_tight:
+        return (f"ไม่ได้เปิดออเดอร์นี้เพราะ ระยะ SL {_dist_now:g} แคบกว่า "
+                f"สเปรดจริง ({_spread:g}) — SL อยู่ในสเปรด")
+    # ---- P0-5 thesis re-validation (snapshot gates only when fetchable) ---
+    if signal_row is not None and snapshot:
+        try:
+            _thesis = thesis_validation.validate_thesis(
+                signal_row, snapshot, max_age_min=G(s, "signal_ttl_min"))
+        except Exception as exc:
+            return (f"ไม่ได้เปิดออเดอร์นี้เพราะ thesis_error: "
+                    f"ตรวจ thesis ไม่ได้ ({exc})")
+        if not _thesis.ok:
+            _thesis_reason = _thesis.reason or "signal_thesis_invalidated"
+            return f"ไม่ได้เปิดออเดอร์นี้เพราะ thesis_error: {_thesis_reason}"
+    return ""
+
+
 def size_position(s: AppSettings, entry: float, stop_loss: Optional[float],
                   asset: Optional[str] = None) -> float:
     """risk_per_trade_pct of settings.capital → lots (risk_to_lot).

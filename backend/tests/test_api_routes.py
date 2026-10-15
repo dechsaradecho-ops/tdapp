@@ -359,9 +359,12 @@ class TestSignalsLatestTiers:
         ]})
         set_state(db)
         from app.api.routes import signals as signals_route
-        async def boom(assets):
-            raise AssertionError("live fetch must not run when DB rows exist")
-        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots", boom)
+        # Snapshot batch may run for pending rows (feeds the thesis/meta
+        # verdict); it must never alter the stored rows the card shows.
+        async def empty_snapshots(assets):
+            return {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
+                            empty_snapshots)
         body = (await call("GET", "/api/signals/latest")).json()
         assert len(body) == 1
         assert body[0]["asset"] == "XAUUSD"
@@ -518,10 +521,20 @@ class TestSignalsLatestTiers:
         ]
 
     @pytest.mark.asyncio
-    async def test_pending_card_carries_order_blocked_note_at_limit(self):
+    async def test_pending_card_carries_order_blocked_note_at_limit(
+            self, monkeypatch):
         """User request (2026-09-04): signals keep generating past the limits;
         a pending card that cannot become an order right now must carry the
         reason "ไม่ได้เปิดออเดอร์นี้เพราะถึง limit แล้ว (...)"."""
+        from app.api.routes import signals as signals_route
+        from app.services import execution as execution_mod
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+                            no_spot)
+        monkeypatch.setattr(execution_mod, "is_market_closed",
+                            lambda *a, **k: False)
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={
             "signals": [
@@ -539,7 +552,22 @@ class TestSignalsLatestTiers:
         assert "limit" in body[0]["order_blocked"]
 
     @pytest.mark.asyncio
-    async def test_pending_card_no_note_when_under_limits(self):
+    async def test_pending_card_no_note_when_under_limits(self, monkeypatch):
+        import app.api.routes.signals as signals_route
+
+        async def no_snapshots(assets, **_kw):
+            return {}
+
+        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
+                            no_snapshots)
+        from app.services import execution as execution_mod
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+                            no_spot)
+        monkeypatch.setattr(execution_mod, "is_market_closed",
+                            lambda *a, **k: False)
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={"signals": [
             {"id": "p1", "asset": "XAUUSD", "direction": "sell",
@@ -552,10 +580,20 @@ class TestSignalsLatestTiers:
         assert body[0]["order_blocked"] is None
 
     @pytest.mark.asyncio
-    async def test_pending_card_notes_open_position_on_same_asset(self):
+    async def test_pending_card_notes_open_position_on_same_asset(
+            self, monkeypatch):
         """User report (2026-09-04): auto mode promised "~1 นาที" forever while
         the auto-trader silently skipped the signal because the asset already
         had an open position. The card must carry that reason instead."""
+        from app.api.routes import signals as signals_route
+        from app.services import execution as execution_mod
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+                            no_spot)
+        monkeypatch.setattr(execution_mod, "is_market_closed",
+                            lambda *a, **k: False)
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={
             "signals": [
