@@ -247,8 +247,15 @@ def _write_equity_snapshot(db, user_id: str, equity: float) -> bool:
         return False
 
 
-def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
-    """Evaluate the portfolio against the Risk Engine; act on breaches."""
+def monitor_once(db: Database, broker, notifier: NotificationService,
+                 rates: dict | None = None) -> dict:
+    """Evaluate the portfolio against the Risk Engine; act on breaches.
+
+    ``rates`` (trusted spot map, open-book legs included) converts
+    non-USD-quote legs in the open-risk sum to USD; None keeps the exact
+    legacy math. The scheduler wrapper fetches it once per cycle so this
+    stays sync (it runs in a worker thread via asyncio.to_thread).
+    """
     # STRICT read (fail-closed, prod 2026-09-28): an unreadable settings row
     # must SKIP the cycle. The lenient get_app_settings() falls back to
     # AppSettings() defaults (max_drawdown 10.0) on ANY read error, and this
@@ -318,7 +325,8 @@ def monitor_once(db: Database, broker, notifier: NotificationService) -> dict:
                 _lots = float(t.get("volume") or 0)
                 if _lots <= 0:
                     continue
-                _r = risk_usd_of_distance(_dist, _lots, _asset, _entry)
+                _r = risk_usd_of_distance(_dist, _lots, _asset, _entry,
+                                            rates=rates)
                 if _r is None:
                     _r = _dist * _lots * contract_value_for(_asset)
                 open_risk += _r

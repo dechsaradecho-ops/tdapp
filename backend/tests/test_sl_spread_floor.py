@@ -559,6 +559,33 @@ def test_monitor_open_risk_zero_volume_does_not_break_a_real_breach():
     assert out["new_trade_blocked"] is True
 
 
+def test_monitor_open_risk_converts_cross_with_rates():
+    """Prod 2026-10-21: one open CHFJPY 0.01 leg read ¥1,594.88 as $1,594.88
+    (319% of $500) and the banner claimed every new order blocked. With the
+    USDJPY leg the real risk is ~$10 (2%) — no block."""
+    from tests.test_limit_expand import RecordingNotifier
+
+    db = _monitor_db([{
+        "id": "c1", "status": "open", "asset": "CHFJPY", "direction": "sell",
+        "volume": 0.01, "entry_price": 191.672, "stop_loss": 193.26688,
+        "created_at": "2026-09-22T00:00:00+00:00",
+    }], daily_limit=60.0)
+
+    out = portfolio_monitor.monitor_once(
+        db, _flat_broker(), RecordingNotifier(), rates={"USDJPY": 158.0})
+    assert out["breach"] is False
+    assert out["new_trade_blocked"] is False
+
+    db2 = _monitor_db([{
+        "id": "c1", "status": "open", "asset": "CHFJPY", "direction": "sell",
+        "volume": 0.01, "entry_price": 191.672, "stop_loss": 193.26688,
+        "created_at": "2026-09-22T00:00:00+00:00",
+    }], daily_limit=60.0)
+    out2 = portfolio_monitor.monitor_once(db2, _flat_broker(),
+                                          RecordingNotifier())
+    assert out2["new_trade_blocked"] is True
+
+
 # ---------------------------------------------------------------------------
 # 7. Spread guard measures AFTER the spread floor (P0 deadlock 2026-10-15)
 # ---------------------------------------------------------------------------

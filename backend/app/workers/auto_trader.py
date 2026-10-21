@@ -93,6 +93,42 @@ async def trade_once(db, broker, notifier) -> dict:
         log.warning("auto-trader: broker book read failed (%s) — the DB "
                     "layer still guards the gate", exc)
     open_assets |= broker_assets
+    # ONE shared quote batch per cycle (prod 2026-10-21: per-signal
+    # fetch_trusted_spot + fetch_pnl_rates + fetch_all_snapshots = 3
+    # sequential network batches × N signals blew the 50 s watchdog, AND
+    # the per-signal rates map carried no OPEN-book legs so heat/exposure
+    # read the open JPY leg at ¥-as-$ while the card converted it).
+    # Prefetch once for pending + open assets; per-signal misses fall back
+    # to the legacy per-signal fetch inside execute_signal.
+    _prefetch_assets = sorted(
+        {str(sig.get("asset") or "").upper() for sig in pending
+         if str(sig.get("asset") or "").strip()}
+        | {str(a or "").upper() for a in open_assets if str(a or "")})
+    _pref_spots: dict = {}
+    _pref_rates: dict | None = None
+    _pref_snaps: dict = {}
+    if _prefetch_assets:
+        try:
+            _spots, _spot_fail = await execution.quotes.fetch_trusted_spot(
+                _prefetch_assets)
+            _pref_spots = dict(_spots or {})
+        except Exception as exc:
+            log.warning("auto-trader: shared spot prefetch failed (%s) — "
+                        "per-signal fallback", exc)
+        try:
+            _pref_rates = await execution.fetch_pnl_rates(_prefetch_assets)
+        except Exception as exc:
+            log.warning("auto-trader: shared rates prefetch failed (%s) — "
+                        "per-signal fallback", exc)
+            _pref_rates = None
+        try:
+            _pref_snaps = await execution.quotes.fetch_all_snapshots(
+                sorted({str(sig.get("asset") or "").upper()
+                        for sig in pending
+                        if str(sig.get("asset") or "").strip()})) or {}
+        except Exception as exc:
+            log.warning("auto-trader: shared snapshot prefetch failed (%s) "
+                        "— per-signal fallback", exc)
     fired, blocked, skipped = 0, 0, 0
     for sig in pending:
         entry = float(sig.get("entry") or 0)
@@ -116,6 +152,7 @@ async def trade_once(db, broker, notifier) -> dict:
                 source="auto",
                 reason=f"{sig.get('asset')} มีไม้เปิดอยู่แล้ว — รอปิดไม้เดิมก่อน")
             continue
+        _sig_asset = str(sig.get("asset") or "").upper()
         report = await execution.execute_signal(
             db, broker, notifier, s,
             user_id=sig.get("user_id", execution.DEFAULT_USER),
@@ -126,6 +163,10 @@ async def trade_once(db, broker, notifier) -> dict:
             opportunity=float(sig.get("opportunity_score") or sig.get("confidence") or 0),
             signal_id=sig.get("id"), source="auto",
             signal_row=sig,
+            rates=_pref_rates,
+            live_price=(float(_pref_spots[_sig_asset])
+                        if _sig_asset in _pref_spots else None),
+            snapshot=_pref_snaps.get(_sig_asset),
         )
         if report.allowed:
             db.update("signals", sig["id"], {"approval": "approved"})

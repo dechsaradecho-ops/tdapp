@@ -22,7 +22,7 @@ from app.services.database import Database
 from app.services.notification_service import NotificationService
 from app.services import quote_log
 from app.services import scheduler_log
-from app.services.execution import expire_unbaselined_pending_signals
+from app.services.execution import expire_unbaselined_pending_signals, fetch_pnl_rates
 from app.integrations.line_client import LineClient
 from app.integrations.brokers import PaperBroker
 from app.workers import (auto_trader, calendar_sync, daily_digest,
@@ -297,10 +297,30 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(_safe(lambda: news_analysis.analyze_once(db),
                                    db, "news_analysis"),
                           "interval", minutes=15, id="news_analysis", **common)
-        scheduler.add_job(_safe(lambda: asyncio.to_thread(
-            portfolio_monitor.monitor_once, db, app.state.broker, notifier),
-            db, "portfolio_monitor"),
-            "interval", minutes=1, id="portfolio_monitor", **common)
+        # Open-book conversion legs, fetched ONCE per cycle (prod
+        # 2026-10-21: the worker read the open JPY leg at ¥-as-$ and the
+        # banner claimed every new order blocked). Fail-soft None keeps the
+        # exact legacy math; the worker itself stays sync (to_thread).
+        async def _monitor_cycle() -> None:
+            _rates = None
+            try:
+                _open = db.select("paper_trades",
+                                  filters={"status": "open"}, limit=100)
+                _assets = sorted({str(r.get("asset") or "").upper()
+                                  for r in _open or [] if r.get("asset")})
+                if _assets:
+                    _rates = await fetch_pnl_rates(_assets)
+            except Exception as exc:
+                log.warning("monitor rates prefetch failed (%s) — "
+                            "legacy math", exc)
+                _rates = None
+            await asyncio.to_thread(
+                portfolio_monitor.monitor_once, db, app.state.broker,
+                notifier, _rates)
+        scheduler.add_job(_safe(lambda: _monitor_cycle(),
+                                db, "portfolio_monitor"),
+                          "interval", minutes=1, id="portfolio_monitor",
+                          **common)
         scheduler.add_job(_safe(lambda:
             notification_worker.dispatch_pending(db, notifier),
             db, "notifications"),

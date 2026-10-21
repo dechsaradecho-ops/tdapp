@@ -2146,7 +2146,10 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          opportunity: float, signal_id: Optional[str],
                          source: str,
                          volume: Optional[float] = None,
-                         signal_row: Optional[dict] = None) -> GateReport:
+                         signal_row: Optional[dict] = None,
+                         rates: dict | None = None,
+                         live_price: float | None = None,
+                         snapshot: dict | None = None) -> GateReport:
     """Gate → size → place order → journal → notify. The single execution path.
 
     volume: caller-supplied lot that OVERRIDES risk sizing. Used by
@@ -2156,6 +2159,11 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     because the size was recomputed for the FULL risk budget instead of
     leg#1's 50% share at a tighter SL). Auto-trader / approve pass nothing
     and keep the risk_to_lot sizing + min_lot floor.
+
+    rates / live_price / snapshot: cycle-shared prefetches the auto-trader
+    hands down (ONE batch per cycle, open-book legs included).
+    None (default) keeps the legacy per-signal fetch — manual /approve and
+    prefetch misses behave exactly as before.
     """
     # ---- P0-4: configuration validation (fail-closed) ---------------------
     # The settings row is the single source of truth for every risk limit. A
@@ -2199,12 +2207,15 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # "closed" on that number. A rejected asset keeps the signal's own prices.
     reanchor_note = ""
     if entry and entry > 0:
-        try:
-            spot, _spot_fail = await quotes.fetch_trusted_spot([asset])
-            live_price = float(spot.get(asset) or 0)
-        except Exception as exc:
-            log.warning("live re-anchor failed for %s: %s", asset, exc)
-            live_price = 0.0
+        if live_price is None:
+            # No prefetched price (manual /approve or prefetch miss) —
+            # legacy per-signal fetch.
+            try:
+                spot, _spot_fail = await quotes.fetch_trusted_spot([asset])
+                live_price = float(spot.get(asset) or 0)
+            except Exception as exc:
+                log.warning("live re-anchor failed for %s: %s", asset, exc)
+                live_price = 0.0
         if live_price > 0 and abs(live_price - entry) > 1e-9:
             shift = live_price / entry
             stop_loss = round(stop_loss * shift, 5) if stop_loss else stop_loss
@@ -2220,12 +2231,15 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # attempt — the legs the heat / exposure / sizing / breach / spread
     # gates need to price a JPY-cross leg in USD. Reuses the existing
     # fetch_pnl_rates helper (no new feed); fail-soft None keeps the exact
-    # legacy behaviour when the feed is down.
-    try:
-        rates = await fetch_pnl_rates([asset])
-    except Exception as exc:
-        log.warning("rates fetch failed for %s: %s", asset, exc)
-        rates = None
+    # legacy behaviour when the feed is down. The auto-trader hands down its
+    # cycle-shared map (open-book legs included); per-signal fetch covers
+    # manual /approve and prefetch misses.
+    if rates is None:
+        try:
+            rates = await fetch_pnl_rates([asset])
+        except Exception as exc:
+            log.warning("rates fetch failed for %s: %s", asset, exc)
+            rates = None
 
     # Effective SL/TP (single shared math with the signal card): stored
     # rows carry กลาง (×1.5) prices — re-derive for sl_distance_mode, then
@@ -2268,9 +2282,12 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     # both gates judge the SAME market picture. Only when the caller passes
     # the signal row (manual approve / auto-trader); extended-open passes no
     # row, so both gates stand down (meta fails open, thesis is skipped).
+    # The auto-trader hands down its cycle-shared snapshot; per-signal
+    # fetch covers manual /approve and prefetch misses.
     _meta_snapshot: Optional[dict] = None
     if signal_row:
-        _meta_snapshot = await _fresh_thesis_snapshot(db, asset)
+        _meta_snapshot = (snapshot if snapshot is not None
+                          else await _fresh_thesis_snapshot(db, asset))
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
                            entry=entry, stop_loss=stop_loss,
                            direction=direction, volume=volume,

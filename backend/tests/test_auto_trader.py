@@ -1190,6 +1190,81 @@ class TestAutoTrader:
         assert db.rows["signals"][0]["approval"] == "expired"
 
 
+class TestPrefetchOpenBookLegs:
+    """Prod 2026-10-21: cards READY but no orders.
+
+    The card converts the open CHFJPY leg (its rates map carries the USDJPY
+    leg) while execute_signal's per-signal fetch_pnl_rates([candidate]) has
+    no open-book legs โ€” heat/exposure read ยฅ1,594 as $1,594 and block.
+    trade_once must prefetch ONE shared quote batch (spots + rates +
+    snapshots, open-book legs included) and hand it down, instead of each
+    signal firing its own 3 sequential network batches (which also trips
+    the 50 s watchdog on slow feeds).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _counting_quotes(self, monkeypatch):
+        calls = {"trusted": 0, "spot": 0, "snaps": 0}
+        table = {"CHFJPY": 191.0, "EURCHF": 0.925, "AUDUSD": 0.70,
+                 "USDJPY": 158.0}
+
+        async def fake_trusted(assets, **_kw):
+            calls["trusted"] += 1
+            return ({a: table[a] for a in (assets or []) if a in table}, {})
+
+        async def fake_spot(assets, **_kw):
+            calls["spot"] += 1
+            return ({a: table[a] for a in (assets or []) if a in table}, {})
+
+        async def fake_snaps(assets, **_kw):
+            calls["snaps"] += 1
+            return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
+
+        monkeypatch.setattr(execution.quotes, "fetch_trusted_spot",
+                            fake_trusted)
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots",
+                            fake_snaps)
+        return calls
+
+    def _db(self):
+        now = datetime.now(timezone.utc).isoformat()
+        # Plain FakeDatabase: its _client reads db.rows, so the settings row
+        # below is what try_load_settings actually loads (db_with_client
+        # replaces _client with an empty store โ€” settings would be defaults).
+        return FakeDatabase(rows={
+            "trading_settings": [{
+                "id": 1, "capital": 500.0, "risk_per_trade_pct": 2.0,
+                "kill_daily_loss_pct": 60.0, "order_mode": "auto",
+                "max_currency_exposure_pct": 40.0}],
+            "signals": [
+                {"id": "s1", "asset": "EURCHF", "direction": "buy",
+                 "confidence": 89.0, "entry": 0.9252, "stop_loss": 0.91695,
+                 "take_profit": 0.93758, "approval": "pending",
+                 "created_at": now},
+                {"id": "s2", "asset": "AUDUSD", "direction": "sell",
+                 "confidence": 78.0, "entry": 0.7029, "stop_loss": 0.7106,
+                 "take_profit": 0.69135, "approval": "pending",
+                 "created_at": now}],
+            "paper_trades": [
+                {"id": "p1", "asset": "CHFJPY", "status": "open",
+                 "direction": "SELL", "volume": 0.01,
+                 "entry_price": 191.672, "stop_loss": 193.26688}],
+        })
+
+    @pytest.mark.asyncio
+    async def test_open_book_converts_and_quotes_batch_once(
+            self, broker, notifier, _counting_quotes):
+        db = self._db()
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["fired"] == 2, f"blocked/skipped: {out}"
+        assert len(broker.orders) == 2
+        # ONE shared batch per feed for the whole cycle, not per signal.
+        assert _counting_quotes["trusted"] == 1
+        assert _counting_quotes["spot"] == 1
+        assert _counting_quotes["snaps"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 3. Position guard (SL/TP enforcement)
 # ---------------------------------------------------------------------------
