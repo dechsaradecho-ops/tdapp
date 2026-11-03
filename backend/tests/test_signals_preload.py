@@ -113,3 +113,46 @@ class TestSignalsPreload:
         assert calls["snaps"] == 1
         assert seen["snaps"] == [["GBPUSD"]]
         assert sorted(s["asset"] for s in body) == ["EURUSD", "GBPUSD"]
+
+
+class TestSignalsSharedGateReads:
+    """Task 3: signals/latest builds ONE SharedCycleState per request.
+
+    The hoisted analytic reads (all-journal 500, open book 100, calendar
+    50) must happen exactly once no matter how many pending cards render
+    — per-card verdicts come from the shared snapshot. Safety reads
+    (kill/cooldown) stay fresh per card and are NOT counted here."""
+
+    def _counting_db(self, *assets: str):
+        class _Counting(FakeDatabase):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.select_calls: list = []
+
+            def select(self, table, filters=None, order="created_at",
+                       desc=True, limit=50, offset=0, columns="*"):
+                self.select_calls.append(
+                    (table, tuple(sorted((filters or {}).items())), limit))
+                return super().select(
+                    table, filters=filters, order=order, desc=desc,
+                    limit=limit, offset=offset, columns=columns)
+
+        return _Counting(rows={
+            "signals": [_pending(a) for a in assets],
+            "trading_settings": [{"id": 1, "kill_daily_loss_pct": 60.0}],
+        })
+
+    @pytest.mark.asyncio
+    async def test_gate_analytic_reads_stay_flat_per_card(self, monkeypatch):
+        """3 pending cards render, but the analytic gate tables are read
+        ONCE for the whole request (shared build), not once per card."""
+        from collections import Counter
+        db = self._counting_db("EURUSD", "GBPUSD", "AUDUSD")
+        _counting_fetches(monkeypatch)
+        set_state(db)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert sorted(s["asset"] for s in body) == ["AUDUSD", "EURUSD", "GBPUSD"]
+        counts = Counter(db.select_calls)
+        assert counts[("paper_trades", (), 500)] == 1, counts
+        assert counts[("paper_trades", (("status", "open"),), 100)] == 1, counts
+        assert counts[("economic_calendar", (), 50)] == 1, counts

@@ -1985,7 +1985,8 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
                           signal_row: Optional[dict] = None,
                           snapshot: Optional[dict] = None,
                           open_assets: Optional[set[str]] = None,
-                          rates: dict | None = None) -> str:
+                          rates: dict | None = None,
+                          shared: Optional[SharedCycleState] = None) -> str:
     """Card preview verdict — the SAME pipeline the real order runs.
 
     WHY (prod 2026-10-15): the /signals/latest preview hand-maintained a
@@ -2015,6 +2016,9 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
     converts JPY-cross legs to USD in the gates, the sizing, the budget
     breach and the spread-floor inputs; None keeps byte-identical legacy
     behaviour.
+    ``shared`` (the caller's one-per-request SharedCycleState, or None)
+    supplies the analytic reads so N cards share 3 reads; None keeps
+    the exact legacy per-card reads.
     Never raises:
     an unreadable gate layer returns a fail-safe reason, never "".
     """
@@ -2051,7 +2055,7 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
         report = _gate_blocked(db, s, DEFAULT_USER, asset_u, confidence, opp,
                                entry=entry, stop_loss=stop_loss,
                                direction=direction, meta_snapshot=snapshot,
-                               rates=rates)
+                               rates=rates, shared=shared)
     except Exception as exc:
         return ("ไม่ได้เปิดออเดอร์นี้เพราะ ตรวจสอบเงื่อนไขเปิดออเดอร์ไม่ได้ "
                 f"— งดประมาณการ (fail-safe): {exc}")

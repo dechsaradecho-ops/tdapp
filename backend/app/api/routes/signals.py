@@ -177,8 +177,17 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
         # even past the user's limits (limits gate ORDER EXECUTION, not signal
         # generation), so pending cards that cannot fire right now carry the
         # reason: "ไม่ได้เปิดออเดอร์เพราะถึง limit แล้ว".
-        open_rows = db.select("paper_trades", filters={"status": "open"},
-                              limit=100)
+        # ONE shared analytic read-set per request (Task 3 of the
+        # shared-gate plan): the builder reads journal + open book +
+        # calendar ONCE; every card's preview judges off the same
+        # snapshot. None (builder failure) falls back to the legacy
+        # per-request select below — same fail-open behaviour as before.
+        shared = execution.build_shared_cycle_state(db, s)
+        if shared is not None:
+            open_rows = list(shared.open_rows)
+        else:
+            open_rows = db.select("paper_trades", filters={"status": "open"},
+                                  limit=100)
         # Assets that already hold an open position — the auto-trader skips
         # pending signals for these (duplicate-position gate), so the card
         # must say so instead of promising "~1 นาที" forever.
@@ -340,7 +349,8 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                         signal_row=r,
                         snapshot=snapshots.get(asset),
                         open_assets=open_assets,
-                        rates=rates)
+                        rates=rates,
+                        shared=shared)
                 except Exception:
                     # Fail-safe (never fail-open): a preview bug must not
                     # restore the "พร้อมยิง forever" symptom — show that the
