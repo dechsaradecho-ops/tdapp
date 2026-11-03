@@ -1,6 +1,7 @@
 """Signal generation + SEMI-AUTO approval endpoints."""
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
@@ -100,15 +101,33 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
     # scanner and the execution gate read. Fail-soft {}: without a snapshot
     # the preview judges the deterministic gates only (execution re-checks
     # thesis/meta at fire time).
+    #
+    # Scanner preload first: scan_once already fetched the FULL universe
+    # minutes ago and snapshots derive from daily candles, so a fresh
+    # preload is the same input a new fetch would return — without paying
+    # the whole-batch timeout again on a slow feed. Stale/absent preloads
+    # fall through to the fetch below (identical behaviour to before).
     snapshots: dict[str, dict] = {}
     try:
         pending_assets = sorted(
             {str(r.get("asset") or "").upper() for r in rows
              if (r.get("approval") or "pending") == "pending"})
         if pending_assets:
-            snapshots = await quotes.fetch_all_snapshots(pending_assets) or {}
+            from app.workers import market_scanner as _scanner
+            _age = time.monotonic() - float(
+                getattr(_scanner, "_PRELOADED_AT", 0.0) or 0.0)
+            if 0 <= _age <= _scanner._PRELOAD_MAX_AGE_SEC:
+                _pre = getattr(_scanner, "_PRELOADED_SNAPS", None) or {}
+                snapshots = {a: dict(_pre[a]) for a in pending_assets
+                             if isinstance(_pre.get(a), dict)}
+                pending_assets = [a for a in pending_assets
+                                  if a not in snapshots]
+            if pending_assets:
+                _fresh = await quotes.fetch_all_snapshots(pending_assets) or {}
+                for _a, _s in _fresh.items():
+                    snapshots[str(_a).upper()] = _s
     except Exception:
-        snapshots = {}
+        pass
     # Converted-USD risk map (FX risk conversion): upper-cased live spot
     # prices plus snapshot marks the request already holds — NO new feed
     # calls. Feeds preview_order_blocked so the card judges JPY-cross legs

@@ -41,6 +41,12 @@ SCAN_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
 # keep working: tests bypass the batch path entirely, prod uses the batch.
 _PRELOADED_SNAPS: dict[str, dict] = {}
 _PRELOADED_SPOT: dict[str, float] = {}
+# Monotonic timestamp of the last preload write (either branch — a failed
+# scan stamps too, so a stale/empty preload is never mistaken for fresh).
+_PRELOADED_AT: float = 0.0
+# Snapshots derive from daily candles: a preload younger than this is still
+# a valid gate input for read-only consumers (signals/latest cards).
+_PRELOAD_MAX_AGE_SEC = 120.0
 _HIGH_IMPACT_EVENT: bool = False
 
 
@@ -156,7 +162,7 @@ def purge_old_market_analysis(db: Database, force: bool = False) -> int:
 
 async def scan_once(db: Database) -> list[dict]:
     """One scan cycle. Live quotes when available, demo feed otherwise."""
-    global _PRELOADED_SNAPS, _PRELOADED_SPOT, _HIGH_IMPACT_EVENT
+    global _PRELOADED_SNAPS, _PRELOADED_SPOT, _HIGH_IMPACT_EVENT, _PRELOADED_AT
     engine = StrategyEngine()
     results: list[dict] = []
     news_by_asset = _news_sentiment_by_asset(db)
@@ -186,6 +192,8 @@ async def scan_once(db: Database) -> list[dict]:
     except Exception as exc:
         log.warning("scanner snapshot batch failed: %s — demo feed", exc)
         _PRELOADED_SNAPS = {}
+    finally:
+        _PRELOADED_AT = time.monotonic()
     # fetch_trusted_spot (NOT fetch_spot_prices): this batch feeds the emit
     # re-anchor below, which WRITES entry/SL/TP into a signal card the user
     # then approves — a daily fallback rate must never anchor a tradeable card.
