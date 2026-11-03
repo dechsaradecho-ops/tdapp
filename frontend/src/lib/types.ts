@@ -1158,6 +1158,9 @@ export interface AppSettings {
   /** Gold (XAUUSD) override — null/undefined = use min_confidence */
   min_confidence_gold: number | null;
   min_opportunity: number;
+  /** Meta-filter take-threshold override (Gate 7) — 0 = use the artifact's
+   *  picked threshold; >0 pins the gate to this P(profitable) cutoff */
+  meta_filter_threshold: number;
   max_trades_daily: number;
   max_trades_weekly: number;
   max_open_positions: number;

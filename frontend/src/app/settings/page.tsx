@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   min_confidence: 70,
   min_confidence_gold: null,
   min_opportunity: 60,
+  meta_filter_threshold: 0.5,
   max_trades_daily: 10,
   max_trades_weekly: 30,
   max_open_positions: 12,
@@ -961,6 +962,9 @@ export default function SettingsPage() {
               <NumField label="Min Opportunity (%)" value={cfg.min_opportunity}
                 onChange={(v) => set("min_opportunity", v)} step={1}
                 hint="คะแนนโอกาสขั้นต่ำ — กรองสัญญาณที่ upside ไม่คุ้มความเสี่ยง" />
+              <NumField label="Meta-filter Take (%)" value={Math.round(cfg.meta_filter_threshold * 100)}
+                onChange={(v) => set("meta_filter_threshold", Math.round(v) / 100)} step={5}
+                hint="เกณฑ์ P(กำไร) ของ meta-filter — ต่ำกว่านี้ข้ามออเดอร์ (ยิ่งสูงยิ่งน้อยแต่แม่นยิ่งขึ้น) · ใส่ 0 = ใช้ค่า threshold ของ artifact ล่าสุด" />
               <div className="flex items-center gap-3 py-1">
                 <div className="flex-1">
                   <p className="text-sm">Gold Breakout Only (XAUUSD)</p>
