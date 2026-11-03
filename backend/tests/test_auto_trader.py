@@ -1384,13 +1384,24 @@ def _fake_live_marks(monkeypatch):
 
     The guard now prefers live marks (that's the TP-not-closing fix); tests
     inject exactly the price the scenario needs via this registry.
+
+    Snapshots are stubbed to {} for the same reason: Smart Exit reads them,
+    and a live snapshot makes the suite depend on what XAUUSD is doing on
+    the day it runs (prod 2026-11: bearish gold fired `reversal` and closed
+    positions these tests assert stay open). {} is the guard's own
+    documented blind-HOLD path — SL/TP/time-stop still fire on marks.
     """
     registry: dict[str, float] = {}
 
     async def fake_fetch(assets):
         return ({a: registry[a] for a in assets if a in registry}, {})
 
+    async def fake_no_snaps(assets, **_kw):
+        return {}
+
     monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices", fake_fetch)
+    monkeypatch.setattr(position_guard.quotes, "fetch_all_snapshots",
+                        fake_no_snaps)
     return registry
 
 

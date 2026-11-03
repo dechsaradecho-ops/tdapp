@@ -1040,13 +1040,21 @@ class TestApiRoutes:
         data = r.json()
         assert "regime" in data and "opportunities" in data
 
-    async def test_market_summary_header_uses_top_asset_score(self, client):
+    async def test_market_summary_header_uses_top_asset_score(self, client, monkeypatch):
         """Header confidence/regime must come from the top scorer's own row —
         not the hardcoded 72.0 / bull_trend fallback (empty live snapshot
         on prod: DB covers all 28 pairs)."""
         from app.main import app as fastapi_app
+        from app.api.routes import market as market_route
         from tests.test_workers import FakeDatabase
 
+        # Live snapshots must not leak in: a strong-trend day would let a
+        # live pair outscore the 78.0 DB row and the assertion would depend
+        # on what the market is doing when the suite runs.
+        async def _no_snaps(assets, **_kw):
+            return {}
+        monkeypatch.setattr(market_route.quotes, "fetch_all_snapshots",
+                            _no_snaps)
         db = FakeDatabase()
         db.insert("market_analysis", {
             "asset": "EURUSD", "regime": "bear_trend", "sentiment": "bearish",
