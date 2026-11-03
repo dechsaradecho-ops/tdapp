@@ -14,6 +14,39 @@ from app.core.config import get_settings
 
 log = logging.getLogger(__name__)
 
+# ONE shared keep-alive httpx client for every Database instance in this
+# process. Prod 2026-11-03: simple log endpoints took 8-9s for ~12 tiny DB
+# roundtrips while the DB answers in ~0.15s — every query paid a fresh TLS
+# handshake because supabase-py got no shared client. Connection reuse only
+# happens when requests flow through the same client object, so this lives
+# at module level (per-process pool; threads share it — httpx pools are
+# thread-safe). Timeout mirrors supabase-py's own postgrest default (120s)
+# so slow queries behave exactly as before; only the handshake is saved.
+_POOL_LIMITS_TIMEOUT_S = 120.0
+_shared_httpx: Any = None
+
+
+def _pooled_options() -> Optional[Any]:
+    """ClientOptions carrying the shared keep-alive client, else None.
+
+    None = fail-soft to a plain create_client() (ancient supabase-py without
+    httpx_client support, missing httpx, whatever). Pooling is an
+    optimization — never a reason to lose the DB.
+    """
+    global _shared_httpx
+    try:
+        import httpx
+        from supabase import ClientOptions
+        if _shared_httpx is None:
+            _shared_httpx = httpx.Client(
+                limits=httpx.Limits(max_connections=20,
+                                    max_keepalive_connections=10),
+                timeout=httpx.Timeout(_POOL_LIMITS_TIMEOUT_S),
+            )
+        return ClientOptions(httpx_client=_shared_httpx)
+    except Exception:
+        return None
+
 
 class Database:
     def __init__(self) -> None:
@@ -29,7 +62,14 @@ class Database:
         else:
             try:
                 from supabase import create_client
-                self._client = create_client(s.supabase_url, s.effective_service_key)
+                options = _pooled_options()
+                if options is None:
+                    self._client = create_client(s.supabase_url,
+                                                 s.effective_service_key)
+                else:
+                    self._client = create_client(s.supabase_url,
+                                                 s.effective_service_key,
+                                                 options=options)
             except Exception as exc:  # pragma: no cover
                 self.init_error = f"create_client failed: {exc}"
                 log.warning("Supabase init failed (%s) — running without DB", exc)
