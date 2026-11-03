@@ -12,6 +12,7 @@ correlation cap and risk officer apply identically to both paths.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 
@@ -108,27 +109,45 @@ async def trade_once(db, broker, notifier) -> dict:
     _pref_rates: dict | None = None
     _pref_snaps: dict = {}
     if _prefetch_assets:
-        try:
-            _spots, _spot_fail = await execution.quotes.fetch_trusted_spot(
-                _prefetch_assets)
-            _pref_spots = dict(_spots or {})
-        except Exception as exc:
-            log.warning("auto-trader: shared spot prefetch failed (%s) — "
-                        "per-signal fallback", exc)
-        try:
-            _pref_rates = await execution.fetch_pnl_rates(_prefetch_assets)
-        except Exception as exc:
-            log.warning("auto-trader: shared rates prefetch failed (%s) — "
-                        "per-signal fallback", exc)
-            _pref_rates = None
-        try:
-            _pref_snaps = await execution.quotes.fetch_all_snapshots(
-                sorted({str(sig.get("asset") or "").upper()
-                        for sig in pending
-                        if str(sig.get("asset") or "").strip()})) or {}
-        except Exception as exc:
-            log.warning("auto-trader: shared snapshot prefetch failed (%s) "
-                        "— per-signal fallback", exc)
+        # The three branches are independent — run them concurrently so a
+        # slow feed costs max(branch), not sum(branch), against the watchdog.
+        # Each branch keeps its own fail-soft default (return_exceptions +
+        # normalize below), so one failing feed never cancels the others.
+        async def _prefetch_spots() -> dict:
+            try:
+                _spots, _spot_fail = await execution.quotes.fetch_trusted_spot(
+                    _prefetch_assets)
+                return dict(_spots or {})
+            except Exception as exc:
+                log.warning("auto-trader: shared spot prefetch failed (%s) — "
+                            "per-signal fallback", exc)
+                return {}
+
+        async def _prefetch_rates() -> dict | None:
+            try:
+                return await execution.fetch_pnl_rates(_prefetch_assets)
+            except Exception as exc:
+                log.warning("auto-trader: shared rates prefetch failed (%s) — "
+                            "per-signal fallback", exc)
+                return None
+
+        async def _prefetch_snaps() -> dict:
+            try:
+                return await execution.quotes.fetch_all_snapshots(
+                    sorted({str(sig.get("asset") or "").upper()
+                            for sig in pending
+                            if str(sig.get("asset") or "").strip()})) or {}
+            except Exception as exc:
+                log.warning("auto-trader: shared snapshot prefetch failed (%s) "
+                            "— per-signal fallback", exc)
+                return {}
+
+        _r = await asyncio.gather(
+            _prefetch_spots(), _prefetch_rates(), _prefetch_snaps(),
+            return_exceptions=True)
+        _pref_spots = _r[0] if isinstance(_r[0], dict) else {}
+        _pref_rates = _r[1] if isinstance(_r[1], dict) else None
+        _pref_snaps = _r[2] if isinstance(_r[2], dict) else {}
     fired, blocked, skipped = 0, 0, 0
     for sig in pending:
         entry = float(sig.get("entry") or 0)

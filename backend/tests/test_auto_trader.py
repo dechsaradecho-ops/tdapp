@@ -1264,6 +1264,51 @@ class TestPrefetchOpenBookLegs:
         assert _counting_quotes["spot"] == 1
         assert _counting_quotes["snaps"] == 1
 
+    @pytest.mark.asyncio
+    async def test_prefetch_branches_run_concurrently(
+            self, broker, notifier, monkeypatch):
+        """Three sequential 0.2 s batches would cost ~0.6 s; gathered they
+        cost ~0.2 s. A slow feed must not serialize the cycle past the
+        50 s watchdog one batch at a time."""
+        import asyncio as _asyncio
+        import time as _time
+
+        async def _slow(assets, **_kw):
+            await _asyncio.sleep(0.2)
+            return ({"EURCHF": 0.9252}, {})
+
+        async def _slow_snaps(assets, **_kw):
+            await _asyncio.sleep(0.2)
+            return {a: {"asset": a, "price": 0.9252} for a in (assets or [])}
+
+        async def _slow_rates(assets):
+            await _asyncio.sleep(0.2)
+            return {"EURCHF": 0.9252}
+
+        monkeypatch.setattr(execution.quotes, "fetch_trusted_spot",
+                            _slow)
+        monkeypatch.setattr(execution, "fetch_pnl_rates", _slow_rates)
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots",
+                            _slow_snaps)
+        now = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={
+            "trading_settings": [{
+                "id": 1, "capital": 500.0, "risk_per_trade_pct": 2.0,
+                "kill_daily_loss_pct": 60.0, "order_mode": "auto",
+                "max_currency_exposure_pct": 40.0}],
+            "signals": [
+                {"id": "s1", "asset": "EURCHF", "direction": "buy",
+                 "confidence": 10.0, "entry": 0.9252, "stop_loss": 0.91695,
+                 "take_profit": 0.93758, "approval": "pending",
+                 "created_at": now}],
+            "paper_trades": [],
+        })
+        t0 = _time.monotonic()
+        out = await auto_trader.trade_once(db, broker, notifier)
+        elapsed = _time.monotonic() - t0
+        assert elapsed < 0.5, f"prefetch ran sequentially: {elapsed:.2f}s"
+        assert out["picked"] == 1
+
 
 # ---------------------------------------------------------------------------
 # 3. Position guard (SL/TP enforcement)
