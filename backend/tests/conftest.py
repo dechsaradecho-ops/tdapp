@@ -96,3 +96,22 @@ def _no_meta_filter_artifact(monkeypatch, tmp_path):
     from app.services import execution
 
     monkeypatch.setattr(execution, "META_FILTER_ARTIFACTS_DIR", tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _reset_scanner_preload(monkeypatch):
+    """Isolate the scanner's in-process preload globals between tests.
+
+    `scan_once()` assigns `market_scanner._PRELOADED_SNAPS` unconditionally
+    (plus a `_PRELOADED_AT` stamp), so any test that runs a real scan cycle
+    leaks fresh snapshots into later tests in the same process. The signals
+    route deliberately trusts a fresh preload — without this reset,
+    /api/signals tests pass or fail depending on which scanner test ran
+    before them (observed: a preview test passed alone, failed in
+    full-suite order). Tests that need a preload set it themselves via
+    monkeypatch, which overrides this fixture.
+    """
+    from app.workers import market_scanner
+
+    monkeypatch.setattr(market_scanner, "_PRELOADED_SNAPS", {})
+    monkeypatch.setattr(market_scanner, "_PRELOADED_AT", 0.0)
