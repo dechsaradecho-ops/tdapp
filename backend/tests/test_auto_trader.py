@@ -1309,6 +1309,63 @@ class TestPrefetchOpenBookLegs:
         assert elapsed < 0.5, f"prefetch ran sequentially: {elapsed:.2f}s"
         assert out["picked"] == 1
 
+    @pytest.mark.asyncio
+    async def test_prefetch_one_branch_failure_does_not_poison_others(
+            self, broker, notifier, monkeypatch):
+        """Spots feed raises a BaseException the inner `except Exception`
+        cannot catch: gather must still resolve with defaults for that
+        branch and fire both signals on the surviving rates + snapshots."""
+        import asyncio as _asyncio
+
+        _spot_calls = {"n": 0}
+
+        class _FeedBlowup(BaseException):
+            """Bypasses `except Exception` on purpose: only gather's
+            return_exceptions + isinstance normalization can contain it."""
+
+        async def _boom_spots(assets, **_kw):
+            # Fail ONLY the shared prefetch batch: per-signal fallback
+            # keeps working, proving the cycle survives a dead branch.
+            _spot_calls["n"] += 1
+            if _spot_calls["n"] == 1:
+                raise _FeedBlowup("simulated feed crash")
+            return {}, {}
+
+        async def _ok_snaps(assets, **_kw):
+            return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
+
+        async def _ok_rates(assets):
+            return {"USDJPY": 158.0, "EURCHF": 0.925, "AUDUSD": 0.70}
+
+        monkeypatch.setattr(execution.quotes, "fetch_trusted_spot",
+                            _boom_spots)
+        monkeypatch.setattr(execution, "fetch_pnl_rates", _ok_rates)
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots",
+                            _ok_snaps)
+        now = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={
+            "trading_settings": [{
+                "id": 1, "capital": 500.0, "risk_per_trade_pct": 2.0,
+                "kill_daily_loss_pct": 60.0, "order_mode": "auto",
+                "max_currency_exposure_pct": 40.0}],
+            "signals": [
+                {"id": "s1", "asset": "EURCHF", "direction": "buy",
+                 "confidence": 89.0, "entry": 0.9252, "stop_loss": 0.91695,
+                 "take_profit": 0.93758, "approval": "pending",
+                 "created_at": now},
+                {"id": "s2", "asset": "AUDUSD", "direction": "sell",
+                 "confidence": 78.0, "entry": 0.7029, "stop_loss": 0.7106,
+                 "take_profit": 0.69135, "approval": "pending",
+                 "created_at": now}],
+            "paper_trades": [
+                {"id": "p1", "asset": "CHFJPY", "status": "open",
+                 "direction": "SELL", "volume": 0.01,
+                 "entry_price": 191.672, "stop_loss": 193.26688}],
+        })
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["fired"] == 2, f"dead spot feed killed the cycle: {out}"
+        assert len(broker.orders) == 2
+
 
 # ---------------------------------------------------------------------------
 # 3. Position guard (SL/TP enforcement)
