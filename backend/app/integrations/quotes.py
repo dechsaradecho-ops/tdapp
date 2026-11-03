@@ -187,9 +187,9 @@ SPOT_DAILY_MAX_DEVIATION = 0.005  # 0.5 % — max gap daily-vs-live we will trus
 # (SL never trailed: "เคยขึ้นไป 1R ทำไมไม่ขยับ sl"). These caps bound the
 # whole batch; on expiry callers get cache hits + partials, never a hang.
 _SPOT_PER_ASSET_TIMEOUT = 12.0   # Yahoo 10s + exchangerate fallback margin
-_SPOT_TOTAL_TIMEOUT = 20.0       # whole spot batch (guard 1-min cycle)
-_SNAP_PER_ASSET_TIMEOUT = 30.0   # Yahoo 15s + fallback 15s margin
-_SNAP_TOTAL_TIMEOUT = 35.0       # whole snapshot batch
+_SPOT_TOTAL_TIMEOUT = 12.0      # whole spot batch (guard 1-min cycle)
+_SNAP_PER_ASSET_TIMEOUT = 30.0  # Yahoo 15s + fallback 15s margin
+_SNAP_TOTAL_TIMEOUT = 20.0      # whole snapshot batch
 
 # exchangerate-api.com state — keys rotate when one exhausts its quota (429)
 EXCHANGERATE_URL = "https://v6.exchangerate-api.com/v6"

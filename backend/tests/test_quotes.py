@@ -827,6 +827,12 @@ class TestTrustedSpot:
         assert failures == {}
         assert quotes.spot_source("GBPUSD") == "spot"
 
+    def test_slow_feed_still_resolves_inside_cycle_budget(self):
+        # A hung-everywhere feed must resolve (with partials) well inside
+        # the 50 s worker watchdog: snapshot total + spot total <= 32 s.
+        assert (quotes._SNAP_TOTAL_TIMEOUT
+                + quotes._SPOT_TOTAL_TIMEOUT) <= 32.0
+
     @pytest.mark.asyncio
     async def test_chain_level_refusal_also_yields_nothing_to_writers(
             self, monkeypatch):
