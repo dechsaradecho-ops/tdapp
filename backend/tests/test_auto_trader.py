@@ -1366,6 +1366,49 @@ class TestPrefetchOpenBookLegs:
         assert out["fired"] == 2, f"dead spot feed killed the cycle: {out}"
         assert len(broker.orders) == 2
 
+    @pytest.mark.asyncio
+    async def test_second_signal_sees_first_fire_in_shared_counts(
+            self, broker, notifier, monkeypatch):
+        """Task 2: max_open_positions=1 — the first pending fires, the
+        second must block on max-open (not fire). Both gates must judge
+        off the SAME one-per-cycle SharedCycleState (no per-signal
+        analytic re-reads), and the first fire must be accounted in it."""
+        seen: list = []
+        _orig_gate = execution._gate_blocked
+
+        def _spy(db, s, *a, **k):
+            seen.append(k.get("shared"))
+            return _orig_gate(db, s, *a, **k)
+
+        monkeypatch.setattr(execution, "_gate_blocked", _spy)
+        now = datetime.now(timezone.utc).isoformat()
+        db = FakeDatabase(rows={
+            "trading_settings": [{"id": 1, "max_open_positions": 1}],
+            "signals": [
+                {"id": "s1", "asset": "XAUUSD", "direction": "buy",
+                 "confidence": 90.0, "entry": 2400.0, "stop_loss": 2350.0,
+                 "take_profit": 2500.0, "approval": "pending",
+                 "created_at": now},
+                {"id": "s2", "asset": "EURUSD", "direction": "buy",
+                 "confidence": 90.0, "entry": 1.1, "stop_loss": 1.09,
+                 "take_profit": 1.12, "approval": "pending",
+                 "created_at": now}],
+        })
+        out = await auto_trader.trade_once(db, broker, notifier)
+        assert out["picked"] == 2, out
+        assert out["fired"] == 1, out
+        assert out["blocked"] == 1, out
+        assert len(broker.orders) == 1
+        # One shared build for the whole cycle: every gate judged off the
+        # same object (not per-signal rebuilds, not legacy None reads).
+        assert len(seen) == 2, seen
+        assert all(x is not None for x in seen), seen
+        assert seen[0] is seen[1], "each signal rebuilt the shared state"
+        # The first fire was accounted intra-cycle: the shared book now
+        # carries the synthetic open row for the fired order.
+        assert any(str(r.get("asset") or "").upper() == "XAUUSD"
+                   for r in seen[0].open_rows), seen[0].open_rows
+
 
 # ---------------------------------------------------------------------------
 # 3. Position guard (SL/TP enforcement)

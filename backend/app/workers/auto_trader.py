@@ -94,6 +94,14 @@ async def trade_once(db, broker, notifier) -> dict:
         log.warning("auto-trader: broker book read failed (%s) — the DB "
                     "layer still guards the gate", exc)
     open_assets |= broker_assets
+    # ONE shared analytic read-set per cycle (Task 2 of the shared-gate
+    # plan): the builder reads the journal/calendar ONCE; every signal's
+    # gates judge off the same snapshot instead of re-reading per
+    # signal. None (builder failure) keeps the legacy per-signal reads.
+    # Pause/kill/cooldown stay fresh per signal inside the gate (never
+    # hoisted). Mutated below after each fired order so intra-cycle
+    # limits see earlier fires.
+    shared = execution.build_shared_cycle_state(db, s)
     # ONE shared quote batch per cycle (prod 2026-10-21: per-signal
     # fetch_trusted_spot + fetch_pnl_rates + fetch_all_snapshots = 3
     # sequential network batches × N signals blew the 50 s watchdog, AND
@@ -183,11 +191,27 @@ async def trade_once(db, broker, notifier) -> dict:
             signal_id=sig.get("id"), source="auto",
             signal_row=sig,
             rates=_pref_rates,
+            shared=shared,
             live_price=(float(_pref_spots[_sig_asset])
                         if _sig_asset in _pref_spots else None),
             snapshot=_pref_snaps.get(_sig_asset),
         )
         if report.allowed:
+            # Account the fire intra-cycle: later signals in THIS cycle
+            # must see it (the DB journal lands too, but the shared
+            # snapshot is what their gates actually judge off). Signal-
+            # level entry/SL is the documented approximation — the
+            # re-anchored fill price lives inside execute_signal only.
+            if shared is not None:
+                shared.today_count += 1
+                shared.week_count += 1
+                shared.open_rows.append({
+                    "asset": str(sig.get("asset") or "").upper(),
+                    "direction": str(sig.get("direction") or "").upper(),
+                    "volume": report.size_lots,
+                    "entry_price": entry,
+                    "stop_loss": sig.get("stop_loss"),
+                })
             db.update("signals", sig["id"], {"approval": "approved"})
             # Separate call — tolerates a DB without the 010 approved_at column.
             db.update("signals", sig["id"], {"approved_at": now_iso()})

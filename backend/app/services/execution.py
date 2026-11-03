@@ -2250,7 +2250,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                          signal_row: Optional[dict] = None,
                          rates: dict | None = None,
                          live_price: float | None = None,
-                         snapshot: dict | None = None) -> GateReport:
+                         snapshot: dict | None = None,
+                         shared: Optional[SharedCycleState] = None) -> GateReport:
     """Gate → size → place order → journal → notify. The single execution path.
 
     volume: caller-supplied lot that OVERRIDES risk sizing. Used by
@@ -2265,6 +2266,9 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     hands down (ONE batch per cycle, open-book legs included).
     None (default) keeps the legacy per-signal fetch — manual /approve and
     prefetch misses behave exactly as before.
+    shared: the auto-trader's one-per-cycle SharedCycleState (or None).
+    Forwarded to _gate_blocked so N signals share 3 analytic reads;
+    None keeps the exact legacy per-signal reads.
     """
     # ---- P0-4: configuration validation (fail-closed) ---------------------
     # The settings row is the single source of truth for every risk limit. A
@@ -2392,7 +2396,8 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
     report = _gate_blocked(db, s, user_id, asset, confidence, opportunity,
                            entry=entry, stop_loss=stop_loss,
                            direction=direction, volume=volume,
-                           meta_snapshot=_meta_snapshot, rates=rates)
+                           meta_snapshot=_meta_snapshot, rates=rates,
+                           shared=shared)
     if not report.allowed:
         log.info("Execution blocked for %s %s: %s", direction, asset, report.rejects)
         # Lifecycle log: the gate said NO (pause/limits/news/correlation/...).
