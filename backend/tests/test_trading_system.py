@@ -574,3 +574,110 @@ def test_gate_converts_chfjpy_risk_with_rates():
     breach = execution.min_lot_budget_breach(
         s, 190.24, 190.33, asset="CHFJPY", rates=None)
     assert breach["minimum_lot_risk_pct"] == 18.0
+
+
+class _CountingFakeDatabase(FakeDatabase):
+    """Counts db.select calls by (table, filters, limit) so tests can prove
+    shared gate reads happen once per cycle instead of once per signal."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.select_calls: list = []
+
+    def select(self, table, filters=None, order="created_at", desc=True,
+               limit=50, offset=0, columns="*"):
+        self.select_calls.append(
+            (table, tuple(sorted((filters or {}).items())), limit))
+        return super().select(table, filters=filters, order=order, desc=desc,
+                              limit=limit, offset=offset, columns=columns)
+
+
+def _count_by_table(db):
+    from collections import Counter
+    return Counter(db.select_calls)
+
+
+def _quiet_settings(**over):
+    kw = dict(capital=500.0, risk_per_trade_pct=2.0,
+              kill_daily_loss_pct=60.0)
+    kw.update(over)
+    return AppSettings(**kw)
+
+
+def test_shared_state_reads_analytic_tables_once():
+    """Two gated signals on one shared build must not re-read the analytic
+    tables (all-journal 500, open book 100, calendar 50) per signal."""
+    db = _CountingFakeDatabase(rows={
+        "trading_settings": [{"id": 1}],
+        "economic_calendar": [],
+    })
+    s = _quiet_settings()
+    shared = execution.build_shared_cycle_state(db, s)
+    assert shared is not None
+    for asset in ("EURUSD", "GBPUSD"):
+        execution._gate_blocked(
+            db, s, "demo", asset, 80.0, 70.0, entry=1.1, stop_loss=1.09,
+            direction="BUY", meta_snapshot=None, rates=None, shared=shared)
+    counts = _count_by_table(db)
+    assert counts[("paper_trades", (), 100)] == 0  # open book: builder only
+    assert counts[("paper_trades", (("status", "open"),), 100)] == 1
+    assert counts[("economic_calendar", (), 50)] == 1
+    # Legacy path repeats the analytic reads per signal: shared must do fewer.
+    legacy = _CountingFakeDatabase(rows={
+        "trading_settings": [{"id": 1}],
+        "economic_calendar": [],
+    })
+    for asset in ("EURUSD", "GBPUSD"):
+        execution._gate_blocked(
+            legacy, s, "demo", asset, 80.0, 70.0, entry=1.1,
+            stop_loss=1.09, direction="BUY", meta_snapshot=None, rates=None)
+    assert sum(counts.values()) < sum(_count_by_table(legacy).values())
+
+
+def test_stale_open_row_fails_safe():
+    """Shared open book is a snapshot: a stale row overstates heat and must
+    BLOCK (fail-safe direction), never open wrongly. Prod 2026-10-21 read an
+    open JPY leg at ¥-as-$ and blocked everything at 319% heat."""
+    db = FakeDatabase(rows={
+        "trading_settings": [{"id": 1}],
+        "paper_trades": [
+            {"id": "p1", "asset": "CHFJPY", "status": "open",
+             "direction": "SELL", "volume": 0.01,
+             "entry_price": 191.672, "stop_loss": 193.26688,
+             "created_at": "2026-11-04T00:00:00+00:00"},
+        ],
+        "economic_calendar": [],
+    })
+    s = _quiet_settings()
+    shared = execution.build_shared_cycle_state(db, s)
+    assert shared is not None
+    rep = execution._gate_blocked(
+        db, s, "demo", "EURCHF", 89.0, 70.0, entry=0.9252,
+        stop_loss=0.91695, direction="BUY", meta_snapshot=None, rates=None,
+        shared=shared)
+    assert rep.allowed is False
+    assert any("Portfolio heat" in r for r in rep.rejects)
+
+
+def test_fresh_kill_blocks_despite_permissive_shared():
+    """Kill switch is read fresh per signal (never hoisted): an engaged kill
+    blocks even when the shared analytic state is fully permissive."""
+    now = datetime.now(timezone.utc).isoformat()
+    db = FakeDatabase(rows={
+        "trading_settings": [{"id": 1}],
+        "paper_trades": [
+            {"id": "c1", "asset": "EURUSD", "status": "closed",
+             "direction": "BUY", "volume": 0.01,
+             "entry_price": 1.1, "exit_price": 1.0, "pnl": -10.0,
+             "created_at": now, "closed_at": now},
+        ],
+        "economic_calendar": [],
+    })
+    s = _quiet_settings(kill_daily_loss_pct=0.1)
+    shared = execution.build_shared_cycle_state(db, s)
+    assert shared is not None
+    rep = execution._gate_blocked(
+        db, s, "demo", "EURUSD", 90.0, 80.0, entry=1.1, stop_loss=1.09,
+        direction="BUY", meta_snapshot=None, rates=None, shared=shared)
+    assert rep.allowed is False
+    assert "kill_switch=ENGAGED" in rep.checks

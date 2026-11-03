@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -713,9 +714,12 @@ class PaperBrokerPnl:
 # ---------------------------------------------------------------------------
 # News gate (calendar rows → NewsRiskStatus)
 # ---------------------------------------------------------------------------
-def _news_risk(db, s: AppSettings) -> NewsRiskStatus:
+def _news_risk(db, s: AppSettings, rows: list[dict] | None = None) -> NewsRiskStatus:
+    """Calendar rows → NewsRiskStatus. Pass pre-fetched rows to skip the read
+    (shared per-cycle build); None reads as before."""
     try:
-        rows = db.select("economic_calendar", limit=50)
+        if rows is None:
+            rows = db.select("economic_calendar", limit=50)
     except Exception:
         rows = []
     now = datetime.now(timezone.utc)
@@ -1372,7 +1376,8 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
                             stop_loss: Optional[float] = None,
                             volume: Optional[float] = None,
                             direction: str = "",
-                            rates: dict | None = None) -> str:
+                            rates: dict | None = None,
+                            open_rows: list | None = None) -> str:
     """Thai block reason when the new order over-concentrates one currency.
 
     Gate 4b — the correlation cap (Gate 4) averages pairwise correlation, so
@@ -1385,7 +1390,9 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
     (size_position → min_lot floor), so the gate judges the trade that would
     actually open. ``rates`` (a trusted spot map) converts JPY-cross legs to
     USD in both the candidate sizing and the bucket math; None keeps the
-    exact legacy behaviour. 0 / missing cap disables. Fail-open ("") when
+    exact legacy behaviour. ``open_rows`` (a pre-fetched open book, or
+    None) skips the read; None reads as before. 0 / missing cap
+    disables. Fail-open ("") when
     the book is unreadable — the other gates still protect. The execution
     gate AND the signal-card preview MUST both call this (no drift).
     """
@@ -1398,10 +1405,13 @@ def currency_exposure_block(db, s: AppSettings, asset: str,
     asset_u = str(asset or "").upper()
     if not asset_u:
         return ""
-    try:
-        rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
-    except Exception:
-        return ""
+    if open_rows is not None:
+        rows = open_rows
+    else:
+        try:
+            rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+        except Exception:
+            return ""
     positions: list[dict] = []
     for r in rows or []:
         try:
@@ -1555,7 +1565,8 @@ def session_filter_block(s: AppSettings) -> str:
 
 def pre_open_block(db, s: AppSettings, asset: str,
                    entry: Optional[float] = None,
-                   stop_loss: Optional[float] = None) -> str:
+                   stop_loss: Optional[float] = None,
+                   news: Optional[NewsRiskStatus] = None) -> str:
     """Thai block reason from the pre-open guards (Gate 3b), else "".
 
     Three independent checks, each disabled by its own 0/False setting:
@@ -1569,6 +1580,8 @@ def pre_open_block(db, s: AppSettings, asset: str,
 
     Fail-open ("") on any read error — the news/session gates still protect.
     Shared with the signal-card preview so the card explains the block first.
+    ``news`` (a precomputed NewsRiskStatus, or None) skips the calendar
+    read; None reads as before.
     """
     asset_u = str(asset or "").upper()
     if not asset_u:
@@ -1605,9 +1618,9 @@ def pre_open_block(db, s: AppSettings, asset: str,
         pre_min = 0
     if pre_min > 0:
         try:
-            news = _news_risk(db, s)
-            nxt = news.next_high_impact
-            mins = news.minutes_to_next
+            _news = news if news is not None else _news_risk(db, s)
+            nxt = _news.next_high_impact
+            mins = _news.minutes_to_next
             if nxt is not None and mins is not None and mins <= pre_min:
                 # Only block when the event's currency is in this pair.
                 from app.models.schemas import ExposureEngine
@@ -1626,6 +1639,78 @@ def pre_open_block(db, s: AppSettings, asset: str,
     return ""
 
 
+@dataclass
+class SharedCycleState:
+    """One batched read of the analytic gate inputs, shared across every
+    signal judged in a cycle/request.
+
+    WHY: each gate call used to re-select the same tables (all-journal 500,
+    open book 100, calendar 50) per signal — ~7 roundtrips × N signals per
+    1-min cycle. The builder reads them ONCE; every caller in the cycle
+    judges off the same snapshot.
+
+    Deliberately NOT included (stay fresh per signal): pause switch, kill
+    switch, re-entry cooldown. A mid-cycle engage/close must act within the
+    same cycle, not at the next one — staleness there would open wrongly,
+    while a stale analytic snapshot only ever blocks (fail-safe direction).
+    Pass None (default) anywhere to get the exact legacy per-call reads.
+    """
+    today_count: int = 0
+    week_count: int = 0
+    open_rows: list = field(default_factory=list)
+    calendar_rows: list = field(default_factory=list)
+    news: Optional[NewsRiskStatus] = None
+
+
+def _split_trade_counts(rows: list[dict], today_str: str,
+                        week_str: str) -> tuple[int, int]:
+    """(today, week) open+closed trade counts from journal rows.
+
+    SINGLE definition for the Gate 2 math: the legacy inline path and the
+    shared-cycle builder both call this, so the two can never drift apart.
+    """
+    today_count = len([r for r in rows or []
+                       if str(r.get("created_at", ""))[:10] == today_str
+                       and r.get("status") != "rejected"])
+    week_count = len([r for r in rows or []
+                      if str(r.get("created_at", "")) >= week_str
+                      and r.get("status") != "rejected"])
+    return today_count, week_count
+
+
+def build_shared_cycle_state(db, s: AppSettings) -> SharedCycleState | None:
+    """Read the analytic gate inputs ONCE for a whole cycle/request.
+
+    Returns None when ANY read fails — callers then fall back to the exact
+    legacy per-signal reads (including their fail-closed/fail-open
+    behaviour), never to guessed limits.
+    """
+    try:
+        todays = db.select("paper_trades", limit=500)
+        open_rows = db.select("paper_trades", filters={"status": "open"},
+                              limit=100)
+        calendar_rows = db.select("economic_calendar", limit=50)
+    except Exception as exc:
+        log.warning("shared gate state unreadable (%s) — per-signal "
+                    "fallback", exc)
+        return None
+    try:
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        week_str = (datetime.now(timezone.utc)
+                    - timedelta(days=7)).isoformat()[:10]
+        today_count, week_count = _split_trade_counts(
+            todays, today_str, week_str)
+        news = _news_risk(db, s, rows=calendar_rows)
+    except Exception as exc:
+        log.warning("shared gate state eval failed (%s) — per-signal "
+                    "fallback", exc)
+        return None
+    return SharedCycleState(
+        today_count=today_count, week_count=week_count,
+        open_rows=list(open_rows or []),
+        calendar_rows=list(calendar_rows or []), news=news)
+
+
 def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                   confidence: float, opportunity: float,
                   entry: Optional[float] = None,
@@ -1633,7 +1718,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
                   direction: str = "",
                   volume: Optional[float] = None,
                   meta_snapshot: Optional[dict] = None,
-                  rates: dict | None = None) -> GateReport:
+                  rates: dict | None = None,
+                  shared: Optional[SharedCycleState] = None) -> GateReport:
     """Run every safety gate. Returns GateReport with allowed=False on any block.
 
     size_lots is computed here too, so callers never place an un-sized order.
@@ -1644,6 +1730,11 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     sync) converts JPY-cross legs to USD in the heat loop, the exposure
     candidate sizing and the exposure buckets; None keeps byte-identical
     legacy behaviour.
+    ``shared`` (a per-cycle/request SharedCycleState, or None) supplies
+    the analytic reads — journal counts, open book, calendar rows,
+    news verdict — so N signals share 3 reads instead of repeating
+    them per signal. Pause, kill switch and re-entry cooldown always
+    read fresh (see SharedCycleState).
     """
     rejects: list[str] = []
     checks: list[str] = []
@@ -1673,17 +1764,22 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     # ---- Gate 2: frequency (today/week/open counts) -----------------------
     freq_allowed, freq_reason = True, ""
     try:
-        today = datetime.now(timezone.utc).date().isoformat()
-        week_ago = (now := datetime.now(timezone.utc)) - timedelta(days=7)
-        todays = db.select("paper_trades", limit=500)
-        today_count = len([r for r in todays
-                           if str(r.get("created_at", ""))[:10] == today
-                           and r.get("status") != "rejected"])
-        week_count = len([r for r in todays
-                          if str(r.get("created_at", "")) >= week_ago.isoformat()[:10]
-                          and r.get("status") != "rejected"])
-        open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
-        open_count = len(open_rows)
+        if shared is not None:
+            # Shared analytic reads (see build_shared_cycle_state). The
+            # caller mutates these after each fired order (trade_once),
+            # so intra-cycle limits still see earlier fires.
+            today_count = shared.today_count
+            week_count = shared.week_count
+            open_rows = list(shared.open_rows)
+            open_count = len(open_rows)
+        else:
+            today = datetime.now(timezone.utc).date().isoformat()
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            todays = db.select("paper_trades", limit=500)
+            today_count, week_count = _split_trade_counts(
+                todays, today, week_ago.isoformat()[:10])
+            open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+            open_count = len(open_rows)
         freq = FrequencyEngine(
             s.risk_profile,
             limits_override=TradeLimits(
@@ -1726,7 +1822,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     # ---- Gate 3: news block ----------------------------------------------
     news: NewsRiskStatus
     try:
-        news = _news_risk(db, s)
+        news = (shared.news if shared is not None and shared.news is not None
+                else _news_risk(db, s))
     except Exception as exc:
         news = NewsRiskStatus(status="DANGER", reason=f"news eval error: {exc}")
     if news.status == "DANGER":
@@ -1738,7 +1835,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     # correlation/exposure so the cheapest-to-explain reason wins. Shared
     # helper with the signal-card preview (no drift).
     try:
-        _pre = pre_open_block(db, s, asset, entry=entry, stop_loss=stop_loss)
+        _pre = pre_open_block(db, s, asset, entry=entry, stop_loss=stop_loss,
+                              news=(shared.news if shared is not None else None))
     except Exception as exc:
         _pre = ""
         checks.append(f"pre_open=error {exc}")
@@ -1750,7 +1848,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     # ---- Gate 4: correlation cap -----------------------------------------
     corr_score, corr_reject = 0.0, ""
     try:
-        open_rows = db.select("paper_trades", filters={"status": "open"}, limit=100)
+        open_rows = (list(shared.open_rows) if shared is not None
+                     else db.select("paper_trades", filters={"status": "open"}, limit=100))
         assets = sorted({r["asset"] for r in open_rows} | {asset})
         from app.models.schemas import CorrelationEngine
         corr_score = CorrelationEngine().portfolio_correlation(assets)
@@ -1770,7 +1869,8 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     try:
         _exp = currency_exposure_block(
             db, s, asset, entry=entry, stop_loss=stop_loss, volume=volume,
-            direction=direction, rates=rates)
+            direction=direction, rates=rates,
+            open_rows=(shared.open_rows if shared is not None else None))
     except Exception as exc:
         _exp = ""
         checks.append(f"exposure=error {exc}")
@@ -1803,8 +1903,9 @@ def _gate_blocked(db, s: AppSettings, user_id: str, asset: str,
     # heat never blocked. Same $ math as the monitor card (fail-safe block).
     heat_open_pct, heat_new_pct = 0.0, 0.0
     try:
-        _open = db.select("paper_trades", filters={"status": "open"},
-                          limit=100)
+        _open = (list(shared.open_rows) if shared is not None
+                 else db.select("paper_trades", filters={"status": "open"},
+                               limit=100))
         _open_risk = 0.0
         for _t in _open or []:
             try:
