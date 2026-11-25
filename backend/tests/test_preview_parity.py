@@ -23,13 +23,14 @@ from tests.test_api_routes import call, set_state
 from tests.test_workers import FakeDatabase
 
 
-async def _no_spot(assets, **_kw):
-    return {}, {}
+async def _no_display(assets, **_kw):
+    return {}, {}, {}
 
 
 def _pin_market_open(monkeypatch):
     import app.api.routes.signals as signals_route
-    monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", _no_spot)
+    monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
+                        _no_display)
     monkeypatch.setattr(execution, "is_market_closed",
                         lambda *a, **k: False)
 
@@ -50,8 +51,8 @@ class TestPreviewParity:
         """Gate 0b (weekend close) blocks execution FIRST, but the old preview
         subset had no market-closed check — the card showed ready on Saturday."""
         import app.api.routes.signals as signals_route
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
-                            _no_spot)
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
+                            _no_display)
         monkeypatch.setattr(execution, "is_market_closed",
                             lambda *a, **k: True)
         monkeypatch.setattr(execution, "session_filter_block",
@@ -132,17 +133,22 @@ class TestPreviewParity:
         requested: list[str] = []
         _TABLE = {"CHFJPY": 190.24, "USDJPY": 157.9}
 
-        async def _echo_spot(assets, **_kw):
+        async def _echo_display(assets, **_kw):
             requested.extend([str(a).upper() for a in (assets or [])])
-            return ({str(a).upper(): _TABLE[str(a).upper()]
-                     for a in (assets or [])
-                     if str(a).upper() in _TABLE}, {})
+            prices = {str(a).upper(): _TABLE[str(a).upper()]
+                      for a in (assets or [])
+                      if str(a).upper() in _TABLE}
+            meta = {a: signals_route.quotes.DisplayQuote(
+                price=p, source="biquote", age_seconds=0.0,
+                market_state="open", stale=False)
+                for a, p in prices.items()}
+            return prices, meta, {}
 
         async def _empty_snapshots(assets, **_kw):
             return {}
 
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
-                            _echo_spot)
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
+                            _echo_display)
         monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
                             _empty_snapshots)
         monkeypatch.setattr(execution, "is_market_closed",
