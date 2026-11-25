@@ -1281,12 +1281,22 @@ class TestDisplayPrices:
         quotes._spot_cache.clear()
         quotes._spot_live.clear()
         quotes._spot_source.clear()
+        quotes._trusted_quotes.clear()
+        quotes._gold_price_source.clear()
+        quotes._GOLD_TICK_CACHE = None
+        quotes._gold_ohlc_cache = None
+        quotes._td_rate_cache = None
         yield
         if hasattr(quotes, "_display_cache"):
             quotes._display_cache.clear()
         quotes._spot_cache.clear()
         quotes._spot_live.clear()
         quotes._spot_source.clear()
+        quotes._trusted_quotes.clear()
+        quotes._gold_price_source.clear()
+        quotes._GOLD_TICK_CACHE = None
+        quotes._gold_ohlc_cache = None
+        quotes._td_rate_cache = None
 
     @pytest.mark.asyncio
     async def test_display_prefers_biquote_batch(self, monkeypatch):
@@ -1362,3 +1372,59 @@ class TestDisplayPrices:
         prices, meta, _ = await quotes.fetch_display_prices(["EURUSD"])
         assert meta["EURUSD"].source == "yahoo_fallback"
         assert prices["EURUSD"] == pytest.approx(1.10)
+
+    @pytest.mark.asyncio
+    async def test_display_gold_prefers_biquote_tick(self, monkeypatch):
+        """Biquote gold tick → source "biquote" with age/state, one HTTP call."""
+        calls: list[str] = []
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            calls.append(url)
+            if "biquote.io" in url:
+                return httpx.Response(
+                    200, json=_biquote_tick_payload(2650.0, 2650.155))
+            return httpx.Response(503, json={})
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, failures = await quotes.fetch_display_prices(["XAUUSD"])
+        assert prices["XAUUSD"] == pytest.approx(2650.0775)
+        assert meta["XAUUSD"].source == "biquote"
+        assert meta["XAUUSD"].age_seconds == pytest.approx(3.0)
+        assert meta["XAUUSD"].market_state == "open"
+        assert meta["XAUUSD"].stale is False
+        assert failures == {}
+        # One Biquote request per gold display resolution (no second tick).
+        assert sum(1 for c in calls if "biquote.io" in c) == 1
+
+    @pytest.mark.asyncio
+    async def test_display_gold_degraded_yahoo_keeps_legacy_source(
+            self, monkeypatch):
+        """All trusted gold legs down → degraded Yahoo keeps "yahoo_degraded".
+
+        The degraded print must never look trusted-grade downstream.
+        """
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url or "twelvedata.com" in url:
+                return httpx.Response(503, json={})
+            return httpx.Response(200, json=_display_yahoo_price(2651.0))
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, failures = await quotes.fetch_display_prices(["XAUUSD"])
+        assert prices["XAUUSD"] == pytest.approx(2651.0)
+        assert meta["XAUUSD"].source == "yahoo_degraded"
+        assert meta["XAUUSD"].stale is False
+        assert failures == {}
+        assert quotes.trusted_quote("XAUUSD") is None

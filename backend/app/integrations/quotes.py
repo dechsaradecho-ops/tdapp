@@ -1312,7 +1312,7 @@ _display_cache: dict[str, tuple[float, float, "DisplayQuote"]] = {}
 class DisplayQuote:
     """One display price plus the freshness metadata glow/badges consume."""
     price: float
-    source: str       # "biquote" | "yahoo_fallback" | "yahoo" | legacy ("daily"/"twelvedata")
+    source: str       # "biquote" | "yahoo_fallback" | "yahoo" | legacy ("daily"/"twelvedata"/"yahoo_degraded")
     age_seconds: float
     market_state: str  # "open" | "closed" (Biquote state when known)
     stale: bool
@@ -1425,7 +1425,12 @@ async def _display_one_fx(asset: str, tick: biquote.BiquoteTick | None,
 
 async def _display_gold_one(asset: str, client: httpx.AsyncClient,
                             ) -> tuple[float | None, DisplayQuote | None, str]:
-    """XAUUSD display via the existing trusted gold spot path (no duplication)."""
+    """XAUUSD display via the existing trusted gold spot path (no duplication).
+
+    Single resolution: `_gold_spot_one` already fetches/caches the Biquote
+    tick (or TD rate / degraded Yahoo) — the DisplayQuote is built from that
+    cached result, never a second tick fetch.
+    """
     key = str(asset or "").upper()
     try:
         _, price, err, _ = await _gold_spot_one(asset, client)
@@ -1435,14 +1440,8 @@ async def _display_gold_one(asset: str, client: httpx.AsyncClient,
         return None, None, err or f"{asset}: no gold feed"
     tag = _gold_price_source.get(key, "")
     if tag == "biquote":
-        try:
-            tick = await _gold_tick(client)
-            return price, DisplayQuote(
-                price=price, source="biquote",
-                age_seconds=float(tick.quote_age_seconds),
-                market_state=tick.market_state, stale=tick.stale), ""
-        except Exception:
-            pass
+        # Trusted ⇒ the tick passed fresh-open (marketState open, !stale);
+        # the cached quote carries its age.
         q = trusted_quote(key)
         return price, DisplayQuote(
             price=price, source="biquote",
@@ -1455,7 +1454,7 @@ async def _display_gold_one(asset: str, client: httpx.AsyncClient,
             age_seconds=float(q.age_seconds) if q else 0.0,
             market_state="open", stale=False), ""
     return price, DisplayQuote(
-        price=price, source="yahoo", age_seconds=0.0,
+        price=price, source="yahoo_degraded", age_seconds=0.0,
         market_state="open", stale=False), ""
 
 
