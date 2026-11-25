@@ -8,8 +8,10 @@ Run from backend/: C:/Python314/python.exe -m pytest tests/test_quotes.py -v
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import random
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -1351,8 +1353,11 @@ def _display_tick(sym: str, mid: float, age: int = 3,
             "quoteAgeSeconds": age}
 
 
-def _display_yahoo_price(price: float) -> dict:
-    return {"chart": {"result": [{"meta": {"regularMarketPrice": price}}]}}
+def _display_yahoo_price(price: float, rmt: float | None = None) -> dict:
+    meta: dict = {"regularMarketPrice": price}
+    if rmt is not None:
+        meta["regularMarketTime"] = rmt
+    return {"chart": {"result": [{"meta": meta}]}}
 
 
 class TestDisplayPrices:
@@ -1365,6 +1370,7 @@ class TestDisplayPrices:
         quotes._spot_source.clear()
         quotes._trusted_quotes.clear()
         quotes._gold_price_source.clear()
+        quotes._gold_yahoo_age.clear()
         quotes._GOLD_TICK_CACHE = None
         quotes._gold_ohlc_cache = None
         quotes._td_rate_cache = None
@@ -1376,6 +1382,7 @@ class TestDisplayPrices:
         quotes._spot_source.clear()
         quotes._trusted_quotes.clear()
         quotes._gold_price_source.clear()
+        quotes._gold_yahoo_age.clear()
         quotes._GOLD_TICK_CACHE = None
         quotes._gold_ohlc_cache = None
         quotes._td_rate_cache = None
@@ -1510,6 +1517,140 @@ class TestDisplayPrices:
         assert meta["XAUUSD"].stale is False
         assert failures == {}
         assert quotes.trusted_quote("XAUUSD") is None
+
+    @pytest.mark.asyncio
+    async def test_display_gold_degraded_unknown_yahoo_age_not_fresh(
+            self, monkeypatch):
+        """Degraded Yahoo without regularMarketTime → age None (delayed).
+
+        A Yahoo Friday-close with no usable timestamp must never render สด.
+        """
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url or "twelvedata.com" in url:
+                return httpx.Response(503, json={})
+            return httpx.Response(200, json=_display_yahoo_price(2651.0))
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, _ = await quotes.fetch_display_prices(["XAUUSD"])
+        assert prices["XAUUSD"] == pytest.approx(2651.0)
+        assert meta["XAUUSD"].source == "yahoo_degraded"
+        assert meta["XAUUSD"].age_seconds is None
+
+    @pytest.mark.asyncio
+    async def test_display_yahoo_real_age_and_unknown_age(
+            self, monkeypatch):
+        """regularMarketTime → real age; missing → None (never fresh-glow)."""
+        _real_client = httpx.AsyncClient
+        now = time.time()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(500, json={})
+            if "EURUSD=X" in url:
+                return httpx.Response(
+                    200, json=_display_yahoo_price(1.15, rmt=now - 4))
+            if "GBPJPY=X" in url:
+                return httpx.Response(200, json=_display_yahoo_price(190.5))
+            return httpx.Response(404, json={})
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, _ = await quotes.fetch_display_prices(
+            ["EURUSD", "GBPJPY"])
+        assert meta["EURUSD"].age_seconds == pytest.approx(4.0, abs=5.0)
+        assert meta["GBPJPY"].age_seconds is None
+        assert set(prices) == {"EURUSD", "GBPJPY"}
+
+    @pytest.mark.asyncio
+    async def test_display_closed_tick_surfaced_when_yahoo_down(
+            self, monkeypatch):
+        """Biquote closed + Yahoo down → closed tick (ปิดตลาด, no glow).
+
+        The closed tick must never fall through to the daily rate as open.
+        """
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(200, json={
+                    "EURUSD": _display_tick("EURUSD", 1.0946, state="closed"),
+                })
+            return httpx.Response(500, json={})
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, _ = await quotes.fetch_display_prices(["EURUSD"])
+        assert prices["EURUSD"] == pytest.approx(1.0946)
+        assert meta["EURUSD"].source == "biquote"
+        assert meta["EURUSD"].market_state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_display_closed_yields_to_fresh_yahoo(
+            self, monkeypatch):
+        """Biquote closed + genuinely fresh Yahoo → Yahoo wins as fallback."""
+        _real_client = httpx.AsyncClient
+        now = time.time()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(200, json={
+                    "EURUSD": _display_tick("EURUSD", 1.09, state="closed"),
+                })
+            if "EURUSD=X" in url:
+                return httpx.Response(
+                    200, json=_display_yahoo_price(1.10, rmt=now - 2))
+            return httpx.Response(404, json={})
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, _ = await quotes.fetch_display_prices(["EURUSD"])
+        assert prices["EURUSD"] == pytest.approx(1.10)
+        assert meta["EURUSD"].source == "yahoo_fallback"
+        assert meta["EURUSD"].market_state == "open"
+        assert meta["EURUSD"].age_seconds == pytest.approx(2.0, abs=5.0)
+
+    @pytest.mark.asyncio
+    async def test_display_total_timeout_bounds_hanging_feeds(
+            self, monkeypatch):
+        """Biquote batch hang + Yahoo hang → returns within budget.
+
+        Failure rows for every asset, no live network, suite stays fast.
+        """
+        monkeypatch.setattr(quotes, "_DISPLAY_TOTAL_TIMEOUT", 0.3)
+        monkeypatch.setattr(quotes, "_DISPLAY_PER_ASSET_TIMEOUT", 0.2)
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(30.0)
+            raise AssertionError("hung leg should have been cancelled")
+
+        monkeypatch.setattr(quotes.biquote, "fetch_latest", _hang)
+        monkeypatch.setattr(quotes, "_display_yahoo_one", _hang)
+        monkeypatch.setattr(quotes, "_fetch_spot_exchangerate", _hang)
+        t0 = time.monotonic()
+        prices, meta, failures = await quotes.fetch_display_prices(
+            ["EURUSD", "GBPJPY"])
+        elapsed = time.monotonic() - t0
+        assert prices == {}
+        assert meta == {}
+        assert set(failures) == {"EURUSD", "GBPJPY"}
+        assert elapsed < 5.0
 
 
 # ---------------------------------------------------------------------------
