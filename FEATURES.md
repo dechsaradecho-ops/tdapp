@@ -111,8 +111,10 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 
 ## 10. ราคา (Quotes) + ความทนทาน feed
 
-- หลาย source fallback (Twelve Data สำหรับทอง + exchangerate/Yahoo/Frankfurter สำหรับ FX) → `QuoteFeedStatus` (ok/error + failed_assets + message) + banner บน UI; mark fallback chain: spot → daily-close → broker → entry (badge บอกที่มาราคา)
-- `supported assets` + `allowed_assets` (DB, migration 021) คุมจักรวาลเทรด; SL/TP re-anchor ด้วย `fetch_trusted_spot` ก่อนเปิดจริง
+- **Biquote-primary** (`biquote.io`, ไม่ต้องใช้ API key): display spot ผ่าน `fetch_display_prices` (batch เดียว 28 assets, TTL ~2s) และแท่งเทียนทุก asset (ทอง + FX) ผ่าน Biquote-first candle chain; tick เก็บ `market_state/stale/quote_age` — stale/closed ไม่ถูกนับเป็นราคาสด
+- Fallback: Biquote → Yahoo (intraday chart; ทอง = `GC=F` futures จึงต่างจาก spot ~0.5%) → Frankfurter/exchangerate (FX daily) / Twelve Data (ทอง OHLC, ต้องมี key) → `QuoteFeedStatus` (ok/error + failed_assets + message) + banner บน UI; badge บอกที่มาราคา (spot → daily-close → broker → entry)
+- จังหวะรีเฟรช: monitor/signals ดีฟอลต์ 2s (DB `refresh_interval`); การ์ดราคาเรืองแสง (glow) เขียว/แดงตามทิศ tick + ป้าย freshness (LIVE/STALE/CLOSED)
+- `supported assets` (28) + `allowed_assets` (DB, migration 021) คุมจักรวาลเทรด; SL/TP re-anchor ด้วย `fetch_trusted_spot` ก่อนเปิดจริง; gold gate `gold_max_atr_pct = 0` = ห้ามเทรดทอง (ไม่เปลี่ยน)
 
 ## 11. Auth + ข้อมูล
 
