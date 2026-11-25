@@ -12,6 +12,7 @@ refused, not waved through.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -2815,11 +2816,33 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     )
 
     # ---- journal rows ----------------------------------------------------
+    # Supabase reads block the event loop — offload to a worker thread so
+    # one slow query cannot stall /health, /auth/status and every poll.
     try:
-        rows = db.select("paper_trades", limit=500)
+        rows = await asyncio.to_thread(db.select, "paper_trades", limit=500)
     except Exception:
         rows = []
     open_rows = [r for r in rows if r.get("status") == "open"]
+
+    # Partial slices for closed rows whose own pnl is NULL (the old path did
+    # these N+1 Supabase reads sequentially) — fanned out with a bounded
+    # semaphore so the stages overlap instead of stacking.
+    _partial_cache: dict[str, float | None] = {}
+    _missing_tickets = [str(r.get("ticket") or "") for r in rows
+                        if r.get("status") == "closed"
+                        and r.get("pnl") is None
+                        and r.get("ticket")]
+    if _missing_tickets:
+        _partial_sem = asyncio.Semaphore(5)
+
+        async def _one_partial(ticket: str):
+            async with _partial_sem:
+                return await asyncio.to_thread(
+                    partial_realized_pnl, db, ticket)
+
+        _partial_vals = await asyncio.gather(
+            *(_one_partial(t) for t in _missing_tickets))
+        _partial_cache = dict(zip(_missing_tickets, _partial_vals))
 
     def _realized_pnl(r: dict) -> float | None:
         """Realized PnL of a journal row, falling back to the sum of its
@@ -2834,7 +2857,10 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             return float(r["pnl"])
         if r.get("status") != "closed":
             return None
-        return partial_realized_pnl(db, str(r.get("ticket") or ""))
+        ticket = str(r.get("ticket") or "")
+        if ticket in _partial_cache:
+            return _partial_cache[ticket]
+        return partial_realized_pnl(db, ticket)
 
     # A closed row counts as realized when EITHER it carries a pnl OR its
     # partial slices do — otherwise a scaled-out trade vanished from the
@@ -2847,6 +2873,47 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         if pnl is None:
             continue
         closed_rows.append({**r, "pnl": pnl})
+
+    # ---- independent DB-heavy reads, overlapped --------------------------
+    # evaluate_kill (its own paper_trades + equity reads), _loss_pcts, the
+    # news-calendar read and the drawdown read are mutually independent —
+    # one gather instead of sequential Supabase round-trips. avg_hold_days
+    # runs on the already-fetched closed_rows (pure CPU, no read). Fail-safe
+    # per key: one failure degrades its own field, never the snapshot.
+    smart_on = bool(getattr(s, "smart_exit_enabled", True))
+    _need_exit_ctx = bool(smart_on and open_rows)
+    _db_keys = ["kill", "avg_hold", "loss_pcts"]
+    _db_calls = [
+        asyncio.to_thread(evaluate_kill, db, s),
+        asyncio.to_thread(avg_hold_days, db, closed_rows),
+        asyncio.to_thread(_loss_pcts, db, float(s.capital or 0)),
+    ]
+    if _need_exit_ctx:
+        _db_keys += ["news", "drawdown"]
+        _db_calls += [
+            asyncio.to_thread(_news_risk, db, s),
+            asyncio.to_thread(equity_drawdown_pct,
+                              db, float(getattr(s, "capital", 0) or 0)),
+        ]
+    _db_ctx = dict(zip(
+        _db_keys, await asyncio.gather(*_db_calls, return_exceptions=True)))
+
+    _kill_cached = _db_ctx["kill"]
+    if isinstance(_kill_cached, Exception):
+        _kill_cached = KillSwitchStatus(
+            engaged=True,
+            triggers=["kill-switch read failed — fail-safe engaged"],
+            message="kill switch unavailable — fail-safe engaged")
+    _loss_triple = _db_ctx["loss_pcts"]
+    if isinstance(_loss_triple, Exception):
+        _loss_triple = (0.0, 0.0, 0.0)
+    exit_avg_hold = _db_ctx["avg_hold"]
+    if isinstance(exit_avg_hold, Exception):
+        exit_avg_hold = _AVG_HOLD_FALLBACK_DAYS
+    _news_cached = _db_ctx.get("news")
+    _drawdown_cached = _db_ctx.get("drawdown", 0.0)
+    if isinstance(_drawdown_cached, Exception):
+        _drawdown_cached = 0.0
 
     # ---- live marks ------------------------------------------------------
     # 1) broker-native marks for open tickets (fail-safe)
@@ -2886,7 +2953,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     feed_status: Optional["QuoteFeedStatus"] = None
     # Indicator snapshots fetched ONCE per cycle — the same dict tops up
     # live marks below AND feeds the Smart Exit block, so the monitor makes
-    # exactly 1 spot batch + 1 snapshot batch (30s/60s caches keep both cheap).
+    # exactly 1 display batch + 1 snapshot batch (caches keep both cheap).
     feed_snaps: dict[str, dict] = {}
     # Which assets got a live spot mark vs a daily-close fallback — the card
     # shows WHERE each price came from (spot / daily / broker / entry).
@@ -2896,36 +2963,72 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # fetch_display_prices batch inside the open-rows block below.
     from app.integrations.quotes import DisplayQuote as _DisplayQuote
     display_meta: dict[str, "_DisplayQuote"] = {}
+    _d_prices: dict[str, float] = {}
+    _d_meta: dict = {}
+    _conv_legs: set[str] = set()
+    _trade_assets: list[str] = []
     if open_rows:
         from app.models.schemas import QuoteFeedStatus
         from app.integrations import quotes as quotes_mod
-        assets = sorted({str(r["asset"]).upper() for r in open_rows
-                         if r.get("asset")})
+        _trade_assets = sorted({str(r["asset"]).upper() for r in open_rows
+                                if r.get("asset")})
+        # Conversion legs the PnL helper needs (<quote>USD et al.) ride in
+        # the SAME display batch (bounded: a few extra symbols, no
+        # per-position loop) so fetch_pnl_rates below is fully seeded and
+        # never fires its own spot batch.
+        for _a in _trade_assets:
+            _leg = pnl_conversion_asset(_a)
+            if _leg:
+                _conv_legs.add(str(_leg).upper())
+            _q = quote_currency(_a)
+            _b = base_currency(_a)
+            if _q and _q != "USD":
+                _conv_legs.add(f"USD{_q}")
+            if _b and _b != "USD":
+                _conv_legs.add(f"{_b}USD")
         try:
-            prices, failures = await quotes_mod.fetch_spot_prices(assets)
-            for asset, price in prices.items():
-                if price > 0:
-                    marks["asset:" + asset] = price
-                    # Provenance, not just a number: the exchangerate fallback
-                    # is a DAILY rate (one value per day). Badge it "daily" so
-                    # the monitor card never implies a live intraday tick —
-                    # prod 2026-09-14 NZDUSD was marked 0.5812 that way while
-                    # the real market sat at 0.5766.
-                    if quotes_mod.spot_source(asset) == "daily":
+            _d_prices, _d_meta, _d_failures = (
+                await quotes_mod.fetch_display_prices(
+                    sorted(set(_trade_assets) | _conv_legs)))
+            prices, failures = {}, {}
+            for asset, price in _d_prices.items():
+                if asset in _trade_assets and price and float(price) > 0:
+                    marks["asset:" + asset] = float(price)
+                    prices[asset] = float(price)
+                    # DisplayQuote source → legacy mark vocabulary: only a
+                    # DAILY rate badges "daily" (one value per day — the card
+                    # must never imply a live intraday tick); every live leg
+                    # (biquote / yahoo / yahoo_fallback / gold legs) badges
+                    # "spot". Closed/stale ticks still mark — market_state
+                    # from meta carries the caveat, and the monitor never
+                    # trades on this.
+                    _src = getattr(_d_meta.get(asset), "source", "") or ""
+                    if _src == "daily":
                         daily_assets.add(asset)
                     else:
                         spot_assets.add(asset)
+            failures = {a: _d_failures[a]
+                        for a in _trade_assets if a in _d_failures}
+            # NOTE: price_source on the position keeps its legacy
+            # mark-provenance vocabulary ("spot"/"daily"/"broker"/"entry");
+            # the display tick source lives only in DisplayQuote.source,
+            # not on the position.
+            if isinstance(_d_meta, dict):
+                display_meta = {str(k).upper(): v
+                                for k, v in _d_meta.items()}
         except Exception as exc:  # whole-feed failure (shouldn't happen —
-            # fetch_spot_prices isolates per-asset errors, but stay safe)
-            prices, failures = {}, {a: str(exc) for a in assets}
-            log.warning("monitor: spot feed unavailable: %s", exc)
+            # fetch_display_prices isolates per-asset errors, but stay safe)
+            prices, failures = {}, {a: str(exc) for a in _trade_assets}
+            _d_prices, _d_meta = {}, {}
+            log.warning("monitor: display feed unavailable: %s", exc)
 
-        # Daily-close snapshots still top up assets the spot feed missed
-        # (better than entry price, and works when Yahoo is down).
+        # Daily-close snapshots still top up assets the display batch
+        # missed (better than entry price, and works when Yahoo is down).
+        # Only truly missing assets are fetched — never a second full batch.
         if failures or not prices:
             try:
                 feed_snaps = await quotes_mod.fetch_all_snapshots(
-                    [a for a in assets if a not in prices])
+                    [a for a in _trade_assets if a not in prices])
                 for asset, snap in feed_snaps.items():
                     price = float((snap or {}).get("price") or 0)
                     if price > 0:
@@ -2943,23 +3046,6 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             failed_assets=sorted(failures),
             message="; ".join(failures[a] for a in sorted(failures))[:300],
         )
-
-        # Display freshness metadata (age/state) for the marks above: ONE
-        # fetch_display_prices batch for all open assets, looked up per
-        # position below — never one fetch per position. Fail-soft {}: the
-        # position keeps its legacy price_source with age None, never raises.
-        # NOTE: price_source on the position keeps its legacy mark-provenance
-        # vocabulary ("spot"/"daily"/"broker"/"entry"); the display tick
-        # source lives only in DisplayQuote.source, not on the position.
-        try:
-            _d_prices, _d_meta, _d_failures = (
-                await quotes_mod.fetch_display_prices(assets))
-            if isinstance(_d_meta, dict):
-                display_meta = {str(k).upper(): v
-                                for k, v in _d_meta.items()}
-        except Exception as exc:
-            log.warning("monitor: display freshness unavailable: %s", exc)
-            display_meta = {}
 
     def mark_for(row: dict) -> tuple[float, str]:
         """Resolve the best mark + WHERE it came from.
@@ -3007,12 +3093,12 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # no indicator snapshot → None (blind HOLD, same rule as the guard).
     exit_snaps: dict[str, dict] = {}
     exit_news_status, exit_news_event = "SAFE", ""
-    exit_avg_hold = _AVG_HOLD_FALLBACK_DAYS
+    # exit_avg_hold arrived via the overlapped DB gather above (module
+    # fallback when its read failed) — never recomputed here.
     exit_drawdown = 0.0
-    smart_on = bool(getattr(s, "smart_exit_enabled", True))
     if smart_on and open_rows:
         # Reuse feed_snaps from the live-marks block above — only fetch the
-        # assets the spot feed already covered (no second full batch).
+        # assets the display batch already covered (no second full batch).
         exit_snaps = dict(feed_snaps or {})
         try:
             from app.integrations import quotes as _quotes_exit
@@ -3025,16 +3111,19 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                     exit_snaps[_a] = _snap
         except Exception:
             pass
+        # News/drawdown arrived via the overlapped DB gather above — the
+        # same calls the old sequential path made, just not re-queried here.
         try:
-            _nr = _news_risk(db, s)
+            _nr = _news_cached
+            if isinstance(_nr, Exception):
+                raise _nr
             exit_news_status = str(getattr(_nr, "status", "SAFE") or "SAFE").upper()
             _nxt = getattr(_nr, "next_high_impact", None)
             exit_news_event = str(getattr(_nxt, "event", "") or "") if _nxt else ""
         except Exception:
             exit_news_status, exit_news_event = "SAFE", ""
-        exit_avg_hold = avg_hold_days(db, closed_rows)
         try:
-            exit_drawdown = equity_drawdown_pct(db, float(getattr(s, "capital", 0) or 0))
+            exit_drawdown = float(_drawdown_cached or 0.0)
         except Exception:
             exit_drawdown = 0.0
 
@@ -3094,12 +3183,22 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             return None
 
     # Quote→USD rate map for unrealized PnL below. Seed with the marks in
-    # hand; the helper fetches only the missing conversion legs (e.g. JPYUSD
-    # for USDJPY). Missing rate → None (fail-closed); never a wrong-currency
-    # dollar figure.
-    _seed = {str(r["asset"]).upper(): float(marks.get("asset:" + str(r["asset"]).upper()) or 0)
-             for r in open_rows if r.get("asset")
-             and float(marks.get("asset:" + str(r["asset"]).upper()) or 0) > 0}
+    # hand PLUS the conversion legs already priced by the single display
+    # batch above, so the helper fires no spot batch of its own. Legs whose
+    # display source is DAILY are NOT seeded (a daily rate must never price
+    # a journal entry — same rule the helper enforces on its own fetches);
+    # those stay absent and the helper fail-closes as before. Missing rate
+    # → None (fail-closed); never a wrong-currency dollar figure.
+    _seed = {a: float(marks["asset:" + a])
+             for a in _trade_assets if marks.get("asset:" + a)}
+    for _leg in _conv_legs:
+        if _leg in _seed:
+            continue
+        _ldq = (_d_meta or {}).get(_leg)
+        _lpx = (_d_prices or {}).get(_leg)
+        if (_lpx and _ldq is not None
+                and (getattr(_ldq, "source", "") or "") != "daily"):
+            _seed[_leg] = float(_lpx)
     pnl_rates = await fetch_pnl_rates(
         [str(r["asset"]) for r in open_rows if r.get("asset")], seed=_seed)
 
@@ -3283,7 +3382,8 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # popup can say "ถือ 4.2 วัน เกินเกณฑ์ 4.2 วัน" without storing prose.
     try:
         from app.engine import smart_exit as _se_rules
-        _avg_hold = avg_hold_days(db, closed_rows)
+        # Reuse the overlapped gather above — same derivation, no second read.
+        _avg_hold = exit_avg_hold
         exit_rules = MonitorExitRules(
             smart_exit_enabled=bool(getattr(s, "smart_exit_enabled", True)),
             max_hold_days=int(getattr(s, "max_hold_days", 0) or 0),
@@ -3308,7 +3408,9 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     live_equity = round(s.capital + live_pnl, 2)
 
     # ---- kill switch (single shared path — see evaluate_kill) ------------
-    kill = evaluate_kill(db, s)
+    # Evaluated in the overlapped DB gather above; same status object the
+    # sequential path returned.
+    kill = _kill_cached
 
     # ---- real Risk Engine status (plan A 2026-09-09) ----------------------
     # Same inputs the portfolio_monitor worker uses: open risk in account
@@ -3349,10 +3451,13 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                     _open_risk += _t_r
                 except Exception:
                     continue
-        _daily, _weekly, _monthly = _loss_pcts(db, float(s.capital or 0))
+        # Reuse the overlapped gather above — same windows, no second read.
+        _daily, _weekly, _monthly = _loss_triple
+        _peak = await asyncio.to_thread(
+            peak_equity, db, float(s.capital or 0), live_equity)
         _risk_snap = _RiskSnap(
             starting_capital=float(s.capital or 0),
-            peak_equity=peak_equity(db, float(s.capital or 0), live_equity),
+            peak_equity=_peak,
             current_equity=live_equity,
             realized_pnl_today=-_daily / 100.0 * float(s.capital or 0),
             realized_pnl_week=-_weekly / 100.0 * float(s.capital or 0),
@@ -3373,8 +3478,11 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     except Exception:
         _mkt_closed, _mkt_next = False, None
 
+    # Pause read off the event loop like every other monitor DB read.
+    pause = await asyncio.to_thread(get_pause, db)
+
     return MonitorSnapshot(
-        pause=get_pause(db), order_mode=s.effective_entry_mode(),
+        pause=pause, order_mode=s.effective_entry_mode(),
         capital=s.capital,
         kill=kill, risk=risk_status, stats=stats, open_positions=open_positions, recent=recent,
         generated_at=now,
