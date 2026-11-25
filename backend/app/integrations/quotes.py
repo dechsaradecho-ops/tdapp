@@ -1297,6 +1297,238 @@ async def fetch_trusted_spot(assets: list[str],
     return trusted, failures
 
 
+# ---- Display spot feed (Biquote-first batched, 2s TTL) --------------------
+# Display-only path: Biquote batch first (ONE /api/latest call per cycle),
+# per-asset Yahoo fallback, then the legacy legs. Execution paths
+# (fetch_spot_prices/fetch_trusted_spot) and their caches are untouched —
+# this section keeps its own short-TTL cache and never writes _spot_cache,
+# _spot_live, or _spot_source.
+_DISPLAY_TTL = 2.0       # seconds — matches the 1–2s display refresh cadence
+_DISPLAY_FRESH_AGE = 10.0  # seconds — badge cutoff: open + !stale + age ≤ 10s
+_display_cache: dict[str, tuple[float, float, "DisplayQuote"]] = {}
+
+
+@dataclass(frozen=True)
+class DisplayQuote:
+    """One display price plus the freshness metadata glow/badges consume."""
+    price: float
+    source: str       # "biquote" | "yahoo_fallback" | "yahoo" | legacy ("daily"/"twelvedata")
+    age_seconds: float
+    market_state: str  # "open" | "closed" (Biquote state when known)
+    stale: bool
+
+
+def _display_is_fresh(tick: biquote.BiquoteTick) -> bool:
+    """Fresh-open per the badge cutoff (fetch_latest never rejects stale)."""
+    try:
+        return (tick.market_state == "open" and not tick.stale
+                and float(tick.quote_age_seconds) <= _DISPLAY_FRESH_AGE)
+    except (TypeError, ValueError):
+        return False
+
+
+def _display_log_fallback(asset: str, primary_price: float,
+                          fallback_price: float, winner: str) -> None:
+    """Divergence visibility: asset + both prices + winner on every fallback."""
+    log.warning("display fallback %s: biquote=%s fallback=%s winner=%s",
+                asset, primary_price, fallback_price, winner)
+
+
+async def _display_yahoo_one(asset: str, client: httpx.AsyncClient,
+                             ) -> tuple[float | None, str]:
+    """Display-only Yahoo intraday print (mirrors the spot `_yahoo_one` leg).
+
+    Same URL/params/inverse-leg handling and quote-log rows, but WITHOUT the
+    _spot_live write — display must not perturb the execution caches.
+    """
+    sym = _yahoo_symbol(asset)
+    inverse_sym = _yahoo_inverse_symbol(asset) if not sym else None
+    if not sym and not inverse_sym:
+        return None, f"no spot symbol mapping for {asset}"
+    target = inverse_sym or sym
+    invert = bool(inverse_sym)
+    url = f"{YAHOO_CHART_URL}/{target}"
+    t0 = time.monotonic()
+    try:
+        resp = await client.get(
+            url, params={"interval": "1m", "range": "1d"},
+            headers={"User-Agent": YAHOO_UA}, timeout=10.0)
+        dur = int((time.monotonic() - t0) * 1000)
+        resp.raise_for_status()
+        meta = ((resp.json().get("chart") or {}).get("result")
+                or [{}])[0].get("meta", {})
+        price = meta.get("regularMarketPrice")
+        if not price:
+            quote_log.log_call(
+                asset=asset, category=quote_log.category_for(asset),
+                provider="yahoo", url=url, status="error",
+                http_status=resp.status_code,
+                error="no regularMarketPrice", duration_ms=dur)
+            return None, f"{asset}: no regularMarketPrice"
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="yahoo", url=url, status="success",
+            http_status=resp.status_code, price=float(price),
+            duration_ms=dur)
+        return (1.0 / float(price)) if invert else float(price), ""
+    except httpx.TimeoutException:
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="yahoo", url=url, status="error",
+            error="spot feed timeout",
+            duration_ms=int((time.monotonic() - t0) * 1000))
+        return None, f"{asset}: spot feed timeout"
+    except (httpx.HTTPError, ValueError, IndexError, KeyError) as exc:
+        quote_log.log_call(
+            asset=asset, category=quote_log.category_for(asset),
+            provider="yahoo", url=url, status="error",
+            error=str(exc),
+            duration_ms=int((time.monotonic() - t0) * 1000))
+        return None, f"{asset}: spot feed error ({exc})"
+
+
+async def _display_one_fx(asset: str, tick: biquote.BiquoteTick | None,
+                          client: httpx.AsyncClient,
+                          ) -> tuple[float | None, DisplayQuote | None, str]:
+    """Non-gold display chain: fresh Biquote → Yahoo → legacy (read-only)."""
+    if tick is not None and _display_is_fresh(tick):
+        dq = DisplayQuote(price=tick.mid, source="biquote",
+                          age_seconds=float(tick.quote_age_seconds),
+                          market_state=tick.market_state, stale=tick.stale)
+        return tick.mid, dq, ""
+    yahoo_price, yahoo_err = await _display_yahoo_one(asset, client)
+    if yahoo_price is not None:
+        source = "yahoo_fallback" if tick is not None else "yahoo"
+        if tick is not None:
+            _display_log_fallback(asset, tick.mid, yahoo_price, source)
+        dq = DisplayQuote(price=yahoo_price, source=source,
+                          age_seconds=0.0, market_state="open", stale=False)
+        return yahoo_price, dq, ""
+    # Legacy legs (read-only: never write the execution caches).
+    seen = _spot_live.get(asset)
+    if seen is not None and time.monotonic() - seen[0] <= SPOT_LIVE_TTL:
+        if tick is not None:
+            _display_log_fallback(asset, tick.mid, seen[1], "yahoo")
+        dq = DisplayQuote(price=seen[1], source="yahoo",
+                          age_seconds=time.monotonic() - seen[0],
+                          market_state="open", stale=False)
+        return seen[1], dq, ""
+    price, err = await _fetch_spot_exchangerate(asset, client)
+    if price:
+        if tick is not None:
+            _display_log_fallback(asset, tick.mid, price, "daily")
+        dq = DisplayQuote(price=price, source="daily",
+                          age_seconds=0.0, market_state="open", stale=False)
+        return price, dq, ""
+    return None, None, f"{yahoo_err}; {err}"
+
+
+async def _display_gold_one(asset: str, client: httpx.AsyncClient,
+                            ) -> tuple[float | None, DisplayQuote | None, str]:
+    """XAUUSD display via the existing trusted gold spot path (no duplication)."""
+    key = str(asset or "").upper()
+    try:
+        _, price, err, _ = await _gold_spot_one(asset, client)
+    except Exception as exc:
+        return None, None, f"{asset}: no gold feed ({exc})"
+    if price is None:
+        return None, None, err or f"{asset}: no gold feed"
+    tag = _gold_price_source.get(key, "")
+    if tag == "biquote":
+        try:
+            tick = await _gold_tick(client)
+            return price, DisplayQuote(
+                price=price, source="biquote",
+                age_seconds=float(tick.quote_age_seconds),
+                market_state=tick.market_state, stale=tick.stale), ""
+        except Exception:
+            pass
+        q = trusted_quote(key)
+        return price, DisplayQuote(
+            price=price, source="biquote",
+            age_seconds=float(q.age_seconds) if q else 0.0,
+            market_state="open", stale=False), ""
+    if tag == "twelvedata":
+        q = trusted_quote(key)
+        return price, DisplayQuote(
+            price=price, source="twelvedata",
+            age_seconds=float(q.age_seconds) if q else 0.0,
+            market_state="open", stale=False), ""
+    return price, DisplayQuote(
+        price=price, source="yahoo", age_seconds=0.0,
+        market_state="open", stale=False), ""
+
+
+async def fetch_display_prices(
+        assets: list[str],
+) -> tuple[dict[str, float], dict[str, DisplayQuote], dict[str, str]]:
+    """Batched display prices: Biquote batch first, per-asset Yahoo fallback.
+
+    Returns (prices, meta, failures). One Biquote /api/latest call covers the
+    whole cycle (never one request per symbol); failures are per-asset rows —
+    a single dead symbol never raises or blanks the rest. Served from a 2s
+    TTL cache so 1–2s polling stays cheap.
+    """
+    now = time.monotonic()
+    out: dict[str, float] = {}
+    meta: dict[str, DisplayQuote] = {}
+    failures: dict[str, str] = {}
+    todo: list[str] = []
+    for a in assets:
+        hit = _display_cache.get(a)
+        if hit is not None and now - hit[0] < _DISPLAY_TTL:
+            out[a], meta[a] = hit[1], hit[2]
+        else:
+            todo.append(a)
+    if not todo:
+        return out, meta, failures
+
+    fx = [a for a in todo if str(a or "").upper() != "XAUUSD"]
+    gold = [a for a in todo if str(a or "").upper() == "XAUUSD"]
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            ticks: dict[str, biquote.BiquoteTick] = {}
+            if fx:
+                try:
+                    ticks = await biquote.fetch_latest(fx, client=client)
+                except Exception as exc:
+                    log.warning("display biquote batch failed (%s) — "
+                                "per-asset yahoo fallback", exc)
+                    ticks = {}
+            for a in fx:
+                try:
+                    tick = ticks.get(a) or ticks.get(str(a).upper())
+                    price, dq, err = await _display_one_fx(a, tick, client)
+                except Exception as exc:  # never raise for one asset
+                    price, dq, err = None, None, f"{a}: display error ({exc})"
+                if price is not None and dq is not None:
+                    out[a], meta[a] = price, dq
+                    if err:
+                        failures[a] = err
+                else:
+                    failures[a] = err or f"{a}: no display price"
+            for a in gold:
+                try:
+                    price, dq, err = await _display_gold_one(a, client)
+                except Exception as exc:
+                    price, dq, err = None, None, f"{a}: display error ({exc})"
+                if price is not None and dq is not None:
+                    out[a], meta[a] = price, dq
+                    if err:
+                        failures[a] = err
+                else:
+                    failures[a] = err or f"{a}: no display price"
+    except Exception as exc:
+        for a in todo:
+            if a not in out and a not in failures:
+                failures[a] = f"{a}: display batch failed ({exc})"
+    now = time.monotonic()
+    for a in todo:
+        if a in out and a in meta:
+            _display_cache[a] = (now, out[a], meta[a])
+    return out, meta, failures
+
+
 _QUOTE_TTL = 60.0  # seconds — protects Twelve Data's 800 credits/day
 # from 10s dashboard polling (8,640 req/day → 1,440/day cached).
 # (2026-09-04: tried 30 min to cut Frankfurter calls — user prefers fresh

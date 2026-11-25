@@ -1252,3 +1252,113 @@ class TestGoldTrustedFeed:
                 transport=httpx.MockTransport(handler_no_http)) as client:
             price, _ = await quotes._fetch_td_gold_rate(client)
             assert price == pytest.approx(2660.0)
+
+
+# ---------------------------------------------------------------------------
+# Display spot feed — Biquote-first batched fetch (Task 2)
+# ---------------------------------------------------------------------------
+def _display_tick(sym: str, mid: float, age: int = 3,
+                  stale: bool = False, state: str = "open") -> dict:
+    """One Biquote /api/latest entry (keyed-object response shape)."""
+    bid = mid - 0.00003
+    ask = mid + 0.00003
+    return {"symbol": sym, "bid": bid, "ask": ask, "mid": mid,
+            "spread": ask - bid, "timestamp": "2026-11-25T12:00:00Z",
+            "source": "biquote", "exchange": "BQT",
+            "marketState": state, "stale": stale,
+            "quoteAgeSeconds": age}
+
+
+def _display_yahoo_price(price: float) -> dict:
+    return {"chart": {"result": [{"meta": {"regularMarketPrice": price}}]}}
+
+
+class TestDisplayPrices:
+    @pytest.fixture(autouse=True)
+    def _reset_display_state(self):
+        if hasattr(quotes, "_display_cache"):
+            quotes._display_cache.clear()
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        yield
+        if hasattr(quotes, "_display_cache"):
+            quotes._display_cache.clear()
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+
+    @pytest.mark.asyncio
+    async def test_display_prefers_biquote_batch(self, monkeypatch):
+        """Fresh Biquote batch wins; exactly one Biquote HTTP call."""
+        calls: list[str] = []
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            calls.append(url)
+            if "biquote.io/api/latest" in url:
+                return httpx.Response(200, json={
+                    "EURUSD": _display_tick("EURUSD", 1.0946),
+                    "CHFJPY": _display_tick("CHFJPY", 170.13),
+                })
+            return httpx.Response(200, json=_display_yahoo_price(1.0))
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, failures = await quotes.fetch_display_prices(
+            ["EURUSD", "CHFJPY"])
+        assert meta["EURUSD"].source == "biquote"
+        assert meta["EURUSD"].age_seconds <= 10
+        assert sum(1 for c in calls if "biquote.io" in c) == 1
+        assert "EURUSD" in prices
+        assert failures == {}
+
+    @pytest.mark.asyncio
+    async def test_display_batch_outage_falls_back_per_asset(self, monkeypatch):
+        """Whole /api/latest 500 → per-asset Yahoo fallback, nothing blank."""
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(500, json={})
+            if "EURUSD=X" in url:
+                return httpx.Response(200, json=_display_yahoo_price(1.15))
+            if "GBPJPY=X" in url:
+                return httpx.Response(200, json=_display_yahoo_price(190.5))
+            return httpx.Response(404, json={})
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, failures = await quotes.fetch_display_prices(
+            ["EURUSD", "GBPJPY"])
+        assert set(prices) == {"EURUSD", "GBPJPY"}
+        assert all(m.source.startswith("yahoo") for m in meta.values())
+
+    @pytest.mark.asyncio
+    async def test_display_prefers_fresh_yahoo_over_stale_biquote(
+            self, monkeypatch):
+        """Stale Biquote + fresh Yahoo → Yahoo wins as yahoo_fallback."""
+        _real_client = httpx.AsyncClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(200, json={
+                    "EURUSD": _display_tick("EURUSD", 1.09,
+                                            age=120, stale=True),
+                })
+            return httpx.Response(200, json=_display_yahoo_price(1.10))
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler)))
+        prices, meta, _ = await quotes.fetch_display_prices(["EURUSD"])
+        assert meta["EURUSD"].source == "yahoo_fallback"
+        assert prices["EURUSD"] == pytest.approx(1.10)
