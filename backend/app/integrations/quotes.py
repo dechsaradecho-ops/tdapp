@@ -23,6 +23,9 @@ from datetime import date, datetime, timedelta, timezone
 import httpx
 
 from app.core.config import get_settings
+from app.core.gold_policy import true_ema as _true_ema
+from app.core.gold_policy import wilder_atr as _wilder_atr
+from app.integrations import biquote
 from app.services import quote_log
 
 log = logging.getLogger(__name__)
@@ -518,18 +521,215 @@ async def _fetch_gold(client: httpx.AsyncClient, days: int) -> list[Candle]:
     return candles
 
 
-async def fetch_candles(asset: str, client: httpx.AsyncClient,
-                        days: int = 40) -> list[Candle]:
-    """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable.
+# ---- Trusted gold feed (XAUUSD gold gate) ---------------------------------
+# Biquote-first OHLC + spot. Consumed by Tasks 5-8 (scanner/guard/routes).
+# Non-gold paths elsewhere in this module are byte-identical.
+@dataclass(frozen=True)
+class CandleFeedResult:
+    """Candles plus provenance: `source` names the winning feed."""
+    candles: list[Candle]
+    source: str       # "biquote" | "twelvedata" | "yahoo" | "frankfurter" | "yahoo_degraded"
+    trusted: bool     # False only for degraded Yahoo (display-only)
 
-    Chain: Yahoo (primary, real OHLC) → mapped fallback feed
-    (Frankfurter FX / TwelveData gold). Only assets inside SUPPORTED_ASSETS
-    (or the explicit ASSET_FEEDS map) are priceable.
+
+@dataclass(frozen=True)
+class TrustedQuote:
+    """Last tradable gold quote (never a degraded-Yahoo print)."""
+    price: float      # mid
+    bid: float
+    ask: float
+    spread: float     # ask - bid
+    source: str       # "biquote" | "twelvedata"
+    timestamp: float  # epoch seconds of the quote
+    age_seconds: float
+
+
+# Gold caches — the ONLY new global TTL constants in this module.
+_GOLD_TICK_TTL = 10.0    # Biquote tick cache (seconds)
+_GOLD_CACHE_TTL = 300.0  # closed daily OHLC + Twelve Data rate cache (5 min)
+
+_GOLD_TICK_CACHE: tuple[float, object] | None = None   # (monotonic_ts, BiquoteTick)
+_gold_ohlc_cache: tuple[float, list] | None = None     # (monotonic_ts, [BiquoteBar])
+_td_rate_cache: tuple[float, float, float] | None = None  # (mono_ts, price, remote_ts)
+_trusted_quotes: dict[str, TrustedQuote] = {}          # UPPER asset → quote
+_gold_price_source: dict[str, str] = {}                # UPPER asset → tick source
+
+TD_EXCHANGE_RATE_URL = "https://api.twelvedata.com/exchange_rate"
+TD_GOLD_SYMBOL = "XAU/USD"
+TD_MAX_RATE_AGE = 300.0  # max accepted Twelve Data quote age (5 min)
+
+
+def trusted_quote(asset: str) -> TrustedQuote | None:
+    """Last tradable quote for `asset`, or None (degraded-only/unknown)."""
+    return _trusted_quotes.get(str(asset or "").upper())
+
+
+def live_spread(asset: str) -> float | None:
+    """Live spread of the last tradable quote, or None when untrusted."""
+    q = trusted_quote(asset)
+    return None if q is None else q.spread
+
+
+async def _gold_tick(client: httpx.AsyncClient):
+    """Biquote XAUUSD tick, cached 10 s. Raises on stale/closed/missing."""
+    global _GOLD_TICK_CACHE
+    now = time.monotonic()
+    if _GOLD_TICK_CACHE is not None and now - _GOLD_TICK_CACHE[0] < _GOLD_TICK_TTL:
+        return _GOLD_TICK_CACHE[1]
+    tick = await biquote.fetch_tick(client=client)
+    _GOLD_TICK_CACHE = (now, tick)
+    return tick
+
+
+async def _fetch_td_gold_rate(client: httpx.AsyncClient) -> tuple[float, float]:
+    """Twelve Data /exchange_rate XAU/USD → (price, epoch ts).
+
+    Throttled to one poll per 5 min (cached); rejects quotes older than
+    5 min. Raises QuotesUnavailable without a key or on stale/error.
+    """
+    global _td_rate_cache
+    now = time.monotonic()
+    if _td_rate_cache is not None and now - _td_rate_cache[0] < _GOLD_CACHE_TTL:
+        return _td_rate_cache[1], _td_rate_cache[2]
+    api_key = get_settings().twelvedata_api_key
+    if not api_key:
+        raise QuotesUnavailable("XAUUSD: TWELVEDATA_API_KEY not set (free key: twelvedata.com)")
+    t0 = time.monotonic()
+    try:
+        resp = await client.get(
+            TD_EXCHANGE_RATE_URL,
+            params={"symbol": TD_GOLD_SYMBOL, "apikey": api_key}, timeout=10.0)
+        dur = int((time.monotonic() - t0) * 1000)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        quote_log.log_call(
+            asset="XAUUSD", category="gold", provider="twelvedata",
+            url=TD_EXCHANGE_RATE_URL, status="error",
+            error=str(exc), duration_ms=int((time.monotonic() - t0) * 1000),
+            api_key_hint=quote_log.mask_key(api_key))
+        raise QuotesUnavailable(f"XAUUSD: twelvedata rate failed ({exc})") from exc
+    try:
+        price = float(payload["rate"])
+        remote_ts = float(payload.get("timestamp") or 0)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise QuotesUnavailable(f"XAUUSD: twelvedata rate unusable ({exc})") from exc
+    age = time.time() - remote_ts if remote_ts > 0 else 0.0
+    if remote_ts <= 0 or age > TD_MAX_RATE_AGE:
+        quote_log.log_call(
+            asset="XAUUSD", category="gold", provider="twelvedata",
+            url=TD_EXCHANGE_RATE_URL, status="error",
+            http_status=resp.status_code, error=f"stale rate ({age:.0f}s)",
+            duration_ms=dur, api_key_hint=quote_log.mask_key(api_key))
+        raise QuotesUnavailable(f"XAUUSD: twelvedata rate stale ({age:.0f}s)")
+    quote_log.log_call(
+        asset="XAUUSD", category="gold", provider="twelvedata",
+        url=TD_EXCHANGE_RATE_URL, status="success",
+        http_status=resp.status_code, price=price,
+        duration_ms=dur, api_key_hint=quote_log.mask_key(api_key))
+    _td_rate_cache = (now, price, remote_ts)
+    return price, remote_ts
+
+
+async def _fetch_yahoo_gold_spot(client: httpx.AsyncClient) -> float:
+    """Degraded Yahoo GC=F intraday print — display only, never an order fill."""
+    url = f"{YAHOO_CHART_URL}/GC=F"
+    t0 = time.monotonic()
+    try:
+        resp = await client.get(
+            url, params={"interval": "1m", "range": "1d"},
+            headers={"User-Agent": YAHOO_UA}, timeout=10.0)
+        dur = int((time.monotonic() - t0) * 1000)
+        resp.raise_for_status()
+        meta = ((resp.json().get("chart") or {}).get("result") or [{}])[0].get("meta", {})
+        price = meta.get("regularMarketPrice")
+        if not price:
+            raise QuotesUnavailable("XAUUSD: no regularMarketPrice (yahoo degraded)")
+        quote_log.log_call(
+            asset="XAUUSD", category="gold", provider="yahoo", url=url,
+            status="success", http_status=resp.status_code,
+            price=float(price), duration_ms=dur)
+        return float(price)
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
+        quote_log.log_call(
+            asset="XAUUSD", category="gold", provider="yahoo", url=url,
+            status="error", error=str(exc),
+            duration_ms=int((time.monotonic() - t0) * 1000))
+        raise QuotesUnavailable(f"XAUUSD: yahoo degraded spot failed ({exc})") from exc
+
+
+async def _gold_spot_one(asset: str, client: httpx.AsyncClient,
+                         ) -> tuple[str, float | None, str, str]:
+    """XAUUSD spot chain: Biquote tick → Twelve Data rate → degraded Yahoo.
+
+    Returns the shared (asset, price, err, src) tuple. Trusted wins cache a
+    TrustedQuote; the degraded Yahoo print is display-only (no TrustedQuote,
+    price_source recorded separately) so writers can refuse it.
+    """
+    key = str(asset or "").upper()
+    # 1) Biquote tick — trusted.
+    try:
+        tick = await _gold_tick(client)
+        quote = TrustedQuote(
+            price=tick.mid, bid=tick.bid, ask=tick.ask, spread=tick.spread,
+            source="biquote", timestamp=tick.timestamp.timestamp(),
+            age_seconds=float(tick.quote_age_seconds))
+        _trusted_quotes[key] = quote
+        _gold_price_source[key] = "biquote"
+        return asset, tick.mid, "", "spot"
+    except (biquote.BiquoteError, QuotesUnavailable, ValueError):
+        pass
+    # 2) Twelve Data /exchange_rate — trusted (timestamped, ≤5 min old).
+    try:
+        price, remote_ts = await _fetch_td_gold_rate(client)
+        _trusted_quotes[key] = TrustedQuote(
+            price=price, bid=price, ask=price, spread=0.0,
+            source="twelvedata", timestamp=remote_ts,
+            age_seconds=max(0.0, time.time() - remote_ts))
+        _gold_price_source[key] = "twelvedata"
+        return asset, price, "", "spot"
+    except QuotesUnavailable:
+        pass
+    # 3) Degraded Yahoo — display only.
+    try:
+        price = await _fetch_yahoo_gold_spot(client)
+    except QuotesUnavailable as exc:
+        _trusted_quotes.pop(key, None)
+        return asset, None, f"XAUUSD: no gold feed ({exc})", ""
+    _trusted_quotes.pop(key, None)  # a stale trusted quote must not linger
+    _gold_price_source[key] = "yahoo_degraded"
+    return asset, price, "", "spot"
+
+
+async def _fetch_gold_biquote_bars(client: httpx.AsyncClient) -> list:
+    """500 Biquote daily bars for XAUUSD (closed-bar cache, 5 min)."""
+    global _gold_ohlc_cache
+    now = time.monotonic()
+    if _gold_ohlc_cache is not None and now - _gold_ohlc_cache[0] < _GOLD_CACHE_TTL:
+        return _gold_ohlc_cache[1]
+    bars = await biquote.fetch_daily_bars(limit=500, client=client)
+    _gold_ohlc_cache = (now, bars)
+    return bars
+
+
+async def fetch_candles_with_source(asset: str, client: httpx.AsyncClient,
+                                    days: int = 40) -> CandleFeedResult:
+    """Fetch ~`days` daily candles plus feed provenance.
+
+    Gold (XAUUSD) ignores `days` and always requests 500 Biquote daily bars;
+    on Biquote failure it falls back to Twelve Data `XAU/USD`, then to
+    degraded Yahoo (`GC=F`, `trusted=False`). Other assets keep the
+    Yahoo-primary → mapped-fallback chain. Raises QuotesUnavailable when
+    every feed fails or fewer than 30 bars come back.
     """
     if asset not in SUPPORTED_ASSETS and asset not in ASSET_FEEDS:
         raise QuotesUnavailable(f"no feed mapping for {asset}")
 
+    if str(asset).upper() == "XAUUSD":
+        return await _fetch_gold_candles_with_source(client)
+
     candles: list[Candle] = []
+    source = FEED_YAHOO
     try:
         candles = await _fetch_yahoo_candles(asset, client, days)
     except QuotesUnavailable as yahoo_exc:
@@ -541,6 +741,7 @@ async def fetch_candles(asset: str, client: httpx.AsyncClient,
                 candles = await _fetch_gold(client, days)
             else:
                 candles = await _fetch_fx(asset, client, days)
+            source = feed
         except QuotesUnavailable as fallback_exc:
             raise QuotesUnavailable(
                 f"{asset}: yahoo failed ({yahoo_exc}) and fallback failed ({fallback_exc})") from fallback_exc
@@ -548,7 +749,59 @@ async def fetch_candles(asset: str, client: httpx.AsyncClient,
     if len(candles) < 30:  # need enough bars for EMA200-substitute + ADX
         raise QuotesUnavailable(f"{asset}: only {len(candles)} candles")
 
-    return candles
+    return CandleFeedResult(candles=candles, source=source, trusted=True)
+
+
+async def _fetch_gold_candles_with_source(
+        client: httpx.AsyncClient) -> CandleFeedResult:
+    """XAUUSD OHLC chain: Biquote (500 bars) → Twelve Data → Yahoo degraded."""
+    errors: list[str] = []
+    # 1) Biquote — trusted, always 500 daily bars regardless of `days`.
+    try:
+        bars = await _fetch_gold_biquote_bars(client)
+        candles = [Candle(o=b.open, h=b.high, l=b.low, c=b.close,
+                          t=int(b.open_time.timestamp()))
+                   for b in bars if not b.is_open]
+        if len(candles) < 30:
+            raise QuotesUnavailable(
+                f"XAUUSD: only {len(candles)} closed biquote bars")
+        return CandleFeedResult(candles=candles, source="biquote", trusted=True)
+    except (biquote.BiquoteError, QuotesUnavailable) as exc:
+        errors.append(f"biquote failed ({exc})")
+    # 2) Twelve Data XAU/USD — trusted fallback.
+    try:
+        candles = await _fetch_gold(client, 500)
+        if len(candles) < 30:
+            raise QuotesUnavailable(
+                f"XAUUSD: only {len(candles)} twelvedata candles")
+        return CandleFeedResult(candles=candles, source="twelvedata",
+                                trusted=True)
+    except QuotesUnavailable as exc:
+        errors.append(f"twelvedata failed ({exc})")
+    # 3) Yahoo GC=F — display-only/degraded, never trusted for orders.
+    try:
+        candles = await _fetch_yahoo_candles("XAUUSD", client, 500)
+        if len(candles) < 30:
+            raise QuotesUnavailable(
+                f"XAUUSD: only {len(candles)} yahoo candles")
+        return CandleFeedResult(candles=candles, source="yahoo_degraded",
+                                trusted=False)
+    except QuotesUnavailable as exc:
+        errors.append(f"yahoo failed ({exc})")
+    raise QuotesUnavailable(f"XAUUSD: {'; '.join(errors)}")
+
+
+async def fetch_candles(asset: str, client: httpx.AsyncClient,
+                        days: int = 40) -> list[Candle]:
+    """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable.
+
+    Thin compatibility wrapper over fetch_candles_with_source — returns
+    only the candles. Chain: Yahoo (primary, real OHLC) → mapped fallback
+    feed (Frankfurter FX / TwelveData gold; Biquote first for XAUUSD).
+    Only assets inside SUPPORTED_ASSETS (or the explicit ASSET_FEEDS map)
+    are priceable.
+    """
+    return (await fetch_candles_with_source(asset, client, days)).candles
 
 
 def _ema(values: list[float], period: int) -> list[float]:
@@ -687,34 +940,71 @@ def _supertrend_dir(candles: list[Candle], period: int = 10, mult: float = 3.0) 
 
 def snapshot_from_candles(asset: str, candles: list[Candle],
                           news_sentiment: float = 0.0,
-                          high_impact_event: bool = False) -> dict:
-    """Compute all engine fields from OHLCV candles. Returns a dict."""
+                          high_impact_event: bool = False,
+                          *,
+                          source: str | None = None,
+                          price_source: str | None = None,
+                          ohlc_source: str | None = None,
+                          trusted: bool | None = None) -> dict:
+    """Compute all engine fields from OHLCV candles. Returns a dict.
+
+    Gold (XAUUSD) uses true EMA200 + Wilder ATR14 and records provenance
+    (`feed_source` for backward compat, `price_source`/`ohlc_source`,
+    `ema_slow_period`, `atr_method`, `atr_period`, `bar_count`, `trusted`).
+    Other assets keep EMA100 + simple ATR14. Short gold history yields None
+    indicator fields (fail closed — never propagate math exceptions).
+    """
+    is_gold = str(asset or "").upper() == "XAUUSD"
     closes = [c.c for c in candles]
     price = closes[-1]
     ema_fast_series = _ema(closes, 50)
     ema_slow_series = _ema(closes, 100)
     ema_fast = ema_fast_series[-1]
-    ema_slow = ema_slow_series[-1]
+    if is_gold:
+        try:
+            ema_slow: float | None = _true_ema(closes, 200)
+        except ValueError:
+            ema_slow = None
+        ema_slow_period = 200
+        atr_method = "wilder"
+    else:
+        ema_slow = ema_slow_series[-1]
+        ema_slow_period = 100
+        atr_method = "simple"
 
     # 20-day change
     ref = closes[-21] if len(closes) >= 21 else closes[0]
     change_pct = (price - ref) / ref * 100.0 if ref else 0.0
 
     ema_fast_series = ema_fast_series[-len(candles):]
-    macd_hist = ema_fast_series[-1] - ema_slow_series[-1] if len(ema_slow_series) else 0.0
-    # scale MACD histogram relative to price so thresholds behave across assets
-    macd_hist = macd_hist / price * 100.0
+    if is_gold:
+        if ema_slow is not None and price:
+            macd_hist = (ema_fast - ema_slow) / price * 100.0
+        else:
+            macd_hist = None
+    else:
+        macd_hist = ema_fast_series[-1] - ema_slow_series[-1] if len(ema_slow_series) else 0.0
+        # scale MACD histogram relative to price so thresholds behave across assets
+        macd_hist = macd_hist / price * 100.0
 
-    atr_pct = _atr_pct(candles)
+    if is_gold:
+        try:
+            atr_raw = _wilder_atr(candles, 14)
+            atr_pct: float | None = atr_raw / price * 100.0 if price > 0 else 0.0
+        except ValueError:
+            atr_pct = None
+    else:
+        atr_pct = _atr_pct(candles)
     # volatility index proxy: normalized ATR (percent-of-price based 0-100 scale)
-    vol_index = min(atr_pct * 8.0, 100.0)
+    vol_index = min(atr_pct * 8.0, 100.0) if atr_pct is not None else None
 
     # Breakout-retest context (gold-specific entry strategy D). Other assets
     # keep 0.0 — the scanner gate only consumes it for XAUUSD.
     breakout_state, breakout_level = _breakout_state(candles) \
         if asset.upper() == "XAUUSD" else (0.0, 0.0)
 
-    return {
+    ohlc_src = ohlc_source or source or "unknown"
+    snap = {
         "asset": asset,
         "price": round(price, 5),
         "ema_fast": ema_fast,
@@ -722,23 +1012,39 @@ def snapshot_from_candles(asset: str, candles: list[Candle],
         "adx": round(_adx(candles), 1),
         "supertrend_dir": _supertrend_dir(candles),
         "rsi": round(_rsi(closes), 1),
-        "macd_hist": round(macd_hist, 2),
+        "macd_hist": round(macd_hist, 2) if macd_hist is not None else None,
         "price_change_pct_20": round(change_pct, 2),
-        "atr_pct": round(atr_pct, 2),
-        "volatility_index": round(vol_index, 1),
+        "atr_pct": round(atr_pct, 2) if atr_pct is not None else None,
+        "volatility_index": round(vol_index, 1) if vol_index is not None else None,
         "news_sentiment": news_sentiment,
         "high_impact_event": high_impact_event,
         "breakout_state": breakout_state,
         "breakout_level": breakout_level,
+        "feed_source": source or ohlc_src,
+        "price_source": price_source or ohlc_src,
+        "ohlc_source": ohlc_src,
+        "ema_slow_period": ema_slow_period,
+        "atr_method": atr_method,
+        "atr_period": 14,
+        "bar_count": len(candles),
+        "trusted": trusted,
     }
+    return snap
 
 
 async def fetch_snapshot(asset: str, client: httpx.AsyncClient,
                          news_sentiment: float = 0.0,
                          high_impact_event: bool = False) -> dict:
     """Convenience: candles → indicator dict. Raises QuotesUnavailable."""
-    candles = await fetch_candles(asset, client)
-    return snapshot_from_candles(asset, candles, news_sentiment, high_impact_event)
+    result = await fetch_candles_with_source(asset, client)
+    if str(asset or "").upper() == "XAUUSD":
+        price_src = _gold_price_source.get("XAUUSD", result.source)
+    else:
+        price_src = result.source
+    return snapshot_from_candles(
+        asset, result.candles, news_sentiment, high_impact_event,
+        source=result.source, price_source=price_src,
+        ohlc_source=result.source, trusted=result.trusted)
 
 
 async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[str, str]]:
@@ -830,6 +1136,10 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
 
         async def _one_inner(asset: str, client: httpx.AsyncClient,
                              ) -> tuple[str, float | None, str, str]:
+            # Gold runs its own trusted chain (Biquote → TD rate → Yahoo
+            # degraded); every other asset keeps the path below byte-identical.
+            if str(asset or "").upper() == "XAUUSD":
+                return await _gold_spot_one(asset, client)
             # 1) Yahoo chart API first (real intraday spots; only XAUUSD source)
             asset_y, y_price, y_err = await _yahoo_one(asset, client)
             if y_price:
@@ -943,6 +1253,11 @@ async def fetch_trusted_spot(assets: list[str],
     dropped: list[str] = []
     for asset, price in (prices or {}).items():
         if spot_source(asset) == "daily":
+            dropped.append(asset)
+            continue
+        if str(asset or "").upper() == "XAUUSD" and trusted_quote(asset) is None:
+            # Only degraded Yahoo fed this cycle — display-only, never a
+            # stored number (gold order-data chain stops at Twelve Data).
             dropped.append(asset)
             continue
         trusted[asset] = price

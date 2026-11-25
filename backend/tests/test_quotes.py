@@ -406,15 +406,21 @@ class TestSnapshotFromCandles:
         assert 0 <= snap["volatility_index"] <= 100
 
     def test_uptrend_reflected(self):
-        snap = quotes.snapshot_from_candles("XAUUSD", self.candles)
+        # Gold needs 200+ bars for true EMA200 (short history → None,
+        # fail closed), so the uptrend check uses a full-length series.
+        snap = quotes.snapshot_from_candles(
+            "XAUUSD", make_candles(250, start=2400.0, drift=2.0, noise=1.0))
         assert snap["ema_fast"] > snap["ema_slow"]
         assert snap["supertrend_dir"] == 1
         assert snap["price_change_pct_20"] > 0
 
     def test_snapshot_feeds_strategy_engine(self):
         from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine
-        snap = quotes.snapshot_from_candles("XAUUSD", self.candles)
-        ind = IndicatorSnapshot(**snap, source="live")
+        snap = quotes.snapshot_from_candles(
+            "XAUUSD", make_candles(250, start=2400.0, drift=2.0, noise=1.0))
+        model_fields = {k: v for k, v in snap.items()
+                        if k in IndicatorSnapshot.__dataclass_fields__}
+        ind = IndicatorSnapshot(**model_fields, source="live")
         opp = StrategyEngine().opportunity_score(ind)
         assert 0 <= opp.score <= 100
 
@@ -422,7 +428,9 @@ class TestSnapshotFromCandles:
         """IndicatorSnapshot(**snap) must not raise (field mismatch guard)."""
         from app.engine.strategy_engine import IndicatorSnapshot
         snap = quotes.snapshot_from_candles("EURUSD", make_candles(60))
-        ind = IndicatorSnapshot(**snap)  # must not raise
+        model_fields = {k: v for k, v in snap.items()
+                        if k in IndicatorSnapshot.__dataclass_fields__}
+        ind = IndicatorSnapshot(**model_fields)  # must not raise
         assert ind.source == "demo"  # default
 
     def test_supertrend_down_in_downtrend_snapshot(self):
@@ -639,7 +647,16 @@ class TestSpotFeed:
     async def test_fetch_spot_prices_chain_yahoo_then_exchangerate(self, monkeypatch):
         """Yahoo serves both FX and gold; exchangerate stays untouched."""
         from app.core.config import get_settings as _gs
+        from app.integrations.biquote import BiquoteError
         monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        # Gold is Biquote-first now: force the trusted legs down so XAUUSD
+        # reaches the degraded-Yahoo display leg (same single Yahoo GET).
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
+
+        async def _no_biquote(*a, **kw):
+            raise BiquoteError("biquote: down (test)")
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _no_biquote,
+                            raising=False)
         calls: list[str] = []
         responses = [
             _yahoo_payload(1.15),            # EURUSD → yahoo primary ok
@@ -891,7 +908,16 @@ class TestBatchTimeouts:
         """One AsyncClient for the whole spot batch (was: one per asset)."""
         import asyncio  # noqa: F401 (keeps the batch event-loop contract explicit)
         from app.core.config import get_settings as _gs
+        from app.integrations.biquote import BiquoteError
         monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA", raising=False)
+        # Gold is Biquote-first now: force the trusted legs down so XAUUSD
+        # uses its single degraded-Yahoo GET (client count stays one).
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
+
+        async def _no_biquote(*a, **kw):
+            raise BiquoteError("biquote: down (test)")
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _no_biquote,
+                            raising=False)
         calls: list[str] = []
         responses = [_yahoo_payload(1.15), _yahoo_payload(4540.2)]
         FakeCls = _fake_client_factory(calls, responses)
@@ -962,3 +988,188 @@ class TestBatchTimeouts:
         assert prices.get("GBPUSD") == 1.35
         assert "EURUSD" in failures and "timeout" in failures["EURUSD"]
         assert elapsed < 2.0
+
+
+# ---------------------------------------------------------------------------
+# Trusted gold feed — Biquote-first OHLC + spot (Task 4: XAUUSD gold gate)
+# ---------------------------------------------------------------------------
+def _biquote_ohlc_payload(closes: list[float], open_last: bool = True) -> dict:
+    """Biquote /api/XAUUSD/ohlc shape: oldest-first bars with is_open flag."""
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    bars = []
+    for i, c in enumerate(closes):
+        bars.append({
+            "openTime": (base + timedelta(days=i)).isoformat(),
+            "open": c * 0.999, "high": c * 1.001,
+            "low": c * 0.998, "close": c,
+            "tickVolume": 100 + i,
+            "isOpen": bool(open_last and i == len(closes) - 1),
+        })
+    return {"symbol": "XAUUSD", "bars": bars}
+
+
+def _biquote_tick_payload(bid: float, ask: float) -> dict:
+    mid = (bid + ask) / 2.0
+    return {"symbol": "XAUUSD", "bid": bid, "ask": ask, "mid": mid,
+            "spread": ask - bid, "timestamp": "2026-11-25T12:00:00Z",
+            "source": "biquote", "exchange": "BQT", "marketState": "open",
+            "stale": False, "quoteAgeSeconds": 3}
+
+
+def _td_exchange_rate_payload(rate: float) -> dict:
+    import time as _time
+    return {"symbol": "XAUUSD", "rate": rate, "timestamp": int(_time.time())}
+
+
+class TestGoldTrustedFeed:
+    @pytest.fixture(autouse=True)
+    def _reset_gold_state(self):
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        quotes._quote_cache.clear()
+        quotes._trusted_quotes.clear()
+        quotes._gold_price_source.clear()
+        quotes._GOLD_TICK_CACHE = None
+        quotes._gold_ohlc_cache = None
+        quotes._td_rate_cache = None
+        yield
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        quotes._quote_cache.clear()
+        quotes._trusted_quotes.clear()
+        quotes._gold_price_source.clear()
+        quotes._GOLD_TICK_CACHE = None
+        quotes._gold_ohlc_cache = None
+        quotes._td_rate_cache = None
+
+    @pytest.mark.asyncio
+    async def test_gold_candles_prefer_biquote_and_use_wilder_ema200(self):
+        """Biquote-first: 500 daily bars requested, trusted, EMA200/Wilder."""
+        from app.core.gold_policy import true_ema, wilder_atr
+        closes = [2400.0 + 0.5 * i for i in range(500)]
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                seen["limit"] = request.url.params.get("limit")
+                return httpx.Response(200, json=_biquote_ohlc_payload(closes))
+            return httpx.Response(503, json={})
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)) as client:
+            result = await quotes.fetch_candles_with_source("XAUUSD", client)
+            assert result.source == "biquote" and result.trusted is True
+            assert seen.get("limit") == "500"
+            # the forming (is_open) bar is dropped — only closed bars map
+            assert len(result.candles) == 499
+            snap = await quotes.fetch_snapshot("XAUUSD", client)
+            assert snap["ema_slow_period"] == 200
+            assert snap["atr_method"] == "wilder"
+            assert snap["atr_period"] == 14
+            assert snap["bar_count"] >= 200
+            assert snap["ohlc_source"] == "biquote"
+            assert snap["feed_source"] == "biquote"
+            assert snap["trusted"] is True
+            assert snap["ema_slow"] == pytest.approx(
+                true_ema([c.c for c in result.candles], 200))
+            atr = wilder_atr(result.candles, 14)
+            assert snap["atr_pct"] == pytest.approx(
+                round(atr / result.candles[-1].c * 100.0, 2))
+
+    @pytest.mark.asyncio
+    async def test_gold_candles_fall_back_to_twelvedata_then_degraded_yahoo(
+            self, monkeypatch):
+        """Biquote down → Twelve Data XAU/USD; all down → yahoo_degraded."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "td-demo-key",
+                            raising=False)
+        closes = [2400.0 + i for i in range(250)]
+
+        def handler_td(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(503, json={})
+            if "twelvedata.com/time_series" in url:
+                return httpx.Response(200, json=_gold_payload(closes))
+            return httpx.Response(503, json={})
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_td)) as client:
+            first = await quotes.fetch_candles_with_source("XAUUSD", client)
+            assert first.source == "twelvedata" and first.trusted is True
+            assert len(first.candles) == 250
+
+        def handler_yahoo(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url or "twelvedata.com" in url:
+                return httpx.Response(200, json={"status": "error",
+                                                 "code": 503,
+                                                 "message": "down"})
+            return httpx.Response(200, json=_yahoo_chart_payload(closes))
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_yahoo)) as client:
+            second = await quotes.fetch_candles_with_source("XAUUSD", client)
+            assert second.source == "yahoo_degraded"
+            assert second.trusted is False
+            snap = await quotes.fetch_snapshot("XAUUSD", client)
+            assert snap["trusted"] is False
+            assert snap["ohlc_source"] == "yahoo_degraded"
+
+    @pytest.mark.asyncio
+    async def test_gold_spot_uses_biquote_and_rejects_degraded_yahoo(
+            self, monkeypatch):
+        """Biquote tick feeds trusted_quote/live_spread; degraded Yahoo is
+        display-only — fetch_trusted_spot must drop XAUUSD then."""
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "", raising=False)
+        calls: list[str] = []
+        _real_client = httpx.AsyncClient
+
+        def handler_tick(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            calls.append(url)
+            if "biquote.io" in url:
+                return httpx.Response(
+                    200, json=_biquote_tick_payload(2650.0, 2650.155))
+            return httpx.Response(200, json=_yahoo_payload(2651.0).json())
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler_tick)))
+        prices, failures = await quotes.fetch_spot_prices(["XAUUSD"])
+        q = quotes.trusted_quote("XAUUSD")
+        assert q is not None and q.source == "biquote"
+        assert prices["XAUUSD"] == q.price == pytest.approx(2650.0775)
+        assert q.bid == pytest.approx(2650.0)
+        assert q.ask == pytest.approx(2650.155)
+        assert quotes.live_spread("XAUUSD") == pytest.approx(0.155)
+        assert failures == {}
+        assert len(calls) == 1 and "biquote.io" in calls[0]
+
+        # Only Yahoo succeeds now → display price served, but untrusted.
+        quotes._spot_cache.clear()
+        quotes._GOLD_TICK_CACHE = None
+
+        def handler_degraded(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url or "twelvedata.com" in url:
+                return httpx.Response(503, json={})
+            return httpx.Response(200, json=_yahoo_payload(2651.0).json())
+
+        monkeypatch.setattr(
+            quotes.httpx, "AsyncClient",
+            lambda *a, **kw: _real_client(
+                transport=httpx.MockTransport(handler_degraded)))
+        prices2, _ = await quotes.fetch_spot_prices(["XAUUSD"])
+        assert prices2["XAUUSD"] == pytest.approx(2651.0)  # display OK
+        assert quotes.trusted_quote("XAUUSD") is None
+        assert quotes.live_spread("XAUUSD") is None
+        trusted, failures2 = await quotes.fetch_trusted_spot(["XAUUSD"])
+        assert "XAUUSD" not in trusted
+        assert "XAUUSD" in failures2
