@@ -10,6 +10,7 @@ import CloseReasonBadge from "@/components/CloseReasonBadge";
 import CopyNum from "@/components/CopyNum";
 import FeedStatusBanner from "@/components/FeedStatusBanner";
 import GlassSelect from "@/components/GlassSelect";
+import { FreshnessBadge, GlowPrice } from "@/components/GlowPrice";
 import Icon from "@/components/Icon";
 import PerformancePanel from "@/components/PerformancePanel";
 import RiskPanel from "@/components/RiskPanel";
@@ -18,10 +19,11 @@ import { fmtNum } from "@/lib/format";
 import { ClosePositionResult, MonitorSnapshot, SignalLog } from "@/lib/types";
 
 // ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.monitor_refresh_sec)
-// ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (backend cache spot quotes 30s ดังนั้น
-// ยิงถี่กว่า 10s ก็ไม่เพิ่มโหลด feed)
+// ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (display batch มี TTL 2s — เคาะ 2s
+// ได้ราคาสดจริง ไม่เพิ่มโหลด feed เกิน batch เดียวต่อรอบ)
 const REFRESH_OPTIONS = [
   { label: "ปิด", value: 0 },
+  { label: "2 วิ", value: 2 },
   { label: "10 วิ", value: 10 },
   { label: "30 วิ", value: 30 },
   { label: "1 นาที", value: 60 },
@@ -149,7 +151,9 @@ function SmartExitBadge({ info }: { info: NonNullable<MonitorSnapshot["open_posi
   );
 }
 
-/** Badge "+0.12R" — กดเพื่อดู popup ที่มาราคา (portal to body สไตล์เดียวกับ SmartExitBadge). */
+/** Badge "+0.12R" — กดเพื่อดู popup ที่มาราคา (portal to body สไตล์เดียวกับ SmartExitBadge).
+ *  GLOW-AUDIT: tooltip แสดง "Entry → ปัจจุบัน" เป็นข้อความ static ของรอบ snapshot
+ *  นี้โดยเจตนา — เซลล์ราคาสดที่ glow คือคอลัมน์ "ราคาปัจจุบัน" (GlowPrice) */
 function RPriceBadge({ asset, direction, rMult, riskUsd, entry, current, priceSource, notes }: {
   asset: string;
   direction: string;
@@ -517,8 +521,8 @@ export default function MonitorPage() {
   // ไทม์ไลน์ SL/TP ต่อไม้: ticket → events จาก signal-logs (order_opened
   // "SL ย้ายไป..." + closed) — โหลดพร้อม snapshot ครั้งเดียว
   const [moveLogs, setMoveLogs] = useState<Record<string, SignalLog[]>>({});
-  // ค่าเริ่มต้น 10 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
-  const [intervalSec, setIntervalSec] = useState<number>(10);
+  // ค่าเริ่มต้น 2 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
+  const [intervalSec, setIntervalSec] = useState<number>(2);
   const [closeResult, setCloseResult] = useState<ClosePositionResult | null>(null);
   const [closeError, setCloseError] = useState("");
   const [closingTicket, setClosingTicket] = useState<string | null>(null);
@@ -943,7 +947,20 @@ export default function MonitorPage() {
                     </td>
                     <td className="py-2 pr-4 font-bold" onClick={(e) => e.stopPropagation()}><CopyNum value={p.entry_price} /></td>
                     <td className="py-2 pr-4 font-bold">
-                      {fmtNum(p.current_price, 5)}
+                      <GlowPrice
+                        value={p.current_price}
+                        ageS={p.price_age_s ?? null}
+                        marketState={p.market_state ?? null}
+                        source={p.price_source ?? null}
+                        stale={p.price_source != null && p.price_source !== "spot"}
+                      />
+                      <FreshnessBadge
+                        ageS={p.price_age_s ?? null}
+                        marketState={p.market_state ?? null}
+                        source={p.price_source ?? null}
+                        stale={p.price_source != null && p.price_source !== "spot"}
+                        className="ml-1"
+                      />
                       <MoveTimelineBadge pos={p} timeline={timeline} />
                       {p.price_source != null && p.price_source !== "spot" && (
                         <span className={`ml-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
@@ -1108,6 +1125,8 @@ export default function MonitorPage() {
                         fmtNum(t.volume, 2)
                       )}
                     </td>
+                    {/* GLOW-AUDIT: ตารางประวัติ (entry/exit ของไม้ที่ปิดแล้ว) เป็นราคา
+                        static ย้อนหลังโดยเจตนา — ไม่ glow */}
                     <td className="py-2 pr-4 font-bold">{fmtNum(t.entry_price, 5)}</td>
                     <td className="py-2 pr-4 font-bold">{t.exit_price != null ? fmtNum(t.exit_price, 5) : "-"}</td>
                     <td className="py-2 pr-4 font-bold">

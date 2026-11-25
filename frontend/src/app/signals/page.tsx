@@ -12,9 +12,10 @@ import { api } from "@/lib/api";
 import { AppSettings, SessionStatus, SignalProposal } from "@/lib/types";
 
 // ความถี่รีเฟรชเลือกได้จาก UI — จำค่าใน DB (trading_settings.signals_refresh_sec)
-// ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้
+// ตามทุกเครื่อง ไม่ใช่แค่เบราว์เซอร์นี้ (display batch มี TTL 2s — เคาะ 2s ได้ราคาสดจริง)
 const REFRESH_OPTIONS = [
   { label: "ปิด", value: 0 },
+  { label: "2 วิ", value: 2 },
   { label: "10 วิ", value: 10 },
   { label: "30 วิ", value: 30 },
   { label: "1 นาที", value: 60 },
@@ -28,8 +29,8 @@ export default function SignalsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  // ค่าเริ่มต้นปิด (0) — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
-  const [intervalSec, setIntervalSec] = useState<number>(0);
+  // ค่าเริ่มต้น 2 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
+  const [intervalSec, setIntervalSec] = useState<number>(2);
   const inFlight = useRef(false);
   // แท็บ: "signals" (ค่าเริ่มต้น) | "logs" (บันทึกสัญญาณ — เดิมหน้า /signal-logs)
   // static export ไม่มี server — อ่าน ?tab=logs จาก window.location.search ใน effect

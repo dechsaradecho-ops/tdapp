@@ -263,6 +263,7 @@ export default function SignalLogsPanel() {
                     <span className={`px-2 py-0.5 rounded whitespace-nowrap ${meta.cls}`}>{meta.label}</span>
                   </td>
                   <td className="py-2 pr-3 font-bold">{l.confidence != null ? `${l.confidence}%` : "—"}</td>
+                  {/* GLOW-AUDIT: journal ย้อนหลัง (entry/SL/TP/exit) — ราคา plan/static โดยเจตนา */}
                   <td className="py-2 pr-3 font-mono font-bold">{l.entry != null ? fmtNum(l.entry, 4) : "—"}</td>
                   <td className="py-2 pr-3">{l.stop_loss != null ? <span className="inline-flex items-center rounded-full bg-loss/30 text-loss px-2 py-0.5 font-mono font-bold">{fmtNum(l.stop_loss, 4)}</span> : "—"}</td>
                   <td className="py-2 pr-3">{l.take_profit != null ? <span className="inline-flex items-center rounded-full bg-profit/30 text-profit px-2 py-0.5 font-mono font-bold">{fmtNum(l.take_profit, 4)}</span> : "—"}</td>

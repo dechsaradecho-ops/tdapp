@@ -69,6 +69,7 @@ export default function CloseSingleModal({
           </div>
           <div>
             <p className="text-xs text-slate-500">ราคาปัจจุบัน</p>
+            {/* GLOW-AUDIT: snapshot ตอนเปิด modal (ไม่มี poll ใน modal) — static โดยเจตนา */}
             <p className="font-bold">{fmtNum(position.current_price, 5)}</p>
           </div>
           <div>

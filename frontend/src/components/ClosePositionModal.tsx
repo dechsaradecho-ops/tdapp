@@ -66,6 +66,7 @@ export default function ClosePositionModal({
           />
           <Detail label="Lots" value={fmtNum(result.volume, 2)} />
           <Detail label="Ticket" value={result.ticket || "-"} />
+          {/* GLOW-AUDIT: ผลปิดไม้ (entry/exit เกิดแล้ว) — static โดยเจตนา */}
           <Detail label="ราคาเข้า (Entry)" value={fmtNum(result.entry_price, 5)} />
           <Detail label="ราคาปิด (Exit)" value={fmtNum(result.exit_price, 5)} />
           <Detail

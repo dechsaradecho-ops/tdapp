@@ -69,6 +69,7 @@ export function ExtendedOpenConfirmModal({
         <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
           <div>
             <p className="text-xs text-slate-500">Entry (ขาแรก)</p>
+            {/* GLOW-AUDIT: ราคา plan (ไม่ tick) — static โดยเจตนา */}
             <p className="font-bold">{first?.price != null ? fmtNum(first.price, 5) : "-"}</p>
           </div>
           <div>

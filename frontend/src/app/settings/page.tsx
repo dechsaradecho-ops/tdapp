@@ -167,7 +167,8 @@ const INDICATOR_OPTIONS = [
 ];
 const REFRESH_OPTIONS = [
   { value: "0", label: "ปิด — รีเฟรชด้วยมือ" },
-  { value: "10", label: "10 วิ — ถี่สุด (ค่าเริ่มต้น monitor)" },
+  { value: "2", label: "2 วิ — ถี่สุด (ค่าเริ่มต้น monitor/สัญญาณ)" },
+  { value: "10", label: "10 วิ" },
   { value: "30", label: "30 วิ" },
   { value: "60", label: "1 นาที" },
   { value: "300", label: "5 นาที — ประหยัดแบต/เน็ต" },
@@ -1350,7 +1351,7 @@ export default function SettingsPage() {
                   onChange={(v) => set("monitor_refresh_sec", Number(v))} className="mt-1 w-full"
                   options={REFRESH_OPTIONS} />
                 <span className="text-xs text-slate-500 mt-1 block">
-                  ดึงข้อมูลมอนิเตอร์ทุกกี่วินาที — เก็บลง DB ตามทุกเครื่อง (ถี่กว่า 10 วิไม่เพิ่มโหลดเพราะ quote cache 30 วิ)
+                  ดึงข้อมูลมอนิเตอร์ทุกกี่วินาที — เก็บลง DB ตามทุกเครื่อง (display batch TTL 2 วิ — เคาะ 2 วิได้ราคาสดจริง)
                 </span>
               </label>
               <label className="block text-sm">

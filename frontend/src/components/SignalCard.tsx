@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { API_BASE, SignalProposal } from "@/lib/types";
-import { fmtNum } from "@/lib/format";
 import CopyNum from "@/components/CopyNum";
+import { FreshnessBadge, GlowPrice } from "@/components/GlowPrice";
 import Icon from "@/components/Icon";
 import SignalLevels from "@/components/SignalLevels";
 import ReasonList from "@/components/ReasonList";
@@ -82,8 +82,18 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
       <div className="mb-2 grid grid-cols-2 gap-1.5 text-xs">
         {signal.live_price != null && signal.live_price > 0 ? (
           <div className="flex min-w-0 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/5 px-2 py-1.5">
-            <span className="shrink-0 text-slate-400">สด</span>
-            <span className="truncate font-semibold text-accent">{fmtNum(signal.live_price, 5)}</span>
+            <FreshnessBadge
+              ageS={signal.price_age_s ?? null}
+              marketState={signal.market_state ?? null}
+              source={signal.price_source ?? null}
+            />
+            <GlowPrice
+              value={signal.live_price}
+              ageS={signal.price_age_s ?? null}
+              marketState={signal.market_state ?? null}
+              source={signal.price_source ?? null}
+              className="truncate font-semibold text-accent"
+            />
             {signal.entry > 0 && (
               <span className={`inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 font-semibold ${liveDeltaPct >= 0 ? "bg-profit/30 text-profit" : "bg-loss/30 text-loss"}`}>
                 {liveDeltaPct >= 0 ? "▲" : "▼"}{Math.abs(liveDeltaPct).toFixed(1)}%

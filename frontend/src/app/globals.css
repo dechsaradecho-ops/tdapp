@@ -1666,6 +1666,29 @@ main a, main summary, main div[role="button"], main div[role="button"] > * {
   max-width: 32rem;
 }
 
+/* ---------- Live-price glow (GlowPrice.tsx) ----------
+   แฟลชพื้นหลังเขียว (ขึ้น) / แดง (ลง) แล้วเฟดออก ~1s — ยิงเฉพาะตอน quote
+   สด (open + !stale + age ≤ 10s) คอมโพเนนต์เป็นคน gate เอง
+   (stale/demo/closed = static ไม่ใส่คลาสนี้)
+   หมายเหตุ: global prefers-reduced-motion ด้านล่างฆ่า animation ให้อยู่แล้ว
+   + คอมโพเนนต์สลับเป็น plain text-profit/text-loss เมื่อ matchMedia ตรง */
+@keyframes glow-price-up {
+  0% { background-color: rgba(48, 209, 88, 0.45); }
+  100% { background-color: transparent; }
+}
+@keyframes glow-price-down {
+  0% { background-color: rgba(255, 69, 58, 0.45); }
+  100% { background-color: transparent; }
+}
+.glow-up {
+  animation: glow-price-up 1s ease-out;
+  border-radius: 0.375rem;
+}
+.glow-down {
+  animation: glow-price-down 1s ease-out;
+  border-radius: 0.375rem;
+}
+
 /* หมายเหตุ: .animate-pulse (Tailwind) ใช้เป็น loading indicator หลายจุด — ไม่ override */
 
 /* เคารพการตั้งค่าลด motion ของ OS */

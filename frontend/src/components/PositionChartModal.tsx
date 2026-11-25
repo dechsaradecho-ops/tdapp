@@ -178,6 +178,7 @@ export default function PositionChartModal({ position, onClose }: {
           )}
           {candles !== null && candles.length > 0 && (
             <>
+              {/* GLOW-AUDIT: snapshot ตอนเปิด modal (ไม่มี poll ใน modal) — static โดยเจตนา */}
               <CandleChart candles={candles} entry={p.entry_price}
                 sl={p.stop_loss} tp={p.take_profit} current={p.current_price} />
               <div className="flex flex-wrap gap-x-4 gap-y-1 px-1 pb-1 text-sm text-slate-300">

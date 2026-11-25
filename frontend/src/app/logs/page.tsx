@@ -1295,6 +1295,7 @@ export default function LogsPage() {
             {Object.entries(testResult.prices).map(([asset, price]) => (
               <div key={asset} className="bg-slate-800/60 rounded px-3 py-2">
                 <p className="text-xs text-slate-500">{asset}</p>
+                {/* GLOW-AUDIT: ผลทดสอบ feed ครั้งเดียว (snapshot) — static โดยเจตนา */}
                 <p className="font-bold text-profit">{fmtNum(price, 4)}</p>
               </div>
             ))}
@@ -1578,6 +1579,7 @@ export default function LogsPage() {
                   <span className={`px-2 py-0.5 rounded ${statusBadge(l.status)}`}>{l.status}</span>
                 </td>
                 <td className="py-2 pr-3">{l.http_status ?? "—"}</td>
+                {/* GLOW-AUDIT: quote call log ย้อนหลัง — ราคา static ต่อแถวโดยเจตนา */}
                 <td className="py-2 pr-3 font-mono">{l.price != null ? fmtNum(l.price, 4) : "—"}</td>
                 <td className="py-2 pr-3 text-slate-400">{l.duration_ms ?? "—"}</td>
                 <td className="py-2 max-w-[200px] truncate" title={l.error ?? ""}><span className="text-loss">{l.error || "—"}</span></td>

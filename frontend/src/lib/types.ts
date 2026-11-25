@@ -770,6 +770,14 @@ export interface SignalProposal {
   // the card show live price next to entry so a stale entry is obvious.
   live_price?: number | null;
   feed_status?: QuoteFeedStatus | null;
+  // Freshness metadata (Task 4/5: biquote price-feed plan) — display-tick
+  // provenance for live_price from the SAME batch the route priced the
+  // card with. NOTE: price_source here is the DISPLAY source
+  // (biquote/yahoo_fallback/yahoo/daily/demo) — distinct from feed_source
+  // below, which is the snapshot feed the setup was judged on.
+  price_source?: string | null;
+  price_age_s?: number | null;
+  market_state?: string | null;
   // Pending-only: นาทีที่เหลือก่อนหมดอายุและระบบเริ่มประเมินใหม่ (TTL 30 นาที)
   expires_min_left?: number | null;
   // Explainability: ขั้นตอนคำนวณทีละขั้น (SL จาก ATR, TP จาก RR, ขนาดไม้,
@@ -1460,6 +1468,13 @@ export interface MonitorOpenPosition {
   r_multiple?: number | null;
   risk_amount?: number | null;
   price_source?: string | null;
+  // Freshness metadata (Task 4/5: biquote price-feed plan) — display-tick
+  // age/state for the mark, looked up from ONE fetch_display_prices batch
+  // per snapshot. price_source above keeps its legacy mark vocabulary
+  // ("spot"/"daily"/"broker"/"entry"); the display tick source lives only
+  // in DisplayQuote.source, not on the position.
+  price_age_s?: number | null;
+  market_state?: string | null;
   calc_notes?: string[] | null;
 }
 
