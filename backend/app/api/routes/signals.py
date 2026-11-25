@@ -33,22 +33,31 @@ class ApprovalRequest(BaseModel):
     approve: bool
 
 
-async def _live_prices(assets: list[str]) -> tuple[dict[str, float], QuoteFeedStatus | None]:
-    """Spot prices + feed health in one probe (prices feed the cards' live_price)."""
+async def _live_prices(
+    assets: list[str],
+) -> tuple[dict[str, float], dict[str, "quotes.DisplayQuote"],
+           QuoteFeedStatus | None]:
+    """Display prices + freshness meta + feed health in one batch.
+
+    Uses the display-only fetch_display_prices batch (Biquote-first, 2s TTL):
+    the returned meta dict carries the per-asset DisplayQuote (source / age /
+    market_state) the cards expose as price_source / price_age_s /
+    market_state. One batch per request — never one fetch per card.
+    """
     if not assets:
-        return {}, None
+        return {}, {}, None
     try:
-        prices, failures = await quotes.fetch_spot_prices(assets)
+        prices, meta, failures = await quotes.fetch_display_prices(assets)
     except Exception as exc:
-        prices, failures = {}, {a: str(exc) for a in assets}
+        prices, meta, failures = {}, {}, {a: str(exc) for a in assets}
     status = QuoteFeedStatus(
         state="ok" if not failures else "error",
-        source="exchangerate+yahoo",
+        source="biquote+yahoo",
         fetched_at=datetime.now(timezone.utc),
         failed_assets=sorted(failures),
         message="; ".join(failures[a] for a in sorted(failures))[:300],
     )
-    return prices, status
+    return prices, meta, status
 
 
 @router.get("/latest", response_model=list[SignalProposal])
@@ -94,7 +103,7 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             _parts = None
         if _parts and _parts[1] != "USD":
             _leg_assets.add(f"USD{_parts[1]}")
-    live_prices, feed = await _live_prices(
+    live_prices, live_meta, feed = await _live_prices(
         sorted({str(r.get("asset") or "").upper() for r in rows}
                | _leg_assets))
     # Fresh indicator snapshots for the snapshot gates (thesis + meta-filter)
@@ -380,6 +389,20 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
             else:
                 _diag_atr, _diag_method, _diag_feed, _diag_max = (
                     None, None, None, None)
+            # Freshness metadata for the card's live_price — looked up from
+            # the SAME display batch the route already priced every card
+            # from (no per-card fetch). Absent meta → neutral fallback,
+            # never raise. (price_source = display tick source;
+            # feed_source below = snapshot feed the verdict was judged on.)
+            _dq = live_meta.get(_eff_asset)
+            _meta_source = str(_dq.source) if _dq is not None else ""
+            try:
+                _meta_age = (float(_dq.age_seconds)
+                             if _dq is not None else None)
+            except (TypeError, ValueError):
+                _meta_age = None
+            _meta_state = (str(_dq.market_state)
+                           if _dq is not None and _dq.market_state else "open")
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
@@ -407,6 +430,9 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 order_blocked=order_block or None,
                 live_price=live_prices.get(str(r["asset"]).upper()),
                 feed_status=feed,
+                price_source=_meta_source,
+                price_age_s=_meta_age,
+                market_state=_meta_state,
                 calc_notes=calc_notes,
                 suggested_lots=_lots_card,
                 atr_pct=_diag_atr,

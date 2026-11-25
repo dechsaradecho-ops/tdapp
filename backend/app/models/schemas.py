@@ -235,6 +235,15 @@ class SignalProposal(BaseModel):
     # Live-price feed health for the page banner (set once per request, on
     # every card of the response — cards share the same fetch).
     feed_status: Optional[QuoteFeedStatus] = None
+    # --- Freshness metadata (Task 4: biquote price-feed plan) ----------------
+    # Display-tick provenance for live_price, from the SAME
+    # fetch_display_prices batch the route already priced the card from (no
+    # per-card fetch). NOTE: price_source here is the DISPLAY tick source
+    # (biquote/yahoo_fallback/yahoo/...) — distinct from feed_source below,
+    # which is the snapshot/candle feed the scanner judged the setup on.
+    price_source: str = ""
+    price_age_s: Optional[float] = None
+    market_state: str = "open"  # "open" | "closed"
     # Pending-only: minutes remaining before this signal leaves the queue and
     # the system re-evaluates (signal_ttl_min, Settings page). Approved/expired cards
     # omit it (None) — no countdown needed once the fate is decided.
@@ -2615,6 +2624,12 @@ class MonitorOpenPosition(BaseModel):
     r_multiple: float = 0.0
     risk_amount: float = 0.0
     price_source: str = ""  # "live" (spot) | "daily" (daily-close fallback) | "broker" | "entry"
+    # --- Freshness metadata (Task 4: biquote price-feed plan) ----------------
+    # Display-tick age/state for the mark, from ONE fetch_display_prices
+    # batch per snapshot (looked up per position, never fetched per
+    # position). price_source above keeps its legacy vocabulary untouched.
+    price_age_s: Optional[float] = None
+    market_state: str = "open"  # "open" | "closed"
     calc_notes: list[str] = Field(default_factory=list)
 
 

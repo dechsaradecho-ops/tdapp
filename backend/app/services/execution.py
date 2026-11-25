@@ -2892,6 +2892,10 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
     # shows WHERE each price came from (spot / daily / broker / entry).
     spot_assets: set[str] = set()
     daily_assets: set[str] = set()
+    # Display freshness metadata (age/state per asset) — filled by ONE
+    # fetch_display_prices batch inside the open-rows block below.
+    from app.integrations.quotes import DisplayQuote as _DisplayQuote
+    display_meta: dict[str, "_DisplayQuote"] = {}
     if open_rows:
         from app.models.schemas import QuoteFeedStatus
         from app.integrations import quotes as quotes_mod
@@ -2940,6 +2944,23 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             message="; ".join(failures[a] for a in sorted(failures))[:300],
         )
 
+        # Display freshness metadata (age/state) for the marks above: ONE
+        # fetch_display_prices batch for all open assets, looked up per
+        # position below — never one fetch per position. Fail-soft {}: the
+        # position keeps its legacy price_source with age None, never raises.
+        # NOTE: price_source on the position keeps its legacy mark-provenance
+        # vocabulary ("spot"/"daily"/"broker"/"entry"); the display tick
+        # source lives only in DisplayQuote.source, not on the position.
+        try:
+            _d_prices, _d_meta, _d_failures = (
+                await quotes_mod.fetch_display_prices(assets))
+            if isinstance(_d_meta, dict):
+                display_meta = {str(k).upper(): v
+                                for k, v in _d_meta.items()}
+        except Exception as exc:
+            log.warning("monitor: display freshness unavailable: %s", exc)
+            display_meta = {}
+
     def mark_for(row: dict) -> tuple[float, str]:
         """Resolve the best mark + WHERE it came from.
 
@@ -2961,6 +2982,24 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         if ticket and ticket in marks:
             return marks[ticket], "broker"
         return float(row.get("entry_price") or 0), "entry"  # unknown → flat, no guess
+
+    def _pos_age_s(row: dict) -> float | None:
+        """Display-tick age for one position (None when the batch had none)."""
+        try:
+            dq = display_meta.get(str(row.get("asset") or "").upper())
+            return float(dq.age_seconds) if dq is not None else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    def _pos_market_state(row: dict) -> str:
+        """Display-tick market state for one position ("open" fallback)."""
+        try:
+            dq = display_meta.get(str(row.get("asset") or "").upper())
+            if dq is not None and dq.market_state:
+                return str(dq.market_state)
+        except AttributeError:
+            pass
+        return "open"
 
     # ---- Smart Exit analysis (per-position exit_info) --------------------
     # Read-only evaluation so the monitor shows the same score/quality/
@@ -3172,6 +3211,10 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
             r_multiple=r_multiple,
             risk_amount=risk_amount,
             price_source=price_source,
+            # Freshness of the mark from the display batch above (looked
+            # up, never fetched per position). Absent → None/"open".
+            price_age_s=_pos_age_s(r),
+            market_state=_pos_market_state(r),
             calc_notes=calc_notes,
         ))
 

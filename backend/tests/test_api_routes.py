@@ -389,7 +389,7 @@ class TestSignalsLatestTiers:
         async def boom(assets):
             raise AssertionError("live fetch must not run for an empty queue")
         monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots", boom)
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
                             boom)
         body = (await call("GET", "/api/signals/latest")).json()
         assert body == []
@@ -537,8 +537,8 @@ class TestSignalsLatestTiers:
         from app.services import execution as execution_mod
 
         async def no_spot(assets, **_kw):
-            return {}, {}
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+            return {}, {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
                             no_spot)
         monkeypatch.setattr(execution_mod, "is_market_closed",
                             lambda *a, **k: False)
@@ -579,8 +579,8 @@ class TestSignalsLatestTiers:
         from app.services import execution as execution_mod
 
         async def no_spot(assets, **_kw):
-            return {}, {}
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+            return {}, {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
                             no_spot)
         monkeypatch.setattr(execution_mod, "is_market_closed",
                             lambda *a, **k: False)
@@ -614,8 +614,8 @@ class TestSignalsLatestTiers:
         from app.services import execution as execution_mod
 
         async def no_spot(assets, **_kw):
-            return {}, {}
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+            return {}, {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
                             no_spot)
         monkeypatch.setattr(execution_mod, "is_market_closed",
                             lambda *a, **k: False)
@@ -655,9 +655,14 @@ class TestSignalsLatestTiers:
         set_state(db)
 
         async def fake_spot(assets, **_kw):
-            return {"XAUUSD": 4517.0}, {}
+            from app.integrations.quotes import DisplayQuote
+            return ({"XAUUSD": 4517.0},
+                    {"XAUUSD": DisplayQuote(price=4517.0, source="biquote",
+                                            age_seconds=1.0,
+                                            market_state="open", stale=False)},
+                    {})
 
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices", fake_spot)
         body = (await call("GET", "/api/signals/latest")).json()
         assert body[0]["live_price"] == 4517.0
         assert body[0]["feed_status"]["state"] == "ok"
@@ -676,9 +681,9 @@ class TestSignalsLatestTiers:
         set_state(db)
 
         async def dead_spot(assets, **_kw):
-            return {}, {"XAUUSD": "timeout"}
+            return {}, {}, {"XAUUSD": "timeout"}
 
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", dead_spot)
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices", dead_spot)
         body = (await call("GET", "/api/signals/latest")).json()
         assert body[0]["live_price"] is None
         assert body[0]["feed_status"]["state"] == "error"
@@ -691,8 +696,8 @@ class TestSignalsLatestTiers:
         from app.models.schemas import AppSettings
 
         async def no_spot(assets, **_kw):
-            return {}, {}
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", no_spot)
+            return {}, {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices", no_spot)
         monkeypatch.setattr(
             signals_route, "get_app_settings",
             lambda _db: AppSettings(sl_distance_mode="short"))
@@ -725,8 +730,8 @@ class TestSignalsLatestTiers:
         from app.models.schemas import AppSettings
 
         async def no_spot(assets, **_kw):
-            return {}, {}
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", no_spot)
+            return {}, {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices", no_spot)
         monkeypatch.setattr(
             signals_route, "get_app_settings",
             lambda _db: AppSettings(sl_distance_mode="long"))
@@ -750,8 +755,8 @@ class TestSignalsLatestTiers:
         from app.models.schemas import AppSettings
 
         async def no_spot(assets, **_kw):
-            return {}, {}
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices", no_spot)
+            return {}, {}, {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices", no_spot)
         monkeypatch.setattr(
             signals_route, "get_app_settings",
             lambda _db: AppSettings(capital=200.0, risk_per_trade_pct=4.0,
@@ -799,11 +804,11 @@ class TestSignalsLatestTiers:
             return {a: dict(snap, asset=a) for a in assets}
 
         async def no_spot(assets, **_kw):
-            return {}, {}
+            return {}, {}, {}
 
         monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
                             fake_snaps)
-        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+        monkeypatch.setattr(signals_route.quotes, "fetch_display_prices",
                             no_spot)
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={"signals": [
@@ -2824,3 +2829,90 @@ class TestGoldManualParity:
         assert zero_blocked["status"] == "blocked"
         assert placed["n"] == 0
         assert app.state.db.rows.get("paper_trades", []) == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — freshness metadata on display responses
+# ---------------------------------------------------------------------------
+class TestFreshnessMetadata:
+    """Every live price carries price_age_s / price_source / market_state.
+
+    No live network: fetch_display_prices is monkeypatched (one batch per
+    route, no per-card fetch).
+    """
+
+    def _stub_display(self, monkeypatch, target, source="biquote",
+                      age=1.5, state="open"):
+        from app.integrations.quotes import DisplayQuote
+
+        async def fake_display(assets, **_kw):
+            prices, meta = {}, {}
+            for a in (assets or []):
+                key = str(a).upper()
+                prices[key] = 1.0850
+                meta[key] = DisplayQuote(
+                    price=1.0850, source=source, age_seconds=age,
+                    market_state=state, stale=False)
+            return prices, meta, {}
+
+        monkeypatch.setattr(target, "fetch_display_prices", fake_display)
+
+    @pytest.mark.asyncio
+    async def test_live_prices_carry_freshness_metadata(self, monkeypatch):
+        import app.api.routes.signals as signals_route
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "EURUSD", "direction": "buy",
+             "confidence": 80.0, "entry": 1.0850, "stop_loss": 1.0800,
+             "take_profit": 1.0950, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()},
+        ]})
+        set_state(db)
+        self._stub_display(monkeypatch, signals_route.quotes)
+
+        async def empty_snaps(assets, **_kw):
+            return {}
+        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
+                            empty_snaps)
+        body = (await call("GET", "/api/signals/latest")).json()
+        assert len(body) == 1
+        for card in body:
+            assert card["price_source"] in (
+                "biquote", "yahoo_fallback", "yahoo", "daily", "demo")
+            assert (isinstance(card["price_age_s"], (int, float))
+                    or card["price_age_s"] is None)
+            assert card["market_state"] in ("open", "closed")
+
+    @pytest.mark.asyncio
+    async def test_monitor_positions_carry_freshness_metadata(
+            self, monkeypatch):
+        from app.services import execution as execution_mod
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"paper_trades": [
+            {"id": "row-1", "ticket": "PAPER-000001", "asset": "EURUSD",
+             "direction": "buy", "volume": 0.01, "entry_price": 1.08500,
+             "stop_loss": 1.08000, "take_profit": 1.09500,
+             "status": "open", "source": "auto",
+             "created_at": now.isoformat()},
+        ]})
+        set_state(db)
+
+        async def fake_spot(assets, **_kw):
+            return {"EURUSD": 1.0860}, {}
+        self._stub_display(monkeypatch, execution_mod.quotes)
+
+        async def empty_snaps(assets, **_kw):
+            return {}
+        monkeypatch.setattr(execution_mod.quotes, "fetch_spot_prices",
+                            fake_spot)
+        monkeypatch.setattr(execution_mod.quotes, "fetch_all_snapshots",
+                            empty_snaps)
+        body = (await call("GET", "/api/trading/monitor")).json()
+        assert len(body["open_positions"]) == 1
+        pos = body["open_positions"][0]
+        # Ruling A: monitor reuses its legacy price_source vocabulary —
+        # only price_age_s / market_state are new here.
+        assert pos["price_source"] in ("spot", "daily", "broker", "entry")
+        assert (isinstance(pos["price_age_s"], (int, float))
+                or pos["price_age_s"] is None)
+        assert pos["market_state"] in ("open", "closed")
