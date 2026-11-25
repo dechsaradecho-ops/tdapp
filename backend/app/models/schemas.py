@@ -3064,8 +3064,8 @@ class AppSettings(BaseModel):
     # Auto-refresh intervals (seconds) for the monitor / signals pages.
     # 0 = auto-refresh off. Stored in trading_settings so the choice follows
     # the account across devices instead of living in one browser.
-    monitor_refresh_sec: int = 10
-    signals_refresh_sec: int = 0
+    monitor_refresh_sec: int = 2
+    signals_refresh_sec: int = 2
 
     # ---- LINE notification categories (per-category on/off) ----------------
     # Each boolean gates one category of LINE push. NotificationService.notify

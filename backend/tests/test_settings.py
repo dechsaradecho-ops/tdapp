@@ -122,9 +122,9 @@ def test_app_settings_defaults_match_engine_defaults():
     assert s.news_block_minutes == 30
     assert s.correlation_cap == 80.0
     assert s.risk_profile == RiskProfile.moderate
-    # UI prefs (moved out of localStorage 2026-09-06)
-    assert s.monitor_refresh_sec == 10
-    assert s.signals_refresh_sec == 0
+    # UI prefs (moved out of localStorage 2026-09-06; 2s display cadence 2026-11-25)
+    assert s.monitor_refresh_sec == 2
+    assert s.signals_refresh_sec == 2
     # moderate profile limits unchanged
     mod = FrequencyEngine(RiskProfile.moderate).limits()
     assert (mod.max_trades_daily, mod.max_trades_weekly,
@@ -216,8 +216,8 @@ def test_settings_fields_accepted_by_put_endpoint():
     AppSettings → _FIELDS auto-includes them → PUT /api/settings persists
     them. 0 values must survive the `v is not None` filter (ปิด = 0)."""
     s = AppSettings()
-    assert s.monitor_refresh_sec == 10
-    assert s.signals_refresh_sec == 0
+    assert s.monitor_refresh_sec == 2
+    assert s.signals_refresh_sec == 2
 
 
 # ---------------------------------------------------------------------------
