@@ -2841,8 +2841,14 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                     partial_realized_pnl, db, ticket)
 
         _partial_vals = await asyncio.gather(
-            *(_one_partial(t) for t in _missing_tickets))
-        _partial_cache = dict(zip(_missing_tickets, _partial_vals))
+            *(_one_partial(t) for t in _missing_tickets),
+            return_exceptions=True)
+        # One ticket's read failing must not 500 the whole monitor: failed
+        # lookups degrade to None (row excluded from realized stats, same as
+        # "no slices found").
+        _partial_cache = {
+            t: (None if isinstance(v, Exception) else v)
+            for t, v in zip(_missing_tickets, _partial_vals)}
 
     def _realized_pnl(r: dict) -> float | None:
         """Realized PnL of a journal row, falling back to the sum of its
@@ -3182,15 +3188,20 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         except Exception:
             return None
 
-    # Quote→USD rate map for unrealized PnL below. Seed with the marks in
-    # hand PLUS the conversion legs already priced by the single display
-    # batch above, so the helper fires no spot batch of its own. Legs whose
-    # display source is DAILY are NOT seeded (a daily rate must never price
-    # a journal entry — same rule the helper enforces on its own fetches);
-    # those stay absent and the helper fail-closes as before. Missing rate
-    # → None (fail-closed); never a wrong-currency dollar figure.
+    # Quote→USD rate map for unrealized PnL below. Seed ONLY live-spot
+    # trade marks (a in spot_assets) PLUS the conversion legs already priced
+    # by the single display batch above, so the helper fires no spot batch
+    # of its own. Daily-fallback and broker-book marks are DISPLAY marks,
+    # not PnL inputs: fetch_pnl_rates trusts seeds unconditionally, so a
+    # seeded daily USDJPY would price uPnL via 1/daily (fail-closed-on-daily
+    # violated). Legs whose display source is DAILY are likewise NOT seeded
+    # (a daily rate must never price a journal entry — same rule the helper
+    # enforces on its own fetches); those stay absent and the helper
+    # fail-closes as before. Missing rate → None (fail-closed); never a
+    # wrong-currency dollar figure.
     _seed = {a: float(marks["asset:" + a])
-             for a in _trade_assets if marks.get("asset:" + a)}
+             for a in _trade_assets
+             if a in spot_assets and marks.get("asset:" + a)}
     for _leg in _conv_legs:
         if _leg in _seed:
             continue
