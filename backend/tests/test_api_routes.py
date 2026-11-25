@@ -776,6 +776,49 @@ class TestSignalsLatestTiers:
             round(1.10000 - 0.25 * 0.00400, 5), abs=1e-9)
         assert any("รัด" in n for n in card["calc_notes"])
 
+    @pytest.mark.asyncio
+    async def test_gold_signal_card_exposes_atr_policy(self, monkeypatch):
+        """Task 9: XAUUSD cards expose ATR policy diagnostics (Biquote-first
+        gold data, Wilder ATR14, gold 3.5 threshold) for the SignalCard badge."""
+        import app.api.routes.signals as signals_route
+
+        snap = {
+            "asset": "XAUUSD", "price": 2400.0,
+            "ema_fast": 2390.0, "ema_slow": 2410.0,
+            "adx": 30.0, "supertrend_dir": -1,
+            "rsi": 50.0, "macd_hist": -0.5,
+            "atr_pct": 2.47, "atr_method": "wilder",
+            "volatility_index": 19.8, "news_sentiment": 0.0,
+            "high_impact_event": False,
+            "breakout_state": 2, "breakout_level": 2380.0,
+            "feed_source": "biquote", "price_source": "biquote",
+            "ohlc_source": "biquote", "trusted": True,
+        }
+
+        async def fake_snaps(assets, **_kw):
+            return {a: dict(snap, asset=a) for a in assets}
+
+        async def no_spot(assets, **_kw):
+            return {}, {}
+
+        monkeypatch.setattr(signals_route.quotes, "fetch_all_snapshots",
+                            fake_snaps)
+        monkeypatch.setattr(signals_route.quotes, "fetch_spot_prices",
+                            no_spot)
+        now = datetime.now(timezone.utc)
+        db = FakeDatabase(rows={"signals": [
+            {"id": "p1", "asset": "XAUUSD", "direction": "sell",
+             "confidence": 75.0, "entry": 2400.0, "stop_loss": 2410.0,
+             "take_profit": 2380.0, "expected_rr": 2.0,
+             "approval": "pending", "created_at": now.isoformat()}],
+        })
+        set_state(db)
+        card = (await call("GET", "/api/signals/latest")).json()[0]
+        assert card["asset"] == "XAUUSD"
+        assert card["atr_method"] == "wilder"
+        assert card["max_atr_pct"] == 3.5
+        assert card["feed_source"] == "biquote"
+
 
 # ---------------------------------------------------------------------------
 # /api/signals/approve — write path

@@ -778,6 +778,12 @@ export interface SignalProposal {
   // ขนาดไม้ (lots) ที่ระบบจะเปิดจริง — คำนวณ read-time ด้วยสูตรเดียวกับ
   // execute_signal (risk_to_lot + min_lot floor บน effective SL)
   suggested_lots?: number | null;
+  // Gold ATR policy diagnostics (Task 9) — provenance of the snapshot the
+  // card was judged against; null when the route had no snapshot.
+  atr_pct?: number | null;
+  atr_method?: string | null;
+  feed_source?: string | null;
+  max_atr_pct?: number | null;
 }
 
 // ---------- Extended Trading System ----------

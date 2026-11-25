@@ -249,6 +249,16 @@ class SignalProposal(BaseModel):
     # so the card shows the lots the order will actually open (e.g. 0.02).
     # None when entry/SL missing or for non-DB proposals that never sized.
     suggested_lots: Optional[float] = None
+    # --- Gold ATR policy diagnostics (Task 9, diagnostics-only) -----------
+    # Provenance of the fresh snapshot this card was judged against:
+    # atr_pct (Wilder ATR14 % for XAUUSD, simple ATR14 % for FX),
+    # atr_method ("wilder"/"simple"), feed_source ("biquote"/...),
+    # max_atr_pct (per-asset volatility ceiling: gold 3.5, FX 2.5).
+    # None when the route had no snapshot — never a new feed fetch.
+    atr_pct: Optional[float] = None
+    atr_method: Optional[str] = None
+    feed_source: Optional[str] = None
+    max_atr_pct: Optional[float] = None
 
 
 class TradeRecord(BaseModel):

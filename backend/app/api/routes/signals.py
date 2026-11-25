@@ -14,6 +14,7 @@ from app.models.schemas import (FinalDecision, G, QuoteFeedStatus, S, SignalProp
                                 effective_min_lot,
                                 effective_sl_tp, effective_spread,
                                 risk_to_lot_for, risk_usd_of_distance)
+from app.core.gold_policy import effective_max_atr_pct
 from app.services import execution
 from app.services import signal_log
 from app.services.execution import (
@@ -358,6 +359,27 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                     order_block = ("ไม่ได้เปิดออเดอร์นี้เพราะ "
                                    "ตรวจสอบเงื่อนไขไม่สำเร็จ — "
                                    "รอดูรอบถัดไป")
+            # Task 9 diagnostics (read-only): ATR policy provenance for the
+            # gold badge — from the SAME fresh snapshot the preview above
+            # judged (never a new feed fetch). Absent snapshot → all None.
+            _snap = snapshots.get(_eff_asset)
+            if _snap:
+                try:
+                    _diag_atr = float(_snap.get("atr_pct")) \
+                        if _snap.get("atr_pct") is not None else None
+                except (TypeError, ValueError):
+                    _diag_atr = None
+                _diag_method: str | None = (
+                    _snap.get("atr_method") or "simple")
+                _diag_feed: str | None = _snap.get("feed_source") or ""
+                try:
+                    _diag_max: float | None = effective_max_atr_pct(
+                        s, _eff_asset)
+                except Exception:
+                    _diag_max = None
+            else:
+                _diag_atr, _diag_method, _diag_feed, _diag_max = (
+                    None, None, None, None)
             proposals.append(SignalProposal(
                 asset=r["asset"], direction=r["direction"].upper(),
                 confidence=float(r["confidence"]), entry=entry,
@@ -387,6 +409,10 @@ async def latest_signals(request: Request) -> list[SignalProposal]:
                 feed_status=feed,
                 calc_notes=calc_notes,
                 suggested_lots=_lots_card,
+                atr_pct=_diag_atr,
+                atr_method=_diag_method,
+                feed_source=_diag_feed,
+                max_atr_pct=_diag_max,
             ))
             # Countdown for pending cards: how long until this signal ages out
             # of the queue (signal_ttl_min) and the scanner re-evaluates the setup.

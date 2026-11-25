@@ -70,6 +70,13 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 - **Left-behind primary** ("no position left behind", migration 032) — กำไร < `no_behind_min_r` (0.5R) และอายุ > `no_behind_hold_mult` (1.75×) × ค่าเฉลี่ยถือครอง (floor `no_behind_min_days` 2 วัน) = ปิดเอาทุนคืน (ยิงก่อน time-stop ~1–2 วัน)
 - **GoalEngine / PortfolioEngine** — ประเมินโอกาสถึงเป้า (best/normal/worst case + คำเตือนความเสี่ยง), แนะนำสัดส่วนพอร์ต
 
+### Gold policy (XAUUSD)
+- Biquote-first data: trusted live quote + daily mid-price OHLC (fallback Twelve Data → Yahoo degraded, flagged `trusted: false`)
+- True EMA200 (trend) + Wilder ATR14 (14-period, closed UTC daily bars); FX keeps EMA100 + simple ATR14
+- SELL = trend-following (bearish EMA + ADX ≥ 25); BUY = breakout-only when `gold_breakout_only` (active breakout/retest of 20-bar high)
+- Volatility ceiling `gold_max_atr_pct` (default 3.5, FX 2.5) — ATR above max blocks new gold orders; **0 = ห้ามเทรดทอง** (blocks every XAUUSD order)
+- Signal cards expose `atr_pct` / `atr_method` / `feed_source` / `max_atr_pct` diagnostics; XAUUSD badge shows `Wilder ATR14 X% / max Y% · Source` or the blocked reason
+
 ## 6. Position management (guard)
 
 - **Breakeven** (`breakeven_trigger_r` default 1.0R) — ถึงเป้า ย้าย SL มาทุน (0 = ปิด)

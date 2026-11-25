@@ -104,6 +104,20 @@ export default function SignalCard({ signal, orderMode }: { signal: SignalPropos
           )}
         </div>
       </div>
+      {/* Gold ATR policy diagnostics (Task 9) — gold-only, one line: the
+          blocked reason when present, else Wilder ATR14 X% / max Y% · Source */}
+      {signal.asset === "XAUUSD" && (signal.order_blocked || signal.atr_pct != null) && (
+        <div className="mb-2 truncate text-[11px] text-slate-400">
+          {signal.order_blocked ?? (() => {
+            const m = (signal.atr_method || "simple").toLowerCase();
+            const mLabel = m === "wilder" ? "Wilder" : m.charAt(0).toUpperCase() + m.slice(1);
+            const src = signal.feed_source
+              ? signal.feed_source.charAt(0).toUpperCase() + signal.feed_source.slice(1)
+              : "—";
+            return `${mLabel} ATR14 ${signal.atr_pct}% / max ${signal.max_atr_pct}% · ${src}`;
+          })()}
+        </div>
+      )}
       {/* SL/TP ด้านบนคือค่า effective (tier + SL cap = ที่ระบบจะยิงจริง) — 3 ระดับล่างรวมในพับเดียว */}
       <SignalLevels signal={signal} />
       {/* เหตุผลจัดหมวดหมู่ (เทรนด์/โมเมนตัม/ผันผวน/ข่าว) — แต่ละหมวด toggle พับ/กางได้ */}
