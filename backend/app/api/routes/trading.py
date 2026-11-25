@@ -42,6 +42,8 @@ from app.models.schemas import (
     analyze_journal,
     analyze_pnl_breakdown,
     effective_min_confidence,
+    effective_min_lot,
+    effective_sl_tp,
     effective_spread,
     G,
     S,
@@ -273,6 +275,44 @@ async def extended_open(payload: ExtendedOpenRequest,
     # Reuse the live Extended computation (top scorer + real proposal +
     # officer + final decision) so the button can never drift from the box.
     body = await extended_analysis(request, asset=payload.asset)
+
+    # Task 7: manual gold parity — re-evaluate the same gold gates here even
+    # though the analysis above recomputed them; never trust the displayed
+    # plan alone (disabled / untrusted-quote blocks before any leg check).
+    if str(body.get("asset") or (payload.asset or "")).upper() == "XAUUSD":
+        _s_open = _settings(request)
+        try:
+            _thr_open = float(G(_s_open, "gold_max_atr_pct",
+                                zero_as_missing=False))
+        except (TypeError, ValueError):
+            _thr_open = 3.5
+        if _thr_open == 0:
+            _reason_open = ("gold_trading_disabled: ปิดการเทรดทอง "
+                            "(gold_max_atr_pct=0) — งดเปิดออเดอร์ XAUUSD ทุกกรณี")
+            signal_log.log_event(
+                db=db, event="order_blocked", asset="XAUUSD",
+                direction="", source="extended", reason=_reason_open)
+            return {"ok": False, "status": "blocked",
+                    "final_decision": str(body.get("final_decision") or ""),
+                    "rejects": [_reason_open],
+                    "message": f"ไม่เปิดออเดอร์ — {_reason_open}"}
+        try:
+            from app.integrations import quotes as _quotes_open
+            _tq_open = _quotes_open.trusted_quote("XAUUSD")
+        except Exception:
+            _tq_open = None
+        if _tq_open is None:
+            _reason_open = ("gold_quote_unavailable: ไม่มีราคา trusted สำหรับ "
+                            "XAUUSD (Biquote/Twelve Data ใช้ไม่ได้) — "
+                            "งดเปิดออเดอร์ทองจากแหล่งเสื่อม")
+            signal_log.log_event(
+                db=db, event="order_blocked", asset="XAUUSD",
+                direction="", source="extended", reason=_reason_open)
+            return {"ok": False, "status": "blocked",
+                    "final_decision": str(body.get("final_decision") or ""),
+                    "rejects": [_reason_open],
+                    "message": f"ไม่เปิดออเดอร์ — {_reason_open}"}
+
     final = str(body.get("final_decision") or "")
     if final.startswith("WAIT"):
         signal_log.log_event(
@@ -374,6 +414,27 @@ async def extended_open(payload: ExtendedOpenRequest,
             pass
 
     s = _settings(request)
+    # Task 7: gold first-leg floor — an explicit plan-leg volume is exempt
+    # from risk re-sizing, but it must still clear the gold minimum lot; a
+    # 0-lot (or sub-floor) leg is a plan defect and blocks, never re-sized.
+    if str(asset or "").upper() == "XAUUSD":
+        try:
+            _open_floor = float(effective_min_lot(s, "XAUUSD"))
+        except Exception:
+            _open_floor = 0.01
+        if 0 < plan_volume < _open_floor:
+            _reason_floor = (
+                f"แผนแสดง lot {plan_volume:g} สำหรับขา Market ต่ำกว่า "
+                f"lot เล็กสุด {_open_floor:g} (ทุน/ความเสี่ยงเล็กเกินไป) "
+                "— ปรับทุนหรือ risk_per_trade_pct ก่อนเปิดออเดอร์ทอง")
+            signal_log.log_event(
+                db=db, event="order_blocked", asset=asset,
+                direction=direction, source="extended",
+                reason=_reason_floor)
+            return {"ok": False, "status": "blocked",
+                    "final_decision": final,
+                    "rejects": [_reason_floor],
+                    "message": f"ไม่เปิดออเดอร์ — {_reason_floor}"}
     broker = request.app.state.broker
     notifier = NotificationService(db, request.app.state.line)
     report = await execution.execute_signal(
@@ -1920,6 +1981,34 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
                 # overwrites both confidence and regime anyway.
                 confidence, regime, opportunity = 0.0, "sideway", 0.0
 
+    # --- Task 7: gold manual parity (execution-equivalent inputs) -----------
+    # XAUUSD overrides the snapshot/quote inputs with the trusted gold path
+    # (Biquote-first quote, true EMA200/Wilder snapshot, gold threshold)
+    # before proposal/frequency/officer/final-decision. Disabled (threshold
+    # 0) or a missing trusted quote blocks with WAIT; the returned
+    # confidence/opportunity/direction/regime/final_decision/order_strategy
+    # then match execution-equivalent inputs. Non-gold path untouched.
+    _gold_thr: float | None = None
+    _gold_block = ""
+    if str(asset or "").upper() == "XAUUSD":
+        try:
+            _gold_thr = float(G(s, "gold_max_atr_pct",
+                                zero_as_missing=False))
+        except (TypeError, ValueError):
+            _gold_thr = 3.5
+        if _gold_thr == 0:
+            _gold_block = ("gold_trading_disabled: ปิดการเทรดทอง "
+                           "(gold_max_atr_pct=0) — งดเปิดออเดอร์ XAUUSD ทุกกรณี")
+        else:
+            try:
+                from app.integrations import quotes as _quotes_gold
+                _gold_tq = _quotes_gold.trusted_quote("XAUUSD")
+            except Exception:
+                _gold_tq = None
+            if _gold_tq is None:
+                _gold_block = ("gold_quote_unavailable: ไม่มีราคา trusted "
+                               "สำหรับ XAUUSD — งดเปิดออเดอร์ทองจากแหล่งเสื่อม")
+
     # Frequency aligned with the execution gate (same counting + bull_trend
     # bypass + per-asset quality bar) so FINAL can reach TRADE on a clean
     # trend top-scorer. The old get_frequency() defaulted regime=sideway →
@@ -1959,6 +2048,10 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
     except Exception:
         _snap = {}
     if _snap:
+        if (str(asset).upper() == "XAUUSD" and not _gold_block
+                and _snap.get("trusted") is False):
+            _gold_block = ("gold_feed_degraded: ฟีดทองอยู่ในโหมด degraded "
+                           "(display-only) — งดเปิดออเดอร์ทอง")
         try:
             _ind = IndicatorSnapshot(**{**_snap, "source": "live"})
             _opp = engine.opportunity_score(_ind)
@@ -1980,7 +2073,16 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
             # P1-3: opportunity is the SETUP-QUALITY axis (independent of
             # evidence-confidence). Keep it separate for the officer/FINAL gate.
             opportunity = float(_opp.score or 0)
-            regime = _regime_of(_ind)
+            if str(asset).upper() == "XAUUSD" and _gold_thr:
+                # Gold threshold drives the regime (same ceiling execution
+                # judges) and an ATR breach blocks manual with WAIT.
+                regime = _regime_of(_ind, max_atr_pct=_gold_thr)
+                if float(_ind.atr_pct or 0) > _gold_thr and not _gold_block:
+                    _gold_block = (
+                        f"gold_atr_exceeded: ATR {float(_ind.atr_pct or 0):g}% "
+                        f"เกินเพดาน {_gold_thr:g}% — งดเปิดออเดอร์ทองช่วงผันผวนสูง")
+            else:
+                regime = _regime_of(_ind)
         except Exception:
             pass
     if not _entry:
@@ -2003,6 +2105,19 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
             _rr = max(0.5, float(G(s, "rr_target")))
             _sl = _spot - _sign * _dist
             _tp = _spot + _sign * _dist * _rr
+    if str(asset).upper() == "XAUUSD" and _entry and _sl:
+        # Same SL/TP cap + sizing math as execution (apply_cap=True: the
+        # manual plan carries no reviewed leg volume yet).
+        try:
+            _eff_sl, _eff_tp, _eff_dist, _tiered, _capped = effective_sl_tp(
+                s, _entry, float(_sl), float(_tp or 0),
+                asset, _direction, apply_cap=True)
+            if abs(_eff_dist - abs(float(_entry) - float(_sl))) > 1e-12:
+                _sl = _eff_sl
+                if _tp:
+                    _tp = _eff_tp
+        except Exception:
+            pass
     plan = OrderStrategyEngine().build_plan(
         asset=asset, direction=_direction,  # type: ignore[arg-type]
         entry=_entry or 1.0, stop_loss=_sl or (_entry or 1.0) * 0.99,
@@ -2027,6 +2142,40 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
         correlation_cap=s.correlation_cap,
         min_confidence=effective_min_confidence(s, asset),
         min_opportunity=s.min_opportunity)
+    if str(asset).upper() == "XAUUSD" and not _gold_block:
+        # No TRADE + zero-lot combination: the first leg is what
+        # extended_open would fire — a non-market leg or a sub-floor lot is
+        # a plan defect and forces WAIT (never fall back to risk re-sizing).
+        _legs = list(getattr(plan, "entries", None) or [])
+        _first = _legs[0] if _legs else None
+        _otype = ""
+        if _first is not None:
+            try:
+                _otype = str(_first.order_type.value or "").lower()
+            except Exception:
+                _otype = str(getattr(_first, "order_type", "") or "").lower()
+        if _otype != "market":
+            _gold_block = (f"ขาแรกเป็น {_otype or 'unknown'} ไม่ใช่ market — "
+                           "แผน breakout (sideway) ให้รอ trigger ไม่ยิง market แทน")
+        else:
+            try:
+                _lot0 = float(_first.lot or 0)
+            except (TypeError, ValueError):
+                _lot0 = 0.0
+            try:
+                _floor = float(effective_min_lot(s, "XAUUSD"))
+            except Exception:
+                _floor = 0.01
+            if _lot0 <= 0 or _lot0 < _floor:
+                _gold_block = (
+                    f"แผนแสดง lot {_lot0:g} สำหรับขา Market ต่ำกว่า lot "
+                    f"เล็กสุด {_floor:g} (ทุน/ความเสี่ยงเล็กเกินไป) — ปรับทุนหรือ "
+                    "risk_per_trade_pct ก่อน เพื่อไม่ให้ออเดอร์เปิดเล็กกว่าขั้นต่ำ")
+
+    _final_extended = _final_decision(officer, news, ks, confidence,
+                                        asset, s, opportunity=opportunity)
+    if _gold_block:
+        _final_extended = f"WAIT — {_gold_block}"
 
     # backtest leg — LIVE run for the same top scorer (fail-soft). The old
     # text told the user to POST manually, so Extended never showed a real
@@ -2089,8 +2238,7 @@ async def extended_analysis(request: Request, asset: str | None = None) -> dict:
         "backtest_result": _bt_text,
         "paper_trading_status": f"readiness {paper.live_readiness_score}/100 — {paper.ai_coaching}",
         "kill_switch_status": ks.message,
-        "final_decision": _final_decision(officer, news, ks, confidence, asset, s,
-                                          opportunity=opportunity),
+        "final_decision": _final_extended,
         "context_block": ctx,
     }
 

@@ -2641,3 +2641,143 @@ class TestRehydrateBook:
         body = (await call("POST", "/api/system/rehydrate-book")).json()
         assert body["verdict"] == "fail"
         assert "SUPABASE_URL" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Manual ORDER STRATEGY parity (gold-aware extended analysis/open)
+# ---------------------------------------------------------------------------
+class TestGoldManualParity:
+    """extended_analysis/extended_open must match execution policy for XAUUSD:
+    trusted Biquote-first quote, gold threshold, true-EMA200 snapshot and the
+    same SL/TP cap + sizing as execution — never TRADE + zero-lot."""
+
+    def _gold_snap(self, **over) -> dict:
+        snap = {
+            "asset": "XAUUSD", "price": 2400.0,
+            "ema_fast": 2390.0, "ema_slow": 2410.0,  # bearish -> SELL
+            "adx": 30.0, "supertrend_dir": -1,
+            "rsi": 50.0, "macd_hist": -0.5,
+            "atr_pct": 2.47,  # below the gold 3.5 threshold
+            "atr_threshold_pct": 3.5, "atr_method": "wilder",
+            "ema_slow_period": 200,
+            "volatility_index": 19.8, "news_sentiment": 0.0,
+            "high_impact_event": False,
+            "breakout_state": 2, "breakout_level": 2380.0,
+            "feed_source": "biquote", "price_source": "biquote",
+            "ohlc_source": "biquote", "trusted": True, "bar_count": 250,
+        }
+        snap.update(over)
+        return snap
+
+    def _bars(self, n: int = 120):
+        from app.integrations.quotes import Candle
+        base = 2350.0
+        return [Candle(o=base + i * 0.5, h=base + i * 0.5 + 2.0,
+                       l=base + i * 0.5 - 2.0,
+                       c=base + i * 0.5 + 0.5) for i in range(n)]
+
+    def _patch_feed(self, monkeypatch, snap: dict):
+        from app.integrations import quotes as quotes_mod
+
+        async def fake_snaps(assets, **_kw):
+            return {a: dict(snap, asset=a) for a in assets}
+
+        async def fake_spot(assets, **_kw):
+            return {a: 2400.0 for a in assets}, {}
+
+        async def fake_trusted(assets, **_kw):
+            return {a: 2400.0 for a in assets}, {}
+
+        async def fake_candles(asset, client, days=120):
+            return self._bars(max(30, days))
+
+        monkeypatch.setattr(quotes_mod, "fetch_all_snapshots", fake_snaps)
+        monkeypatch.setattr(quotes_mod, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(quotes_mod, "fetch_trusted_spot", fake_trusted)
+        monkeypatch.setattr(quotes_mod, "fetch_candles", fake_candles)
+
+    def _trusted(self, monkeypatch, price: float = 2400.0):
+        from app.integrations.quotes import TrustedQuote as _TQ
+        from app.services import execution as execution_mod
+        monkeypatch.setattr(
+            execution_mod.quotes, "trusted_quote",
+            lambda asset: _TQ(price=price, bid=price - 0.15,
+                              ask=price + 0.15, spread=0.30,
+                              source="biquote", timestamp=0.0,
+                              age_seconds=0.0)
+            if str(asset or "").upper() == "XAUUSD" else None)
+
+    def _gold_db(self, **settings_over) -> FakeDatabase:
+        db = FakeDatabase(rows={"market_analysis": [
+            {"asset": "XAUUSD", "regime": "bear_trend",
+             "sentiment": "bearish", "confidence": 80.0,
+             "opportunity_score": 80.0, "explanation": "t"},
+        ]})
+        if settings_over:
+            db.rows["trading_settings"] = [{"id": 1, **settings_over}]
+        return db
+
+    @pytest.mark.asyncio
+    async def test_gold_manual_plan_matches_execution_levels(
+            self, monkeypatch):
+        import json
+        self._patch_feed(monkeypatch, self._gold_snap())
+        self._trusted(monkeypatch)
+        set_state(self._gold_db())
+        body = (await call(
+            "GET", "/api/trading/extended-analysis?asset=XAUUSD")).json()
+        plan = json.loads(body["order_strategy"])
+        assert body["regime"] == "bear_trend"       # ATR 2.47 < gold threshold 3.5
+        assert body["final_decision"].startswith("TRADE")
+        assert plan["entries"][0]["order_type"] == "market"
+        assert plan["entries"][0]["lot"] >= 0.01
+
+    @pytest.mark.asyncio
+    async def test_gold_manual_open_blocked_when_disabled_or_zero_lot(
+            self, monkeypatch):
+        from app.models import schemas as _schemas
+        # --- disabled gold (threshold 0): analysis WAITs, open never hits broker
+        self._patch_feed(monkeypatch, self._gold_snap())
+        self._trusted(monkeypatch)
+        set_state(self._gold_db(gold_max_atr_pct=0))
+        body = (await call(
+            "GET", "/api/trading/extended-analysis?asset=XAUUSD")).json()
+        assert body["final_decision"].startswith("WAIT")
+
+        placed = {"n": 0}
+
+        class StrictBroker(FakeBroker):
+            async def place_order(self, order):
+                placed["n"] += 1
+                return await super().place_order(order)
+
+        app.state.broker = StrictBroker()
+        blocked = (await call("POST", "/api/trading/extended-open",
+                              {"confirm": True, "asset": "XAUUSD"})).json()
+        assert blocked["ok"] is False and blocked["status"] == "blocked"
+        assert placed["n"] == 0
+        assert app.state.db.rows.get("paper_trades", []) == []
+        # --- forced zero-lot plan: analysis WAITs, open never hits broker
+        self._patch_feed(monkeypatch, self._gold_snap())
+        self._trusted(monkeypatch)
+        set_state(self._gold_db())
+        app.state.broker = StrictBroker()
+        _real = _schemas.OrderStrategyEngine.build_plan
+
+        def _zero_leg(engine_self, **kw):
+            p = _real(engine_self, **kw)
+            p.entries[0].lot = 0.0
+            return p
+
+        monkeypatch.setattr(_schemas.OrderStrategyEngine, "build_plan",
+                            _zero_leg)
+        zero_body = (await call(
+            "GET", "/api/trading/extended-analysis?asset=XAUUSD")).json()
+        assert zero_body["final_decision"].startswith("WAIT")
+        zero_blocked = (await call(
+            "POST", "/api/trading/extended-open",
+            {"confirm": True, "asset": "XAUUSD"})).json()
+        assert zero_blocked["ok"] is False
+        assert zero_blocked["status"] == "blocked"
+        assert placed["n"] == 0
+        assert app.state.db.rows.get("paper_trades", []) == []
