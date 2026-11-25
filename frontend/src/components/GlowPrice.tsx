@@ -25,10 +25,15 @@ export interface FreshnessInput {
 
 /** Shared สด/ดีเลย์/ปิดตลาด classifier (Global Constraints, verbatim):
  *  สด = open + !stale + age ≤ 10s; ดีเลย์ = open but stale or age > 10s;
- *  ปิดตลาด = closed. Unknown/old payloads (no age) → ดีเลย์, never สด. */
+ *  ปิดตลาด = closed. Unknown/old payloads (no age, missing or unexpected
+ *  marketState) → ดีเลย์, never สด. */
 export function quoteFreshness(input: FreshnessInput): QuoteFreshness {
   const { ageS, marketState, source, stale } = input;
-  if ((marketState ?? "").toLowerCase() === "closed") return "closed";
+  const state = (marketState ?? "").toLowerCase();
+  if (state === "closed") return "closed";
+  // Require "open" explicitly — null/""/unexpected states can never be fresh,
+  // so a payload missing market_state never glows even with a valid age.
+  if (state !== "open") return "delayed";
   const src = (source ?? "").toLowerCase();
   if (stale || STALE_SOURCES.has(src) || src.includes("demo")) return "delayed";
   if (ageS == null || !Number.isFinite(ageS) || ageS < 0) return "delayed";
@@ -52,12 +57,17 @@ function useReducedMotion(): boolean {
   return reduced;
 }
 
-/** Tracks the rendered-value delta and returns "up" | "down" for ~1s after
- *  a change while `fresh` — null otherwise (static, no glow on
- *  stale/demo/closed). Timer cleanup on unmount + on each new tick. */
+/** Tracks the rendered-value delta and returns the latest tick
+ *  ({ dir, gen }) for ~1s after a change while `fresh` — null otherwise
+ *  (static, no glow on stale/demo/closed/unknown-state). `gen` increments on
+ *  every tick so a same-direction re-tick inside the ~1s window still
+ *  re-triggers the flash (the span keys on it — React `setState` with an
+ *  identical "up"/"down" value would bail out and the keyframe would never
+ *  restart). Timer cleanup on unmount + on each new tick. */
 export function useGlowPrice(value: number | null | undefined, fresh: boolean) {
-  const [dir, setDir] = useState<"up" | "down" | null>(null);
+  const [tick, setTick] = useState<{ dir: "up" | "down"; gen: number } | null>(null);
   const prevRef = useRef<number | null>(null);
+  const genRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -69,13 +79,16 @@ export function useGlowPrice(value: number | null | undefined, fresh: boolean) {
       timerRef.current = null;
     }
     if (prev == null || v == null || v === prev || !fresh) {
-      setDir(null);
+      setTick(null);
       return;
     }
-    setDir(v > prev ? "up" : "down");
+    genRef.current += 1;
+    const gen = genRef.current;
+    setTick({ dir: v > prev ? "up" : "down", gen });
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
-      setDir(null);
+      // Only clear our own tick — a newer tick (higher gen) owns the flash now.
+      setTick((cur) => (cur && cur.gen === gen ? null : cur));
     }, 1000);
     return () => {
       if (timerRef.current) {
@@ -89,7 +102,7 @@ export function useGlowPrice(value: number | null | undefined, fresh: boolean) {
     if (timerRef.current) clearTimeout(timerRef.current);
   }, []);
 
-  return dir;
+  return tick;
 }
 
 export interface GlowPriceProps extends FreshnessInput {
@@ -113,18 +126,22 @@ export function GlowPrice({
   title,
 }: GlowPriceProps) {
   const fresh = isFreshQuote({ ageS, marketState, source, stale });
-  const dir = useGlowPrice(value, fresh);
+  const tick = useGlowPrice(value, fresh);
   const reduced = useReducedMotion();
   const text = value == null || !Number.isFinite(value) ? "—" : fmtNum(value, decimals);
 
   let glowClass = "";
-  if (dir) {
+  if (tick) {
     glowClass = reduced
-      ? (dir === "up" ? "text-profit" : "text-loss")
-      : (dir === "up" ? "glow-up" : "glow-down");
+      ? (tick.dir === "up" ? "text-profit" : "text-loss")
+      : (tick.dir === "up" ? "glow-up" : "glow-down");
   }
   return (
     <span
+      // Key on the tick generation so a same-direction re-tick remounts the
+      // span and restarts the CSS keyframe (same class re-applied alone will
+      // not replay the animation).
+      key={tick ? `${tick.dir}-${tick.gen}` : "static"}
       className={`${className} ${glowClass}`.trim()}
       title={title}
       aria-live="off"
