@@ -14,6 +14,7 @@ from app.integrations.biquote import (
     BiquoteError,
     BiquoteTick,
     fetch_daily_bars,
+    fetch_latest,
     fetch_tick,
 )
 
@@ -155,3 +156,115 @@ async def test_fetch_bars_http_error_raises():
     async with _mock_client({}, status=500) as client:
         with pytest.raises(BiquoteError):
             await fetch_daily_bars(client=client)
+
+
+# ---- Task 1: generalized adapter (TDD RED) ----------------------------------
+
+_FX_TICKS: dict[str, dict] = {
+    "EURUSD": {
+        "symbol": "EURUSD",
+        "bid": 1.09457,
+        "ask": 1.09463,
+        "mid": 1.0946,
+        "spread": 0.00006,
+        "timestamp": "2026-11-25T08:08:20Z",
+        "source": "MetaTrader 5 (Broker 1)",
+        "exchange": "OTC",
+        "marketState": "open",
+        "stale": False,
+        "quoteAgeSeconds": 1,
+    },
+    "AUDNZD": {
+        "symbol": "AUDNZD",
+        "bid": 1.08210,
+        "ask": 1.08225,
+        "mid": 1.082175,
+        "spread": 0.00015,
+        "timestamp": "2026-11-25T08:08:20Z",
+        "source": "MetaTrader 5 (Broker 1)",
+        "exchange": "OTC",
+        "marketState": "open",
+        "stale": False,
+        "quoteAgeSeconds": 1,
+    },
+    "CHFJPY": {
+        "symbol": "CHFJPY",
+        "bid": 172.410,
+        "ask": 172.425,
+        "mid": 172.4175,
+        "spread": 0.015,
+        "timestamp": "2026-11-25T08:08:20Z",
+        "source": "MetaTrader 5 (Broker 1)",
+        "exchange": "OTC",
+        "marketState": "open",
+        "stale": False,
+        "quoteAgeSeconds": 2,
+    },
+}
+
+_REQUEST_COUNT = {"n": 0}
+
+
+def http_request_count() -> int:
+    return _REQUEST_COUNT["n"]
+
+
+def _generalized_handler(request: httpx.Request) -> httpx.Response:
+    _REQUEST_COUNT["n"] += 1
+    path = request.url.path
+    if path == "/api/latest":
+        wanted = request.url.params.get_list("symbols")
+        body: dict = {}
+        for sym in wanted:
+            if sym in _FX_TICKS:
+                body[sym] = _FX_TICKS[sym]
+            else:
+                body[sym] = {"error": "unknown symbol"}
+        return httpx.Response(200, json=body)
+    symbol = path.rsplit("/", 1)[-1]
+    if symbol in _FX_TICKS:
+        return httpx.Response(200, json=_FX_TICKS[symbol])
+    return httpx.Response(404, json={"error": "unknown symbol"})
+
+
+def _generalized_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(_generalized_handler))
+
+
+def run_tick_fixture(symbol: str = "EURUSD") -> BiquoteTick:
+    import asyncio
+
+    async def _go() -> BiquoteTick:
+        async with _generalized_client() as client:
+            return await fetch_tick(symbol, client=client)
+
+    return asyncio.run(_go())
+
+
+def run_latest_fixture(symbols: list[str]) -> dict[str, BiquoteTick]:
+    import asyncio
+
+    _REQUEST_COUNT["n"] = 0
+
+    async def _go() -> dict[str, BiquoteTick]:
+        async with _generalized_client() as client:
+            return await fetch_latest(symbols, client=client)
+
+    return asyncio.run(_go())
+
+
+def test_fetch_tick_takes_symbol():
+    tick = run_tick_fixture(symbol="EURUSD")
+    assert tick.symbol == "EURUSD" and tick.mid == pytest.approx(1.0946, abs=0.01)
+
+
+def test_fetch_latest_batches_one_request():
+    ticks = run_latest_fixture(["EURUSD", "AUDNZD", "CHFJPY"])
+    assert set(ticks) == {"EURUSD", "AUDNZD", "CHFJPY"}
+    assert ticks["EURUSD"].spread == pytest.approx(0.00006)
+    assert http_request_count() == 1
+
+
+def test_fetch_latest_skips_bad_symbol_keeps_rest():
+    ticks = run_latest_fixture(["EURUSD", "BADSYM"])
+    assert set(ticks) == {"EURUSD"}
