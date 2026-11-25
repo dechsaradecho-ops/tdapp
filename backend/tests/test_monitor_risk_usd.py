@@ -104,15 +104,20 @@ def _stub_feed(monkeypatch, spots: dict[str, float]) -> None:
 
     async def fake_display(assets, **_kw):
         from app.integrations.quotes import DisplayQuote
-        prices, meta = {}, {}
+        prices, meta, failures = {}, {}, {}
         for a in (assets or []):
             key = str(a).upper()
-            px = spots.get(key, 1.0)
+            if key not in spots:
+                # Unknown leg, not a silent 1.0: the monitor must fail
+                # closed on conversion exactly like the spot stub below.
+                failures[key] = f"{key}: no feed"
+                continue
+            px = spots[key]
             prices[key] = px
             meta[key] = DisplayQuote(price=px, source="yahoo",
                                      age_seconds=1.0, market_state="open",
                                      stale=False)
-        return prices, meta, {}
+        return prices, meta, failures
     monkeypatch.setattr(execution_mod.quotes, "fetch_display_prices",
                         fake_display)
 
