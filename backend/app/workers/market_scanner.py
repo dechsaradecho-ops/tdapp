@@ -161,6 +161,77 @@ def purge_old_market_analysis(db: Database, force: bool = False) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Retention — signals had NO TTL and grew forever (~90 rows/day, 7.5k rows
+# since 2026-09-02, ~95% of them approval='expired'). Only TERMINAL rows
+# (expired/rejected/approved) older than SIGNALS_TTL_DAYS are deleted:
+# 'pending' rows belong to the auto-trader queue and are kept at ANY age
+# (fail-closed — a stuck expiry worker must never eat the live queue), and
+# every reader only needs the latest 20-200 rows. No bulk delete_before
+# here on purpose: it cannot filter by approval, so it would also delete
+# old pending rows. Instead pages are scanned oldest-first and only stale
+# terminal rows are deleted per-row.
+# Canonical values: AppSettings.signals_ttl_days /
+# signals_purge_interval_s (Settings page).
+SIGNALS_TTL_DAYS = S("signals_ttl_days")
+SIGNALS_PURGE_INTERVAL_S = S("signals_purge_interval_s")  # hourly
+_signals_last_purge = 0.0
+
+
+def purge_old_signals(db: Database, force: bool = False) -> int:
+    """Delete terminal signals older than SIGNALS_TTL_DAYS.
+
+    Keeps every 'pending' row regardless of age. Throttled to once per
+    SIGNALS_PURGE_INTERVAL_S unless force=True. Returns the number of rows
+    deleted (0 when skipped/unavailable). Never raises.
+    """
+    global _signals_last_purge
+    now = time.monotonic()
+    if not force and now - _signals_last_purge < SIGNALS_PURGE_INTERVAL_S:
+        return 0
+    _signals_last_purge = now
+    try:
+        if db is None or not getattr(db, "available", False):
+            return 0
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=SIGNALS_TTL_DAYS)).isoformat()
+        deleted = 0
+        offset = 0
+        while True:
+            rows = db.select("signals", order="created_at", desc=False,
+                             limit=1000, offset=offset)
+            if not rows:
+                break
+            stale = [r for r in rows
+                     if str(r.get("created_at") or "")
+                     and str(r.get("created_at") or "") < cutoff
+                     and str(r.get("approval") or "") != "pending"]
+            before = deleted
+            for r in stale:
+                try:
+                    if db.delete("signals", {"id": r.get("id")}):
+                        deleted += 1
+                except Exception as exc:
+                    log.debug("signals purge row failed: %s", exc)
+            if len(rows) < 1000:
+                break
+            if deleted == before:
+                # Full page but nothing was removed (deletes failing or
+                # nothing matched) — no progress is being made, stop rather
+                # than re-scan the same window forever.
+                break
+            # Rows shift under us as we delete; re-scan from the part of the
+            # window we have not examined yet.
+            offset += len(rows) - len(stale)
+        if deleted:
+            log.info("signals: purged %d terminal rows older than %d days",
+                     deleted, SIGNALS_TTL_DAYS)
+        return deleted
+    except Exception as exc:
+        log.debug("signals purge failed: %s", exc)
+        return 0
+
+
 async def scan_once(db: Database) -> list[dict]:
     """One scan cycle. Live quotes when available, demo feed otherwise."""
     global _PRELOADED_SNAPS, _PRELOADED_SPOT, _HIGH_IMPACT_EVENT, _PRELOADED_AT

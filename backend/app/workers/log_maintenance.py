@@ -28,7 +28,7 @@ from typing import Any
 from app.services import quote_log, scheduler_log, signal_log
 from app.services import notification_service
 from app.services import simulation
-from app.workers import market_scanner
+from app.workers import market_scanner, news_analysis
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +112,10 @@ async def run_once(db: Any, notifier: Any = None) -> dict[str, Any]:
                          .purge_old_notifications(db, force=True)),
                      ("market_analysis", lambda: market_scanner
                          .purge_old_market_analysis(db, force=True)),
+                     ("news_analysis", lambda: news_analysis
+                         .purge_old_news_analysis(db, force=True)),
+                     ("signals", lambda: market_scanner
+                         .purge_old_signals(db, force=True)),
                      # Simulation runs: 5,000 events per run and the owner
                      # runs several while tuning — without a purge these grow
                      # faster than anything else here.

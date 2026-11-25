@@ -3054,6 +3054,19 @@ class AppSettings(BaseModel):
     # Market-analysis retention (days) + purge throttle (seconds).
     market_analysis_ttl_days: int = 7
     market_analysis_purge_interval_s: float = 3600.0
+    # News-analysis retention (days) + purge throttle (seconds). ~30 rows/day
+    # (worker runs every 15 min) — 30 days keeps ~900 rows, far more than the
+    # latest-20 the scanner reads, while bounding the previously uncapped
+    # growth (2.7k rows since 2026-09-03 with no purge at all).
+    news_analysis_ttl_days: int = 30
+    news_analysis_purge_interval_s: float = 3600.0
+    # Signals retention (days) + purge throttle (seconds). Only TERMINAL
+    # rows (expired/rejected/approved) are ever deleted — pending rows belong
+    # to the auto-trader queue and are kept at any age. Readers only need the
+    # latest 20-200 rows; 30 days keeps ~2.7k while previous growth was
+    # unbounded (~7.5k rows since 2026-09-02, ~95% of them expired).
+    signals_ttl_days: int = 30
+    signals_purge_interval_s: float = 3600.0
     # Drawdown early-warning: ratio of limit + cooldown (minutes).
     drawdown_approach_ratio: float = 0.8
     drawdown_approach_cooldown_min: float = 360.0
