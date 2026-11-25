@@ -200,3 +200,28 @@ class TestExecuteSignalBlocksInvalidConfig:
         # Validation did NOT block (other gates may or may not, but the
         # configuration_error field is the discriminator we assert here).
         assert report.configuration_error is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (gold volatility gate): config validation for the gold threshold
+# ---------------------------------------------------------------------------
+class TestGoldMaxAtrValidation:
+    def test_config_validation_rejects_invalid_gold_threshold(self):
+        # NOTE: the schema field carries ge=0/le=10, so a direct constructor
+        # call with -1 raises ValidationError before the validator ever runs.
+        # model_construct bypasses the schema guard to exercise the
+        # fail-closed config validator (e.g. a hand-edited DB row).
+        s = AppSettings.model_construct(gold_max_atr_pct=-1)
+        report = cv.validate_settings(s)
+        assert "gold_max_atr_pct_invalid" in report.error_codes
+
+    def test_config_validation_rejects_above_ten_and_non_finite(self):
+        for bad in (10.1, float("inf"), float("nan")):
+            s = AppSettings.model_construct(gold_max_atr_pct=bad)
+            assert "gold_max_atr_pct_invalid" in \
+                cv.validate_settings(s).error_codes
+
+    def test_config_validation_accepts_zero_through_ten(self):
+        for ok_value in (0, 3.5, 10):
+            r = cv.validate_settings(AppSettings(gold_max_atr_pct=ok_value))
+            assert "gold_max_atr_pct_invalid" not in r.error_codes

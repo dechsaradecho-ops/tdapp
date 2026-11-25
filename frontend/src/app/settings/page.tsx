@@ -52,6 +52,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   time_stop_min_r: 1.0,
   trailing_ladder: true,
   gold_breakout_only: true,
+  gold_max_atr_pct: 3.5,
   paper_spread: 0,
   spread_overrides: null,
   paper_exit_spread_mult: 0.5,
@@ -981,6 +982,14 @@ export default function SettingsPage() {
                     cfg.gold_breakout_only ? "left-[21px]" : "left-[3px]"}`} />
                 </button>
               </div>
+              <NumField label="Gold Max ATR (%)" value={cfg.gold_max_atr_pct}
+                onChange={(v) => set("gold_max_atr_pct", v)} step={0.1}
+                hint="เพดานความผันผวนทอง (ATR% รายวัน) — เกินนี้ไม่ออกไม้ XAUUSD ใหม่ · 0 = ห้ามเทรดทอง" />
+              {cfg.gold_max_atr_pct === 0 && (
+                <p className="text-xs text-amber-400">
+                  0 = ห้ามเทรดทอง — ระบบจะไม่เปิดออเดอร์ XAUUSD ใหม่ทุกเส้นทาง
+                </p>
+              )}
               <NumField label="Capital (USD)" value={cfg.capital}
                 onChange={(v) => set("capital", v)} step={100}
                 hint="ทุนบัญชีสำหรับคำนวณ lot ตาม %risk — กดบันทึกถึงมีผลทั้งระบบ" />

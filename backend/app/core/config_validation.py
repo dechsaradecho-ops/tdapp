@@ -64,6 +64,7 @@ breaker); the shipped defaults (max DD 10%, monthly 8%) are valid.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -268,6 +269,20 @@ def validate_settings(s: Optional[AppSettings], *,
             "min_lot > 0 แต่ sl_cap_enabled = False — ไม้เล็กสุดอาจเสี่ยงเกินงบ "
             "ต่อไม้เมื่อ SL กว้าง (ระบบจะบล็อกออเดอร์นั้นแทน ไม่เปิดเกินงบ)",
             severity="warning"))
+
+    # ---- Gold volatility threshold (XAUUSD ATR% ceiling) -----------------
+    # Accepts 0..10; 0 forbids every new XAUUSD order path. Anything else
+    # (negative, >10, NaN/inf, non-numeric — e.g. a hand-edited DB row that
+    # bypassed the schema ge/le) is an ERROR and blocks new orders.
+    try:
+        _gold_atr = float(getattr(s, "gold_max_atr_pct", 3.5))
+    except (TypeError, ValueError):
+        _gold_atr = float("nan")
+    if not math.isfinite(_gold_atr) or not 0 <= _gold_atr <= 10:
+        issues.append(ConfigIssue(
+            "gold_max_atr_pct_invalid",
+            f"gold_max_atr_pct = {getattr(s, 'gold_max_atr_pct', '?')} "
+            "ต้องอยู่ในช่วง 0..10 (0 = ห้ามเทรดทอง)"))
 
     has_error = any(i.severity == "error" for i in issues)
     status = STATUS_INVALID if has_error else STATUS_VALID

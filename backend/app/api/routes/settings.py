@@ -7,6 +7,7 @@ POST /api/settings/reset  → delete the row (engines fall back to defaults)
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -282,6 +283,19 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
             message="อ่านค่าตั้งเดิมไม่สำเร็จ — ยกเลิกบันทึกเพื่อไม่ให้ค่าอื่นถูกรีเซ็ต")
 
     current = _row_to_settings(raw_row)
+    # Gold volatility threshold: range-guard BEFORE model_validate so the
+    # schema ge/le (0..10) cannot raise into a 500. Reject without writing,
+    # preserving the partial-write safety behavior (current row untouched).
+    if "gold_max_atr_pct" in patch:
+        try:
+            _g = float(patch["gold_max_atr_pct"])
+        except (TypeError, ValueError):
+            _g = float("nan")
+        if not (math.isfinite(_g) and 0 <= _g <= 10):
+            return SettingsSaveResult(
+                ok=False, settings=current,
+                message="gold_max_atr_pct ต้องอยู่ในช่วง 0..10 "
+                        "(0 = ห้ามเทรดทอง) — ไม่ได้บันทึก")
     # model_validate (NOT model_copy) so client values are coerced to field types —
     # e.g. float 30.0 → int 30; Postgres integer columns reject "30.0" (22P02)
     merged = AppSettings.model_validate({**current.model_dump(), **patch})

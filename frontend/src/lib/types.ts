@@ -1209,6 +1209,9 @@ export interface AppSettings {
   trailing_ladder: boolean;
   /** Strategy D: XAUUSD only trades breakout/retest setups (false = old behaviour) */
   gold_breakout_only: boolean;
+  /** Gold volatility gate: max daily ATR% for XAUUSD — above this no new
+   *  gold orders (later tasks enforce); 0 = forbid every new XAUUSD order */
+  gold_max_atr_pct: number;
   /** Simulated spread (price units) applied to paper fills — legacy global
    *  fallback; per-symbol spreads take precedence for known assets */
   paper_spread: number;

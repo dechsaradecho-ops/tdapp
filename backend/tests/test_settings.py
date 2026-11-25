@@ -794,7 +794,11 @@ def test_risk_presets_moderate_mirrors_live_prod_profile():
                 # Meta-filter take-threshold override (migration 060):
                 # same rationale as the 053 knobs — user-owned gate tuning,
                 # a risk preset must never silently retune it.
-                "meta_filter_threshold"}
+                "meta_filter_threshold",
+                # Gold volatility gate ceiling (migration 061): user-owned
+                # gold gate tuning, independent of risk presets (like
+                # min_confidence_gold / min_lot_gold).
+                "gold_max_atr_pct"}
     assert set(RISK_PRESET_FIELDS) | excluded == set(
         AppSettings.model_fields.keys()) - {"risk_profile"}, \
         set(AppSettings.model_fields.keys()) - {"risk_profile"} - set(RISK_PRESET_FIELDS) - excluded
@@ -946,6 +950,31 @@ async def test_put_settings_survives_both_ai_columns_missing():
     body = res.json()
     assert body["ok"] is True
     assert "ai_model" in body["message"] and "ai_base_url" in body["message"]
+    assert body["ok"] is True
+    assert "ai_model" in body["message"] and "ai_base_url" in body["message"]
     assert db._client.row["min_confidence"] == 75
     assert "ai_model" not in db._client.row
     clear_ai_overrides()
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (gold volatility gate): gold_max_atr_pct persistence (RED first)
+# ---------------------------------------------------------------------------
+def test_gold_max_atr_defaults_to_three_point_five():
+    assert AppSettings().gold_max_atr_pct == 3.5
+
+
+@pytest.mark.asyncio
+async def test_settings_api_persists_zero_and_rejects_out_of_range():
+    # 0 persists (0 = forbid every new XAUUSD order path).
+    db = SettingsDatabase(None)
+    set_state(db)
+    res = await call("PUT", "/api/settings", {"gold_max_atr_pct": 0})
+    assert res.status_code == 200
+    assert res.json()["settings"]["gold_max_atr_pct"] == 0
+    # Out-of-range is rejected WITHOUT writing (fresh defaults DB).
+    set_state(SettingsDatabase(None))
+    bad = await call("PUT", "/api/settings", {"gold_max_atr_pct": 10.1})
+    assert bad.status_code == 200
+    assert bad.json()["ok"] is False
+    assert (await call("GET", "/api/settings")).json()["gold_max_atr_pct"] == 3.5

@@ -2834,6 +2834,11 @@ class AppSettings(BaseModel):
     # at the broken level with a 0.5×ATR invalidation buffer. False = old
     # behaviour (gold trades like every other asset).
     gold_breakout_only: bool = True
+    # ---- Gold volatility gate (XAUUSD ATR% ceiling) ------------------------
+    # Max daily ATR% for gold before new XAUUSD orders are blocked (later
+    # tasks consume this; 0 forbids every new XAUUSD order path).
+    # Independent of risk presets (identity-adjacent, like min_lot_gold).
+    gold_max_atr_pct: float = Field(default=3.5, ge=0, le=10)
 
     # ---- Paper execution realism ------------------------------------------
     # Simulated spread (in price units) applied to paper fills: BUYs fill at
