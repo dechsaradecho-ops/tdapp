@@ -740,8 +740,8 @@ async def fetch_candles_with_source(asset: str, client: httpx.AsyncClient,
 
     Gold (XAUUSD) ignores `days` and always requests 500 Biquote daily bars;
     on Biquote failure it falls back to Twelve Data `XAU/USD`, then to
-    degraded Yahoo (`GC=F`, `trusted=False`). Other assets keep the
-    Yahoo-primary → mapped-fallback chain. Raises QuotesUnavailable when
+    degraded Yahoo (`GC=F`, `trusted=False`). Biquote FX OHLC first (500 daily bars, `isOpen` bar excluded),
+    then the Yahoo-primary → mapped-fallback chain. Raises QuotesUnavailable when
     every feed fails or fewer than 30 bars come back.
     """
     if asset not in SUPPORTED_ASSETS and asset not in ASSET_FEEDS:
@@ -749,6 +749,21 @@ async def fetch_candles_with_source(asset: str, client: httpx.AsyncClient,
 
     if str(asset).upper() == "XAUUSD":
         return await _fetch_gold_candles_with_source(client)
+
+    # 0) Biquote FX OHLC — trusted, 500 daily bars, isOpen bar excluded
+    # (same bar→Candle mapping as the gold leg). Any Biquote failure falls
+    # through to the Yahoo → Frankfurter chain below unchanged.
+    try:
+        bars = await biquote.fetch_daily_bars(
+            str(asset).upper(), limit=500, client=client)
+        bq_candles = [Candle(o=b.open, h=b.high, l=b.low, c=b.close,
+                             t=int(b.open_time.timestamp()))
+                      for b in bars if not b.is_open]
+        if len(bq_candles) >= 30:
+            return CandleFeedResult(
+                candles=bq_candles, source="biquote", trusted=True)
+    except biquote.BiquoteError:
+        pass
 
     candles: list[Candle] = []
     source = FEED_YAHOO
@@ -821,8 +836,8 @@ async def fetch_candles(asset: str, client: httpx.AsyncClient,
     """Fetch ~`days` daily candles for an asset. Raises QuotesUnavailable.
 
     Thin compatibility wrapper over fetch_candles_with_source — returns
-    only the candles. Chain: Yahoo (primary, real OHLC) → mapped fallback
-    feed (Frankfurter FX / TwelveData gold; Biquote first for XAUUSD).
+    only the candles. Chain: Biquote (FX + XAUUSD) → Yahoo (real OHLC)
+    → mapped fallback feed (Frankfurter FX / TwelveData gold).
     Only assets inside SUPPORTED_ASSETS (or the explicit ASSET_FEEDS map)
     are priceable.
     """

@@ -1255,6 +1255,62 @@ class TestGoldTrustedFeed:
 
 
 # ---------------------------------------------------------------------------
+# Biquote-first FX candle chain (Task 3)
+# ---------------------------------------------------------------------------
+class TestFxBiquoteFirst:
+    @pytest.mark.asyncio
+    async def test_fx_candles_prefer_biquote_and_drop_open_bar(self):
+        """Biquote FX OHLC wins: 500 daily bars requested, isOpen bar dropped."""
+        closes = [1.10 + 0.001 * i for i in range(500)]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "biquote.io" in str(request.url):
+                return httpx.Response(200, json=_biquote_ohlc_payload(closes))
+            return httpx.Response(503, json={})
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)) as client:
+            result = await quotes.fetch_candles_with_source("AUDNZD", client)
+            assert result.source == "biquote" and result.trusted is True
+            assert len(result.candles) >= 400
+            # the forming (is_open) bar is dropped — only closed bars map
+            assert len(result.candles) == 499
+            assert result.candles[-1].c == pytest.approx(closes[-2])
+
+    @pytest.mark.asyncio
+    async def test_fx_candles_fall_back_to_yahoo_then_frankfurter(self):
+        """Biquote down → Yahoo daily; both down → Frankfurter synth."""
+        closes = [1.10 + 0.001 * i for i in range(35)]
+
+        def handler_yahoo(request: httpx.Request) -> httpx.Response:
+            if "biquote.io" in str(request.url):
+                return httpx.Response(503, json={})
+            return httpx.Response(200, json=_yahoo_chart_payload(closes))
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_yahoo)) as client:
+            yahoo_result = await quotes.fetch_candles_with_source(
+                "EURUSD", client)
+            assert yahoo_result.source == "yahoo"
+            assert yahoo_result.trusted is True
+
+        fx_closes = [100.0 + i for i in range(35)]
+
+        def handler_frankfurter(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url or "yahoo" in url:
+                return httpx.Response(503, json={})
+            return httpx.Response(200, json=_fx_payload(fx_closes))
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_frankfurter)) as client:
+            frank_result = await quotes.fetch_candles_with_source(
+                "EURUSD", client)
+            assert frank_result.source == "frankfurter"
+            assert frank_result.trusted is True
+
+
+# ---------------------------------------------------------------------------
 # Display spot feed — Biquote-first batched fetch (Task 2)
 # ---------------------------------------------------------------------------
 def _display_tick(sym: str, mid: float, age: int = 3,
