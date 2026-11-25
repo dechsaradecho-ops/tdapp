@@ -56,6 +56,10 @@ _GUARD_MARKS_BUDGET = S("guard_marks_timeout_s")   # live spot marks (safety pat
 _GUARD_SNAP_BUDGET = S("guard_snap_timeout_s")    # Smart-Exit snapshots (AI score enhancement)
 _GUARD_NEWS_BUDGET = S("guard_news_timeout_s")    # Smart-Exit news calendar
 
+# Gold feed-outage state: assets already warned this outage (once-per-outage
+# spam guard; the entry is dropped when a trusted quote returns).
+_GOLD_FEED_OUTAGE_WARNED: set[str] = set()
+
 
 async def _none() -> None:
     """Awaitable no-op — keeps asyncio.gather's branches uniform."""
@@ -1200,6 +1204,41 @@ async def guard_once(db, broker, notifier: NotificationService,
     emergency_user = ""
 
     for pos in positions:
+        # ---- Gold feed-outage gate (XAUUSD needs a fresh trusted quote) --
+        # No tradable gold quote → skip ALL price-based actions for this
+        # asset this cycle (SL/TP close, breakeven/trailing, partial, Smart
+        # Exit, emergency, time stop): acting on a stale/demo/book/Yahoo
+        # print would book a fabricated fill. Market-closed still takes
+        # precedence — while shut, the existing market_closed paths explain
+        # the untouched position instead of feed_unavailable.
+        _asset_u = str(getattr(pos, "asset", "") or "").upper()
+        if _asset_u == "XAUUSD":
+            try:
+                _tq = quotes.trusted_quote("XAUUSD")
+            except Exception:
+                _tq = None
+            if _tq is not None:
+                _GOLD_FEED_OUTAGE_WARNED.discard(_asset_u)
+            elif not discretionary_block:
+                skip_assets.append(f"{pos.asset}:feed_unavailable")
+                if _asset_u not in _GOLD_FEED_OUTAGE_WARNED:
+                    _GOLD_FEED_OUTAGE_WARNED.add(_asset_u)
+                    log.warning(
+                        "gold guard: no trusted XAUUSD quote — holding %s "
+                        "without price-based action until the feed returns",
+                        getattr(pos, "ticket", "?"))
+                    try:
+                        await notifier.notify(
+                            getattr(pos, "user_id", "") or "", "risk_warning",
+                            "⚠️ XAUUSD feed unavailable\n"
+                            "No trusted gold quote — holding positions "
+                            "without SL/TP action until the feed returns.\n"
+                            f"Ticket {getattr(pos, 'ticket', '')}",
+                            asset="XAUUSD",
+                        )
+                    except Exception as exc:
+                        log.debug("gold outage notify failed: %s", exc)
+                continue
         # refresh mark price: live feed first, then broker-native, then book
         price = live.get(pos.asset.upper()) or 0.0
         if not price:

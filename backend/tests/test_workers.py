@@ -2498,6 +2498,144 @@ class TestPositionGuardManagement:
 
 
 # ---------------------------------------------------------------------------
+# Gold Guard — feed-outage safety (Task 8: XAUUSD without a fresh trusted
+# quote is skipped for ALL price-based actions, reported as feed_unavailable)
+# ---------------------------------------------------------------------------
+class TestGoldGuardOutage:
+    """Feed-outage safety: no trusted gold quote → no gold exits.
+
+    All gold exits (SL/TP close, breakeven/trailing, partial, Smart Exit,
+    emergency) require quotes.trusted_quote("XAUUSD"). Without it the asset
+    is skipped for the cycle (skip_assets "XAUUSD:feed_unavailable") and the
+    existing risk-warning path fires once per outage. Offline: trusted_quote
+    is monkeypatched, never the network.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_network(self, monkeypatch):
+        """Live gold mark beyond SL; blind Smart Exit; market OPEN."""
+        async def fake_spot(assets, **_kw):
+            out = {}
+            for a in assets:
+                out[a] = 2380.0 if str(a).upper() == "XAUUSD" else 1.2500
+            return out, {}
+
+        async def fake_snaps(assets, **_kw):
+            return {}
+
+        monkeypatch.setattr(position_guard.quotes, "fetch_spot_prices",
+                            fake_spot)
+        monkeypatch.setattr(position_guard.quotes, "fetch_all_snapshots",
+                            fake_snaps)
+        from app.services import execution
+        monkeypatch.setattr(execution, "is_market_closed",
+                            lambda *a, **k: False)
+        warned = getattr(position_guard, "_GOLD_FEED_OUTAGE_WARNED", None)
+        if warned is not None:
+            warned.clear()
+        yield
+        warned = getattr(position_guard, "_GOLD_FEED_OUTAGE_WARNED", None)
+        if warned is not None:
+            warned.clear()
+
+    def _gold_broker(self, **overrides):
+        from app.integrations.brokers import Position
+        closed: list[str] = []
+        moved: list[float] = []
+        partials: list[float] = []
+        broker = SimpleNamespace()
+        broker._positions = {"GX": Position(
+            ticket="GX", user_id="u1", asset="XAUUSD", direction="BUY",
+            volume=0.02, entry_price=2400.0, stop_loss=2390.0,
+            take_profit=2450.0, current_price=2400.0)}
+        broker.all_positions = lambda: _AsyncList(list(broker._positions.values()))
+        broker.mark_price = lambda ticket: _AsyncFloat(2400.0)
+        broker.quote = lambda asset: _AsyncFloat(0.0)
+        broker.close_position = lambda ticket: _AsyncClosedWith(closed, ticket)
+        broker.modify_stop_loss = lambda ticket, sl: _AsyncModifySL(moved, sl)
+        broker.partial_close = lambda ticket, vol: _AsyncPartial(partials, vol)
+        broker.calls = {"closed": closed, "moved": moved, "partials": partials}
+        return broker
+
+    def _gold_db(self):
+        return FakeDatabase(rows={"paper_trades": [
+            {"id": "g1", "ticket": "GX", "asset": "XAUUSD", "status": "open",
+             "direction": "buy", "volume": 0.02, "entry_price": 2400.0,
+             "stop_loss": 2390.0, "take_profit": 2450.0,
+             "partial_done": False}]})
+
+    def _settings(self, **overrides):
+        from app.models.schemas import AppSettings
+        s = AppSettings()
+        for k, v in overrides.items():
+            setattr(s, k, v)
+        return s
+
+    @pytest.mark.asyncio
+    async def test_gold_guard_skips_stale_price_actions(self, monkeypatch):
+        """Outage (trusted_quote → None), live mark beyond SL → no close,
+        no SL move, no partial, no Smart Exit; skip recorded + warned once."""
+        from app.workers import position_guard
+        monkeypatch.setattr(position_guard.quotes, "trusted_quote",
+                            lambda asset: None)
+        broker = self._gold_broker()
+        db = self._gold_db()
+        notifier = _SilentNotifier(db=db)
+        settings = self._settings(breakeven_trigger_r=1.0, trail_atr_mult=2.0,
+                                  partial_close_pct=50, partial_trigger_r=1.0)
+        s1 = await position_guard.guard_once(db, broker, notifier,
+                                             settings=settings)
+        # live 2380 ≤ SL 2390 would close — the outage must block it
+        assert broker.calls["closed"] == []
+        assert s1["closed"] == 0
+        assert broker.calls["moved"] == []
+        assert s1["moved_sl"] == 0
+        assert broker.calls["partials"] == []
+        assert s1["partial_closed"] == 0
+        assert "XAUUSD:feed_unavailable" in s1["skip_assets"]
+        assert db.rows["paper_trades"][0]["status"] == "open"
+        warned = [m for _, t, m in notifier.sent if t == "risk_warning"]
+        assert len(warned) == 1
+        # second outage cycle → still blocked, still exactly one warning
+        s2 = await position_guard.guard_once(db, broker, notifier,
+                                             settings=settings)
+        assert broker.calls["closed"] == []
+        assert s2["closed"] == 0
+        assert "XAUUSD:feed_unavailable" in s2["skip_assets"]
+        assert len([m for _, t, m in notifier.sent
+                    if t == "risk_warning"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_gold_guard_resumes_when_trusted_quote_returns(self, monkeypatch):
+        """Fresh quote beyond SL → the normal close fires again."""
+        from app.workers import position_guard
+        monkeypatch.setattr(position_guard.quotes, "trusted_quote",
+                            lambda asset: None)
+        broker = self._gold_broker()
+        db = self._gold_db()
+        notifier = _SilentNotifier(db=db)
+        settings = self._settings(breakeven_trigger_r=0, trail_atr_mult=0,
+                                  partial_close_pct=0)
+        s1 = await position_guard.guard_once(db, broker, notifier,
+                                             settings=settings)
+        assert s1["closed"] == 0
+        assert broker.calls["closed"] == []
+        # feed recovers: a fresh trusted quote is available again
+        monkeypatch.setattr(
+            position_guard.quotes, "trusted_quote",
+            lambda asset: SimpleNamespace(price=2380.0, bid=2379.9,
+                                          ask=2380.1, spread=0.2,
+                                          source="biquote",
+                                          timestamp=0.0, age_seconds=1.0))
+        s2 = await position_guard.guard_once(db, broker, notifier,
+                                             settings=settings)
+        assert broker.calls["closed"] == ["GX"]
+        assert s2["closed"] == 1
+        assert db.rows["paper_trades"][0]["status"] == "closed"
+        assert db.rows["paper_trades"][0]["close_reason"] == "sl"
+
+
+# ---------------------------------------------------------------------------
 # Portfolio monitor — breach → pause + notify + equity snapshots
 # ---------------------------------------------------------------------------
 class _SilentNotifier:
