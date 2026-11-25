@@ -9,6 +9,10 @@ Covers the user-facing contract:
 """
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
+
 import httpx
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -247,3 +251,37 @@ class TestHttpGate:
                                 headers={"Origin": "http://localhost:3000",
                                          "Access-Control-Request-Method": "GET"})
         assert r.status_code in (200, 204)
+
+
+class TestLoginNonBlocking:
+    """Regression: login must not run blocking PBKDF2/DB I/O on the loop thread."""
+
+    @pytest.mark.asyncio
+    async def test_login_verifies_pin_off_event_loop(self, monkeypatch):
+        loop_thread = threading.get_ident()
+        caller_threads: list[int] = []
+        to_thread_calls: list[bool] = []
+
+        real_verify = pin_auth.verify_pin
+        real_to_thread = asyncio.to_thread
+
+        def blocking_verify(db, pin):
+            caller_threads.append(threading.get_ident())
+            time.sleep(0.2)  # simulate the blocking PBKDF2 + DB I/O
+            return real_verify(db, pin)
+
+        async def spy_to_thread(func, /, *args, **kwargs):
+            to_thread_calls.append(True)
+            return await real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(pin_auth, "verify_pin", blocking_verify)
+        monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+        app.state.db = auth_db()
+        r = await call("POST", "/api/auth/login", {"pin": "123456"})
+
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert to_thread_calls, "login must offload verify_pin via asyncio.to_thread"
+        assert caller_threads, "verify_pin was never called"
+        assert all(t != loop_thread for t in caller_threads), \
+            "verify_pin ran on the event loop thread (blocks FastAPI)"

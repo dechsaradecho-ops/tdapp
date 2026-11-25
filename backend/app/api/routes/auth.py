@@ -6,6 +6,7 @@ auth to worry about here.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -30,7 +31,9 @@ async def status(request: Request) -> PinStatus:
 
 @router.post("/login", response_model=PinLoginResponse)
 async def login(payload: PinLoginRequest, request: Request) -> PinLoginResponse:
-    ok, msg, extra = pin_auth.verify_pin(_db(request), payload.pin)
+    # verify_pin does blocking DB I/O + PBKDF2 (100k iters); offload it so the
+    # uvicorn event loop stays responsive for monitor/signals.
+    ok, msg, extra = await asyncio.to_thread(pin_auth.verify_pin, _db(request), payload.pin)
     return PinLoginResponse(
         ok=ok, token=extra.get("token"), message=msg,
         remaining_attempts=extra.get("remaining_attempts"),
