@@ -24,6 +24,15 @@ from app.services.execution import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_live_spread(monkeypatch):
+    """Pin the live-spread leg offline: these tests assert the configured /
+    builtin spread math, and Task 6 routes XAUUSD through the global trusted
+    quote store first (which another test module may have populated)."""
+    from app.integrations import quotes as _quotes
+    monkeypatch.setattr(_quotes, "live_spread", lambda asset: None)
+
+
 def _pos(direction="BUY", entry=1.0850, price=1.0950, volume=0.01, asset="EURUSD"):
     return SimpleNamespace(direction=direction, entry_price=entry,
                            current_price=price, volume=volume, asset=asset)

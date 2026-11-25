@@ -2047,6 +2047,26 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
         _cfg_reason = _cfg.reason or "settings_unavailable"
         return (f"ไม่ได้เปิดออเดอร์นี้เพราะ configuration_error: "
                 f"{_cfg_reason}")
+    # ---- Task 6: gold policy pre-gates (preview == execution) -------------
+    # Disabled (threshold 0) and untrusted-quote blocks run even when the
+    # snapshot is missing (the thesis is skipped then, but these are not).
+    _gold_thr_prev: Optional[float] = None
+    if asset_u == "XAUUSD":
+        try:
+            _gold_thr_prev = float(G(s, "gold_max_atr_pct",
+                                     zero_as_missing=False))
+        except (TypeError, ValueError):
+            _gold_thr_prev = 3.5
+        if _gold_thr_prev == 0:
+            return ("ไม่ได้เปิดออเดอร์นี้เพราะ gold_trading_disabled: "
+                    "ปิดการเทรดทอง (gold_max_atr_pct=0)")
+        try:
+            _tq_prev = quotes.trusted_quote("XAUUSD")
+        except Exception:
+            _tq_prev = None
+        if _tq_prev is None:
+            return ("ไม่ได้เปิดออเดอร์นี้เพราะ gold_quote_unavailable: "
+                    "ไม่มีราคา trusted สำหรับ XAUUSD")
     opp = opportunity
     if not opp:
         opp = confidence or 0.0
@@ -2104,14 +2124,33 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
     # ---- P0-5 thesis re-validation (snapshot gates only when fetchable) ---
     if signal_row is not None and snapshot:
         try:
-            _thesis = thesis_validation.validate_thesis(
-                signal_row, snapshot, max_age_min=G(s, "signal_ttl_min"))
+            if asset_u == "XAUUSD" and _gold_thr_prev:
+                _thesis = thesis_validation.validate_thesis(
+                    signal_row, snapshot,
+                    max_age_min=G(s, "signal_ttl_min"),
+                    max_atr_pct=_gold_thr_prev,
+                    gold_breakout_only=bool(G(s, "gold_breakout_only")),
+                    require_adx=str(direction or "").upper() == "SELL")
+            else:
+                _thesis = thesis_validation.validate_thesis(
+                    signal_row, snapshot,
+                    max_age_min=G(s, "signal_ttl_min"))
         except Exception as exc:
             return (f"ไม่ได้เปิดออเดอร์นี้เพราะ thesis_error: "
                     f"ตรวจ thesis ไม่ได้ ({exc})")
         if not _thesis.ok:
             _thesis_human = (_thesis.user_message
                              or _thesis.reason or "signal_thesis_invalidated")
+            try:
+                _snap_atr_prev = float((snapshot or {}).get("atr_pct") or 0)
+            except (TypeError, ValueError):
+                _snap_atr_prev = 0.0
+            if (asset_u == "XAUUSD" and _gold_thr_prev
+                    and _snap_atr_prev > _gold_thr_prev
+                    and "regime_blocked" in _thesis.error_codes):
+                return (f"ไม่ได้เปิดออเดอร์นี้เพราะ {_thesis_human} "
+                        f"[gold_atr_exceeded: ATR {_snap_atr_prev:g}% เกินเพดาน "
+                        f"{_gold_thr_prev:g}%]")
             return f"ไม่ได้เปิดออเดอร์นี้เพราะ {_thesis_human}"
     return ""
 
@@ -2299,6 +2338,49 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
                      _cfg.summary()],
             pause=get_pause(db), checks=[_cfg.summary()],
             configuration_error=_cfg_reason)
+
+    # ---- Task 6: gold policy pre-gates (disabled + trusted quote) -----------
+    # Order: (1) gold_max_atr_pct==0 blocks EVERYTHING gold; (2) no trusted
+    # quote blocks (never fill gold from a degraded/stale/demo source).
+    # Both run BEFORE the live-price re-anchor so a degraded quote can never
+    # move entry/SL/TP. Non-gold assets skip this entirely.
+    _asset_u = str(asset or "").upper()
+    _gold_thr: Optional[float] = None
+    if _asset_u == "XAUUSD":
+        try:
+            _gold_thr = float(G(s, "gold_max_atr_pct",
+                                zero_as_missing=False))
+        except (TypeError, ValueError):
+            _gold_thr = 3.5
+        if _gold_thr == 0:
+            _reason = ("gold_trading_disabled: ปิดการเทรดทอง "
+                       "(gold_max_atr_pct=0) — งดเปิดออเดอร์ XAUUSD ทุกกรณี")
+            log.warning("Execution blocked %s %s: %s", direction, asset,
+                        _reason)
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(signal_id or ""),
+                asset=asset, direction=direction, confidence=confidence,
+                entry=entry, source=source, reason=_reason)
+            return GateReport(
+                allowed=False, size_lots=0.0, rejects=[_reason],
+                pause=get_pause(db), checks=["gold_trading_disabled"])
+        try:
+            _gold_tq = quotes.trusted_quote("XAUUSD")
+        except Exception:
+            _gold_tq = None
+        if _gold_tq is None:
+            _reason = ("gold_quote_unavailable: ไม่มีราคา trusted สำหรับ "
+                       "XAUUSD (Biquote/Twelve Data ใช้ไม่ได้) — "
+                       "งดเปิดออเดอร์ทองจากแหล่งเสื่อม")
+            log.warning("Execution blocked %s %s: %s", direction, asset,
+                        _reason)
+            signal_log.log_event(
+                db=db, event="order_blocked", signal_id=str(signal_id or ""),
+                asset=asset, direction=direction, confidence=confidence,
+                entry=entry, source=source, reason=_reason)
+            return GateReport(
+                allowed=False, size_lots=0.0, rejects=[_reason],
+                pause=get_pause(db), checks=["gold_quote_unavailable"])
 
     # ---- Live-price re-anchor (2026-09-08) --------------------------------
     # The stored signal row can be up to SIGNAL_TTL_MIN (30 min) old, so its
@@ -2509,8 +2591,20 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         # Reuses the snapshot fetched above (same picture the meta-filter
         # judged) instead of refetching — one feed read per order attempt.
         _thesis_snapshot = _meta_snapshot
-        _thesis = thesis_validation.validate_thesis(
-            signal_row, _thesis_snapshot, max_age_min=G(s, "signal_ttl_min"))
+        if _asset_u == "XAUUSD" and _gold_thr:
+            # Task 6 parity: the gold threshold, breakout flag and (SELL)
+            # ADX requirement travel into the thesis so execution judges the
+            # same policy the scanner gated on.
+            _thesis = thesis_validation.validate_thesis(
+                signal_row, _thesis_snapshot,
+                max_age_min=G(s, "signal_ttl_min"),
+                max_atr_pct=_gold_thr,
+                gold_breakout_only=bool(G(s, "gold_breakout_only")),
+                require_adx=str(direction or "").upper() == "SELL")
+        else:
+            _thesis = thesis_validation.validate_thesis(
+                signal_row, _thesis_snapshot,
+                max_age_min=G(s, "signal_ttl_min"))
         # Non-blocking confirmations (Supertrend-only conflict/flip — P0-5
         # refinement: EMA is the primary thesis, Supertrend is CONFIRMATION).
         # Log them so the conflict is auditable but DO NOT stop the order.
@@ -2524,6 +2618,20 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
             report.allowed = False
             report.thesis_error = _thesis_reason
             report.rejects.append(f"thesis_error: {_thesis.summary()}")
+            # Task 6 alias: an ATR breach on gold surfaces the execution
+            # code gold_atr_exceeded alongside the kept thesis reason, so
+            # routers/monitors can match the gold policy directly.
+            try:
+                _snap_atr = float((_thesis_snapshot or {}).get("atr_pct")
+                                  or 0)
+            except (TypeError, ValueError):
+                _snap_atr = 0.0
+            if (_asset_u == "XAUUSD" and _gold_thr
+                    and _snap_atr > _gold_thr
+                    and "regime_blocked" in _thesis.error_codes):
+                report.rejects.append(
+                    f"gold_atr_exceeded: ATR {_snap_atr:g}% เกินเพดาน "
+                    f"{_gold_thr:g}% — งดเปิดออเดอร์ทองช่วงผันผวนสูง")
             log.warning("Execution blocked %s %s: %s", direction, asset,
                         _thesis.summary())
             signal_log.log_event(

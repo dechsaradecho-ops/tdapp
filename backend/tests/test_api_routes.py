@@ -80,13 +80,20 @@ def _neutral_thesis_snapshot(asset: str) -> dict:
     """P0-5 offline fake: a snapshot with NO trend/Supertrend/regime signal, so
     ``thesis_validation`` skips those checks and never spuriously blocks the
     offline approve tests (matches ``quotes.snapshot_from_candles`` fields)."""
-    return {
+    snap = {
         "asset": asset, "price": 1.0,
         "ema_fast": 0.0, "ema_slow": 0.0, "adx": 0.0, "supertrend_dir": 0,
         "rsi": 50.0, "macd_hist": 0.0, "price_change_pct_20": 0.0,
         "atr_pct": 0.0, "volatility_index": 0.0, "news_sentiment": 0.0,
         "high_impact_event": False, "breakout_state": 0, "breakout_level": 0.0,
     }
+    if str(asset or "").upper() == "XAUUSD":
+        # Task 6: gold BUY requires a live breakout/retest structure when
+        # gold_breakout_only (default True) — the neutral fake carries one
+        # so offline approve paths keep testing the flow, not the breakout.
+        snap["breakout_state"] = 2
+        snap["breakout_level"] = snap.get("price") or 1.0
+    return snap
 
 
 async def call(method: str, path: str, json_body: dict | None = None) -> httpx.Response:
@@ -535,6 +542,15 @@ class TestSignalsLatestTiers:
                             no_spot)
         monkeypatch.setattr(execution_mod, "is_market_closed",
                             lambda *a, **k: False)
+        # Task 6: gold cards require a trusted quote — stub the store so the
+        # card judges the limit gates (the pre-existing intent of this test).
+        from app.integrations.quotes import TrustedQuote as _TQ
+        monkeypatch.setattr(execution_mod.quotes, "trusted_quote",
+                            lambda asset: _TQ(
+                                price=2400.0, bid=2399.85, ask=2400.15,
+                                spread=0.30, source="biquote",
+                                timestamp=0.0, age_seconds=0.0)
+                            if str(asset or "").upper() == "XAUUSD" else None)
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={
             "signals": [
@@ -568,6 +584,15 @@ class TestSignalsLatestTiers:
                             no_spot)
         monkeypatch.setattr(execution_mod, "is_market_closed",
                             lambda *a, **k: False)
+        # Task 6: gold cards require a trusted quote — stub the store so the
+        # card judges the limit gates (the pre-existing intent of this test).
+        from app.integrations.quotes import TrustedQuote as _TQ
+        monkeypatch.setattr(execution_mod.quotes, "trusted_quote",
+                            lambda asset: _TQ(
+                                price=2400.0, bid=2399.85, ask=2400.15,
+                                spread=0.30, source="biquote",
+                                timestamp=0.0, age_seconds=0.0)
+                            if str(asset or "").upper() == "XAUUSD" else None)
         now = datetime.now(timezone.utc)
         db = FakeDatabase(rows={"signals": [
             {"id": "p1", "asset": "XAUUSD", "direction": "sell",
@@ -771,6 +796,15 @@ class TestApproveFlow:
         async def fake_snaps(assets, **_kw):
             return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
         monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
+        # Task 6: gold orders require a trusted quote — stub the store so
+        # offline approve paths read like a fresh Biquote tick.
+        from app.integrations.quotes import TrustedQuote as _TQ
+        monkeypatch.setattr(
+            execution.quotes, "trusted_quote",
+            lambda asset: _TQ(
+                price=2400.0, bid=2399.85, ask=2400.15, spread=0.30,
+                source="biquote", timestamp=0.0, age_seconds=0.0)
+            if str(asset or "").upper() == "XAUUSD" else None)
 
     @pytest.mark.asyncio
     async def test_reject_updates_row_and_returns_status(self):

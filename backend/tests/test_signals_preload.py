@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 import pytest
 
 from app.workers import market_scanner
+from app.services import execution
+from app.models.schemas import AppSettings
+from app.integrations.quotes import TrustedQuote
 from tests.test_api_routes import call, set_state
 from tests.test_workers import FakeDatabase
 
@@ -156,3 +159,118 @@ class TestSignalsSharedGateReads:
         assert counts[("paper_trades", (), 500)] == 1, counts
         assert counts[("paper_trades", (("status", "open"),), 100)] == 1, counts
         assert counts[("economic_calendar", (), 50)] == 1, counts
+
+
+# ---------------------------------------------------------------------------
+# Task 6: gold preview == execution policy (disabled / untrusted / ATR)
+# ---------------------------------------------------------------------------
+def _prev_settings(**over) -> AppSettings:
+    base = dict(
+        capital=10_000.0, min_confidence=70.0,
+        kill_daily_loss_pct=2.0, kill_weekly_loss_pct=5.0,
+        kill_monthly_loss_pct=8.0, max_drawdown_pct=10.0,
+        max_trades_daily=6, max_trades_weekly=30, max_open_positions=4,
+        risk_per_trade_pct=1.0, correlation_cap=80.0,
+        news_block_minutes=30, order_mode="auto",
+    )
+    base.update(over)
+    return AppSettings(**base)
+
+
+def _prev_trusted(spread: float = 0.30,
+                  price: float = 3518.0585) -> TrustedQuote:
+    return TrustedQuote(
+        price=price, bid=price - spread / 2.0, ask=price + spread / 2.0,
+        spread=spread, source="biquote", timestamp=0.0, age_seconds=0.0)
+
+
+def _prev_row(direction: str, **over) -> dict:
+    base = {
+        "id": "sig-gold", "asset": "XAUUSD", "direction": direction,
+        "entry": 3518.0585, "stop_loss": 3500.0, "take_profit": 3560.0,
+        "confidence": 90.0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "baseline_supertrend_dir": 1 if direction == "BUY" else -1,
+        "baseline_macd_hist": 0.1 if direction == "BUY" else -0.1,
+    }
+    base.update(over)
+    return base
+
+
+def _prev_snap(direction: str, **over) -> dict:
+    buy = direction == "BUY"
+    base = {
+        "asset": "XAUUSD", "price": 3518.0585,
+        "ema_fast": 3520.0 if buy else 3510.0,
+        "ema_slow": 3510.0 if buy else 3520.0,
+        "adx": 30.0,
+        "supertrend_dir": 1 if buy else -1,
+        "rsi": 55.0,
+        "macd_hist": 0.1 if buy else -0.1,
+        "price_change_pct_20": 1.0,
+        "atr_pct": 1.0,
+        "volatility_index": 8.0,
+        "news_sentiment": 0.0,
+        "high_impact_event": False,
+        "breakout_state": 2 if buy else 0,
+        "breakout_level": 3500.0 if buy else 0.0,
+    }
+    base.update(over)
+    return base
+
+
+class _DummyBroker:
+    """Blocked-path broker: place_order must never be reached."""
+
+    async def place_order(self, order):
+        raise AssertionError("blocked gold order reached the broker")
+
+
+class TestGoldPreviewParity:
+    @pytest.fixture(autouse=True)
+    def _offline_gold(self, monkeypatch):
+        async def fake_spot(assets, **_kw):
+            return {}, {}
+
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(execution.quotes, "trusted_quote",
+                            lambda asset: _prev_trusted())
+
+    def test_preview_blocks_disabled_gold_without_snapshot(self):
+        s = _prev_settings(gold_max_atr_pct=0)
+        out = execution.preview_order_blocked(
+            FakeDatabase(), s, asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, snapshot=None, open_assets=set())
+        assert out and "gold_trading_disabled" in out
+
+    def test_preview_blocks_untrusted_gold_without_snapshot(self, monkeypatch):
+        monkeypatch.setattr(execution.quotes, "trusted_quote",
+                            lambda asset: None)
+        out = execution.preview_order_blocked(
+            FakeDatabase(), _prev_settings(), asset="XAUUSD",
+            direction="BUY", entry=3518.0585, stop_loss=3500.0,
+            take_profit=3560.0, confidence=90.0, snapshot=None,
+            open_assets=set())
+        assert out and "gold_quote_unavailable" in out
+
+    @pytest.mark.asyncio
+    async def test_preview_matches_execution_on_gold_atr(self):
+        # ATR 3.6 > 3.5: card AND execution both block (alias on execution).
+        row = _prev_row("BUY")
+        snap_breach = _prev_snap("BUY", atr_pct=3.6)
+        out = execution.preview_order_blocked(
+            FakeDatabase(), _prev_settings(), asset="XAUUSD",
+            direction="BUY", entry=3518.0585, stop_loss=3500.0,
+            take_profit=3560.0, confidence=90.0, signal_row=row,
+            snapshot=snap_breach, open_assets=set())
+        assert out != ""
+        report = await execution.execute_signal(
+            FakeDatabase(), _DummyBroker(), None, _prev_settings(),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gold",
+            source="auto", signal_row=row, snapshot=snap_breach,
+            live_price=3518.0585)
+        assert not report.allowed
+        assert any("gold_atr_exceeded" in r for r in report.rejects)

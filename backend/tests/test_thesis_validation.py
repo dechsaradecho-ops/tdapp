@@ -447,3 +447,66 @@ class TestExecuteSignalThesisSeam:
         assert report.allowed is False
         assert report.thesis_error == "trend_flipped"
         assert broker.orders == []
+
+
+# --------------------------------------------------------------------------
+# Task 6: gold thesis rechecks (SELL ADX/ATR, BUY breakout incl. zero-state)
+# --------------------------------------------------------------------------
+def _gold_signal(direction: str, **over) -> dict:
+    base = {
+        "id": "sig-gold", "asset": "XAUUSD", "direction": direction,
+        "entry": 3518.0, "stop_loss": 3500.0, "take_profit": 3550.0,
+        "confidence": 85.0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "baseline_supertrend_dir": 1 if direction == "BUY" else -1,
+        "baseline_macd_hist": 0.1 if direction == "BUY" else -0.1,
+    }
+    base.update(over)
+    return base
+
+
+def _gold_snap(direction: str, **over) -> dict:
+    buy = direction == "BUY"
+    base = {
+        "asset": "XAUUSD",
+        "price": 3518.0,
+        "ema_fast": 3520.0 if buy else 3510.0,
+        "ema_slow": 3510.0 if buy else 3520.0,
+        "adx": 30.0,
+        "supertrend_dir": 1 if buy else -1,
+        "rsi": 55.0,
+        "macd_hist": 0.1 if buy else -0.1,
+        "price_change_pct_20": 1.0,
+        "atr_pct": 1.0,
+        "volatility_index": 8.0,
+        "news_sentiment": 0.0,
+        "high_impact_event": False,
+        "breakout_state": 2 if buy else 0,
+        "breakout_level": 3500.0 if buy else 0.0,
+    }
+    base.update(over)
+    return base
+
+
+class TestGoldSellRechecksAdxAndAtr:
+    def test_gold_sell_execution_rechecks_adx_and_atr(self):
+        sell_signal = _gold_signal("SELL")
+        snap_adx_24 = _gold_snap("SELL", adx=24.0)
+        snap_atr_3_6 = _gold_snap("SELL", atr_pct=3.6)
+        snap_atr_2_47 = _gold_snap("SELL", atr_pct=2.47)
+        assert tv.validate_thesis(sell_signal, snap_adx_24, max_atr_pct=3.5,
+                                  require_adx=True).ok is False
+        assert tv.validate_thesis(sell_signal, snap_atr_3_6, max_atr_pct=3.5,
+                                  require_adx=True).ok is False
+        assert tv.validate_thesis(sell_signal, snap_atr_2_47, max_atr_pct=3.5,
+                                  require_adx=True).ok is True
+
+
+class TestGoldBuyLostBreakout:
+    def test_gold_buy_lost_breakout_blocks_even_when_state_and_level_are_zero(self):
+        buy_signal = _gold_signal("BUY")
+        snap_state_0_level_0 = _gold_snap("BUY", breakout_state=0,
+                                         breakout_level=0.0)
+        assert "breakout_invalidated" in tv.validate_thesis(
+            buy_signal, snap_state_0_level_0,
+            gold_breakout_only=True).error_codes

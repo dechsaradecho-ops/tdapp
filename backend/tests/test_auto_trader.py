@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.schemas import AppSettings
+from app.integrations import quotes as quotes_mod
 from app.services import execution
 from app.workers import auto_trader, position_guard
 from tests.test_workers import FakeDatabase
@@ -123,13 +124,20 @@ def _neutral_thesis_snapshot(asset: str) -> dict:
     ``thesis_validation`` skips those checks and never spuriously blocks the
     offline approve/auto tests. Matches the field set of
     ``quotes.snapshot_from_candles``."""
-    return {
+    snap = {
         "asset": asset, "price": 1.0,
         "ema_fast": 0.0, "ema_slow": 0.0, "adx": 0.0, "supertrend_dir": 0,
         "rsi": 50.0, "macd_hist": 0.0, "price_change_pct_20": 0.0,
         "atr_pct": 0.0, "volatility_index": 0.0, "news_sentiment": 0.0,
         "high_impact_event": False, "breakout_state": 0, "breakout_level": 0.0,
     }
+    if str(asset or "").upper() == "XAUUSD":
+        # Task 6: gold BUY requires a live breakout/retest structure when
+        # gold_breakout_only (default True) — the neutral fake carries one
+        # so offline BUY paths keep testing the gates, not the breakout.
+        snap["breakout_state"] = 2
+        snap["breakout_level"] = snap.get("price") or 1.0
+    return snap
 
 
 def clean_settings(**over) -> AppSettings:
@@ -179,6 +187,15 @@ class TestGatePipeline:
         async def fake_snaps(assets, **_kw):
             return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
         monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
+        # Task 6: gold orders require a trusted quote — stub the store so
+        # offline XAUUSD paths read like a fresh Biquote tick (spread 0.30
+        # keeps the per-symbol builtin-spread fill test byte-identical).
+        monkeypatch.setattr(
+            execution.quotes, "trusted_quote",
+            lambda asset: quotes_mod.TrustedQuote(
+                price=2400.0, bid=2399.85, ask=2400.15, spread=0.30,
+                source="biquote", timestamp=0.0, age_seconds=0.0)
+            if str(asset or "").upper() == "XAUUSD" else None)
 
     @pytest.mark.asyncio
     async def test_clean_signal_fires_and_journals(self, broker, notifier):
@@ -464,9 +481,13 @@ class TestGatePipeline:
         assert broker.orders[1].entry_price == pytest.approx(1.0850 - 0.00005)
 
     @pytest.mark.asyncio
-    async def test_fill_prefers_spread_override_over_builtin(self, broker, notifier):
+    async def test_fill_prefers_spread_override_over_builtin(self, broker, notifier, monkeypatch):
         """A user override (spread_overrides) replaces the built-in spread
         for that symbol; other symbols keep theirs."""
+        # Task 6: live Biquote spread wins over the override — neutralize it
+        # so this test keeps asserting override-beats-builtin (no live quote).
+        monkeypatch.setattr(execution.quotes, "live_spread",
+                            lambda asset: None)
         db = FakeDatabase()
         s = clean_settings(spread_overrides={"XAUUSD": 0.50})
         report = await execution.execute_signal(
@@ -1016,6 +1037,14 @@ class TestAutoTrader:
         async def fake_snaps(assets, **_kw):
             return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
         monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
+        # Task 6: gold orders require a trusted quote — stub the store so
+        # offline XAUUSD paths read like a fresh Biquote tick.
+        monkeypatch.setattr(
+            execution.quotes, "trusted_quote",
+            lambda asset: quotes_mod.TrustedQuote(
+                price=2400.0, bid=2399.85, ask=2400.15, spread=0.30,
+                source="biquote", timestamp=0.0, age_seconds=0.0)
+            if str(asset or "").upper() == "XAUUSD" else None)
 
     @pytest.mark.asyncio
     async def test_semi_auto_mode_does_nothing(self, broker, notifier):
@@ -1225,6 +1254,14 @@ class TestPrefetchOpenBookLegs:
         monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
         monkeypatch.setattr(execution.quotes, "fetch_all_snapshots",
                             fake_snaps)
+        # Task 6: gold orders require a trusted quote — stub the store so
+        # the offline XAUUSD path reads like a fresh Biquote tick.
+        monkeypatch.setattr(
+            execution.quotes, "trusted_quote",
+            lambda asset: quotes_mod.TrustedQuote(
+                price=2400.0, bid=2399.85, ask=2400.15, spread=0.30,
+                source="biquote", timestamp=0.0, age_seconds=0.0)
+            if str(asset or "").upper() == "XAUUSD" else None)
         return calls
 
     def _db(self):
@@ -1446,6 +1483,19 @@ def _fake_live_marks(monkeypatch):
     monkeypatch.setattr(position_guard.quotes, "fetch_all_snapshots",
                         fake_no_snaps)
     return registry
+
+
+@pytest.fixture(autouse=True)
+def _no_live_spread(monkeypatch):
+    """Pin the live-spread leg offline for this module.
+
+    Exit-cost / fill assertions here are written against the override /
+    builtin spreads, and ``effective_spread`` now reads the global trusted
+    quote store first — without this pin a quote stored by another test
+    module would leak its spread into this module's PnL math. Task 6 covers
+    the live-first precedence in its own dedicated test (which re-patches
+    this leg explicitly)."""
+    monkeypatch.setattr(execution.quotes, "live_spread", lambda asset: None)
 
 
 class GuardBroker(FakeBroker):
@@ -1708,3 +1758,149 @@ class TestPauseState:
     def test_missing_table_means_not_paused(self):
         assert execution.get_pause(FakeDatabase()).paused is False
         assert execution.get_pause(None).paused is False
+
+
+# ---------------------------------------------------------------------------
+# Task 6: gold execution parity — disabled / untrusted / ATR / ADX / spread
+# ---------------------------------------------------------------------------
+def _trusted_gold(spread: float = 0.30,
+                  price: float = 3518.0585) -> quotes_mod.TrustedQuote:
+    return quotes_mod.TrustedQuote(
+        price=price, bid=price - spread / 2.0, ask=price + spread / 2.0,
+        spread=spread, source="biquote", timestamp=0.0, age_seconds=0.0)
+
+
+def _gold_row(direction: str, **over) -> dict:
+    base = {
+        "id": "sig-gold", "asset": "XAUUSD", "direction": direction,
+        "entry": 3518.0585, "stop_loss": 3500.0, "take_profit": 3560.0,
+        "confidence": 90.0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "baseline_supertrend_dir": 1 if direction == "BUY" else -1,
+        "baseline_macd_hist": 0.1 if direction == "BUY" else -0.1,
+    }
+    base.update(over)
+    return base
+
+
+def _gold_snap(direction: str, **over) -> dict:
+    buy = direction == "BUY"
+    base = {
+        "asset": "XAUUSD", "price": 3518.0585,
+        "ema_fast": 3520.0 if buy else 3510.0,
+        "ema_slow": 3510.0 if buy else 3520.0,
+        "adx": 30.0,
+        "supertrend_dir": 1 if buy else -1,
+        "rsi": 55.0,
+        "macd_hist": 0.1 if buy else -0.1,
+        "price_change_pct_20": 1.0,
+        "atr_pct": 1.0,
+        "volatility_index": 8.0,
+        "news_sentiment": 0.0,
+        "high_impact_event": False,
+        "breakout_state": 2 if buy else 0,
+        "breakout_level": 3500.0 if buy else 0.0,
+    }
+    base.update(over)
+    return base
+
+
+class TestGoldExecutionGates:
+    @pytest.fixture(autouse=True)
+    def _no_network_gold(self, monkeypatch):
+        async def fake_spot(assets, **_kw):
+            return {}, {}
+        monkeypatch.setattr(execution.quotes, "fetch_spot_prices", fake_spot)
+        async def fake_snaps(assets, **_kw):
+            return {a: _neutral_thesis_snapshot(a) for a in (assets or [])}
+        monkeypatch.setattr(execution.quotes, "fetch_all_snapshots", fake_snaps)
+        monkeypatch.setattr(execution.quotes, "trusted_quote",
+                            lambda asset: _trusted_gold())
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_blocks_disabled_or_untrusted_gold(
+            self, notifier, monkeypatch):
+        # threshold=0 blocks even with a trusted quote present.
+        broker = FakeBroker()
+        report = await execution.execute_signal(
+            FakeDatabase(), broker, notifier, clean_settings(gold_max_atr_pct=0),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-g0",
+            source="auto")
+        assert not report.allowed
+        assert any("gold_trading_disabled" in r for r in report.rejects)
+        assert broker.orders == []
+        # missing trusted_quote blocks even with a normal threshold.
+        monkeypatch.setattr(execution.quotes, "trusted_quote",
+                            lambda asset: None)
+        broker2 = FakeBroker()
+        report2 = await execution.execute_signal(
+            FakeDatabase(), broker2, notifier, clean_settings(),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-g0b",
+            source="auto")
+        assert not report2.allowed
+        assert any("gold_quote_unavailable" in r for r in report2.rejects)
+        assert broker2.orders == []
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_maps_gold_atr_breach(self, notifier):
+        broker = FakeBroker()
+        report = await execution.execute_signal(
+            FakeDatabase(), broker, notifier, clean_settings(),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gatr",
+            source="auto", signal_row=_gold_row("BUY"),
+            snapshot=_gold_snap("BUY", atr_pct=3.6),
+            live_price=3518.0585)
+        assert not report.allowed
+        assert any("gold_atr_exceeded" in r for r in report.rejects)
+        assert broker.orders == []
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_blocks_gold_sell_weak_adx(self, notifier):
+        broker = FakeBroker()
+        report = await execution.execute_signal(
+            FakeDatabase(), broker, notifier, clean_settings(),
+            user_id="demo", asset="XAUUSD", direction="SELL",
+            entry=3518.0585, stop_loss=3535.0, take_profit=3490.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gadx",
+            source="auto", signal_row=_gold_row("SELL"),
+            snapshot=_gold_snap("SELL", adx=24.0),
+            live_price=3518.0585)
+        assert not report.allowed
+        assert any("gold_trend_strength_lost" in r
+                   for r in report.rejects + [report.thesis_error or ""])
+        assert broker.orders == []
+
+    @pytest.mark.asyncio
+    async def test_gold_fill_uses_live_biquote_spread(self, notifier,
+                                                      monkeypatch):
+        # live spread 0.155, BUY mid 3518.0585 -> fill 3518.136; SELL -> 3517.981.
+        monkeypatch.setattr(execution.quotes, "live_spread",
+                            lambda asset: 0.155
+                            if str(asset or "").upper() == "XAUUSD" else None)
+        s = clean_settings(spread_overrides={"XAUUSD": 0.50})
+        broker = FakeBroker()
+        report = await execution.execute_signal(
+            FakeDatabase(), broker, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gbuy",
+            source="auto", live_price=3518.0585)
+        assert report.allowed, report.rejects
+        assert broker.orders[0].entry_price == pytest.approx(3518.136,
+                                                             abs=1e-9)
+        broker2 = FakeBroker()
+        report2 = await execution.execute_signal(
+            FakeDatabase(), broker2, notifier, s,
+            user_id="demo", asset="XAUUSD", direction="SELL",
+            entry=3518.0585, stop_loss=3535.0, take_profit=3490.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gsell",
+            source="auto", live_price=3518.0585)
+        assert report2.allowed, report2.rejects
+        assert broker2.orders[0].entry_price == pytest.approx(3517.981,
+                                                              abs=1e-9)

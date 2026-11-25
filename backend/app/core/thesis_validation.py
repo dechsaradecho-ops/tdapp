@@ -248,7 +248,10 @@ def _opt_num(source: Any, key: str) -> Optional[float]:
 
 def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
                     now: Optional[datetime] = None,
-                    max_age_min: Optional[int] = None) -> ThesisValidation:
+                    max_age_min: Optional[int] = None,
+                    max_atr_pct: Optional[float] = None,
+                    gold_breakout_only: bool = False,
+                    require_adx: bool = False) -> ThesisValidation:
     """Re-check that a stored signal's thesis still holds on the live market.
 
     Parameters
@@ -267,6 +270,23 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
     max_age_min : int | None
         When set, a signal whose ``created_at`` is older expires
         (``signal_expired``). ``None`` (default) skips the expiry check.
+    max_atr_pct : float | None
+        ATR% ceiling the fresh ``snapshot["atr_pct"]`` is judged against.
+        ``None`` (default) derives it from the snapshot's
+        ``atr_threshold_pct`` (when present) or the 2.5 FX default — so
+        existing callers without this kwarg keep their current behaviour.
+        The gold execution path passes its own threshold (Settings
+        ``gold_max_atr_pct``) so XAUUSD is judged on the gold ceiling.
+    gold_breakout_only : bool
+        When True, an XAUUSD BUY requires a live breakout/retest structure
+        (``breakout_state`` in 1/2) — even a bare ``state=0, level=0``
+        snapshot counts as a lost breakout. ``False`` (default) keeps the
+        legacy guard (structure fields of 0/0 are ignored as "no data").
+    require_adx : bool
+        When True, a snapshot ADX below 25 blocks with
+        ``gold_trend_strength_lost`` (the gold SELL execution path passes
+        True; all other callers omit it). Unknown ADX (0/missing) is skipped,
+        never a false block.
 
     Returns
     -------
@@ -401,13 +421,41 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
                          "— การยืนยันล้มเหลว"),
             ))
 
+    # ---- ATR ceiling ------------------------------------------------------
+    # The gold execution path passes its own threshold so XAUUSD is judged on
+    # the gold ceiling (Settings ``gold_max_atr_pct``); everyone else keeps
+    # the snapshot threshold (when carried) or the 2.5 FX default.
+    if max_atr_pct is None:
+        try:
+            _atr_limit = float((snapshot or {}).get("atr_threshold_pct", 2.5))
+        except (TypeError, ValueError):
+            _atr_limit = 2.5
+        if not _atr_limit:
+            _atr_limit = 2.5
+        _explicit_atr = False
+    else:
+        try:
+            _atr_limit = float(max_atr_pct)
+        except (TypeError, ValueError):
+            _atr_limit = 2.5
+        _explicit_atr = True
+
     # ---- regime block -----------------------------------------------------
     if regime in HOSTILE_REGIMES and (is_buy or is_sell):
-        issues.append(ThesisIssue(
-            code="regime_blocked",
-            message=(f"สภาวะตลาดล่าสุดเป็น{regime_th(regime)} — ไม่เหมาะกับ "
-                     f"entry ทิศทาง {direction} (ตลาดไร้เทรนด์/ผันผวน/ขับด้วยข่าว)"),
-        ))
+        # Gold-aware window: a high_volatility regime INSIDE the gold ATR
+        # ceiling is the metal's normal state, not a hostile one — suppress
+        # the generic block when the execution path passed its threshold
+        # explicitly and the fresh ATR sits within it.
+        _suppress_high_vol = (
+            asset == "XAUUSD" and _explicit_atr
+            and regime == "high_volatility" and atr_pct
+            and atr_pct <= _atr_limit)
+        if not _suppress_high_vol:
+            issues.append(ThesisIssue(
+                code="regime_blocked",
+                message=(f"สภาวะตลาดล่าสุดเป็น{regime_th(regime)} — ไม่เหมาะกับ "
+                         f"entry ทิศทาง {direction} (ตลาดไร้เทรนด์/ผันผวน/ขับด้วยข่าว)"),
+            ))
     elif regime and (is_buy or is_sell):
         wants_bull = is_buy
         regime_is_bull = regime in _BULLISH_REGIMES
@@ -419,13 +467,41 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
                          f"ทิศทาง {direction}"),
             ))
 
+    # ---- explicit ATR ceiling ---------------------------------------------
+    # Covers ceilings the coarse regime cannot see: a user threshold BELOW
+    # 2.5 (bull/bear trend with an ATR the budget forbids) still blocks.
+    # Dedupes against the regime block above so the legacy path (FX, no
+    # explicit threshold) keeps byte-identical issues.
+    if ((is_buy or is_sell) and atr_pct and atr_pct > _atr_limit
+            and "regime_blocked" not in [i.code for i in issues]):
+        issues.append(ThesisIssue(
+            code="regime_blocked",
+            message=(f"ATR {atr_pct:g}% เกินเพดาน {_atr_limit:g}% — สภาวะผันผวน "
+                     f"เกินกว่าระบบรับได้สำหรับ entry ทิศทาง {direction}"),
+        ))
+
+    # ---- ADX strength recheck (gold SELL execution path) -------------------
+    # An EMA200 downtrend with ADX < 25 is a weak trend, not a tradable one.
+    # Only runs when the caller asks (gold SELL passes require_adx=True);
+    # unknown ADX (0/missing) is skipped, never a false block.
+    if require_adx and (is_buy or is_sell):
+        if adx and adx < 25.0:
+            issues.append(ThesisIssue(
+                code="gold_trend_strength_lost",
+                message=(f"ADX {adx:g} ต่ำกว่า 25 — แนวโน้มอ่อนแรง "
+                         f"ไม่เหมาะกับ entry ทิศทาง {direction}"),
+            ))
+
     # ---- XAUUSD Strategy-D breakout structure -----------------------------
     # breakout_state: 2 = breakout, 1 = retest, 0 = none. A BUY needs a live
     # upside breakout/retest; a SELL needs the structure GONE (0). When the
     # feed reports a breakout context for the direction it contradicts, the
-    # Strategy-D entry is invalid.
+    # Strategy-D entry is invalid. With gold_breakout_only=True a BUY with a
+    # bare state=0/level=0 snapshot is a LOST breakout (missing structure
+    # blocks, including the zero case); otherwise 0/0 reads as "no data".
     if asset == "XAUUSD" and (is_buy or is_sell) and (
-            breakout_state or breakout_level):
+            breakout_state or breakout_level
+            or (gold_breakout_only and is_buy)):
         if is_buy and breakout_state == 0:
             issues.append(ThesisIssue(
                 code="breakout_invalidated",

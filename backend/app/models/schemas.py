@@ -1025,13 +1025,29 @@ def effective_spread(settings: "AppSettings", asset: Optional[str]) -> float:
     """Per-symbol paper spread (price units) for paper fills.
 
     Resolution order:
-      1. User override (settings.spread_overrides[ASSET]) — set from the
+      1. XAUUSD live quote — ``quotes.live_spread("XAUUSD")`` when a trusted
+         quote exists (Biquote spread when fresh). Non-gold assets skip this.
+      2. User override (settings.spread_overrides[ASSET]) — set from the
          Settings page per symbol.
-      2. Built-in DEFAULT_SPREADS[ASSET] — realistic typical spread.
-      3. Legacy global paper_spread (0 = no spread) — covers symbols that
+      3. Built-in DEFAULT_SPREADS[ASSET] — realistic typical spread.
+      4. Legacy global paper_spread (0 = no spread) — covers symbols that
          are not in the table (forward compatibility).
     """
     a = str(asset or "").upper()
+    if a == "XAUUSD":
+        try:
+            _live = quotes.live_spread("XAUUSD")
+        except Exception:
+            _live = None
+        if _live is not None:
+            try:
+                _lv = float(_live)
+            except (TypeError, ValueError):
+                _lv = None
+            if _lv is not None and _lv == _lv \
+                    and _lv not in (float("inf"), float("-inf")) \
+                    and _lv >= 0:
+                return _lv
     overrides = getattr(settings, "spread_overrides", None) or {}
     if a in overrides and overrides[a] is not None:
         try:
