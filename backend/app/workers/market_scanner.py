@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from app.api.routes.settings import try_load_settings
+from app.core.gold_policy import effective_max_atr_pct, gold_entry_block_reason
 from app.engine.strategy_engine import IndicatorSnapshot, StrategyEngine, regime_of
 from app.integrations import quotes
 from app.models.schemas import (
@@ -222,6 +223,17 @@ async def scan_once(db: Database) -> list[dict]:
 
     for asset in universe:
         ind = await _snapshot_for(asset, news_by_asset.get(asset, 0.0))
+        # Task 5: per-asset volatility ceiling + live spread ride on the
+        # snapshot — regime/scoring read ind.atr_threshold_pct (gold 3.5,
+        # FX 2.5) instead of the old hardcoded 2.5.
+        try:
+            ind.atr_threshold_pct = effective_max_atr_pct(settings, asset)
+        except Exception:
+            pass
+        try:
+            ind.spread = quotes.live_spread(asset)
+        except Exception:
+            ind.spread = None
         if ind.source == "live":
             live_used += 1
         else:
@@ -288,19 +300,44 @@ async def scan_once(db: Database) -> list[dict]:
         min_conf = effective_min_confidence(settings, asset)
         min_opp = effective_min_opportunity(settings, asset)
         if opp.score >= min_opp and opp.confidence >= min_conf:
-            # Strategy D — gold breakout-retest gate. Gold's high ATR makes
-            # narrow pullback entries unattractive; XAUUSD only trades an
-            # active breakout (close above the prior 20-bar high) or a
-            # successful retest of it. Prod evidence: gold scored 65+ every
-            # day in a bull market and opened chase entries that lost.
-            # gold_breakout_only=False restores the old behaviour.
-            if (asset.upper() == GOLD_ASSET
-                    and G(settings, "gold_breakout_only")
-                    and ind.breakout_state <= 0):
-                log.info("Signal for %s skipped: no breakout/retest setup "
-                         "(strategy D gate)", asset)
-                results[-1]["breakout_gate_skipped"] = True
-                continue
+            # Task 5: asset-aware gold entry policy (Task 2 gold_policy).
+            # SELL needs NO breakout (trend + ADX + trust + ATR suffice);
+            # BUY keeps the breakout gate when gold_breakout_only. Non-gold
+            # branches below are unchanged.
+            if asset.upper() == GOLD_ASSET:
+                _snap_dict = {
+                    "ema_fast": ind.ema_fast, "ema_slow": ind.ema_slow,
+                    "adx": ind.adx, "atr_pct": ind.atr_pct,
+                    "breakout_state": ind.breakout_state,
+                    "trusted": ind.trusted, "ohlc_source": ind.ohlc_source,
+                    "feed_source": ind.feed_source,
+                    "price_source": ind.price_source,
+                    "bar_count": ind.bar_count,
+                }
+                _block = gold_entry_block_reason(
+                    settings, asset=asset, direction=_dir,
+                    snapshot=_snap_dict)
+                if not _block and (ind.bar_count or 0) < 200:
+                    _block = "gold_insufficient_history"
+                if _block:
+                    log.info("Signal for %s skipped: %s", asset, _block)
+                    results[-1]["gold_policy_skipped"] = True
+                    results[-1]["gold_policy_reason"] = _block
+                    continue
+                # Strategy D — gold breakout-retest gate, BUY side only.
+                # Gold's high ATR makes narrow pullback entries unattractive;
+                # XAUUSD BUY only trades an active breakout (close above the
+                # prior 20-bar high) or a successful retest of it. SELL never
+                # enters this gate. Prod evidence: gold scored 65+ every day
+                # in a bull market and opened chase entries that lost.
+                # gold_breakout_only=False restores the old behaviour.
+                if (G(settings, "gold_breakout_only")
+                        and _dir == "BUY"
+                        and (ind.breakout_state or 0) <= 0):
+                    log.info("Signal for %s skipped: no breakout/retest setup "
+                             "(strategy D gate)", asset)
+                    results[-1]["breakout_gate_skipped"] = True
+                    continue
             # Market-closed guard — FX/gold trade Sun 21:00 UTC → Fri 21:00
             # UTC. Emitting signals into a closed market would pin entries at
             # Friday's close for the whole weekend (the "ราคาเก่า" complaint).

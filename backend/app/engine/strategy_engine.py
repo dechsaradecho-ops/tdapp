@@ -57,18 +57,46 @@ class IndicatorSnapshot:
 
     reasons: list[str] = field(default_factory=list)
 
+    # ---- Task 5: gold provenance + per-asset volatility gate ---------------
+    # Carried from quotes.snapshot_from_candles (Task 4 keys) so
+    # IndicatorSnapshot(**snap) never raises TypeError. All optional with
+    # defaults — positional constructors keep working.
+    ema_slow_period: int = 100    # 200 for gold (true EMA200), 100 for FX
+    atr_method: str = "simple"    # "wilder" for gold, "simple" for FX
+    atr_period: int = 14
+    atr_threshold_pct: float = 2.5  # per-asset ATR ceiling (gold: 3.5)
+    feed_source: str = ""         # backward-compat alias of ohlc_source
+    price_source: str = ""        # winning spot feed ("biquote"/"twelvedata"/...)
+    ohlc_source: str = ""         # winning OHLC feed ("biquote"/.../"yahoo_degraded")
+    bar_count: int = 0            # closed bars behind the indicators
+    spread: Optional[float] = None  # live spread of the last tradable quote
+    trusted: Optional[bool] = None  # False only for degraded Yahoo (display-only)
+
 
 BANDS = ((81.0, 100.0, OpportunityBand.very_high), (61.0, 81.0, OpportunityBand.high),
          (31.0, 61.0, OpportunityBand.medium), (0.0, 31.0, OpportunityBand.low))
 
 
-def regime_of(ind: IndicatorSnapshot) -> str:
-    """Classify the market regime from an indicator snapshot (worker + API share this)."""
+def regime_of(ind: IndicatorSnapshot,
+              max_atr_pct: float | None = None) -> str:
+    """Classify the market regime from an indicator snapshot (worker + API share this).
+
+    ``max_atr_pct`` overrides the high-volatility ATR ceiling; None (default)
+    uses the snapshot's own ``atr_threshold_pct`` (2.5 for FX, 3.5 for gold) —
+    so existing single-arg callers are backward-compatible.
+    """
     if ind.high_impact_event:
         return "news_driven_market"
     if ind.adx < 20:
         return "sideway"
-    if ind.atr_pct > 2.5:
+    threshold = max_atr_pct if max_atr_pct is not None else getattr(
+        ind, "atr_threshold_pct", 2.5)
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        threshold = 2.5
+    atr_pct = ind.atr_pct if ind.atr_pct is not None else 0.0
+    if atr_pct > threshold:
         return "high_volatility"
     if ind.ema_fast > ind.ema_slow:
         return "bull_trend" if ind.adx < 35 else "strong_bull_trend"
@@ -181,12 +209,20 @@ class StrategyEngine:
                 reasons.append("MACD histogram สวนทางกับฝั่งที่ต้องการ → โมเมนตัมไม่ยืนยัน")
 
         # --- Volatility (0-20): moderate volatility is ideal ---
-        if 0.4 <= ind.atr_pct <= 1.5:
+        # The high-volatility ceiling is per-asset (gold tolerates 3.5%,
+        # FX 2.5%) via the snapshot's atr_threshold_pct.
+        _atr = ind.atr_pct if ind.atr_pct is not None else 0.0
+        _thr = getattr(ind, "atr_threshold_pct", 2.5)
+        try:
+            _thr = float(_thr)
+        except (TypeError, ValueError):
+            _thr = 2.5
+        if 0.4 <= _atr <= 1.5:
             score += 15
-            reasons.append(f"ATR {ind.atr_pct:.2f}% → ความผันผวนเหมาะสมต่อการเทรด")
-        elif ind.atr_pct > 2.5:
+            reasons.append(f"ATR {_atr:.2f}% → ความผันผวนเหมาะสมต่อการเทรด")
+        elif _atr > _thr:
             score -= 10
-            reasons.append(f"ATR {ind.atr_pct:.2f}% → ผันผวนสูงเกิน ปรับลดขนาดโพซิชัน")
+            reasons.append(f"ATR {_atr:.2f}% → ผันผวนสูงเกิน ปรับลดขนาดโพซิชัน")
         else:
             score += 5
 

@@ -1175,3 +1175,39 @@ class TestApiRoutes:
         paths = r.json()["paths"]
         assert "/health" in paths
         assert "/api/goal/assess" in paths
+
+
+# ---------------------------------------------------------------------------
+# Task 5: gold regime thresholds (strategy_engine.regime_of)
+# ---------------------------------------------------------------------------
+from app.engine.strategy_engine import regime_of
+
+
+class TestGoldRegimeThreshold:
+    def test_fx_regime_still_uses_two_point_five(self):
+        """FX keeps the 2.5% ATR ceiling; gold uses its own 3.5% ceiling."""
+        fx = make_ind(asset="EURUSD", atr_pct=2.6, adx=30.0,
+                      ema_fast=1.20, ema_slow=1.10)
+        assert regime_of(fx, max_atr_pct=2.5) == "high_volatility"
+        gold = make_ind(asset="XAUUSD", atr_pct=2.6, adx=30.0,
+                        ema_fast=2420.0, ema_slow=2380.0)
+        assert regime_of(gold, max_atr_pct=3.5) != "high_volatility"
+        assert regime_of(gold, max_atr_pct=3.5) == "bull_trend"
+        # None → per-snapshot threshold (default 2.5 keeps FX behaviour).
+        assert regime_of(make_ind(atr_pct=2.6, adx=30.0)) == "high_volatility"
+        assert regime_of(
+            make_ind(atr_pct=2.6, adx=30.0, atr_threshold_pct=3.5)
+        ) == "bull_trend"
+
+    def test_snapshot_carries_task5_provenance_defaults(self):
+        """New IndicatorSnapshot fields are optional (positional ctors work)."""
+        ind = IndicatorSnapshot("XAUUSD", 2400.0)
+        assert ind.ema_slow_period == 100
+        assert ind.atr_method == "simple"
+        assert ind.atr_period == 14
+        assert ind.atr_threshold_pct == 2.5
+        assert ind.feed_source == ""
+        assert ind.price_source == ""
+        assert ind.ohlc_source == ""
+        assert ind.bar_count == 0
+        assert ind.spread is None

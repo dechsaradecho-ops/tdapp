@@ -164,12 +164,16 @@ def strong_snapshot(asset: str, news_sentiment: float = 0.0):
     from app.engine.strategy_engine import IndicatorSnapshot
     # breakout context (strategy D): strong setups carry an active breakout
     # above the broken 99.0 level so the gold gate lets them through.
+    # Task 5 provenance: trusted biquote-like OHLC with 300 closed bars so
+    # the gold entry policy (trust + 200-bar minimum) lets them through.
     return IndicatorSnapshot(
         asset=asset, price=100.0, ema_fast=105.0, ema_slow=95.0,
         adx=40.0, supertrend_dir=1, rsi=62.0, macd_hist=2.0,
         atr_pct=0.8, volatility_index=12.0, news_sentiment=news_sentiment,
         high_impact_event=False, source="live",
-        breakout_state=2.0, breakout_level=99.0)
+        breakout_state=2.0, breakout_level=99.0,
+        trusted=True, ohlc_source="biquote", feed_source="biquote",
+        price_source="biquote", bar_count=300)
 
 
 def choppy_snapshot(asset: str, news_sentiment: float = 0.0):
@@ -179,7 +183,9 @@ def choppy_snapshot(asset: str, news_sentiment: float = 0.0):
         adx=12.0, supertrend_dir=0, rsi=50.0, macd_hist=0.1,
         atr_pct=0.5, volatility_index=8.0, news_sentiment=news_sentiment,
         high_impact_event=False, source="live",
-        breakout_state=2.0, breakout_level=99.0)
+        breakout_state=2.0, breakout_level=99.0,
+        trusted=True, ohlc_source="biquote", feed_source="biquote",
+        price_source="biquote", bar_count=300)
 
 
 class TestMarketScanner:
@@ -413,6 +419,121 @@ class TestMarketScanner:
             # shifts it to ≈99.586 — below the re-anchored level (99.99).
             assert abs(gold[0]["stop_loss"] - 99.586) < 0.05
             assert gold[0]["stop_loss"] < 99.99
+
+    @staticmethod
+    def _gold_trusted_snapshot(asset: str, *, bearish: bool = False,
+                               breakout: float = 2.0,
+                               ohlc_source: str = "biquote",
+                               trusted: bool = True,
+                               news_sentiment: float = 0.0):
+        """Biquote-like XAUUSD snapshot with full Task 4 provenance metadata."""
+        from app.engine.strategy_engine import IndicatorSnapshot
+        if bearish:
+            # EMA50 < EMA200, ADX 36, ATR 2.47 — trend SELL, no breakout.
+            return IndicatorSnapshot(
+                asset=asset, price=2400.0, ema_fast=2380.0, ema_slow=2420.0,
+                adx=36.0, supertrend_dir=-1, rsi=55.0, macd_hist=-2.0,
+                atr_pct=2.47, volatility_index=19.8,
+                news_sentiment=news_sentiment, high_impact_event=False,
+                source="live", breakout_state=breakout, breakout_level=0.0,
+                trusted=trusted, ohlc_source=ohlc_source,
+                feed_source=ohlc_source, price_source=ohlc_source,
+                bar_count=300)
+        ind = strong_snapshot(asset, news_sentiment)
+        ind.breakout_state = breakout
+        ind.breakout_level = 99.0 if breakout else 0.0
+        ind.trusted = trusted
+        ind.ohlc_source = ohlc_source
+        ind.feed_source = ohlc_source
+        ind.price_source = ohlc_source
+        ind.bar_count = 300
+        return ind
+
+    @pytest.mark.asyncio
+    async def test_bearish_gold_emits_sell_without_breakout(self, monkeypatch):
+        """Task 5: bearish gold (EMA50<EMA200, ADX 36, ATR 2.47, breakout 0)
+        emits one pending XAUUSD SELL — SELL needs no breakout."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            if asset == "XAUUSD":
+                return self._gold_trusted_snapshot(
+                    asset, bearish=True, breakout=0.0,
+                    news_sentiment=news_sentiment)
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "try_load_settings",
+                            lambda _db: AppSettings())
+        out = await market_scanner.scan_once(db)
+        gold = [row for table, row in db.inserted
+                if table == "signals" and row["asset"] == "XAUUSD"]
+        assert len(gold) == 1, (
+            "bearish trusted gold within ATR must emit one SELL without breakout")
+        assert gold[0]["direction"] == "sell"
+        xau = next(r for r in out if r["asset"] == "XAUUSD")
+        assert "gold_policy_skipped" not in xau
+
+    @pytest.mark.asyncio
+    async def test_bullish_gold_buy_without_breakout_is_blocked(self, monkeypatch):
+        """Task 5: bullish gold BUY without breakout stays blocked under
+        gold_breakout_only=True."""
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            if asset == "XAUUSD":
+                return self._gold_trusted_snapshot(
+                    asset, breakout=0.0, news_sentiment=news_sentiment)
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "try_load_settings",
+                            lambda _db: AppSettings())
+        out = await market_scanner.scan_once(db)
+        signals = {row["asset"] for table, row in db.inserted
+                   if table == "signals"}
+        assert "XAUUSD" not in signals
+        xau = next(r for r in out if r["asset"] == "XAUUSD")
+        assert xau.get("gold_policy_skipped") or xau.get("breakout_gate_skipped"), (
+            "blocked gold must record the skip reason")
+
+    @pytest.mark.asyncio
+    async def test_gold_disabled_or_untrusted_emits_no_signal(self, monkeypatch):
+        """Task 5: gold_max_atr_pct=0 emits no XAUUSD; nor does a
+        yahoo_degraded (untrusted) feed — even for breakout BUY setups."""
+        # Case A: trading disabled via threshold 0.
+        db = FakeDatabase()
+
+        async def snap(asset, news_sentiment=0.0):
+            if asset == "XAUUSD":
+                return self._gold_trusted_snapshot(
+                    asset, breakout=2.0, news_sentiment=news_sentiment)
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
+        monkeypatch.setattr(market_scanner, "try_load_settings",
+                            lambda _db: AppSettings(gold_max_atr_pct=0.0))
+        await market_scanner.scan_once(db)
+        assert "XAUUSD" not in {row["asset"] for table, row in db.inserted
+                                if table == "signals"}, (
+            "gold_max_atr_pct=0 must emit no XAUUSD signal")
+        # Case B: degraded Yahoo feed (untrusted OHLC).
+        db2 = FakeDatabase()
+
+        async def snap2(asset, news_sentiment=0.0):
+            if asset == "XAUUSD":
+                return self._gold_trusted_snapshot(
+                    asset, breakout=2.0, ohlc_source="yahoo_degraded",
+                    trusted=False, news_sentiment=news_sentiment)
+            return strong_snapshot(asset, news_sentiment)
+
+        monkeypatch.setattr(market_scanner, "_snapshot_for", snap2)
+        monkeypatch.setattr(market_scanner, "try_load_settings",
+                            lambda _db: AppSettings())
+        await market_scanner.scan_once(db2)
+        assert "XAUUSD" not in {row["asset"] for table, row in db2.inserted
+                                if table == "signals"}, (
+            "yahoo_degraded gold must emit no XAUUSD signal")
 
     @pytest.mark.asyncio
     async def test_gold_gate_disabled_by_setting(self, monkeypatch):
