@@ -192,10 +192,17 @@ class TestMarketScanner:
     @pytest.fixture(autouse=True)
     def _no_network_spot(self, monkeypatch):
         """The emit block re-anchors entries at the live spot price — patch
-        the feed so tests stay offline and deterministic."""
-        async def fake_spot(assets, **_kw):
+        the feed so tests stay offline and deterministic.
+
+        The scanner re-anchors through ``fetch_trusted_spot`` (a daily rate
+        must never become a stored entry/SL/TP), so the fake patches THAT —
+        patching ``fetch_spot_prices`` would leave the real trusted filter
+        (daily rejection + XAUUSD trusted_quote drop) in the path and the
+        re-anchor would never fire."""
+        async def fake_trusted(assets, **_kw):
             return {a: 101.0 for a in assets}, {}
-        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", fake_spot)
+        monkeypatch.setattr(market_scanner.quotes, "fetch_trusted_spot",
+                            fake_trusted)
 
     @pytest.fixture(autouse=True)
     def _market_open(self, monkeypatch):
@@ -858,11 +865,12 @@ class TestMarketScanner:
         async def snap(asset, news_sentiment=0.0):
             return strong_snapshot(asset, news_sentiment)  # price=100.0
 
-        async def live_spot(assets, **_kw):
+        async def live_trusted(assets, **_kw):
             return {a: 102.5 for a in assets}, {}
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", live_spot)
+        monkeypatch.setattr(market_scanner.quotes, "fetch_trusted_spot",
+                            live_trusted)
         await market_scanner.scan_once(db)
         emitted = [row for table, row in db.inserted
                    if table == "signals" and "created_at" not in row]
@@ -884,14 +892,15 @@ class TestMarketScanner:
         async def snap(asset, news_sentiment=0.0):
             return strong_snapshot(asset, news_sentiment)  # price=100.0
 
-        async def daily_spot(assets, **_kw):
-            return {a: 102.5 for a in assets}, {}
+        async def daily_trusted(assets, **_kw):
+            # The trusted filter refuses daily fallback rates, so the
+            # scanner sees no live price (the real fetch_trusted_spot drops
+            # them via spot_source == "daily" — simulated here directly).
+            return {}, {a: f"{a}: daily fallback refused" for a in assets}
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices",
-                            daily_spot)
-        monkeypatch.setattr(market_scanner.quotes, "spot_source",
-                            lambda a: "daily")
+        monkeypatch.setattr(market_scanner.quotes, "fetch_trusted_spot",
+                            daily_trusted)
         await market_scanner.scan_once(db)
         emitted = [row for table, row in db.inserted
                    if table == "signals" and "created_at" not in row]
@@ -914,7 +923,8 @@ class TestMarketScanner:
             raise RuntimeError("feed down")
 
         monkeypatch.setattr(market_scanner, "_snapshot_for", snap)
-        monkeypatch.setattr(market_scanner.quotes, "fetch_spot_prices", dead_spot)
+        monkeypatch.setattr(market_scanner.quotes, "fetch_trusted_spot",
+                            dead_spot)
         await market_scanner.scan_once(db)
         emitted = [row for table, row in db.inserted
                    if table == "signals" and "created_at" not in row]

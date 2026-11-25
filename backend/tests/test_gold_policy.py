@@ -134,3 +134,34 @@ def test_gold_degraded_feed_and_insufficient_history():
         snapshot=dict(base, ohlc_source="yahoo_degraded")) == "gold_feed_degraded"
     assert gold_entry_block_reason(
         s, asset="XAUUSD", direction="SELL", snapshot={}) == "gold_insufficient_history"
+
+
+# ---- I1: numeric-coercion hardening (fail closed, never raises) -----------
+def test_effective_max_atr_pct_malformed_falls_back_to_default():
+    """Hand-edited NULL/string/NaN/inf settings rows must not crash the scan
+    cycle (scan_once calls this unwrapped) — gold falls back to the default
+    ceiling, FX keeps 2.5 regardless."""
+    from app.core.gold_policy import GOLD_DEFAULT_MAX_ATR_PCT
+    for bad in (None, "high", float("nan"), float("inf"),
+                float("-inf")):
+        assert effective_max_atr_pct(
+            SimpleNamespace(gold_max_atr_pct=bad),
+            "XAUUSD") == GOLD_DEFAULT_MAX_ATR_PCT
+        assert effective_max_atr_pct(
+            SimpleNamespace(gold_max_atr_pct=bad), "EURUSD") == 2.5
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("ema_fast", "bad"), ("ema_slow", "bad"),
+    ("adx", float("nan")), ("atr_pct", "high"),
+])
+def test_gold_entry_block_reason_malformed_snapshot_fails_closed(key, bad):
+    """Malformed indicator values (strings/NaN) are unverifiable history —
+    fail closed as gold_insufficient_history, never raise."""
+    s = SimpleNamespace(gold_max_atr_pct=3.5, gold_breakout_only=True)
+    base = {"ema_fast": 3976, "ema_slow": 4212, "adx": 36,
+            "atr_pct": 2.0, "breakout_state": 0}
+    snap = dict(base, **{key: bad})
+    assert gold_entry_block_reason(
+        s, asset="XAUUSD", direction="SELL",
+        snapshot=snap) == "gold_insufficient_history"

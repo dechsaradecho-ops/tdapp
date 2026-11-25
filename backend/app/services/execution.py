@@ -2123,6 +2123,15 @@ def preview_order_blocked(db, s: AppSettings, *, asset: str, direction: str,
                 f"สเปรดจริง ({_spread:g}) — SL อยู่ในสเปรด")
     # ---- P0-5 thesis re-validation (snapshot gates only when fetchable) ---
     if signal_row is not None and snapshot:
+        # C1: tick-trust (checked above) never proves the OHLC the snapshot
+        # was built from — a yahoo_degraded / short-history gold snapshot
+        # must block the card here, not just at fire time.
+        if asset_u == "XAUUSD":
+            _gold_ohlc_prev = _gold_ohlc_block(s, asset_u, direction,
+                                               snapshot)
+            if _gold_ohlc_prev:
+                return (f"ไม่ได้เปิดออเดอร์นี้เพราะ {_gold_ohlc_prev}: "
+                        "ข้อมูลทองเสื่อม/ไม่พอ — งดเปิดออเดอร์ทอง (fail-closed)")
         try:
             if asset_u == "XAUUSD" and _gold_thr_prev:
                 _thesis = thesis_validation.validate_thesis(
@@ -2281,6 +2290,61 @@ async def _fresh_thesis_snapshot(db, asset: str) -> Optional[dict]:
     if not snaps:
         return None
     return snaps.get(asset) if isinstance(snaps, dict) else None
+
+
+def _gold_ohlc_block(_settings, asset: str, direction: str,
+                     snapshot: Optional[dict]) -> str:
+    """XAUUSD OHLC-trust pre-check — "" when the thesis snapshot is usable.
+
+    The tick-trust gate (``trusted_quote``) runs earlier on both paths, but a
+    present tick says nothing about the OHLC the thesis snapshot was built
+    from: with Biquote/Twelve Data down, ``fetch_all_snapshots`` returns a
+    yahoo_degraded / short-history snapshot (``trusted`` False, ``ema_slow``
+    None) that the thesis math would otherwise read as VALID ("Yahoo never
+    fills gold").
+
+    This enforces the trust/history SUBSET explicitly (trusted flag, OHLC
+    source, None indicators, sub-200-bar history) rather than calling the
+    full ``gold_entry_block_reason`` policy: the trend/ATR/ADX judgments
+    belong to the thesis below, and a zero-indicator snapshot (offline
+    neutral fakes, and any feed that computed nothing) must keep the
+    thesis's skip-zero semantics instead of reading 0==0 as a trend flip.
+    Legacy snapshots that carry no provenance keys at all AND complete
+    indicators are not blocked — only an explicit degraded signal or
+    unverifiable (None/malformed) gold indicators fail closed. Non-gold
+    assets always return "". Never raises — an unreadable snapshot blocks
+    (``gold_insufficient_history``).
+    """
+    if str(asset or "").upper() != "XAUUSD":
+        return ""
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    try:
+        if snap.get("trusted") is False:
+            return "gold_feed_degraded"
+        if "yahoo_degraded" in {str(snap.get(k) or "") for k in
+                                ("ohlc_source", "feed_source",
+                                 "price_source")}:
+            return "gold_feed_degraded"
+        for key in ("ema_fast", "ema_slow", "adx", "atr_pct",
+                    "breakout_state"):
+            if snap.get(key) is None:
+                return "gold_insufficient_history"
+            try:
+                val = float(snap.get(key))
+            except (TypeError, ValueError):
+                return "gold_insufficient_history"
+            if val != val or val in (float("inf"), float("-inf")):
+                return "gold_insufficient_history"
+        bars = snap.get("bar_count")
+        if bars is not None:
+            try:
+                if float(bars) < 200:
+                    return "gold_insufficient_history"
+            except (TypeError, ValueError):
+                return "gold_insufficient_history"
+    except Exception:
+        return "gold_insufficient_history"
+    return ""
 
 
 async def execute_signal(db, broker, notifier, s: AppSettings, *,
@@ -2591,6 +2655,33 @@ async def execute_signal(db, broker, notifier, s: AppSettings, *,
         # Reuses the snapshot fetched above (same picture the meta-filter
         # judged) instead of refetching — one feed read per order attempt.
         _thesis_snapshot = _meta_snapshot
+        if _asset_u == "XAUUSD" and _thesis_snapshot is not None:
+            # C1: tick-trust (checked at the top) never proves the OHLC the
+            # thesis snapshot was built from — a yahoo_degraded /
+            # short-history gold snapshot must block here with the Task 2
+            # gold code. A missing snapshot falls through to validate_thesis,
+            # which fail-closes with latest_snapshot_unavailable as before.
+            _gold_ohlc = _gold_ohlc_block(s, asset, direction,
+                                          _thesis_snapshot)
+            if _gold_ohlc:
+                _gold_human = (
+                    "ฟีดทองเสื่อม (OHLC ที่ไม่ใช่ Biquote/Twelve Data) — "
+                    "งดเปิดออเดอร์ทองจากข้อมูลเสื่อม"
+                    if _gold_ohlc == "gold_feed_degraded"
+                    else "ข้อมูลทองไม่พอ/ตรวจไม่ได้ (ประวัติสั้นหรือ "
+                         "อินดิเคเตอร์ขาด) — งดเปิดออเดอร์ทอง")
+                report.allowed = False
+                report.thesis_error = _gold_ohlc
+                report.rejects.append(
+                    f"thesis_error: {_gold_ohlc}: {_gold_human}")
+                log.warning("Execution blocked %s %s: %s", direction, asset,
+                            _gold_ohlc)
+                signal_log.log_event(
+                    db=db, event="order_blocked",
+                    signal_id=str(signal_id or ""),
+                    asset=asset, direction=direction, confidence=confidence,
+                    entry=entry, source=source, reason=_gold_human)
+                return report
         if _asset_u == "XAUUSD" and _gold_thr:
             # Task 6 parity: the gold threshold, breakout flag and (SELL)
             # ADX requirement travel into the thesis so execution judges the

@@ -502,6 +502,77 @@ class TestGoldSellRechecksAdxAndAtr:
                                   require_adx=True).ok is True
 
 
+class TestGoldOhlcTrustFailClosed:
+    """C1: tick-trust never proves the OHLC the snapshot was built from.
+
+    A yahoo_degraded / short-history gold snapshot (trusted False,
+    ema_slow None) must INVALIDATE here — the old _num(None)->0 skip read
+    it as VALID and let gold fill from a degraded feed.
+    """
+
+    def test_gold_degraded_snapshot_blocks_with_feed_code(self):
+        sig = _gold_signal("BUY")
+        degraded = _gold_snap("BUY", trusted=False,
+                              ohlc_source="yahoo_degraded",
+                              feed_source="yahoo_degraded",
+                              ema_slow=None, atr_pct=None, bar_count=50)
+        r = tv.validate_thesis(sig, degraded, max_atr_pct=3.5,
+                               max_age_min=30, gold_breakout_only=True)
+        assert r.ok is False
+        assert "gold_feed_degraded" in r.error_codes
+
+    def test_gold_short_history_blocks_with_history_code(self):
+        sig = _gold_signal("SELL")
+        short = _gold_snap("SELL", ema_slow=None, atr_pct=None,
+                           bar_count=50)
+        short.pop("trusted", None)
+        r = tv.validate_thesis(sig, short, max_atr_pct=3.5,
+                               max_age_min=30, require_adx=True)
+        assert r.ok is False
+        assert "gold_insufficient_history" in r.error_codes
+
+    def test_gold_trusted_snapshot_still_valid(self):
+        sig = _gold_signal("SELL")
+        snap = _gold_snap("SELL", trusted=True, ohlc_source="biquote",
+                          bar_count=300)
+        r = tv.validate_thesis(sig, snap, max_atr_pct=3.5,
+                               max_age_min=30, require_adx=True)
+        assert r.ok is True
+
+
+class TestGoldRegimeUsesOwnAtrCeiling:
+    """I2: _regime_of threads the per-asset ATR ceiling instead of the
+    hardcoded 2.5 — gold 2.6-3.5% ATR is a normal trending metal under a
+    3.5 ceiling, while the same ATR on FX stays high_volatility."""
+
+    def test_regime_of_defaults_to_fx_ceiling(self):
+        snap = {"asset": "EURUSD", "ema_fast": 1.1050, "ema_slow": 1.0900,
+                "adx": 30.0, "atr_pct": 2.6}
+        assert tv._regime_of(snap) == "high_volatility"
+
+    def test_regime_of_accepts_gold_ceiling(self):
+        snap = {"asset": "XAUUSD", "ema_fast": 3520.0, "ema_slow": 3510.0,
+                "adx": 30.0, "atr_pct": 3.0}
+        assert tv._regime_of(snap) == "high_volatility"
+        assert tv._regime_of(snap, atr_threshold_pct=3.5) == "bull_trend"
+
+    def test_gold_atr_within_own_ceiling_is_not_regime_blocked(self):
+        sig = _gold_signal("SELL")
+        snap = _gold_snap("SELL", atr_pct=3.0, trusted=True,
+                          ohlc_source="biquote", bar_count=300)
+        r = tv.validate_thesis(sig, snap, max_atr_pct=3.5,
+                               max_age_min=30, require_adx=True)
+        assert r.ok is True
+        assert r.values["regime"] == "bear_trend"
+
+    def test_fx_same_atr_is_regime_blocked(self):
+        sig = _signal(direction="BUY")
+        snap = _snapshot(adx=30.0, atr_pct=2.6)
+        r = tv.validate_thesis(sig, snap, max_age_min=30)
+        assert "regime_blocked" in r.error_codes
+        assert r.values["regime"] == "high_volatility"
+
+
 class TestGoldBuyLostBreakout:
     def test_gold_buy_lost_breakout_blocks_even_when_state_and_level_are_zero(self):
         buy_signal = _gold_signal("BUY")

@@ -330,6 +330,45 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
                              f"(อายุ {age_min:.0f} นาที) — thesis อาจไม่จริงแล้ว"),
                 ))
 
+    # ---- gold OHLC trust (fail-closed) -------------------------------------
+    # Execution judges tick-trust (trusted_quote), but a present tick says
+    # nothing about the OHLC the thesis snapshot was built from: with
+    # Biquote/Twelve Data down, fetch_all_snapshots returns a yahoo_degraded
+    # / short-history snapshot (trusted False, ema_slow None) whose Nones
+    # _num() maps to 0 — skipping every gate below and returning VALID.
+    # Reject those snapshots here ("Yahoo never fills gold"). Legacy offline
+    # snapshots that carry no provenance keys at all (no trusted/ohlc_source
+    # AND complete indicators) are NOT blocked — only an explicit degraded
+    # signal or unverifiable (None) gold indicators fail closed.
+    if asset == "XAUUSD":
+        _gold_sources = {str(snapshot.get(k) or "")
+                         for k in ("ohlc_source", "feed_source",
+                                   "price_source")}
+        if snapshot.get("trusted") is False \
+                or "yahoo_degraded" in _gold_sources:
+            issues.append(ThesisIssue(
+                code="gold_feed_degraded",
+                message=("ฟีดทองเสื่อม (OHLC ที่ไม่ใช่ Biquote/Twelve Data) — "
+                         "งดเปิดออเดอร์ทองจากข้อมูลเสื่อม (fail-closed)"),
+            ))
+        else:
+            _gold_required = ("ema_fast", "ema_slow", "adx", "atr_pct",
+                              "breakout_state")
+            _gold_bars = snapshot.get("bar_count")
+            try:
+                _gold_bars_n = (None if _gold_bars is None
+                                else float(_gold_bars))
+            except (TypeError, ValueError):
+                _gold_bars_n = None
+            if any(snapshot.get(k) is None for k in _gold_required) \
+                    or (_gold_bars is not None
+                        and (_gold_bars_n is None or _gold_bars_n < 200)):
+                issues.append(ThesisIssue(
+                    code="gold_insufficient_history",
+                    message=("ข้อมูลทองไม่พอ/ตรวจไม่ได้ (ประวัติสั้นหรือ "
+                             "อินดิเคเตอร์ขาด) — งดเปิดออเดอร์ทอง (fail-closed)"),
+                ))
+
     ema_fast = _num(snapshot, "ema_fast")
     ema_slow = _num(snapshot, "ema_slow")
     supertrend_dir = int(_num(snapshot, "supertrend_dir"))
@@ -339,7 +378,21 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
     adx = _num(snapshot, "adx")
     atr_pct = _num(snapshot, "atr_pct")
     news_now = bool(snapshot.get("high_impact_event"))
-    regime = _regime_of(snapshot)
+    # Gold judges the regime on its own ATR ceiling (Settings
+    # gold_max_atr_pct, else the snapshot's atr_threshold_pct, else 2.5);
+    # FX always keeps the legacy 2.5 default — byte-identical.
+    _regime_limit = 2.5
+    if asset == "XAUUSD":
+        _regime_raw = (max_atr_pct if max_atr_pct is not None
+                       else snapshot.get("atr_threshold_pct", 2.5))
+        try:
+            _regime_cand = float(_regime_raw)
+        except (TypeError, ValueError):
+            _regime_cand = 2.5
+        if _regime_cand and _regime_cand == _regime_cand \
+                and _regime_cand not in (float("inf"), float("-inf")):
+            _regime_limit = _regime_cand
+    regime = _regime_of(snapshot, atr_threshold_pct=_regime_limit)
 
     # Baseline indicator values captured when the signal was created (may be
     # absent on pre-migration signals ⇒ read as None ⇒ "no baseline").
@@ -550,14 +603,27 @@ def validate_thesis(signal: Optional[dict], snapshot: Optional[dict], *,
         status=STATUS_INVALID, issues=issues, source="live", values=values)
 
 
-def _regime_of(snapshot: dict) -> str:
+def _regime_of(snapshot: dict, atr_threshold_pct: float = 2.5) -> str:
     """Re-derive the market regime from a fresh snapshot (mirror of
     ``strategy_engine.regime_of`` but dict-based so this module stays decoupled
-    from the engine dataclass)."""
+    from the engine dataclass).
+
+    ``atr_threshold_pct`` is the per-asset ATR ceiling: gold passes its own
+    (Settings ``gold_max_atr_pct``) so a 2.6-3.5% ATR reads as a normal
+    trending metal, not ``high_volatility``; every other caller omits it and
+    keeps the legacy 2.5 FX ceiling byte-identical.
+    """
     if not snapshot:
         return ""
     if snapshot.get("high_impact_event"):
         return "news_driven_market"
+    try:
+        _limit = float(atr_threshold_pct)
+    except (TypeError, ValueError):
+        _limit = 2.5
+    if not _limit or _limit != _limit \
+            or _limit in (float("inf"), float("-inf")):
+        _limit = 2.5
     adx = _num(snapshot, "adx")
     atr_pct = _num(snapshot, "atr_pct")
     ema_fast = _num(snapshot, "ema_fast")
@@ -567,7 +633,7 @@ def _regime_of(snapshot: dict) -> str:
         return ""
     if adx < 20:
         return "sideway"
-    if atr_pct > 2.5:
+    if atr_pct > _limit:
         return "high_volatility"
     if ema_fast > ema_slow:
         return "bull_trend" if adx < 35 else "strong_bull_trend"

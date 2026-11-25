@@ -74,10 +74,38 @@ def _is_gold_asset(asset: str) -> bool:
 
 
 def effective_max_atr_pct(settings: Any, asset: str) -> float:
-    """Gold returns its own threshold; every other asset returns 2.5."""
+    """Gold returns its own threshold; every other asset returns 2.5.
+
+    Fail-closed: a hand-edited NULL/string/NaN/inf row (scan_once reads the
+    settings row unwrapped) falls back to GOLD_DEFAULT_MAX_ATR_PCT instead
+    of raising — a bad config row must never crash the scan cycle.
+    """
     if not _is_gold_asset(asset):
         return FX_MAX_ATR_PCT
-    return float(getattr(settings, "gold_max_atr_pct", GOLD_DEFAULT_MAX_ATR_PCT))
+    try:
+        value = float(getattr(settings, "gold_max_atr_pct",
+                              GOLD_DEFAULT_MAX_ATR_PCT))
+    except (TypeError, ValueError):
+        return GOLD_DEFAULT_MAX_ATR_PCT
+    if value != value or value in (float("inf"), float("-inf")):
+        return GOLD_DEFAULT_MAX_ATR_PCT
+    return value
+
+
+def _snap_num(snap: Mapping[str, Any], key: str) -> float | None:
+    """snapshot[key] → float, or None when missing/malformed/NaN/inf.
+
+    A malformed number is indistinguishable from missing history downstream
+    (both mean "the indicator cannot be verified"), so callers map None to
+    ``gold_insufficient_history`` — never raise out of the policy.
+    """
+    try:
+        value = float(snap[key])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
 
 
 def gold_entry_block_reason(
@@ -110,17 +138,26 @@ def gold_entry_block_reason(
     if any(snap.get(key) is None for key in required):
         return "gold_insufficient_history"
 
-    atr_pct = float(snap["atr_pct"])
+    # Malformed numbers (strings/NaN/inf from a corrupt feed row) carry no
+    # verifiable indicator — fail closed as insufficient history (documented
+    # choice over gold_feed_degraded: the feed may be fine, the VALUES are
+    # not). Never raises: scan_once calls this unwrapped.
+    atr_pct = _snap_num(snap, "atr_pct")
+    ema_fast = _snap_num(snap, "ema_fast")
+    ema_slow = _snap_num(snap, "ema_slow")
+    adx_val = _snap_num(snap, "adx")
+    if (atr_pct is None or ema_fast is None or ema_slow is None
+            or adx_val is None):
+        return "gold_insufficient_history"
+
     if atr_pct > threshold:
         return "gold_atr_exceeded"
 
     side = str(direction or "").upper()
-    ema_fast = float(snap["ema_fast"])
-    ema_slow = float(snap["ema_slow"])
     if side == "SELL":
         if ema_fast >= ema_slow:
             return "gold_trend_not_bearish"
-        if float(snap["adx"]) < GOLD_SELL_MIN_ADX:
+        if adx_val < GOLD_SELL_MIN_ADX:
             return "gold_trend_strength_lost"
         return ""
     if side == "BUY":

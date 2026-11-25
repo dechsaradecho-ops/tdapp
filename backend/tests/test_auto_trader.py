@@ -1877,6 +1877,75 @@ class TestGoldExecutionGates:
         assert broker.orders == []
 
     @pytest.mark.asyncio
+    async def test_execute_and_preview_block_gold_degraded_ohlc_despite_trusted_tick(
+            self, notifier):
+        """C1: a present trusted tick never proves the OHLC the thesis
+        snapshot was built from. Biquote/TD down → fetch_all_snapshots
+        returns a yahoo_degraded / short-history snapshot (trusted False,
+        ema_slow None): execute_signal AND preview_order_blocked must both
+        block with the Task 2 gold code and place zero broker orders."""
+        from app.integrations import quotes as _q
+        # Reset gold caches so full-suite order (Task 9 bleed) cannot leak a
+        # trusted quote/snapshot into this offline test.
+        _q._quote_cache.clear()
+        _q._trusted_quotes.clear()
+        _q._gold_price_source.clear()
+        degraded = _gold_snap(
+            "BUY", trusted=False, ohlc_source="yahoo_degraded",
+            feed_source="yahoo_degraded", ema_slow=None, atr_pct=None,
+            bar_count=50)
+        broker = FakeBroker()
+        report = await execution.execute_signal(
+            FakeDatabase(), broker, notifier, clean_settings(),
+            user_id="demo", asset="XAUUSD", direction="BUY",
+            entry=3518.0585, stop_loss=3500.0, take_profit=3560.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gdeg",
+            source="auto", signal_row=_gold_row("BUY"),
+            snapshot=degraded, live_price=3518.0585)
+        assert not report.allowed, report.rejects
+        assert any("gold_feed_degraded" in r
+                   for r in report.rejects + [report.thesis_error or ""])
+        assert broker.orders == []
+        preview = execution.preview_order_blocked(
+            FakeDatabase(), clean_settings(), asset="XAUUSD",
+            direction="BUY", entry=3518.0585, stop_loss=3500.0,
+            take_profit=3560.0, confidence=90.0,
+            signal_row=_gold_row("BUY"), snapshot=dict(degraded))
+        assert "gold_feed_degraded" in preview
+
+    @pytest.mark.asyncio
+    async def test_execute_and_preview_block_gold_short_history_despite_trusted_tick(
+            self, notifier):
+        """C1 mirror: a snapshot with unverifiable (None) gold indicators /
+        sub-200-bar history blocks both paths as gold_insufficient_history —
+        the _num(None)->0 skip must never read as VALID."""
+        from app.integrations import quotes as _q
+        _q._quote_cache.clear()
+        _q._trusted_quotes.clear()
+        _q._gold_price_source.clear()
+        short = _gold_snap("SELL", ema_slow=None, atr_pct=None,
+                           bar_count=50)
+        short.pop("trusted", None)  # no provenance key: Nones must still fail closed
+        broker = FakeBroker()
+        report = await execution.execute_signal(
+            FakeDatabase(), broker, notifier, clean_settings(),
+            user_id="demo", asset="XAUUSD", direction="SELL",
+            entry=3518.0585, stop_loss=3535.0, take_profit=3490.0,
+            confidence=90.0, opportunity=90.0, signal_id="sig-gshort",
+            source="auto", signal_row=_gold_row("SELL"),
+            snapshot=short, live_price=3518.0585)
+        assert not report.allowed, report.rejects
+        assert any("gold_insufficient_history" in r
+                   for r in report.rejects + [report.thesis_error or ""])
+        assert broker.orders == []
+        preview = execution.preview_order_blocked(
+            FakeDatabase(), clean_settings(), asset="XAUUSD",
+            direction="SELL", entry=3518.0585, stop_loss=3535.0,
+            take_profit=3490.0, confidence=90.0,
+            signal_row=_gold_row("SELL"), snapshot=dict(short))
+        assert "gold_insufficient_history" in preview
+
+    @pytest.mark.asyncio
     async def test_gold_fill_uses_live_biquote_spread(self, notifier,
                                                       monkeypatch):
         # live spread 0.155, BUY mid 3518.0585 -> fill 3518.136; SELL -> 3517.981.
