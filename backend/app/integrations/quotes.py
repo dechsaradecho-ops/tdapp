@@ -1180,6 +1180,29 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
             # degraded); every other asset keeps the path below byte-identical.
             if str(asset or "").upper() == "XAUUSD":
                 return await _gold_spot_one(asset, client)
+            # 0) Biquote tick first (fresh-open only, allow_stale=False).
+            # Failures fall through silently to the Yahoo chain below —
+            # no new failure modes surface (Ruling C).
+            t0 = time.monotonic()
+            try:
+                tick = await biquote.fetch_tick(
+                    str(asset).upper(), allow_stale=False, client=client)
+                dur = int((time.monotonic() - t0) * 1000)
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="biquote",
+                    url=f"{biquote.BASE_URL}/api/{str(asset).upper()}",
+                    status="success", price=float(tick.mid),
+                    duration_ms=dur)
+                _spot_live[asset] = (time.monotonic(), float(tick.mid))
+                return asset, float(tick.mid), "", "spot"
+            except biquote.BiquoteError as exc:
+                quote_log.log_call(
+                    asset=asset, category=quote_log.category_for(asset),
+                    provider="biquote",
+                    url=f"{biquote.BASE_URL}/api/{str(asset).upper()}",
+                    status="error", error=str(exc),
+                    duration_ms=int((time.monotonic() - t0) * 1000))
             # 1) Yahoo chart API first (real intraday spots; only XAUUSD source)
             asset_y, y_price, y_err = await _yahoo_one(asset, client)
             if y_price:

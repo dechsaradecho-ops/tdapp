@@ -530,6 +530,19 @@ class TestSpotFeed:
         quotes._spot_source.clear()
         quotes._exchange_key_idx = 0
 
+    @pytest.fixture(autouse=True)
+    def _biquote_down(self, monkeypatch):
+        """Pin the Biquote-first leg down: these tests cover the unchanged
+        Yahoo → last-intraday → exchangerate chain underneath it."""
+        from app.integrations.biquote import BiquoteError
+
+        async def _down(symbol: str = "XAUUSD", *, allow_stale: bool = False,
+                       client=None):
+            raise BiquoteError("biquote: down (test)")
+
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _down,
+                            raising=False)
+
     def test_pair_mapping_covers_fx_only(self):
         assert quotes._exchange_pair("GBPUSD") == ("GBP", "USD")
         assert quotes._exchange_pair("XAUUSD") is None  # no gold on free tier
@@ -806,6 +819,19 @@ class TestTrustedSpot:
         quotes._spot_live.clear()
         quotes._spot_source.clear()
         quotes._exchange_key_idx = 0
+
+    @pytest.fixture(autouse=True)
+    def _biquote_down(self, monkeypatch):
+        """Pin the Biquote-first leg down: writer-path tests cover the
+        unchanged Yahoo → fallback chain and its trusted-drop gate."""
+        from app.integrations.biquote import BiquoteError
+
+        async def _down(symbol: str = "XAUUSD", *, allow_stale: bool = False,
+                       client=None):
+            raise BiquoteError("biquote: down (test)")
+
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _down,
+                            raising=False)
 
     @pytest.mark.asyncio
     async def test_accepted_daily_rate_is_still_dropped_for_writers(
@@ -1484,3 +1510,119 @@ class TestDisplayPrices:
         assert meta["XAUUSD"].stale is False
         assert failures == {}
         assert quotes.trusted_quote("XAUUSD") is None
+
+
+# ---------------------------------------------------------------------------
+# Execution spot parity — Biquote-first non-gold branch (Task 6)
+# ---------------------------------------------------------------------------
+def _exec_tick(symbol: str, mid: float):
+    """Fresh-open Biquote tick stand-in (fetch_tick mock return value)."""
+    from datetime import datetime, timezone
+    return quotes.biquote.BiquoteTick(
+        symbol=symbol, bid=mid - 0.00003, ask=mid + 0.00003, mid=mid,
+        spread=0.00006, timestamp=datetime(2026, 11, 25, 12, 0, 0,
+                                           tzinfo=timezone.utc),
+        source="biquote", exchange="BQT", market_state="open",
+        stale=False, quote_age_seconds=3)
+
+
+def _capture_providers(monkeypatch) -> list:
+    """Record quote_log provider tags (DB sink is a no-op in tests)."""
+    seen: list = []
+    orig = quotes.quote_log.log_call
+
+    def _cap(*a, **kw):
+        if "provider" in kw:
+            seen.append(kw["provider"])
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(quotes.quote_log, "log_call", _cap)
+    return seen
+
+
+class TestExecutionSpotParity:
+    @pytest.fixture(autouse=True)
+    def _reset_spot_state(self):
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        quotes._exchange_key_idx = 0
+        yield
+        quotes._spot_cache.clear()
+        quotes._spot_live.clear()
+        quotes._spot_source.clear()
+        quotes._exchange_key_idx = 0
+
+    @pytest.mark.asyncio
+    async def test_execution_spot_prefers_biquote_tick(self, monkeypatch):
+        """Biquote tick first: fresh-open print wins, Yahoo never touched."""
+        from app.integrations.biquote import BiquoteError  # noqa: F401
+        mids = {"EURUSD": 1.0946, "CHFJPY": 170.13}
+        biquote_calls: list[str] = []
+
+        async def _tick(symbol: str = "XAUUSD", *, allow_stale: bool = False,
+                       client=None):
+            assert allow_stale is False
+            biquote_calls.append(str(symbol).upper())
+            return _exec_tick(str(symbol).upper(), mids[str(symbol).upper()])
+
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _tick,
+                            raising=False)
+        providers = _capture_providers(monkeypatch)
+        calls: list[str] = []
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, []))
+        prices, failures = await quotes.fetch_spot_prices(
+            ["EURUSD", "CHFJPY"])
+        assert failures == {} and set(prices) == {"EURUSD", "CHFJPY"}
+        assert prices["EURUSD"] == pytest.approx(1.0946)
+        assert prices["CHFJPY"] == pytest.approx(170.13)
+        assert quotes.spot_source("EURUSD") == "spot"
+        assert len(biquote_calls) >= 1
+        assert "biquote" in providers
+        assert not any("yahoo" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_execution_spot_biquote_outage_keeps_yahoo_chain(
+            self, monkeypatch):
+        """Biquote down → silent fallthrough to the Yahoo leg."""
+        from app.integrations.biquote import BiquoteError
+
+        async def _down(symbol: str = "XAUUSD", *, allow_stale: bool = False,
+                       client=None):
+            raise BiquoteError("biquote: down (test)")
+
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _down,
+                            raising=False)
+        providers = _capture_providers(monkeypatch)
+        calls: list[str] = []
+        responses = [_yahoo_payload(1.15)]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        prices, failures = await quotes.fetch_spot_prices(["EURUSD"])
+        assert "EURUSD" in prices and failures == {}
+        assert "yahoo" in providers and "biquote" in providers
+
+    @pytest.mark.asyncio
+    async def test_trusted_spot_still_drops_daily_rates(self, monkeypatch):
+        """Writer path still refuses exchangerate daily rates (USDCAD)."""
+        from app.core.config import get_settings as _gs
+        from app.integrations.biquote import BiquoteError
+        monkeypatch.setattr(_gs(), "exchangerate_api_keys", "keyA",
+                            raising=False)
+
+        async def _down(symbol: str = "XAUUSD", *, allow_stale: bool = False,
+                       client=None):
+            raise BiquoteError("biquote: down (test)")
+
+        monkeypatch.setattr(quotes.biquote, "fetch_tick", _down,
+                            raising=False)
+        calls: list[str] = []
+        responses = [
+            _resp({}, status=429),          # yahoo dead, cold start: no live ref
+            _ex_resp("CAD", 1.35),          # exchangerate /latest/USD → CAD leg
+        ]
+        monkeypatch.setattr(quotes.httpx, "AsyncClient",
+                            _fake_client_factory(calls, responses))
+        trusted, failures = await quotes.fetch_trusted_spot(["USDCAD"])
+        assert "USDCAD" not in trusted and "USDCAD" in failures
