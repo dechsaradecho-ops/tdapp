@@ -1685,6 +1685,91 @@ class TestDisplayPrices:
         assert set(failures) == {"EURUSD", "GBPJPY"}
         assert elapsed < 5.0
 
+    @pytest.mark.asyncio
+    async def test_display_batch_hang_returns_partials_within_budget(
+            self, monkeypatch):
+        """Hung Biquote batch + one fast Yahoo leg → partials, never wipeout.
+
+        Single shared deadline: the batch hang must degrade to per-asset
+        Yahoo fallback, keeping the fast asset in `out` and the hung one in
+        `failures` — never a blank `{}` + blanket "display batch timeout"
+        wipeout. No live network; hangs are deferred (cancelled on timeout),
+        so wall time stays within budget + slack.
+        """
+        monkeypatch.setattr(quotes, "_DISPLAY_TOTAL_TIMEOUT", 1.5)
+        monkeypatch.setattr(quotes, "_DISPLAY_PER_ASSET_TIMEOUT", 1.0)
+
+        async def _hang(*args, **kwargs):
+            await asyncio.Event().wait()
+            raise AssertionError("hung leg should have been cancelled")
+
+        async def _fake_yahoo(asset, client):
+            if asset == "EURUSD":
+                return 1.15, 2.0, ""
+            await asyncio.Event().wait()
+            raise AssertionError("hung leg should have been cancelled")
+
+        async def _no_legacy(asset, client=None):
+            return 0.0, f"{asset}: no legacy"
+
+        monkeypatch.setattr(quotes.biquote, "fetch_latest", _hang)
+        monkeypatch.setattr(quotes, "_display_yahoo_one", _fake_yahoo)
+        monkeypatch.setattr(
+            quotes, "_fetch_spot_exchangerate", _no_legacy)
+        t0 = time.monotonic()
+        prices, meta, failures = await quotes.fetch_display_prices(
+            ["EURUSD", "GBPJPY"])
+        elapsed = time.monotonic() - t0
+        assert elapsed < 5.0
+        assert "EURUSD" in prices  # fast leg survives — no blank wipeout
+        assert meta["EURUSD"].source.startswith("yahoo")
+        assert "GBPJPY" in failures
+        assert "timeout" in failures["GBPJPY"]
+
+    @pytest.mark.asyncio
+    async def test_display_partial_progress_survives_slow_batch(
+            self, monkeypatch):
+        """Slow-but-under-budget Biquote batch → both legs resolve.
+
+        The batch serves EURUSD while GBPJPY falls back to fast Yahoo; the
+        batch delay must not eat the fan-out budget (single shared deadline)
+        and must not wipe out either leg.
+        """
+        from datetime import datetime, timezone
+
+        monkeypatch.setattr(quotes, "_DISPLAY_TOTAL_TIMEOUT", 2.0)
+        monkeypatch.setattr(quotes, "_DISPLAY_PER_ASSET_TIMEOUT", 1.0)
+
+        async def _slow_batch(symbols, client=None):
+            await asyncio.sleep(0.3)
+            return {"EURUSD": quotes.biquote.BiquoteTick(
+                symbol="EURUSD", bid=1.0945, ask=1.0947, mid=1.0946,
+                spread=0.0002,
+                timestamp=datetime(2026, 11, 25, 12, 0, 0,
+                                   tzinfo=timezone.utc),
+                source="biquote", exchange="BQT", market_state="open",
+                stale=False, quote_age_seconds=3)}
+
+        async def _fake_yahoo(asset, client):
+            return 190.5, None, ""
+
+        async def _no_legacy(asset, client=None):
+            return 0.0, f"{asset}: no legacy"
+
+        monkeypatch.setattr(quotes.biquote, "fetch_latest", _slow_batch)
+        monkeypatch.setattr(quotes, "_display_yahoo_one", _fake_yahoo)
+        monkeypatch.setattr(
+            quotes, "_fetch_spot_exchangerate", _no_legacy)
+        t0 = time.monotonic()
+        prices, meta, failures = await quotes.fetch_display_prices(
+            ["EURUSD", "GBPJPY"])
+        elapsed = time.monotonic() - t0
+        assert elapsed < 5.0
+        assert prices["EURUSD"] == pytest.approx(1.0946)
+        assert meta["EURUSD"].source == "biquote"
+        assert prices["GBPJPY"] == pytest.approx(190.5)
+        assert failures == {}
+
 
 # ---------------------------------------------------------------------------
 # Execution spot parity — Biquote-first non-gold branch (Task 6)

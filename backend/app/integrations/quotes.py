@@ -1565,8 +1565,12 @@ async def fetch_display_prices(
     a single dead symbol never raises or blanks the rest. Served from a 2s
     TTL cache so 1–2s polling stays cheap. The whole batch (Biquote call +
     per-asset legs fanned out via gather) resolves within
-    _DISPLAY_TOTAL_TIMEOUT — cache hits + per-asset failure rows, never a
-    correlated-outage hang past the 2s poll cadence.
+    _DISPLAY_TOTAL_TIMEOUT via a SINGLE shared deadline computed once in
+    _fetch_display_uncached — cache hits + per-asset failure rows, never a
+    correlated-outage hang past the 2s poll cadence. There is deliberately
+    no outer asyncio.wait_for here: an outer cap would discard partials
+    already collected (blanket wipeout); the inner deadline is the bound
+    (total ≤ _DISPLAY_TOTAL_TIMEOUT + scheduling overhead).
     """
     now = time.monotonic()
     out: dict[str, float] = {}
@@ -1584,16 +1588,7 @@ async def fetch_display_prices(
 
     fx = [a for a in todo if str(a or "").upper() != "XAUUSD"]
     gold = [a for a in todo if str(a or "").upper() == "XAUUSD"]
-    try:
-        b_out, b_meta, b_fail = await asyncio.wait_for(
-            _fetch_display_uncached(fx, gold),
-            timeout=_DISPLAY_TOTAL_TIMEOUT)
-    except asyncio.TimeoutError:
-        log.warning("display batch timed out after %.0fs (%d assets) — "
-                    "returning cache hits + failure rows",
-                    _DISPLAY_TOTAL_TIMEOUT, len(todo))
-        b_out, b_meta, b_fail = {}, {}, {
-            a: f"{a}: display batch timeout" for a in todo}
+    b_out, b_meta, b_fail = await _fetch_display_uncached(fx, gold)
     out.update(b_out)
     meta.update(b_meta)
     failures.update(b_fail)
@@ -1607,17 +1602,23 @@ async def fetch_display_prices(
 async def _fetch_display_uncached(
         fx: list[str], gold: list[str],
 ) -> tuple[dict[str, float], dict[str, DisplayQuote], dict[str, str]]:
-    """One Biquote batch + per-asset legs fanned out under a total budget.
+    """One Biquote batch + per-asset legs fanned out under a single deadline.
 
-    Mirrors the fetch_spot_prices pattern: a per-asset cap keeps one hung
-    leg a failure row, and asyncio.wait bounds the whole fan-out so the
-    2s-poll callers get cache hits + partials, never a hang. The outer
-    fetch_display_prices wait_for is the hard bound (covers a hung Biquote
-    batch call itself).
+    deadline = monotonic + _DISPLAY_TOTAL_TIMEOUT is computed ONCE here and
+    shared by both stages, so the stages can never stack (Biquote batch +
+    fan-out ≤ _DISPLAY_TOTAL_TIMEOUT + scheduling overhead): the Biquote
+    batch waits at most the remaining budget (floored at 0.1s; on expiry it
+    is treated as a batch failure → per-asset Yahoo fallback, exactly like
+    a 500 today), and the per-asset fan-out's asyncio.wait uses whatever
+    budget is left — unfinished legs become per-asset timeout failure rows.
+    Mirrors the fetch_spot_prices pattern otherwise: a per-asset cap keeps
+    one hung leg a failure row. Callers get cache hits + partials, never a
+    hang and never a wipeout of already-collected partials.
     """
     out: dict[str, float] = {}
     meta: dict[str, DisplayQuote] = {}
     failures: dict[str, str] = {}
+    deadline = time.monotonic() + _DISPLAY_TOTAL_TIMEOUT
 
     async def _fx_one(a: str, tick: biquote.BiquoteTick | None,
                       client: httpx.AsyncClient,
@@ -1643,9 +1644,12 @@ async def _fetch_display_uncached(
             ticks: dict[str, biquote.BiquoteTick] = {}
             if fx:
                 try:
+                    batch_budget = deadline - time.monotonic()
                     ticks = await asyncio.wait_for(
                         biquote.fetch_latest(fx, client=client),
-                        timeout=_DISPLAY_PER_ASSET_TIMEOUT)
+                        timeout=max(
+                            min(_DISPLAY_PER_ASSET_TIMEOUT,
+                                batch_budget), 0.1))
                 except (asyncio.TimeoutError, Exception) as exc:
                     log.warning("display biquote batch failed (%s) — "
                                 "per-asset yahoo fallback", exc)
@@ -1658,8 +1662,9 @@ async def _fetch_display_uncached(
                 tasks[asyncio.create_task(_gold_one(a, client))] = a
             if not tasks:
                 return out, meta, failures
+            fanout_budget = deadline - time.monotonic()
             done, pending = await asyncio.wait(
-                tasks.keys(), timeout=_DISPLAY_TOTAL_TIMEOUT)
+                tasks.keys(), timeout=max(fanout_budget, 0.0))
             for t in done:
                 a = tasks[t]
                 try:
