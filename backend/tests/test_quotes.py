@@ -73,6 +73,39 @@ def _gold_payload(closes: list[float]) -> dict:
     return {"meta": {"symbol": "XAU/USD", "interval": "1day"}, "values": values, "status": "ok"}
 
 
+@pytest.fixture(autouse=True)
+def _clear_feed_caches():
+    """Reset module-level feed caches so live data can't bleed across tests.
+
+    One pre-existing test hits the live network and populates the
+    quotes-module caches (Biquote ticks, TD rates, OHLC, spot/quote/display
+    dicts). Later mocked tests then take cache-short-circuit paths and never
+    execute their fake `client.get`, failing only in full-suite order.
+    Clearing before AND after each test keeps every test hermetic.
+    """
+    quotes._spot_cache.clear()
+    quotes._spot_live.clear()
+    quotes._spot_source.clear()
+    quotes._trusted_quotes.clear()
+    quotes._gold_price_source.clear()
+    quotes._quote_cache.clear()
+    quotes._display_cache.clear()
+    quotes._GOLD_TICK_CACHE = None
+    quotes._gold_ohlc_cache = None
+    quotes._td_rate_cache = None
+    yield
+    quotes._spot_cache.clear()
+    quotes._spot_live.clear()
+    quotes._spot_source.clear()
+    quotes._trusted_quotes.clear()
+    quotes._gold_price_source.clear()
+    quotes._quote_cache.clear()
+    quotes._display_cache.clear()
+    quotes._GOLD_TICK_CACHE = None
+    quotes._gold_ohlc_cache = None
+    quotes._td_rate_cache = None
+
+
 # ---------------------------------------------------------------------------
 # Indicator math
 # ---------------------------------------------------------------------------
