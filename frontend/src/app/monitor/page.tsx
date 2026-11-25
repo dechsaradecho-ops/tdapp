@@ -548,14 +548,47 @@ export default function MonitorPage() {
     if (new URLSearchParams(window.location.search).get("tab") === "performance") setTab("performance");
   }, []);
 
+  // Non-overlapping polling guards (polling hotfix 2026-11-25).
+  // Coalesce policy: a manual refresh requested while a load is running JOINS
+  // the current run (returns its promise) instead of starting a second fetch.
+  // Generation guard: only the latest started load may write state; stale
+  // late responses are dropped. The auto-refresh timer fires only after the
+  // previous load settles (recursive setTimeout), so slow requests never pile.
+  const inFlightRef = useRef(false);
+  const genRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intervalSecRef = useRef(intervalSec);
+  intervalSecRef.current = intervalSec;
+  const currentRunRef = useRef<Promise<void> | null>(null);
+
   const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const s = await api.monitor();
-      setSnap(s);
-      setMarketClosed(Boolean(s.market_closed));
-      setErr("");
-      setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+    // Coalesce manual refresh into the running load — never two fetches at once.
+    if (inFlightRef.current) return currentRunRef.current ?? undefined;
+    inFlightRef.current = true;
+    const gen = ++genRef.current;
+    const run = (async () => {
+      let snapData: MonitorSnapshot | null = null;
+      setLoading(true);
+      try {
+        const snap = await api.monitor();
+        // Stale guard: drop results if a newer load has started since.
+        if (gen !== genRef.current) return;
+        snapData = snap;
+        // Main snapshot paints FIRST — before the slower timeline fetch below.
+        setSnap(snap);
+        setMarketClosed(Boolean(snap.market_closed));
+        setErr("");
+        setUpdatedAt(new Date().toLocaleTimeString("th-TH"));
+      } catch (e) {
+        if (gen !== genRef.current) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        // Release the global spinner as soon as the main snapshot settles —
+        // the timeline fetch below must NOT hold it (first paint stays fast).
+        if (gen === genRef.current) setLoading(false);
+      }
+      if (!snapData) return;
+      const s = snapData;
       // ไทม์ไลน์ SL/TP: ดึง signal-logs แล้วจัดกลุ่มตาม ticket — เฉพาะ
       // เหตุการณ์ขยับจริง (guard "SL ย้ายไป..." / ปรับด้วยมือ / trailing /
       // breakeven) + ปิดไม้ — ไม่รวม log "เปิดออเดอร์" ตอนเปิดไม้ครั้งแรก
@@ -566,6 +599,9 @@ export default function MonitorPage() {
       // การขยับ SL) — ยังรับ order_opened เดิมไว้เพื่ออ่าน log เก่าย้อนหลัง
       try {
         const logs = await api.signalLogs(200);
+        // Stale guard: a newer snapshot has painted since — drop this timeline
+        // so it can never clobber newer state. Failure keeps old timeline.
+        if (gen !== genRef.current) return;
         // ticket → เจ้าของไม้ที่ snapshot นี้รู้จัก (asset/ฝั่ง/เวลาเปิด)
         // WHY: PaperBroker._seq อยู่ในหน่วยความจำ รีสตาร์ทแล้วเริ่มนับ 1 ใหม่
         // ขณะที่ signal_logs (TTL 7 วัน) ยังจำ ticket เก่า ⇒ ประวัติของไม้ที่
@@ -609,21 +645,46 @@ export default function MonitorPage() {
         }
         setMoveLogs(byTicket);
       } catch {
-        /* ไทม์ไลน์ล้มเหลว — badge เดิมยังทำงานจาก journal row */
+        /* ไทม์ไลน์ล้มเหลว — snapshot หลักยังแสดงอยู่ + badge เดิมยังทำงานจาก journal row */
       }
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+    })();
+    currentRunRef.current = run;
+    try {
+      await run;
     } finally {
-      setLoading(false);
+      currentRunRef.current = null;
+      inFlightRef.current = false;
     }
   }, []);
 
+  // Non-overlapping auto-refresh: the next poll is scheduled only after the
+  // previous load settles (recursive setTimeout — never setInterval, so a
+  // >2s monitor/logs cycle can't stack requests). intervalSec <= 0 disables
+  // the timer but the initial load still runs. Manual load() callers
+  // (pause/close/reset/group) share the same in-flight guard, so they never
+  // spawn a second loop. Effect re-runs on interval change: old timer cleared.
   useEffect(() => {
-    load();
-    if (intervalSec <= 0) return; // ปิดรีเฟรชอัตโนมัติ
-    const t = setInterval(load, intervalSec * 1000);
-    return () => clearInterval(t);
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      await load();
+      if (cancelled || intervalSecRef.current <= 0) return;
+      timerRef.current = setTimeout(tick, intervalSecRef.current * 1000);
+    };
+    if (intervalSec <= 0) {
+      load(); // ปิดรีเฟรชอัตโนมัติ — โหลดครั้งแรกครั้งเดียว
+      return;
+    }
+    tick();
+    return () => {
+      cancelled = true;
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = null;
+    };
   }, [load, intervalSec]);
+
+  // Unmount → invalidate any in-flight run so late responses never set state.
+  useEffect(() => () => { genRef.current++; }, []);
 
   // sync ค่า interval จาก settings (DB) ครั้งแรกที่โหลดหน้า
   useEffect(() => {
@@ -887,7 +948,7 @@ export default function MonitorPage() {
         {err && <p className="text-loss text-sm mt-2">โหลดไม่สำเร็จ: {err}</p>}
         {!snap && !err && (
           <p className="text-slate-400 text-sm mt-3 animate-pulse">
-            กำลังโหลดข้อมูล — API บน Render free tier อาจใช้เวลาเริ่มต้น 30 วิ หาก service หลับ
+            กำลังโหลดข้อมูล — API อาจใช้เวลาเริ่มต้น ~30 วิ หาก service หลับ
           </p>
         )}
         {closeError && (

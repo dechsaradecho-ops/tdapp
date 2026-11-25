@@ -32,6 +32,15 @@ export default function SignalsPage() {
   // ค่าเริ่มต้น 2 วิ — เดี๋ยว sync จาก settings (DB) หลังโหลดครั้งแรก
   const [intervalSec, setIntervalSec] = useState<number>(2);
   const inFlight = useRef(false);
+  // Non-overlapping polling guards (polling hotfix 2026-11-25).
+  // Coalesce policy: refresh() while one runs JOINS the current run (returns
+  // its promise) instead of starting a second fetch. Generation guard: only
+  // the latest started refresh may write state; stale late responses dropped.
+  const genRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intervalSecRef = useRef(intervalSec);
+  intervalSecRef.current = intervalSec;
+  const currentRunRef = useRef<Promise<void> | null>(null);
   // แท็บ: "signals" (ค่าเริ่มต้น) | "logs" (บันทึกสัญญาณ — เดิมหน้า /signal-logs)
   // static export ไม่มี server — อ่าน ?tab=logs จาก window.location.search ใน effect
   // (useSearchParams ต้องมี Suspense boundary ทั้งหน้า)
@@ -42,26 +51,39 @@ export default function SignalsPage() {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (inFlight.current) return; // กันยิงซ้อนระหว่าง request เก่ายังค้าง
+    // Coalesce into the running refresh — never two fetches at once.
+    if (inFlight.current) return currentRunRef.current ?? undefined;
     inFlight.current = true;
-    setLoading(true);
+    const gen = ++genRef.current;
+    const run = (async () => {
+      setLoading(true);
+      try {
+        // settings อาจล้มเหลวได้ (auth/expiry) — หน้ายังแสดง signals ได้ปกติ
+        const [data, st, sess] = await Promise.all([
+          api.latestSignals(),
+          api.getSettings().catch(() => null),
+          api.tradingSession().catch(() => null),
+        ]);
+        // Stale guard: drop results if a newer refresh has started since.
+        if (gen !== genRef.current) return;
+        setSignals(data);
+        if (st) setSettings(st);
+        if (sess) setSession(sess);
+        setError(null);
+        setLastUpdated(new Date());
+      } catch (e) {
+        if (gen !== genRef.current) return;
+        setError(String(e));
+      } finally {
+        if (gen === genRef.current) setLoading(false);
+      }
+    })();
+    currentRunRef.current = run;
     try {
-      // settings อาจล้มเหลวได้ (auth/expiry) — หน้ายังแสดง signals ได้ปกติ
-      const [data, st, sess] = await Promise.all([
-        api.latestSignals(),
-        api.getSettings().catch(() => null),
-        api.tradingSession().catch(() => null),
-      ]);
-      setSignals(data);
-      if (st) setSettings(st);
-      if (sess) setSession(sess);
-      setError(null);
-      setLastUpdated(new Date());
-    } catch (e) {
-      setError(String(e));
+      await run;
     } finally {
+      currentRunRef.current = null;
       inFlight.current = false;
-      setLoading(false);
     }
   }, []);
 
@@ -76,12 +98,29 @@ export default function SignalsPage() {
       .catch(() => { /* settings ล้มเหลว — ใช้ค่าเริ่มต้น */ });
   }, [refresh]);
 
-  // รีเฟรชอัตโนมัติตามช่วงที่เลือก (0 = ปิด)
+  // รีเฟรชอัตโนมัติแบบไม่ซ้อนกัน (0 = ปิด): เคาะรอบถัดไปหลังรอบก่อน settle
+  // (recursive setTimeout — ไม่ใช้ setInterval รอบช้าจะได้ไม่ทับกัน).
+  // Effect แรกข้างบนโหลดครั้งแรกแล้ว ที่นี่จึงเริ่มจากตั้ง timer รอบถัดไป.
+  // Effect re-run เมื่อ interval เปลี่ยน: timer เก่าถูก clear ก่อนเสมอ.
   useEffect(() => {
-    if (intervalSec <= 0) return;
-    const id = setInterval(refresh, intervalSec * 1000);
-    return () => clearInterval(id);
+    if (intervalSec <= 0) return; // ปิดรีเฟรชอัตโนมัติ — ไม่ตั้ง timer
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      await refresh();
+      if (cancelled || intervalSecRef.current <= 0) return;
+      timerRef.current = setTimeout(tick, intervalSecRef.current * 1000);
+    };
+    timerRef.current = setTimeout(tick, intervalSec * 1000);
+    return () => {
+      cancelled = true;
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = null;
+    };
   }, [intervalSec, refresh]);
+
+  // Unmount → invalidate any in-flight run so late responses never set state.
+  useEffect(() => () => { genRef.current++; }, []);
 
   const changeInterval = async (v: number) => {
     setIntervalSec(v);
