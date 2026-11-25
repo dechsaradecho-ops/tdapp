@@ -285,3 +285,79 @@ class TestLoginNonBlocking:
         assert caller_threads, "verify_pin was never called"
         assert all(t != loop_thread for t in caller_threads), \
             "verify_pin ran on the event loop thread (blocks FastAPI)"
+
+
+class TestStatusNonBlocking:
+    """Regression: status must not run blocking DB reads on the loop thread."""
+
+    @pytest.mark.asyncio
+    async def test_status_reads_off_event_loop(self, monkeypatch):
+        loop_thread = threading.get_ident()
+        caller_threads: list[int] = []
+        to_thread_calls: list[bool] = []
+
+        real_status = pin_auth.pin_status
+        real_to_thread = asyncio.to_thread
+
+        def blocking_status(db):
+            caller_threads.append(threading.get_ident())
+            time.sleep(0.02)  # simulate the blocking DB read
+            return real_status(db)
+
+        async def spy_to_thread(func, /, *args, **kwargs):
+            to_thread_calls.append(True)
+            return await real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(pin_auth, "pin_status", blocking_status)
+        monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+        app.state.db = auth_db()
+        r = await call("GET", "/api/auth/status")
+
+        assert r.status_code == 200 and r.json()["pin_set"] is True
+        assert to_thread_calls, "status must offload pin_status via asyncio.to_thread"
+        assert caller_threads, "pin_status was never called"
+        assert all(t != loop_thread for t in caller_threads), \
+            "pin_status ran on the event loop thread (blocks FastAPI)"
+
+
+class TestSetPinNonBlocking:
+    """Regression: set-pin must not run blocking DB/PBKDF2 on the loop thread."""
+
+    @pytest.mark.asyncio
+    async def test_set_pin_writes_off_event_loop(self, monkeypatch):
+        loop_thread = threading.get_ident()
+        caller_threads: list[int] = []
+        to_thread_calls: list[bool] = []
+
+        real_status = pin_auth.pin_status
+        real_set_pin = pin_auth.set_pin
+        real_to_thread = asyncio.to_thread
+
+        def blocking_status(db):
+            caller_threads.append(threading.get_ident())
+            time.sleep(0.02)  # simulate the blocking DB read
+            return real_status(db)
+
+        def blocking_set_pin(db, pin):
+            caller_threads.append(threading.get_ident())
+            time.sleep(0.02)  # simulate the blocking DB write + PBKDF2
+            return real_set_pin(db, pin)
+
+        async def spy_to_thread(func, /, *args, **kwargs):
+            to_thread_calls.append(True)
+            return await real_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(pin_auth, "pin_status", blocking_status)
+        monkeypatch.setattr(pin_auth, "set_pin", blocking_set_pin)
+        monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+        app.state.db = auth_db(pin=None)  # bootstrap: no token needed
+        r = await call("POST", "/api/auth/set-pin", {"pin": "111222"})
+
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert to_thread_calls, "set-pin must offload via asyncio.to_thread"
+        assert len(caller_threads) == 2, \
+            f"expected pin_status + set_pin off-loop, got {len(caller_threads)} call(s)"
+        assert all(t != loop_thread for t in caller_threads), \
+            "pin_status/set_pin ran on the event loop thread (blocks FastAPI)"

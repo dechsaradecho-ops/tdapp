@@ -26,7 +26,9 @@ def _db(request: Request):
 @router.get("/status", response_model=PinStatus)
 async def status(request: Request) -> PinStatus:
     """Public: does a PIN exist, and is the account currently locked?"""
-    return PinStatus(**{k: v for k, v in pin_auth.pin_status(_db(request)).items() if k in PinStatus.model_fields})
+    # pin_status does a blocking DB read; keep it off the event loop.
+    st = await asyncio.to_thread(pin_auth.pin_status, _db(request))
+    return PinStatus(**{k: v for k, v in st.items() if k in PinStatus.model_fields})
 
 
 @router.post("/login", response_model=PinLoginResponse)
@@ -50,10 +52,12 @@ async def set_pin(payload: PinSetRequest, request: Request) -> PinLoginResponse:
     """
     header = request.headers.get("authorization") or ""
     token = header[7:] if header.startswith("Bearer ") else ""
-    st = pin_auth.pin_status(_db(request))
+    # pin_status (DB read) and set_pin (DB write + PBKDF2) both block; run them
+    # off the event loop, preserving order: status → auth check → set.
+    st = await asyncio.to_thread(pin_auth.pin_status, _db(request))
     if st["pin_set"] and not pin_auth.session_valid(token):
         raise HTTPException(status_code=401, detail="unauthorized")
-    ok, msg = pin_auth.set_pin(_db(request), payload.pin)
+    ok, msg = await asyncio.to_thread(pin_auth.set_pin, _db(request), payload.pin)
     if not ok:
         return PinLoginResponse(ok=False, message=msg)
     return PinLoginResponse(ok=True, token=pin_auth.create_session(), message="ตั้ง PIN เรียบร้อย")
