@@ -53,6 +53,9 @@ def _full_db() -> FakeDatabase:
         "signal_logs": [_old_row("signal_logs", 9, event="created")],
         "scheduler_runs": [_old_row("scheduler_runs", 8, job_id="market_scanner")],
         "market_analysis": [_old_row("market_analysis", 8, asset="EURUSD")],
+        "news_analysis": [_old_row("news_analysis", 40, event="CPI")],
+        "signals": [_old_row("signals", 40, asset="EURUSD",
+                             approval="expired")],
     })
 
 
@@ -65,8 +68,10 @@ class TestRunOnce:
         assert out["purged"]["signal_logs"] == 1
         assert out["purged"]["scheduler_runs"] == 1
         assert out["purged"]["market_analysis"] == 1
+        assert out["purged"]["news_analysis"] == 1
+        assert out["purged"]["signals"] == 1
         for table in ("quote_api_logs", "signal_logs", "scheduler_runs",
-                      "market_analysis"):
+                      "market_analysis", "news_analysis", "signals"):
             assert db.rows[table] == [], table
 
     @pytest.mark.asyncio
@@ -77,6 +82,9 @@ class TestRunOnce:
             "signal_logs": [_old_row("signal_logs", 0.1)],
             "scheduler_runs": [_old_row("scheduler_runs", 0.1)],
             "market_analysis": [_old_row("market_analysis", 0.1)],
+            "news_analysis": [_old_row("news_analysis", 0.1, event="CPI")],
+            "signals": [_old_row("signals", 0.1, asset="EURUSD",
+                                 approval="expired")],
         })
         out = await log_maintenance.run_once(db)
         assert sum(out["purged"].values()) == 0
@@ -177,6 +185,73 @@ class TestAlerting:
              "provider": "yahoo", "asset": "EURUSD"} for i in range(100)]})
         out = await log_maintenance.run_once(db, None)
         assert "quote_error_rate" in out
+
+
+class TestMarketAnalysisRetention:
+    def test_purge_deletes_old_rows(self):
+        from app.workers import news_analysis
+        db = FakeDatabase(rows={"news_analysis": [
+            _old_row("news_analysis", 40, event="CPI"),
+            _old_row("news_analysis", 1, event="NFP")]})
+        assert news_analysis.purge_old_news_analysis(db, force=True) == 1
+        assert len(db.rows["news_analysis"]) == 1
+
+    def test_throttled_without_force(self, monkeypatch):
+        from app.workers import news_analysis
+        monkeypatch.setattr(news_analysis, "_last_purge", 0.0)
+        db = FakeDatabase(rows={"news_analysis": [
+            _old_row("news_analysis", 40, event="CPI")]})
+        news_analysis.purge_old_news_analysis(db)      # runs, 1 deleted
+        db.rows["news_analysis"] = [_old_row("news_analysis", 40,
+                                             event="CPI")]
+        assert news_analysis.purge_old_news_analysis(db) == 0  # throttled
+
+    def test_uses_bulk_delete_before_when_available(self):
+        from app.workers import news_analysis
+        calls: list[tuple] = []
+
+        class BulkDb(FakeDatabase):
+            def delete_before(self, table, column, cutoff):
+                calls.append((table, column, cutoff[:10]))
+                return 42
+
+        db = BulkDb()
+        assert news_analysis.purge_old_news_analysis(db, force=True) == 42
+        assert calls and calls[0][:2] == ("news_analysis", "created_at")
+
+
+class TestSignalsRetention:
+    def test_purges_only_old_terminal_signals(self):
+        """Old expired/rejected/approved rows go; pending + fresh stay."""
+        db = FakeDatabase(rows={"signals": [
+            {"id": "s-expired", "created_at": _stamp(40), "asset": "EURUSD",
+             "approval": "expired"},
+            {"id": "s-rejected", "created_at": _stamp(40), "asset": "GBPUSD",
+             "approval": "rejected"},
+            {"id": "s-approved", "created_at": _stamp(40), "asset": "USDJPY",
+             "approval": "approved"},
+            {"id": "s-pending", "created_at": _stamp(40), "asset": "XAUUSD",
+             "approval": "pending"},
+            {"id": "s-fresh", "created_at": _stamp(1), "asset": "AUDUSD",
+             "approval": "expired"},
+        ]})
+        assert market_scanner.purge_old_signals(db, force=True) == 3
+        kept = {(r["asset"], r["approval"]) for r in db.rows["signals"]}
+        assert kept == {("XAUUSD", "pending"), ("AUDUSD", "expired")}
+
+    def test_throttled_without_force(self, monkeypatch):
+        monkeypatch.setattr(market_scanner, "_signals_last_purge", 0.0)
+        db = FakeDatabase(rows={"signals": [
+            _old_row("signals", 40, asset="EURUSD", approval="expired")]})
+        market_scanner.purge_old_signals(db)      # runs, 1 deleted
+        db.rows["signals"] = [_old_row("signals", 40, asset="EURUSD",
+                                       approval="expired")]
+        assert market_scanner.purge_old_signals(db) == 0  # throttled
+
+    def test_never_raises_on_dead_db(self):
+        class Dead:
+            available = False
+        assert market_scanner.purge_old_signals(Dead(), force=True) == 0
 
 
 class TestMarketAnalysisRetention:

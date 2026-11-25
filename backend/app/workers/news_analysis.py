@@ -11,11 +11,14 @@ import json
 import logging
 import random
 import re
+import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from app.core.config import get_settings
 from app.integrations.ai_provider import get_ai_provider
+from app.models.schemas import S
 from app.services.database import Database
 
 log = logging.getLogger(__name__)
@@ -160,3 +163,59 @@ async def analyze_once(db: Database) -> dict:
         log.info("news_analysis row not persisted (table missing or DB unavailable)")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Retention — news_analysis had NO TTL and grew forever (~30 rows/day, one
+# per 15-min tick; 2.7k rows since 2026-09-03). Every reader only needs
+# recent rows (the scanner reads the latest 20), so rows older than
+# NEWS_ANALYSIS_TTL_DAYS are deleted. Same throttle + bulk-first shape as
+# market_scanner.purge_old_market_analysis.
+# Canonical values: AppSettings.news_analysis_ttl_days /
+# news_analysis_purge_interval_s (Settings page).
+NEWS_ANALYSIS_TTL_DAYS = S("news_analysis_ttl_days")
+PURGE_INTERVAL_S = S("news_analysis_purge_interval_s")  # hourly; worker runs every 15 min
+_last_purge = 0.0
+
+
+def purge_old_news_analysis(db: Database, force: bool = False) -> int:
+    """Delete news_analysis rows older than NEWS_ANALYSIS_TTL_DAYS.
+
+    Throttled to once per PURGE_INTERVAL_S unless force=True. Returns the
+    number of rows deleted (0 when skipped/unavailable). Never raises.
+    Prefers one bulk delete_before; falls back to per-row deletes when the
+    client lacks it (FakeDatabase).
+    """
+    global _last_purge
+    now = time.monotonic()
+    if not force and now - _last_purge < PURGE_INTERVAL_S:
+        return 0
+    _last_purge = now
+    try:
+        if db is None or not getattr(db, "available", False):
+            return 0
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=NEWS_ANALYSIS_TTL_DAYS)).isoformat()
+        bulk = getattr(db, "delete_before", None)
+        if bulk is not None:
+            deleted = int(bulk(get_settings().news_analysis_table,
+                               "created_at", cutoff) or 0)
+            if deleted:
+                log.info("news_analysis: purged %d rows older than %d days",
+                         deleted, NEWS_ANALYSIS_TTL_DAYS)
+            return deleted
+        rows = db.select(get_settings().news_analysis_table,
+                         order="created_at", desc=True, limit=2000)
+        # A row with no readable created_at is NOT provably stale — the bulk
+        # path (PostgREST `created_at < cutoff`) skips NULLs, so this path
+        # must too, or a fresh row would be deleted just for lagging.
+        stale = [r for r in rows if str(r.get("created_at") or "")
+                 and str(r.get("created_at") or "") < cutoff]
+        deleted = 0
+        for r in stale:
+            if db.delete(get_settings().news_analysis_table, {"id": r["id"]}):
+                deleted += 1
+        return deleted
+    except Exception as exc:
+        log.debug("news_analysis purge failed: %s", exc)
+        return 0
