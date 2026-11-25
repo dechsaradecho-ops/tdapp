@@ -589,8 +589,15 @@ async def _fetch_td_gold_rate(client: httpx.AsyncClient) -> tuple[float, float]:
     """
     global _td_rate_cache
     now = time.monotonic()
-    if _td_rate_cache is not None and now - _td_rate_cache[0] < _GOLD_CACHE_TTL:
-        return _td_rate_cache[1], _td_rate_cache[2]
+    if _td_rate_cache is not None:
+        if now - _td_rate_cache[0] < _GOLD_CACHE_TTL:
+            price, remote_ts = _td_rate_cache[1], _td_rate_cache[2]
+            if remote_ts > 0 and time.time() - remote_ts <= TD_MAX_RATE_AGE:
+                return price, remote_ts
+        # Poll window elapsed or the quote aged past TD_MAX_RATE_AGE while
+        # cached — evict and refetch below (a rate accepted at ~4 min old
+        # must never be served again at ~8–9 min total age).
+        _td_rate_cache = None
     api_key = get_settings().twelvedata_api_key
     if not api_key:
         raise QuotesUnavailable("XAUUSD: TWELVEDATA_API_KEY not set (free key: twelvedata.com)")
@@ -701,6 +708,21 @@ async def _gold_spot_one(asset: str, client: httpx.AsyncClient,
     return asset, price, "", "spot"
 
 
+def _gold_history_sufficient(candles: list[Candle]) -> bool:
+    """True when gold history supports EMA200 + Wilder ATR14 (fail closed).
+
+    Mirrors the snapshot math: short history yields None indicators, so the
+    feed must report untrusted rather than let a `trusted=True` flag carry
+    a None-indicator snapshot past downstream guards.
+    """
+    try:
+        _true_ema([c.c for c in candles], 200)
+        _wilder_atr(candles, 14)
+    except ValueError:
+        return False
+    return True
+
+
 async def _fetch_gold_biquote_bars(client: httpx.AsyncClient) -> list:
     """500 Biquote daily bars for XAUUSD (closed-bar cache, 5 min)."""
     global _gold_ohlc_cache
@@ -765,7 +787,10 @@ async def _fetch_gold_candles_with_source(
         if len(candles) < 30:
             raise QuotesUnavailable(
                 f"XAUUSD: only {len(candles)} closed biquote bars")
-        return CandleFeedResult(candles=candles, source="biquote", trusted=True)
+        # Short history (< 200 bars) yields None EMA200/ATR → untrusted,
+        # fail closed: downstream guards key off `trusted`.
+        return CandleFeedResult(candles=candles, source="biquote",
+                                trusted=_gold_history_sufficient(candles))
     except (biquote.BiquoteError, QuotesUnavailable) as exc:
         errors.append(f"biquote failed ({exc})")
     # 2) Twelve Data XAU/USD — trusted fallback.
@@ -775,7 +800,7 @@ async def _fetch_gold_candles_with_source(
             raise QuotesUnavailable(
                 f"XAUUSD: only {len(candles)} twelvedata candles")
         return CandleFeedResult(candles=candles, source="twelvedata",
-                                trusted=True)
+                                trusted=_gold_history_sufficient(candles))
     except QuotesUnavailable as exc:
         errors.append(f"twelvedata failed ({exc})")
     # 3) Yahoo GC=F — display-only/degraded, never trusted for orders.

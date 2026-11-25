@@ -1173,3 +1173,82 @@ class TestGoldTrustedFeed:
         trusted, failures2 = await quotes.fetch_trusted_spot(["XAUUSD"])
         assert "XAUUSD" not in trusted
         assert "XAUUSD" in failures2
+
+    @pytest.mark.asyncio
+    async def test_short_history_gold_candles_are_untrusted(self, monkeypatch):
+        """40 bars (< 200 for EMA200) → trusted False on every trusted leg.
+
+        Fail closed: downstream guards key off `trusted`, and short history
+        yields None indicators — a `trusted=True` flag must never carry such
+        a snapshot past the guards.
+        """
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "td-demo-key",
+                            raising=False)
+        closes = [2400.0 + i for i in range(40)]
+
+        # Biquote leg with short history.
+        def handler_short_biquote(request: httpx.Request) -> httpx.Response:
+            if "biquote.io" in str(request.url):
+                return httpx.Response(200, json=_biquote_ohlc_payload(closes))
+            return httpx.Response(503, json={})
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_short_biquote)) as client:
+            result = await quotes.fetch_candles_with_source("XAUUSD", client)
+            assert result.source == "biquote"
+            assert result.trusted is False
+            snap = await quotes.fetch_snapshot("XAUUSD", client)
+            assert snap["trusted"] is False
+            assert snap["ema_slow"] is None  # < 200 bars: EMA200 impossible
+            # (39 bars still satisfy Wilder ATR14 — the single `trusted`
+            # flag is what carries the fail-closed signal downstream).
+        quotes._gold_ohlc_cache = None
+
+        # Twelve Data leg with short history (Biquote down).
+        def handler_short_td(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "biquote.io" in url:
+                return httpx.Response(503, json={})
+            if "twelvedata.com/time_series" in url:
+                return httpx.Response(200, json=_gold_payload(closes))
+            return httpx.Response(503, json={})
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_short_td)) as client:
+            result = await quotes.fetch_candles_with_source("XAUUSD", client)
+            assert result.source == "twelvedata"
+            assert result.trusted is False
+
+    @pytest.mark.asyncio
+    async def test_td_rate_cache_hit_revalidates_max_age(self, monkeypatch):
+        """A cached TD rate older than 5 min (remote age) is refetched/evicted,
+        never served — the cache-hit path must enforce TD_MAX_RATE_AGE too."""
+        import time as _time
+        from app.core.config import get_settings as _gs
+        monkeypatch.setattr(_gs(), "twelvedata_api_key", "td-demo-key",
+                            raising=False)
+        # Fresh poll window but stale quote: accepted at ~4 min, now ~400 s old.
+        quotes._td_rate_cache = (_time.monotonic(), 2650.0,
+                                 _time.time() - 400.0)
+        calls: list[str] = []
+
+        def handler_fresh(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(200, json=_td_exchange_rate_payload(2660.0))
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_fresh)) as client:
+            price, _ = await quotes._fetch_td_gold_rate(client)
+            assert price == pytest.approx(2660.0)  # refetched, not 2650.0
+            assert any("exchange_rate" in u for u in calls)
+        # Fresh quote within max age is still served from cache (no HTTP).
+        quotes._td_rate_cache = (_time.monotonic(), 2660.0, _time.time() - 60.0)
+
+        def handler_no_http(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("cache hit must not hit the network")
+
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler_no_http)) as client:
+            price, _ = await quotes._fetch_td_gold_rate(client)
+            assert price == pytest.approx(2660.0)
