@@ -3122,6 +3122,7 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
         # shows math instead of bare values. Fail-safe: any error → zeros.
         r_multiple = 0.0
         risk_amount = 0.0
+        _risk_unconverted = False  # True → $risk unknown (fail-closed note)
         calc_notes: list[str] = []
         exit_info = exit_info_for(r, mark)
         try:
@@ -3137,12 +3138,21 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                 r_multiple = round(sign * (mark - entry) / sl_dist, 2)
                 # $ at risk if stopped = (dist × lots × contract) converted
                 # from the QUOTE currency to USD (USDJPY → yen → USD; the
-                # nominal figure would read ~157× too large).
-                _r_usd = risk_usd_of_distance(sl_dist, vol, asset_u, entry)
-                risk_amount = round(
-                    _r_usd if _r_usd is not None
-                    else sl_dist * vol * contract, 2)
-            src_label = {"spot": "spot สด (Yahoo intraday)",
+                # nominal figure would read ~157× too large). pnl_rates
+                # prices the cross legs (JPYUSD, GBPUSD, ...) — calling
+                # WITHOUT it booked raw quote currency as USD on every
+                # non-USD-quoted cross (prod GBPJPY $4209.44 vs $26.43).
+                _r_usd = risk_usd_of_distance(
+                    sl_dist, vol, asset_u, entry, rates=pnl_rates)
+                if _r_usd is None:
+                    # Fail-closed: quote→USD leg underivable — keep $0
+                    # plus an honest note, never a wrong-currency figure.
+                    risk_amount = 0.0
+                    _risk_unconverted = True
+                else:
+                    risk_amount = round(_r_usd, 2)
+                    _risk_unconverted = False
+            src_label = {"spot": "spot สด (intraday, Yahoo-first)",
                          "daily": "daily close (สำรองตอน spot ล่ม)",
                          "broker": "broker book (สำรอง)",
                          "entry": "entry (ไม่มี feed — PnL นิ่ง)"}.get(
@@ -3151,14 +3161,22 @@ async def monitor_snapshot(db, broker, s: AppSettings) -> "MonitorSnapshot":
                 f"ราคาปัจจุบัน {mark:g} มาจาก {src_label}")
             calc_notes.append(
                 f"uPnL = {'+' if sign > 0 else '−'}(mark−entry) × {vol:g} lots "
-                f"× contract {contract:g} → ${unrealized:,.2f}")
+                f"× contract {contract:g} → " + (
+                    f"${unrealized:,.2f}" if unrealized is not None
+                    else "— (แปลงสกุลเงินไม่สำเร็จ)"))
             if sl_dist > 0:
                 calc_notes.append(
                     f"R = {direction_u}×({mark:g}−{entry:g}) ÷ SLระยะ {sl_dist:g} "
                     f"→ {r_multiple:+.2f}R")
-                calc_notes.append(
-                    f"ถ้าโดน SL เสีย ${risk_amount:,.2f} "
-                    f"({sl_dist:g} × {vol:g} × {contract:g})")
+                if _risk_unconverted:
+                    _q = quote_currency(asset_u) or asset_u[-3:]
+                    calc_notes.append(
+                        f"ถ้าโดน SL: แปลงสกุลเงินไม่สำเร็จ ({_q}→USD "
+                        f"ไม่มีเรท) — $risk แสดง $0.00 ชั่วคราว")
+                else:
+                    calc_notes.append(
+                        f"ถ้าโดน SL เสีย ${risk_amount:,.2f} "
+                        f"({sl_dist:g} × {vol:g} × {contract:g})")
             if tp_v is not None and sl_dist > 0:
                 tp_r = abs(tp_v - entry) / sl_dist
                 calc_notes.append(f"TP อยู่ที่ {tp_r:.2f}R (TP {tp_v:g})")
