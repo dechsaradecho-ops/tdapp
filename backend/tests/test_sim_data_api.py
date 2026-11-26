@@ -704,6 +704,45 @@ class TestBaseReuse:
         assert "GBPUSD" not in td_calls
 
     @pytest.mark.asyncio
+    async def test_td_fetched_when_base_has_interior_hole(
+            self, fake_db, inline_worker, monkeypatch):
+        # One interior weekday TD bar removed: endpoints still covered, so
+        # an endpoint-only check would wrongly skip the fetch and leave a
+        # silent gap. Full weekday coverage must force the fetch.
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        v1 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD"], "years": 5})
+        assert v1["ok"] is True
+        td_rows = [r for r in fake_db.rows[sim_market_data.BARS_TABLE]
+                   if r.get("dataset_version") == v1["version"]
+                   and r.get("source") == "twelvedata"]
+        dates = sorted(r["bar_date"] for r in td_rows)
+        hole = next(d for d in dates[1:-1]
+                    if datetime.fromisoformat(d).weekday() < 5)
+        fake_db.rows[sim_market_data.BARS_TABLE] = [
+            r for r in fake_db.rows[sim_market_data.BARS_TABLE]
+            if not (r.get("dataset_version") == v1["version"]
+                    and r.get("bar_date") == hole
+                    and r.get("source") == "twelvedata")]
+
+        td_calls: list = []
+
+        async def spy_td(asset, *, years, client):
+            td_calls.append(asset)
+            return await fake_td(asset, years=years, client=client)
+
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            spy_td)
+        v2 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD"], "years": 5,
+                         "base_version": v1["version"]})
+        assert v2["ok"] is True
+        assert v2["status"] == "done", v2["report"]
+        assert td_calls == ["EURUSD"]
+
+    @pytest.mark.asyncio
     async def test_fresh_biquote_overrides_base_same_date(
             self, fake_db, inline_worker, monkeypatch):
         monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)

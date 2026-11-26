@@ -712,29 +712,36 @@ def _resolve_base(db, base_version: str | None, cutoff: str,
 
 def _td_needed(base_asset_bars: list[SimBar] | None, cutoff: str,
                today: str, bq_start: str | None) -> bool:
-    """True unless base Twelve Data bars fully cover [cutoff, bq_start).
+    """True unless base Twelve Data bars cover every trading day in range.
 
-    ``bq_start`` is the earliest fresh Biquote date (fresh Biquote always
-    covers everything newer); with no fresh Biquote the gap runs to today.
-    Conservative by design: any doubt fetches, which is always safe because
-    the final merge + gates apply either way.
+    Skip requires FULL coverage: each weekday (Mon-Fri) in
+    ``[cutoff, bq_start)`` — or ``[cutoff, today)`` with no fresh Biquote —
+    must be present in the base TD-sourced date set. An interior hole (or a
+    holiday gap, which is indistinguishable from one) forces a fetch: the
+    safe conservative direction. The endpoint comparison stays only as a
+    fast path to *require* a fetch; it can never grant a skip on its own.
     """
     if not base_asset_bars:
         return True
-    td_dates = sorted(b.bar_date for b in base_asset_bars
-                      if b.source == "twelvedata")
-    if not td_dates:
+    td_set = {b.bar_date for b in base_asset_bars
+              if b.source == "twelvedata"}
+    if not td_set:
         return True
     try:
-        if bq_start:
-            need_end = (datetime.fromisoformat(bq_start[:10]).date()
-                        - timedelta(days=1)).isoformat()
-        else:
-            need_end = (datetime.fromisoformat(today[:10]).date()
-                        - timedelta(days=1)).isoformat()
+        start = datetime.fromisoformat(cutoff[:10]).date()
+        end_excl = datetime.fromisoformat((bq_start or today)[:10]).date()
     except ValueError:
         return True
-    return not (td_dates[0] <= cutoff and td_dates[-1] >= need_end)
+    # Fast path: endpoints outside the base TD span cannot be covered.
+    if (min(td_set) > cutoff
+            or max(td_set) < (end_excl - timedelta(days=1)).isoformat()):
+        return True
+    day = start
+    while day < end_excl:
+        if day.weekday() < 5 and day.isoformat() not in td_set:
+            return True
+        day += timedelta(days=1)
+    return False
 
 
 def dataset_build_status(db, version: str) -> dict:
