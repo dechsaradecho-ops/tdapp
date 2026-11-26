@@ -377,8 +377,8 @@ export const api = {
       `/api/system/optimize/${encodeURIComponent(id)}/apply`, { confirm }),
 
   // ---------- Price-history dataset (sim-data v2) — Optimize tab ---------
-  // Thin typed wrappers over /api/system/sim-data/* — existing simulation
-  // and optimizer API methods above are unchanged.
+  // Thin typed wrappers over /api/system/sim-data/* — existing optimizer
+  // API methods above are unchanged.
   // POST starts an update (blank assets = reuse the newest complete
   // version's set; fixed 5-year span, same convention as the tab's builds;
   // base_version omitted = newest complete). Refused (ok: false) while a

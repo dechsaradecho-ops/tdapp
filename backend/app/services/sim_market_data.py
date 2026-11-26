@@ -420,11 +420,17 @@ def _cutoff_plus_30d(cutoff: str) -> str:
 
 def _select_all_bars_fallback(db, version: str, page_size: int = _BARS_PAGE_SIZE,
                               max_rows: int = 200000) -> list[dict]:
-    """Page through bars with offset/limit until a short page arrives.
+    """Page through bars with offset/limit until an empty page arrives.
 
     Replaces the old single ``limit=20000`` read which silently truncated
     multi-asset datasets. Raises the underlying DB error so callers can
     fail closed instead of replaying a truncated dataset.
+
+    The offset advances by ``len(page)`` (not the requested ``page_size``)
+    and only an empty page terminates: PostgREST caps a single response
+    below a large requested page, and a short-page break would then skip
+    rows. Offset-by-received is safe under capping and identical without
+    it.
     """
     out: list[dict] = []
     offset = 0
@@ -436,9 +442,7 @@ def _select_all_bars_fallback(db, version: str, page_size: int = _BARS_PAGE_SIZE
         if not page:
             break
         out.extend(page)
-        if len(page) < page_size:
-            break
-        offset += page_size
+        offset += len(page)
     return out
 
 
@@ -941,8 +945,12 @@ def _run_build(db, version: str, assets: list[str], years: int,
     With ``base_bars`` (snapshot from a terminal-complete ``base_version``),
     fresh Biquote is still fetched for every asset and wins every overlap;
     the Twelve Data fetch is skipped per asset iff base TD bars fully cover
-    ``[cutoff, bq_start)``; remaining base bars fill dates neither fresh
-    provider covers. All gates apply unchanged to the final set.
+    ``[cutoff, bq_start)``. Union tier on date collision (Biquote beats
+    Twelve Data regardless of base/fresh provenance, consistent with
+    ``merge_history``): fresh-BQ > base-BQ > fresh-TD > base-TD. So
+    base-TD fills only dates neither fresh provider covers, while base-BQ
+    additionally overwrites a stale fresh-TD bar on the same date (recorded
+    as a seam discrepancy). All gates apply unchanged to the final set.
     """
     cutoff, today = _date_range(years)
     base_map: dict[str, list[SimBar]] = dict(base_bars or {})
@@ -1028,9 +1036,10 @@ def _run_build(db, version: str, assets: list[str], years: int,
             clean_td, dup_td = _clean_provider_bars(raw_td, cutoff, today)
             merged, discrepancies = merge_history(asset, clean_bq, clean_td)
             seam_all.extend(discrepancies)
-            # Union base bars for dates neither fresh provider covers.
-            # Source priority on collision: fresh-BQ > base-BQ >
-            # fresh-TD > base-TD; a Biquote winner over a Twelve Data
+            # Union base bars into gaps. Tier on date collision: fresh-BQ >
+            # base-BQ > fresh-TD > base-TD — Biquote beats Twelve Data
+            # regardless of base/fresh provenance, consistent with
+            # merge_history; a Biquote winner over a Twelve Data
             # bar records a seam discrepancy under the current rules.
             base_asset_bars = base_map.get(asset) or []
             if base_asset_bars:
@@ -1126,6 +1135,9 @@ def _run_build(db, version: str, assets: list[str], years: int,
             }
         data_hash = hash_bars(kept)
         complete = not failed_assets
+        # A base pointer that contributed nothing is misleading: report
+        # None when zero bars were reused (e.g. disjoint asset sets).
+        effective_base = base_version if reused_bars else None
         _set_stage(db, version, "persisting")
         batch: list[SimBar] = []
         for b in kept:
@@ -1141,7 +1153,7 @@ def _run_build(db, version: str, assets: list[str], years: int,
             "assets": assets,
             "years": years,
             "bars": len(kept),
-            "base_version": base_version,
+            "base_version": effective_base,
             "reused_bars": reused_bars,
             "reused_per_asset": reused_per_asset,
             "fetched_bars": fetched_bars,
@@ -1173,7 +1185,7 @@ def _run_build(db, version: str, assets: list[str], years: int,
                 "finished_at": _now_iso(),
                 "report": {"stage": "failed", "version": version,
                            "assets": assets, "years": years,
-                           "base_version": base_version,
+                           "base_version": base_version if reused_bars else None,
                            "complete": False,
                            "error": f"{type(exc).__name__}: {exc}"[:300],
                            "per_asset": per_asset,

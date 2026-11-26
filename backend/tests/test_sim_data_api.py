@@ -532,6 +532,31 @@ class TestPagedFallback:
         assert res["bars"] == 20500
         assert res["per_asset_counts"]["EURUSD"] == 20500
 
+    def test_fallback_survives_capped_backend(self):
+        """A backend capping every page at 1000 must not lose rows.
+
+        Regression: with ``page_size=5000`` a ``len(page) < page_size``
+        break (or ``offset += page_size``) stops/skips after the first
+        capped page. Offset-by-received + empty-page-only break walks
+        the whole version.
+        """
+
+        class _CappedFake(_NoPagedFake):
+            def select(self, table, filters=None, order="created_at",
+                       desc=True, limit=50, offset=0, columns="*"):
+                rows = super().select(
+                    table, filters=filters, order=order, desc=desc,
+                    limit=1000000, offset=offset)
+                return rows[:min(int(limit or 0), 1000)]
+
+        db = _CappedFake()
+        assert not hasattr(db, "select_paged")
+        _seed_big_version(db, "v-capped", n=6500)
+        rows = sim_market_data._select_all_bars_fallback(db, "v-capped")
+        assert len(rows) == 6500
+        ds = sim_market_data.load_dataset(db, "v-capped")
+        assert len(ds["EURUSD"]) == 6500
+
 
 # ---------------------------------------------------------------------------
 # Task 1: base-version reuse + updatable datasets (RED first)
@@ -832,6 +857,21 @@ class TestUpdateDataset:
         _seed_complete(fake_db, "v20261127-110000-bbbbbb",
                        ["EURUSD", "GBPUSD"],
                        started_at="2026-11-27T00:00:00+00:00")
+        # Realistic base: Twelve Data bars covering the old range so the
+        # TD fetch is skipped and the base actually contributes (reused>0).
+        # BQ seeds cover [300..1] days ago; these cover [370..301].
+        for _asset in ["EURUSD", "GBPUSD"]:
+            for _b in _drift_bars(_asset, end_ago_days=301, n=70,
+                                  base=1.0500, source="twelvedata"):
+                fake_db.insert(sim_market_data.BARS_TABLE, {
+                    "dataset_version": "v20261127-110000-bbbbbb",
+                    "asset": _b.asset,
+                    "bar_date": _b.bar_date,
+                    "open": _b.open, "high": _b.high,
+                    "low": _b.low, "close": _b.close,
+                    "source": _b.source,
+                    "source_timestamp": _b.source_timestamp,
+                })
         res = sim_market_data.update_dataset(fake_db, years=1)
         assert res["ok"] is True, res
         st = sim_market_data.dataset_build_status(fake_db, res["version"])
@@ -883,6 +923,28 @@ class TestUpdateDataset:
         res = await call("POST", "/api/system/sim-data/update",
                          {"assets": ["EURUSD"]})
         assert res["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_disjoint_base_reports_no_base(
+            self, fake_db, inline_worker, monkeypatch):
+        """Explicit base with a disjoint asset set contributes zero bars.
+
+        The report must record ``base_version=None`` (with
+        ``reused_bars == 0``) — a pointer to a version that contributed
+        nothing is misleading.
+        """
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        _seed_complete(fake_db, "v-base-eurusd", ["EURUSD"])
+        res = sim_market_data.update_dataset(
+            fake_db, assets=["GBPUSD"], years=5,
+            base_version="v-base-eurusd")
+        assert res["ok"] is True, res
+        st = sim_market_data.dataset_build_status(fake_db, res["version"])
+        assert st["status"] == "complete", st["report"]
+        assert st["report"]["reused_bars"] == 0
+        assert st["report"]["base_version"] is None
 
 
 class TestPersistTuning:
