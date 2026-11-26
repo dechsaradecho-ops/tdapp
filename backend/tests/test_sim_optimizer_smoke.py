@@ -15,20 +15,17 @@ apply path. Asserts:
      succeeds.
 
 Run from backend/:
-  D:\\tdapp\\.venv\\Scripts\\python.exe -m pytest tests/test_sim_optimizer_smoke.py -v
+  pytest tests/test_sim_optimizer_smoke.py -v
 """
 from __future__ import annotations
 
-import ast
 import inspect
-from datetime import date, datetime, timedelta, timezone
 
-import httpx
 import pytest
 
 from app.main import app
 from app.models.schemas import AppSettings
-from app.services import sim_market_data, sim_optimizer
+from app.services import sim_optimizer
 from tests.test_sim_optimizer import fake_replay
 from tests.test_sim_optimizer_api import _seed_dataset, call
 from tests.test_sim_optimizer_apply import (

@@ -148,7 +148,7 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 
 ## 14. คุณภาพ + Deploy
 
-- Backend pytest (**1577 tests** ใน `backend/tests/` — cooldown 7 เคส, ticket-recycling, ticket seed, realized stats, smart-exit, RR, costs, web-push 26 เคส ฯลฯ) · frontend `npx tsc --noEmit` + `next build` (13/13 routes)
+- Backend pytest (**1753 tests** ใน `backend/tests/` — cooldown 7 เคส, ticket-recycling, ticket seed, realized stats, smart-exit, RR, costs, web-push 26 เคส ฯลฯ) · frontend `npx tsc --noEmit` + `next build` (13/13 routes)
 - `backend/scripts/` มี probe ตรวจ prod (check_*, e2e_probe_post_deploy, probe_line_*) + `gen_vapid_keys.py` (สร้างคู่คีย์ Web Push)
 - Web Push ต้องตั้ง env `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (ไม่มี = ฟีเจอร์นิ่ง ไม่พัง: `/api/push/key` ตอบ `enabled: false`); `pywebpush` เพิ่มใน `requirements.txt` → api service ต้อง redeploy; หมุน private key = subscription เดิมทุกเครื่องใช้ไม่ได้ ต้องกดเปิดใหม่
 - Deploy: push `master` → Render build api (pip + uvicorn, health `/health` มี commit/workers/ai_config) + static web (`out/` ~5–10 นาที); ตรวจ deploy ด้วย ASCII marker ใน JS chunk (ไทยโดน \\u-escape, hash เปลี่ยนทุก build)
