@@ -1307,3 +1307,103 @@ def cancel_optimization(db, run_id: str) -> dict:
     patched.update({"status": "cancelled", "stage": "cancelled",
                     "finished_at": now, "error": "cancelled"})
     return _status_dict(patched)
+
+
+def apply_recommendation(db, run_id: str, *, confirm: bool) -> dict:
+    """Guarded diff-only apply of one run's recommendation. Never raises.
+
+    This is the single explicit exception to "the optimizer never writes
+    live settings": it writes ONLY the recommended diff fields, through the
+    shared settings merge/audit path, and only after explicit confirmation.
+
+    Guards, in order (every refusal performs zero writes):
+    (1) unknown run -> refuse; run not terminal-``complete``, or with no
+        recommendation/best -> refuse;
+    (2) ``confirm is True`` required — any other value, including truthy
+        non-``True``, refuses;
+    (3) recompute ``diff_settings`` between the run's captured baseline and
+        live settings — non-empty means live moved since the run -> refuse
+        with a ``baseline``-mentioning error;
+    (4) recompute the recommendation diff — empty means nothing to change ->
+        success with ``applied: {}`` and no row write;
+    (5) otherwise write ``{field: to-value}`` via the shared settings merge
+        helper with ``source="simulation_apply"`` and the run id in the
+        audit row.
+
+    A successful apply inherently makes the next apply stale (live now
+    differs from the stored baseline). Returns ``{ok: True, run_id,
+    applied: {field: {from, to}}, settings}`` on success.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    row = _run_row(db, str(run_id))
+    if row is None:
+        return {"ok": False, "error": "unknown optimization run"}
+    if str(row.get("status")) != "complete" or str(row.get("stage")) != "done":
+        return {"ok": False, "error": (
+            f"run {run_id} is not complete "
+            f"(status={row.get('status')}) — apply refused")}
+    result = row.get("result") or {}
+    rec = result.get("recommendation")
+    if (result.get("best") is None or not isinstance(rec, dict)
+            or not rec.get("config")):
+        return {"ok": False, "error": "run has no recommendation to apply"}
+    if confirm is not True:
+        return {"ok": False, "error": (
+            "apply requires confirm: true — refusing to write live settings")}
+    stored_raw = row.get("baseline_settings")
+    if not isinstance(stored_raw, dict) or not stored_raw:
+        return {"ok": False, "error": (
+            "run baseline is missing or unreadable — apply refused")}
+    try:
+        stored_baseline = AppSettings.model_validate(stored_raw)
+    except Exception:
+        return {"ok": False, "error": (
+            "run baseline is unreadable — apply refused")}
+    try:
+        best_config = AppSettings.model_validate(rec.get("config") or {})
+    except Exception:
+        return {"ok": False, "error": (
+            "run recommendation is unreadable — apply refused")}
+    try:
+        from app.api.routes.settings import (
+            apply_settings_patch,
+            diff_settings,
+            try_load_settings,
+        )
+        live_loaded = try_load_settings(db)
+        if live_loaded is None:
+            return {"ok": False, "error": (
+                "live settings are unreadable — apply refused")}
+        live_now = live_loaded
+    except Exception:
+        return {"ok": False, "error": (
+            "live settings are unreadable — apply refused")}
+    drift = diff_settings(stored_baseline, live_now)
+    if drift:
+        fields = ", ".join(str(d.get("field", "?")) for d in drift[:8])
+        more = f" (+{len(drift) - 8} more)" if len(drift) > 8 else ""
+        return {"ok": False, "error": (
+            "live settings changed since the run baseline was captured "
+            f"({len(drift)} field(s) differ: {fields}{more}) — apply "
+            "refused as stale baseline")}
+    applied = _json_safe(config_diff(stored_baseline, best_config))
+    if not applied:
+        return {"ok": True, "run_id": str(run_id), "applied": {},
+                "settings": live_now.model_dump(mode="json")}
+    diff_values = {field: entry["to"] for field, entry in applied.items()
+                   if isinstance(entry, dict) and "to" in entry}
+    if not diff_values:
+        return {"ok": True, "run_id": str(run_id), "applied": {},
+                "settings": live_now.model_dump(mode="json")}
+    try:
+        saved = apply_settings_patch(db, diff_values,
+                                     source="simulation_apply",
+                                     run_id=str(run_id))
+    except Exception as exc:
+        return {"ok": False, "error": f"settings write failed: {exc}"[:200]}
+    if not getattr(saved, "ok", False):
+        return {"ok": False, "error": (
+            getattr(saved, "message", "") or "settings write failed")}
+    return {"ok": True, "run_id": str(run_id), "applied": applied,
+            "settings": saved.settings.model_dump(mode="json")}

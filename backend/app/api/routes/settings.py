@@ -52,9 +52,14 @@ def diff_settings(old: AppSettings, new: AppSettings) -> list[dict[str, Any]]:
 
 
 def log_settings_change(db, old: AppSettings, new: AppSettings,
-                        source: str = "ui") -> None:
+                        source: str = "ui", run_id: str | None = None) -> None:
     """Insert one audit row for a successful settings write. Never raises —
-    a missing table (migration not run) must never break a Settings save."""
+    a missing table (migration not run) must never break a Settings save.
+
+    ``run_id`` pins which optimizer run produced the change (apply path
+    only). settings_change_logs has no run_id column (migration 054), so the
+    run id rides in the human-readable summary — a dedicated column would
+    PGRST204 the whole audit insert away on un-migrated databases."""
     try:
         changes = diff_settings(old, new)
         if not changes:
@@ -64,6 +69,8 @@ def log_settings_change(db, old: AppSettings, new: AppSettings,
         head = changes[0]
         summary = (f"{head['field']}: {head['old']} → {head['new']}"
                    + (f" (+{len(changes) - 1} ช่อง)" if len(changes) > 1 else ""))
+        if run_id:
+            summary += f" [run {run_id}]"
         db.insert(SETTINGS_CHANGE_TABLE, {
             "source": str(source or "ui"),
             "changes": changes,
@@ -263,6 +270,21 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
     if "spread_overrides" in (payload or {}) \
             and not (payload or {}).get("spread_overrides"):
         patch["spread_overrides"] = None
+    return apply_settings_patch(db, patch, source="ui")
+
+
+def apply_settings_patch(db, patch: dict[str, Any], *, source: str,
+                         run_id: str | None = None) -> SettingsSaveResult:
+    """Shared merge-persist core behind PUT /api/settings and the guarded
+    optimizer apply (POST /api/system/optimize/{id}/apply).
+
+    Extracted byte-identical from ``save_settings``: raw-row read, patch
+    merge, model_validate coercion, partial-write keep-list, upsert with
+    PGRST204 retry, ``log_settings_change`` audit, equity-reseed block.
+    The UI route stays a thin delegate (``source="ui"``); the optimizer
+    apply passes only its recommendation diff (``source="simulation_apply"``,
+    ``run_id`` set). No behavior change for the UI save path.
+    """
     if not db or not db.available:
         return SettingsSaveResult(
             ok=False, settings=AppSettings(),
@@ -343,7 +365,8 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
                 })
         except Exception as exc:
             log.warning("equity reseed on capital change failed: %s", exc)
-        log_settings_change(db, current, merged, source="ui")
+        log_settings_change(db, current, merged, source=source,
+                            run_id=run_id)
         _note = "saved" + _apply_ai_overrides(merged)
         if unread:
             # Name up to 10. A shorter cap was a trap: `max_drawdown_pct`
@@ -387,7 +410,8 @@ def save_settings(request: Request, payload: dict[str, Any]) -> SettingsSaveResu
                     msg += (f" (ข้าม column ที่ยังไม่มี: {', '.join(skipped)} — "
                             "รัน migration ที่เกี่ยวข้องใน Supabase SQL Editor "
                             "เพื่อเปิดใช้ฟีเจอร์นี้)")
-                log_settings_change(db, current, merged, source="ui")
+                log_settings_change(db, current, merged, source=source,
+                            run_id=run_id)
                 return SettingsSaveResult(
                     ok=True, settings=_row_to_settings(resp.data[0]),
                     message=msg)

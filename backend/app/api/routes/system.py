@@ -1497,6 +1497,7 @@ async def sim_data_status(request: Request, version: str) -> dict:
 # GET  /api/system/optimize/{id}/equity -> trades + equity (?iteration=N,
 #                                          default best else baseline)
 # POST /api/system/optimize/{id}/cancel -> cooperative stop
+# POST /api/system/optimize/{id}/apply -> guarded diff-only recommendation apply
 #
 # Thin wrappers mirroring the /sim-data/* section above: check DB
 # availability, validate the body, delegate to app/services/sim_optimizer.py.
@@ -1586,3 +1587,24 @@ async def cancel_optimization(request: Request, run_id: str) -> dict:
     if not db or not db.available:
         return {"ok": False, "error": "DB unavailable"}
     return sim_optimizer.cancel_optimization(db, run_id)
+
+
+@router.post("/optimize/{run_id}/apply")
+async def apply_optimization(request: Request, run_id: str,
+                             payload: Optional[dict[str, Any]] = None) -> dict:
+    """Apply a run's recommendation through the guarded diff-only path.
+
+    The body must carry ``{"confirm": true}`` — anything else (including
+    truthy non-``true``) refuses with zero writes. The service recomputes
+    the live-vs-baseline drift (stale refuses), writes only the recommended
+    diff fields through the shared settings merge/audit path, and audits
+    with ``source="simulation_apply"`` plus the run id.
+    """
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    body = payload if isinstance(payload, dict) else {}
+    return sim_optimizer.apply_recommendation(
+        db, run_id, confirm=body.get("confirm"))
