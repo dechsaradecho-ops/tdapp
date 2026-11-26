@@ -7,6 +7,7 @@ Run from backend/: D:\\tdapp\\.venv\\Scripts\\python.exe -m pytest tests/test_si
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -150,3 +151,82 @@ class TestDatasetBuildApi:
                          {"assets": ["EURUSD"], "years": 5})
         assert res["ok"] is True
         assert res["status"] == "failed"
+
+
+class TestDatasetBuildGuard:
+    """Finding 1: the active check-and-set must be a single locked CAS."""
+
+    def test_concurrent_starts_only_one_wins(
+            self, fake_db, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "_TD_MIN_GAP_S", 0.0)
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        release = threading.Event()
+        entered = threading.Event()
+
+        class BlockingPool:
+            def submit(self, fn, *args, **kwargs):
+                entered.set()
+                assert release.wait(timeout=15)
+                fn(*args, **kwargs)
+                return None
+
+        monkeypatch.setattr(sim_market_data, "_POOL", BlockingPool())
+        barrier = threading.Barrier(2)
+        results: list = []
+
+        def go():
+            barrier.wait(timeout=15)
+            results.append(sim_market_data.start_dataset_build(
+                fake_db, assets=["EURUSD"], years=5))
+
+        workers = [threading.Thread(target=go) for _ in range(2)]
+        for t in workers:
+            t.start()
+        assert entered.wait(timeout=15)
+        # The winner is parked inside submit holding the slot; give the
+        # loser a chance to attempt, then let the winner run.
+        for t in workers:
+            t.join(timeout=5)
+        release.set()
+        for t in workers:
+            t.join(timeout=30)
+        assert len(results) == 2
+        assert sum(1 for r in results if r.get("ok")) == 1
+        assert sum(1 for r in results if not r.get("ok")) == 1
+        assert sim_market_data.active_build() is None
+
+
+class TestDatasetBuildStages:
+    """Finding 2: `fetching_twelvedata` must precede the TD fetch call."""
+
+    def test_twelvedata_stage_set_before_fetch(
+            self, fake_db, inline_worker, monkeypatch):
+        events: list = []
+        orig_stage = sim_market_data._set_stage
+
+        def spy_stage(db, version, stage):
+            events.append(("stage", stage))
+            return orig_stage(db, version, stage)
+
+        async def spy_td(asset, *, years, client):
+            events.append(("td_fetch", asset))
+            return []
+
+        monkeypatch.setattr(sim_market_data, "_set_stage", spy_stage)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            spy_td)
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        res = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert res.get("ok") is True
+        stages = [s for k, s in events if k == "stage"]
+        assert "fetching_twelvedata" in stages
+        idx_stage = events.index(("stage", "fetching_twelvedata"))
+        idx_fetch = next(i for i, e in enumerate(events)
+                         if e[0] == "td_fetch")
+        assert idx_stage < idx_fetch
+        assert (stages.index("fetching_biquote")
+                < stages.index("fetching_twelvedata")
+                < stages.index("validating"))

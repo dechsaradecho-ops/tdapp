@@ -325,6 +325,28 @@ def active_build() -> str | None:
         return _ACTIVE
 
 
+def _try_start_active(version: str) -> bool:
+    """Claim the single-worker slot iff it is free — one locked CAS.
+
+    The check and the set happen under the same lock acquisition so two
+    concurrent starts cannot both pass the guard.
+    """
+    global _ACTIVE
+    with _ACTIVE_LOCK:
+        if _ACTIVE is not None:
+            return False
+        _ACTIVE = version
+        return True
+
+
+def _release_active(version: str) -> None:
+    """Clear the slot, but only if this version still holds it."""
+    global _ACTIVE
+    with _ACTIVE_LOCK:
+        if _ACTIVE == version:
+            _ACTIVE = None
+
+
 def _new_version() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"v{stamp}-{uuid.uuid4().hex[:6]}"
@@ -427,11 +449,11 @@ def start_dataset_build(db, *, assets: list[str],
     except (TypeError, ValueError):
         yrs = 5
     yrs = max(1, min(yrs, 10))
-    live = active_build()
-    if live is not None:
+    version = _new_version()
+    if not _try_start_active(version):
+        live = active_build()
         return {"ok": False, "error": "มีงาน build รันอยู่แล้ว",
                 "version": live}
-    version = _new_version()
     try:
         row = {
             "dataset_version": version,
@@ -446,11 +468,12 @@ def start_dataset_build(db, *, assets: list[str],
             "code_version": CODE_VERSION,
         }
         if db.insert(META_TABLE, row) is None:
+            _release_active(version)
             return {"ok": False, "error": "could not create dataset row"}
     except Exception as exc:
         log.error("sim-data: could not create dataset row: %s", exc)
+        _release_active(version)
         return {"ok": False, "error": "could not create dataset row"}
-    _set_active(version)
     _POOL.submit(_run_build, db, version, clean, yrs)
     return {"ok": True, "version": version, "status": "building"}
 
@@ -572,35 +595,54 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
     try:
         _set_stage(db, version, "fetching_biquote")
 
-        async def _go() -> dict:
+        async def _fetch_bq() -> dict:
             import httpx as _httpx
 
-            fetched: dict = {}
+            out: dict = {}
             async with _httpx.AsyncClient() as client:
                 for asset in assets:
                     try:
-                        bq = await fetch_biquote_recent(asset, client)
-                        bq_err: str | None = None
+                        out[asset] = await fetch_biquote_recent(asset, client)
+                        out[asset + ":err"] = None
                     except Exception as exc:
-                        bq, bq_err = [], f"{type(exc).__name__}: {exc}"[:200]
-                    if _td_over_daily_cap():
-                        td, td_err = [], "twelvedata daily cap reached (750)"
-                    else:
-                        try:
-                            await _td_throttle()
-                            td = await fetch_twelvedata_history(
-                                asset, years=years, client=client)
-                            td_err = None
-                        except Exception as exc:
-                            td = []
-                            td_err = f"{type(exc).__name__}: {exc}"[:200]
-                    fetched[asset] = {"bq": bq, "td": td,
-                                      "bq_err": bq_err, "td_err": td_err}
-            return fetched
+                        out[asset] = []
+                        out[asset + ":err"] = (
+                            f"{type(exc).__name__}: {exc}"[:200])
+            return out
 
-        fetched = _await_sync(_go())
+        async def _fetch_td() -> dict:
+            import httpx as _httpx
+
+            out: dict = {}
+            async with _httpx.AsyncClient() as client:
+                for asset in assets:
+                    if _td_over_daily_cap():
+                        out[asset] = []
+                        out[asset + ":err"] = (
+                            "twelvedata daily cap reached (750)")
+                        continue
+                    try:
+                        await _td_throttle()
+                        out[asset] = await fetch_twelvedata_history(
+                            asset, years=years, client=client)
+                        out[asset + ":err"] = None
+                    except Exception as exc:
+                        out[asset] = []
+                        out[asset + ":err"] = (
+                            f"{type(exc).__name__}: {exc}"[:200])
+            return out
+
+        bq_data = _await_sync(_fetch_bq())
         _set_stage(db, version, "fetching_twelvedata")
+        td_data = _await_sync(_fetch_td())
         _set_stage(db, version, "validating")
+        fetched = {
+            asset: {"bq": bq_data.get(asset) or [],
+                    "td": td_data.get(asset) or [],
+                    "bq_err": bq_data.get(asset + ":err"),
+                    "td_err": td_data.get(asset + ":err")}
+            for asset in assets
+        }
         for asset in assets:
             pack = fetched.get(asset) or {}
             raw_bq = pack.get("bq") or []
@@ -684,7 +726,7 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
         except Exception:
             pass
     finally:
-        _set_active(None)
+        _release_active(version)
 
 
 def _persist_batch(db, version: str, batch: list[SimBar]) -> None:
