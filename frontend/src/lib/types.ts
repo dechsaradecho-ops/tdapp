@@ -1998,4 +1998,56 @@ export type OptApplyResponse =
   | { ok: true; run_id: string; applied: Record<string, OptDiffEntry>; settings: Record<string, unknown> }
   | OptApiError;
 
+// ---------------------------------------------------------------------------
+// Price-history dataset (sim-data v2) — Optimize tab update button
+// Shapes mirror backend/app/services/sim_market_data.py report dict +
+// app/api/routes/system.py _sim_data_status_with_counts wrapper:
+// update mints a new version (reusing the newest complete version's bars as
+// the base); latest resolves the newest COMPLETE version only; status polls
+// one version (stage done/failed drives the tab's poll loop).
+// ---------------------------------------------------------------------------
+
+/** The final per-version report persisted to sim_dataset_meta_v2.report. */
+export interface SimDataReport {
+  stage?: string;
+  version?: string;
+  assets?: string[];
+  years?: number;
+  bars?: number;
+  base_version?: string | null;
+  reused_bars?: number;
+  reused_per_asset?: Record<string, number>;
+  fetched_bars?: number;
+  complete?: boolean;
+  failed_assets?: string[];
+  error?: string;
+  [key: string]: unknown;
+}
+
+/** POST /api/system/sim-data/update — refused (ok: false) while one is live. */
+export interface SimDataUpdateResponse {
+  ok: boolean;
+  version?: string;
+  status?: string;
+  error?: string;
+  report?: unknown;
+}
+
+/** GET /api/system/sim-data/latest + GET /api/system/sim-data/{version}. */
+export interface SimDataStatusResponse {
+  ok: boolean;
+  version?: string;
+  status?: string;
+  stage?: string;
+  error?: string;
+  report?: SimDataReport;
+  data_hash?: string | null;
+  assets?: string[];
+  years?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  bars?: number;
+  per_asset_counts?: Record<string, number>;
+}
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";

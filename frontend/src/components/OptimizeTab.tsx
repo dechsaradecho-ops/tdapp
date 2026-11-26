@@ -28,6 +28,7 @@ import type {
   OptEquityResponse,
   OptIterationRow,
   OptRunStatus,
+  SimDataReport,
 } from "@/lib/types";
 
 const POLL_MS = 1000;
@@ -114,6 +115,15 @@ export default function OptimizeTab() {
   const [assetsText, setAssetsText] = useState("");
   const [maxIter, setMaxIter] = useState(100);
 
+  // ---- dataset update (sim-data v2; never auto-starts optimization) ----
+  // The version textbox is auto-resolved, never mandatory typing: on mount
+  // (and on demand via the ↻ affordance) the newest COMPLETE version
+  // prefills it; the user may still override it manually.
+  const [dsUpdating, setDsUpdating] = useState(false);
+  const [dsTarget, setDsTarget] = useState<string | null>(null);
+  const [dsMsg, setDsMsg] = useState("");
+  const [dsResolving, setDsResolving] = useState(false);
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runIdRef = useRef<string | null>(null);
   runIdRef.current = runId;
@@ -126,6 +136,14 @@ export default function OptimizeTab() {
   const eqKeyRef = useRef<string>("");
   const confirmingRef = useRef(false);
   confirmingRef.current = confirming;
+  // Dataset-update poll guard — mirrors the run poll's inFlightRef: never
+  // two GET /sim-data/{version} in flight, and the interval dies with the
+  // update (or unmount) so a late response can't flip dsUpdating back on.
+  const dsInFlightRef = useRef(false);
+  const dsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dsTargetRef = useRef<string | null>(null);
+  dsTargetRef.current = dsTarget;
+  const dsResolveRef = useRef(false);
 
   const live = !!run && !TERMINAL.includes(run.status);
   const done = run?.status === "complete";
@@ -153,6 +171,89 @@ export default function OptimizeTab() {
   useEffect(() => {
     void loadRuns();
   }, [loadRuns]);
+
+  // ---- dataset version auto-resolve (newest COMPLETE, never mandatory) --
+  // Fail-soft by design: no complete dataset yet (or DB down) just leaves
+  // the textbox for manual typing — the missing-version inline error only
+  // fires at start time, when the field is still empty.
+  const resolveLatest = useCallback(async (force: boolean) => {
+    if (dsResolveRef.current) return;
+    dsResolveRef.current = true;
+    setDsResolving(true);
+    try {
+      const r = await api.simDataLatest();
+      if (!r.ok) return;
+      const v = (r.version || "").trim();
+      if (!v) return;
+      setDatasetVersion((cur) => (force || !cur.trim() ? v : cur));
+    } catch {
+      // Leave the field alone — manual typing still works.
+    } finally {
+      dsResolveRef.current = false;
+      setDsResolving(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void resolveLatest(false);
+  }, [resolveLatest]);
+
+  // ---- dataset-update poll (no overlap, mirrors the run pull guard) -----
+  useEffect(() => {
+    if (!dsUpdating || !dsTarget) return;
+    const target = dsTarget;
+    const tick = async () => {
+      if (dsInFlightRef.current) return;
+      if (dsTargetRef.current !== target) return;
+      dsInFlightRef.current = true;
+      try {
+        const st = await api.simDataStatus(target);
+        if (dsTargetRef.current !== target) return;
+        if (!st.ok) {
+          // Verbatim: unknown version / DB outage mid-poll.
+          setErr(st.error || "อ่านสถานะ dataset ไม่สำเร็จ");
+          setDsUpdating(false);
+          setDsTarget(null);
+          return;
+        }
+        const rep = (st.report || {}) as SimDataReport;
+        const stage = st.stage || st.status || "";
+        if (stage === "done" || st.status === "complete" || rep.complete === true) {
+          setDatasetVersion(st.version || target);
+          const reused = typeof rep.reused_bars === "number" ? intF(rep.reused_bars) : "—";
+          const fetched = typeof rep.fetched_bars === "number" ? intF(rep.fetched_bars) : "—";
+          const base = rep.base_version ? ` (ฐาน ${rep.base_version})` : "";
+          setDsMsg(`อัปเดตเสร็จ ${st.version || target} — ใช้ซ้ำ ${reused} bars · ดึงใหม่ ${fetched} bars${base}`);
+          setDsUpdating(false);
+          setDsTarget(null);
+          return;
+        }
+        if (stage === "failed" || st.status === "failed") {
+          // Verbatim: the report's own error, never paraphrased.
+          const msg = rep.error || st.error || `dataset ${target} ล้มเหลว`;
+          setErr(msg);
+          setDsMsg("");
+          setDsUpdating(false);
+          setDsTarget(null);
+          return;
+        }
+        setDsMsg(`กำลังอัปเดต dataset ${target}… (${stage || "building"})`);
+      } catch (e) {
+        if (dsTargetRef.current !== target) return;
+        setErr(String(e));
+        setDsUpdating(false);
+        setDsTarget(null);
+      } finally {
+        dsInFlightRef.current = false;
+      }
+    };
+    void tick();
+    if (dsTimerRef.current) clearInterval(dsTimerRef.current);
+    dsTimerRef.current = setInterval(() => void tick(), POLL_MS);
+    return () => {
+      if (dsTimerRef.current) clearInterval(dsTimerRef.current);
+    };
+  }, [dsUpdating, dsTarget]);
 
   const fetchEquity = useCallback(async (id: string, bestIter: number | null) => {
     try {
@@ -266,6 +367,42 @@ export default function OptimizeTab() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, run?.status]);
+
+  // ---- dataset update: mint a new version, then poll it ----------------
+  // Same assets textbox as optimization (blank = omit = reuse the newest
+  // complete version's set) and a fixed 5-year span — no new years
+  // control. Never auto-starts optimization; the user presses start
+  // explicitly once the version textbox holds the new version.
+  const updateDataset = async () => {
+    if (dsUpdating) return;
+    setDsMsg("");
+    setErr("");
+    try {
+      const assets = assetsText
+        .split(",")
+        .map((a) => a.trim().toUpperCase())
+        .filter(Boolean);
+      const res = await api.simDataUpdate({
+        ...(assets.length ? { assets } : {}),
+        years: 5,
+      });
+      if (!res.ok) {
+        // Refusal (a build/update already live, bad years, …) verbatim.
+        setErr(res.error || "อัปเดต dataset ไม่สำเร็จ");
+        return;
+      }
+      const v = (res.version || "").trim();
+      if (!v) {
+        setErr("อัปเดต dataset ไม่สำเร็จ (ไม่ได้ version กลับมา)");
+        return;
+      }
+      setDsUpdating(true);
+      setDsTarget(v);
+      setDsMsg(`เริ่มอัปเดต dataset ${v}…`);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
 
   const start = async () => {
     if (!datasetVersion.trim()) {
@@ -384,9 +521,24 @@ export default function OptimizeTab() {
             <input
               type="text" value={datasetVersion}
               onChange={(e) => setDatasetVersion(e.target.value)}
-              placeholder="เช่น v2026-11-20-5y"
+              placeholder={dsResolving ? "กำลังดึง version ล่าสุด…" : "เช่น v2026-11-20-5y"}
               className="mt-1 w-full bg-surface border border-slate-700 rounded px-3 py-2"
             />
+            <span className="mt-1 flex gap-1">
+              <button type="button" onClick={() => void updateDataset()}
+                disabled={dsUpdating}
+                title="ดึงราคาล่าสุดต่อจาก dataset ที่ใหม่สุด (สินทรัพย์ตามช่องข้างๆ ว่าง = ชุดเดิม, ย้อนหลัง 5 ปี)"
+                className="px-2 py-1 rounded border border-slate-700 text-slate-300 text-xs disabled:opacity-50 min-h-[32px]">
+                {dsUpdating ? "กำลังอัปเดต…" : "อัปเดต dataset"}
+              </button>
+              <button type="button" onClick={() => void resolveLatest(true)}
+                disabled={dsResolving || dsUpdating}
+                title="ดึง dataset version ล่าสุดที่ complete มาใส่ช่อง"
+                className="px-2 py-1 rounded border border-slate-700 text-slate-300 text-xs disabled:opacity-50 min-h-[32px]">
+                {dsResolving ? "…" : "↻ ล่าสุด"}
+              </button>
+            </span>
+            {dsMsg && <span className="mt-1 block text-[11px] text-slate-400">{dsMsg}</span>}
           </label>
           <label className="block text-sm">
             <span className="text-slate-300">ทุนตั้งต้น (USD)</span>
@@ -422,9 +574,10 @@ export default function OptimizeTab() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={start} disabled={starting || live || !datasetVersion.trim()}
+            onClick={start} disabled={starting || live || dsUpdating || !datasetVersion.trim()}
+            title={dsUpdating ? "ปิดการเริ่มระหว่างอัปเดต dataset — รอให้อัปเดตเสร็จก่อน" : undefined}
             className="px-4 py-2 rounded bg-accent text-white font-bold disabled:opacity-50 min-h-[40px]">
-            {starting ? "กำลังเริ่ม..." : live ? "กำลังรันอยู่" : "เริ่ม optimization"}
+            {starting ? "กำลังเริ่ม..." : live ? "กำลังรันอยู่" : dsUpdating ? "รออัปเดต dataset…" : "เริ่ม optimization"}
           </button>
           {live && (
             <button onClick={cancel}
@@ -433,6 +586,11 @@ export default function OptimizeTab() {
             </button>
           )}
         </div>
+        {dsUpdating && (
+          <p className="mt-2 text-xs text-slate-400">
+            ปิดการเริ่ม optimization ระหว่างอัปเดต dataset — รอให้เสร็จก่อน แล้วค่อยกดเริ่มเอง
+          </p>
+        )}
         {err && <p className="mt-2 text-loss text-sm">{err}</p>}
         {run?.status === "failed" && run?.error && (
           <p className="mt-2 text-loss text-xs">รันไม่สำเร็จ: {run.error}</p>

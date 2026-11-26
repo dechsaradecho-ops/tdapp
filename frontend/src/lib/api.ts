@@ -63,6 +63,8 @@ import {
   SimRunsResponse,
   SignalLogsResponse,
   SignalReport,
+  SimDataStatusResponse,
+  SimDataUpdateResponse,
   StatsResetResult,
   SignalProposal,
   WalkForwardResult,
@@ -402,6 +404,23 @@ export const api = {
   optApply: (id: string, confirm: boolean) =>
     post<OptApplyResponse>(
       `/api/system/optimize/${encodeURIComponent(id)}/apply`, { confirm }),
+
+  // ---------- Price-history dataset (sim-data v2) — Optimize tab ---------
+  // Thin typed wrappers over /api/system/sim-data/* — existing simulation
+  // and optimizer API methods above are unchanged.
+  // POST starts an update (blank assets = reuse the newest complete
+  // version's set; fixed 5-year span, same convention as the tab's builds;
+  // base_version omitted = newest complete). Refused (ok: false) while a
+  // build/update is live.
+  simDataUpdate: (input?: { assets?: string[]; years?: number; base_version?: string }) =>
+    post<SimDataUpdateResponse>("/api/system/sim-data/update", input ?? {}),
+  // GET newest COMPLETE version only ({ok: false} when none exists yet).
+  simDataLatest: () =>
+    get<SimDataStatusResponse>("/api/system/sim-data/latest"),
+  // GET status + stage + report + per-asset bar counts for one version.
+  simDataStatus: (version: string) =>
+    get<SimDataStatusResponse>(
+      `/api/system/sim-data/${encodeURIComponent(version)}`),
 
   // ---------- CSV export: same rows the tab streams, as a file ----------
   // Blob via the authed client (a plain <a href> would carry no token).
