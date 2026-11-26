@@ -121,7 +121,17 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 - Source precedence: Biquote = authoritative สำหรับ ~500 แท่ง D1 ล่าสุด (ตัดแท่งที่ยังเปิดค้าง `is_open` ทิ้ง) → Twelve Data (`/time_series` interval=1day, outputsize=5000) เติมประวัติด้านหลัง; วันที่ซ้ำกัน Biquote ชนะเสมอ และทุก overlap ถูกบันทึกใน `seam_discrepancies` (OHLC ทั้งสองฝั่ง + `selected_source: biquote`) ไม่มีการเฉลี่ย
 - Validation/quarantine: ทุกแท่งผ่าน `validate_sim_bar` (OHLC geometry + spike >20% vs close ก่อนหน้า + future-bar) — แท่งเสียถูก quarantine ไม่ persist; asset ใดมี valid bars < 250 = build จบแบบ `failed` พร้อม `failed_assets`; เก่า `price_history_daily` ไม่ถูกแตะ
 - Twelve Data throttle (free tier 8 req/min, 800/day): หน่วง ≥7.5s ระหว่าง request + daily cap 750; build ซ้อนกันถูกปฏิเสธ (`ok: False` "มีงาน build รันอยู่แล้ว")
+
 - Readiness probe 2026-11-26 (read-only, ไม่แตะ trading/settings): Biquote live คืน 500 raw / **499 closed D1 bars** ทั้ง EURUSD (2025-04-21→2026-11-25) และ XAUUSD (2025-04-20→2026-11-25); Twelve Data live ตรวจไม่ได้ (ไม่มี `TWELVEDATA_API_KEY` ใน worktree) จึงใช้ mocked TD fixture (ประวัติด้านหลัง + overlap 30 วันราคาต่าง +0.1%) — merge แล้วไม่มี duplicate dates, เรียง oldest-first, overlap 30 จุดถูกรายงานครบ, invalid 0, `data_hash` (SHA-256) เสถียรเมื่อ build ซ้ำด้วยข้อมูลชุดเดิม
+
+### Sandbox settings optimizer (v1)
+- Workflow หน้า Monitor → แท็บย่อย **Optimize**: เลือก dataset version + สินทรัพย์, กรอก **starting capital (บังคับ, USD)** → Start → live progress (stage/progress/best-train-PnL) → iteration log, กราฟ equity/PnL/drawdown/parameter, การ์ด recommendation → Apply (ต้องติ๊กยืนยันชัดเจน)
+- Dataset: ใช้ `sim_price_bars_v2` ที่ build ไว้ (Biquote ล่าสุด + Twelve Data ส่วนเก่า, versioned/immutable, มี `data_hash` + source label ต่อแท่ง)
+- Replay: shared timeline ทุก asset, เข้าไม้ที่ราคาเปิดแท่งถัดไป (next-open, production parity), คิดต้นทุนครั้งเดียวต่อ round-trip, กรณีแท่งคลุมเครือใช้กฎ stop-first (side เดียวกับไม้ก่อน); ข่าวไม่มีใน replay (news-optimistic — ผลจริงอาจแย่กว่าถ้าโดน news-block)
+- Search: มากสุดตาม PnL สุทธิ (profit-max), default **100 / สูงสุด 500 iterations**, แบ่ง train/validation **70/30 ตามเวลา** (คัดกลางทางด้วย train เท่านั้น), validation top-5, เกณฑ์ขั้นต่ำ **รวม 100 / validation 30 เทรด** (ต่ำกว่า = ไม่มี recommendation), seed ซ้ำได้ผลซ้ำ
+- Run/iteration persistence: `sim_opt_runs` (single-active-run — start ซ้อนถูกปฏิเสธ, cancel ได้, iteration ที่เสร็จแล้วยังอยู่) + `sim_opt_iterations` (config/config-diff/train metrics ทุก iteration) + equity/detail เฉพาะ baseline/best/top-5
+- Apply safety: ไม่แตะ live settings ระหว่าง optimize — เขียนได้ทางเดียวคือปุ่ม Apply พร้อม **confirm ชัดเจน**; ปฏิเสธถ้า live drift จาก baseline ที่ capture ไว้ (stale-baseline, บอก fields ที่ต่าง), เขียนเฉพาะ fields ที่ต่าง (diff-only) ผ่าน shared settings path พร้อม audit `source="simulation_apply"` + run id; apply สำเร็จครั้งเดียวแล้วครั้งถัดไป stale ทันที
+- ข้อจำกัดที่รู้: แท่ง daily เท่านั้น (intraday/สเปรด tick-level ไม่อยู่ใน replay), ไม่มีข่าวในอดีต, Twelve Data free-tier quota (8 req/min, 800/day — build ช้า/ต้องรอ), verification ของ optimizer ใช้ mocked-TD ตาม Plan 1 (ยังไม่ได้พิสูจน์กับ TD live)
 
 ## 11. Auth + ข้อมูล
 
