@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import random
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -23,6 +27,8 @@ from app.engine.portfolio_replay import (
     replay_portfolio,
 )
 from app.models.schemas import AppSettings
+
+log = logging.getLogger(__name__)
 
 MAX_ITERATIONS_HARD_MAX = 500
 
@@ -477,3 +483,803 @@ def optimize_settings(
         best=best, baseline=iterations[0], iterations=iterations,
         validation_leaderboard=board, warnings=[],
     )
+
+
+# ---------------------------------------------------------------------------
+# Background optimization job + persistence (Task 4).
+#
+# WHY A JOB AND NOT A REQUEST
+# ---------------------------
+# A full search replays the whole immutable dataset per candidate (up to 500
+# iterations plus validation replays), so it cannot live inside a
+# request/response cycle. It runs on a single-worker thread pool mirroring
+# the Plan 1 dataset-build job (app/services/sim_market_data.py): one
+# optimization at a time, progress stages on the run row, and a terminal
+# done/failed/cancelled verdict. Datasets stay immutable — the worker only
+# reads sim_dataset_meta_v2/sim_price_bars_v2 and writes sim_opt_* rows.
+#
+# SAFETY
+# ------
+# * Read-only baseline: the live AppSettings snapshot is captured once at
+#   start through capture_live_baseline(); the worker NEVER writes
+#   live settings row and never touches broker/notifier/orders.
+# * Primary objective is highest net simulated PnL; drawdown is reported,
+#   not penalized (inherited from optimize_settings).
+# * Progress writes are throttled to at most one run-row patch per
+#   iteration (a cheap dict update, no extra tables).
+# * Cancellation is cooperative: the worker's cancel event is checked
+#   between iterations and validation replays, preserving everything
+#   completed so far.
+# ---------------------------------------------------------------------------
+
+RUNS_TABLE = "sim_opt_runs"
+ITER_TABLE = "sim_opt_iterations"
+TRADES_TABLE = "sim_opt_trades"
+EQUITY_TABLE = "sim_opt_equity"
+
+CODE_VERSION = "sim-opt-v1"
+
+TERMINAL_STATUSES = ("complete", "failed", "cancelled")
+
+#: One worker on purpose — see "WHY A JOB" above.
+_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sim-opt")
+
+#: The live run id, so a second start is refused while one runs.
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE: str | None = None
+
+#: run_id -> cancel flag, so /cancel can reach a run already in flight.
+_CANCEL: dict[str, threading.Event] = {}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _new_run_id() -> str:
+    """Mint ``opt-YYYYMMDD-HHMMSS-xxxxxx`` (Plan 1 scheme, opt- prefix)."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"opt-{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+def _set_active(run_id: str | None) -> None:
+    global _ACTIVE
+    with _ACTIVE_LOCK:
+        _ACTIVE = run_id
+
+
+def active_optimization() -> str | None:
+    with _ACTIVE_LOCK:
+        return _ACTIVE
+
+
+def _try_start_active(run_id: str) -> bool:
+    """Claim the single-worker slot iff it is free — one locked CAS.
+
+    The check and the set happen under the same lock acquisition so two
+    concurrent starts cannot both pass the guard.
+    """
+    global _ACTIVE
+    with _ACTIVE_LOCK:
+        if _ACTIVE is not None:
+            return False
+        _ACTIVE = run_id
+        return True
+
+
+def _release_active(run_id: str) -> None:
+    """Clear the slot, but only if this run still holds it."""
+    global _ACTIVE
+    with _ACTIVE_LOCK:
+        if _ACTIVE == run_id:
+            _ACTIVE = None
+
+
+def capture_live_baseline(db) -> AppSettings:
+    """Read-only snapshot of the live settings for this run (test seam).
+
+    Returns schema defaults when no stored row is readable (first-run DB);
+    never raises and never writes — the optimizer must not move live risk
+    limits as a side effect of searching. Tests monkeypatch this seam.
+    """
+    try:
+        from app.api.routes.settings import try_load_settings
+        loaded = try_load_settings(db)
+        return loaded if loaded is not None else AppSettings()
+    except Exception:
+        return AppSettings()
+
+
+def _coerce_search_config(value: Any) -> tuple[SearchConfig | None, str | None]:
+    """Accept None/a SearchConfig/a plain dict; dicts are validated."""
+    if value is None:
+        return SearchConfig(), None
+    if isinstance(value, SearchConfig):
+        return value, None
+    if isinstance(value, dict):
+        known = {"max_iterations", "seed", "train_ratio", "top_n",
+                 "min_trades", "min_validation_trades"}
+        try:
+            cfg = SearchConfig(**{k: v for k, v in value.items()
+                                  if k in known})
+        except (TypeError, ValueError) as exc:
+            return None, f"invalid search_config: {exc}"
+        unknown = sorted(set(value) - known - {"code_version"})
+        if unknown:
+            return None, f"invalid search_config: unknown keys {unknown}"
+        return cfg, None
+    return None, "invalid search_config: must be an object"
+
+
+def _search_config_json(cfg: SearchConfig) -> dict[str, Any]:
+    return {"max_iterations": cfg.max_iterations, "seed": cfg.seed,
+            "train_ratio": cfg.train_ratio, "top_n": cfg.top_n,
+            "min_trades": cfg.min_trades,
+            "min_validation_trades": cfg.min_validation_trades,
+            "code_version": CODE_VERSION}
+
+
+def _finite(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively force JSON-safe (no NaN/Infinity, dates to ISO)."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _metrics_dict(result: Any | None) -> dict[str, Any] | None:
+    """JSON-safe summary metrics; profit_factor None stays null."""
+    metrics = getattr(result, "metrics", None)
+    if metrics is None:
+        return None
+    profit = getattr(metrics, "profit_factor", None)
+    try:
+        profit_value = (None if profit is None
+                        else (float(profit)
+                              if math.isfinite(float(profit)) else None))
+    except (TypeError, ValueError):
+        profit_value = None
+    return {
+        "net_pnl": _finite(getattr(metrics, "net_pnl", 0.0)),
+        "gross_pnl": _finite(getattr(metrics, "gross_pnl", 0.0)),
+        "costs": _finite(getattr(metrics, "costs", 0.0)),
+        "trades": int(getattr(metrics, "trades", 0) or 0),
+        "wins": int(getattr(metrics, "wins", 0) or 0),
+        "win_rate_pct": _finite(getattr(metrics, "win_rate_pct", 0.0)),
+        "profit_factor": profit_value,
+        "average_r": _finite(getattr(metrics, "average_r", 0.0)),
+        "max_drawdown_pct": _finite(
+            getattr(metrics, "max_drawdown_pct", 0.0)),
+        "ambiguous_pct": _finite(getattr(metrics, "ambiguous_pct", 0.0)),
+    }
+
+
+def _trade_direction(raw: Any) -> str:
+    """Normalize engine BUY/SELL to the sim_opt_trades long/short check."""
+    text = str(raw or "").strip().upper()
+    if text in ("LONG", "BUY", "B", "L"):
+        return "long"
+    if text in ("SHORT", "SELL", "S"):
+        return "short"
+    return "long"
+
+
+def _trade_rows(run_id: str, iteration: int, trades: list | None) -> list[dict]:
+    rows: list[dict] = []
+    for trade in trades or []:
+        try:
+            entry_date = getattr(trade, "entry_date", None)
+            exit_date = getattr(trade, "exit_date", None)
+            rows.append({
+                "run_id": run_id,
+                "iteration": int(iteration),
+                "trade_id": str(getattr(trade, "trade_id", "")),
+                "asset": str(getattr(trade, "asset", "")),
+                "direction": _trade_direction(getattr(trade, "direction", "")),
+                "entry_date": (entry_date.isoformat()
+                               if hasattr(entry_date, "isoformat")
+                               else str(entry_date)),
+                "entry_price": _finite(getattr(trade, "entry_price", 0.0)),
+                "exit_date": (exit_date.isoformat()
+                              if hasattr(exit_date, "isoformat")
+                              else (str(exit_date) if exit_date else None)),
+                "exit_price": _finite(getattr(trade, "exit_price", 0.0)),
+                "volume": _finite(getattr(trade, "volume", 0.0)),
+                "pnl_usd": _finite(getattr(trade, "pnl_usd", 0.0)),
+                "r_multiple": _finite(getattr(trade, "r_multiple", 0.0)),
+                "exit_reason": str(getattr(trade, "exit_reason", "") or ""),
+                "mae_r": _finite(getattr(trade, "mae_r", 0.0)),
+                "mfe_r": _finite(getattr(trade, "mfe_r", 0.0)),
+                "ambiguous": bool(getattr(trade, "ambiguous", False)),
+            })
+        except Exception as exc:  # noqa: BLE001 - skip one bad row, keep run
+            log.debug("opt %s iter %s: skipping bad trade row: %s",
+                      run_id, iteration, exc)
+    return rows
+
+
+def _equity_rows(run_id: str, iteration: int, curve: list | None) -> list[dict]:
+    rows: list[dict] = []
+    for point in curve or []:
+        try:
+            stamp = getattr(point, "date", None)
+            rows.append({
+                "run_id": run_id,
+                "iteration": int(iteration),
+                "date": (stamp.isoformat() if hasattr(stamp, "isoformat")
+                         else str(stamp)),
+                "equity": _finite(getattr(point, "equity", 0.0)),
+                "realized_pnl": _finite(getattr(point, "realized_pnl", 0.0)),
+                "unrealized_pnl": _finite(
+                    getattr(point, "unrealized_pnl", 0.0)),
+                "drawdown_pct": _finite(getattr(point, "drawdown_pct", 0.0)),
+            })
+        except Exception as exc:  # noqa: BLE001 - skip one bad point
+            log.debug("opt %s iter %s: skipping bad equity point: %s",
+                      run_id, iteration, exc)
+    return rows
+
+
+def _patch_run(db, run_id: str, changes: dict) -> bool:
+    """Update the run row by PK. Returns False (logged) when unwritable."""
+    try:
+        if db.update(RUNS_TABLE, run_id, changes):
+            return True
+    except Exception as exc:
+        log.warning("opt %s: run patch failed: %s", run_id, exc)
+        return False
+    log.warning("opt %s: run patch missed (row gone?)", run_id)
+    return False
+
+
+def _read_data_hash(db, dataset_version: str) -> str | None:
+    """Best-effort reproducibility hash from the dataset meta row."""
+    try:
+        from app.services.sim_market_data import META_TABLE
+        rows = db.select(META_TABLE,
+                         filters={"dataset_version": str(dataset_version)},
+                         order="started_at", desc=True, limit=1)
+    except Exception:
+        return None
+    if not rows:
+        return None
+    row = rows[0] or {}
+    report = row.get("report") or {}
+    return row.get("data_hash") or report.get("data_hash")
+
+
+def _finish_run(db, run_id: str, status: str, *,
+                result: dict | None = None, error: str | None = None) -> None:
+    """Write the terminal verdict.
+
+    ``status`` honors the migration 063 check constraint
+    (pending/running/complete/failed/cancelled); ``stage`` carries the
+    worker vocabulary (done/failed/cancelled), mirroring the Plan 1
+    dataset-build job (status complete + report stage done).
+    """
+    stage = {"complete": "done", "failed": "failed",
+             "cancelled": "cancelled"}.get(status, status)
+    _patch_run(db, run_id, {
+        "status": status,
+        "stage": stage,
+        "finished_at": _now_iso(),
+        "result": _json_safe(result or {}),
+        "error": None if status == "complete" else (error or status),
+    })
+
+
+def _best_summary(entry: Any) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    return {
+        "iteration": int(getattr(entry, "iteration", 0) or 0),
+        "train_metrics": _metrics_dict(getattr(entry, "train_result", None)),
+        "validation_metrics": _metrics_dict(
+            getattr(entry, "validation_result", None)),
+        "config_diff": _json_safe(getattr(entry, "config_diff", None) or {}),
+    }
+
+
+def start_optimization(db, *, dataset_version: str,
+                       assets: list[str] | None = None,
+                       starting_capital: float = 1000.0,
+                       search_config: Any = None) -> dict:
+    """Queue one optimization run and hand it to the worker. Returns at once.
+
+    One run at a time: a second start while one is live is refused with
+    ``ok: False``. ``search_config`` may be a SearchConfig or a plain dict
+    (validated — ``max_iterations > 500`` is refused). Assets default to the
+    baseline's ``effective_assets()`` when omitted. Never writes live
+    settings; the baseline is a read-only snapshot.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    try:
+        capital = float(starting_capital)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "starting_capital must be a number"}
+    if not math.isfinite(capital) or capital <= 0:
+        return {"ok": False,
+                "error": "starting_capital must be finite and > 0"}
+    cfg, cfg_error = _coerce_search_config(search_config)
+    if cfg_error is not None or cfg is None:
+        return {"ok": False, "error": cfg_error or "bad search_config"}
+    version = str(dataset_version or "").strip()
+    if not version:
+        return {"ok": False, "error": "dataset_version required"}
+    try:
+        baseline = capture_live_baseline(db)
+    except Exception:
+        baseline = AppSettings()
+    if not isinstance(baseline, AppSettings):
+        baseline = AppSettings()
+    clean = sorted({str(a).strip().upper() for a in (assets or [])
+                    if str(a).strip()})
+    if not clean:
+        try:
+            clean = [str(a).upper() for a in baseline.effective_assets()
+                     if str(a).strip()]
+        except Exception:
+            clean = []
+        if not clean:
+            return {"ok": False, "error": "assets required"}
+    if len(clean) > 40:
+        return {"ok": False, "error": "assets required (1-40)"}
+    run_id = _new_run_id()
+    if not _try_start_active(run_id):
+        live = active_optimization()
+        return {"ok": False, "error": "มีการ optimize รันอยู่แล้ว",
+                "run_id": live}
+    now = _now_iso()
+    try:
+        row = {
+            "id": run_id,
+            "status": "running",
+            "stage": "queued",
+            "progress": 0.0,
+            "seed": int(cfg.seed),
+            "starting_capital": capital,
+            "search_config": _search_config_json(cfg),
+            "baseline_settings": _json_safe(
+                baseline.model_dump(mode="json")),
+            "dataset_version": version,
+            "data_hash": None,
+            "result": {"stage": "queued", "best_train_pnl": None,
+                       "best": None, "recommendation": None,
+                       "warnings": []},
+            "error": None,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+        }
+        if db.insert(RUNS_TABLE, row) is None:
+            _release_active(run_id)
+            return {"ok": False, "error": "could not create optimization run"}
+    except Exception as exc:
+        log.error("opt: could not create run row: %s", exc)
+        _release_active(run_id)
+        return {"ok": False, "error": "could not create optimization run"}
+    _CANCEL[run_id] = threading.Event()
+    _POOL.submit(_run_optimization, db, run_id, {
+        "dataset_version": version,
+        "assets": clean,
+        "starting_capital": capital,
+        "search_config": cfg,
+        "baseline": baseline,
+    })
+    return {"ok": True, "run_id": run_id}
+
+
+def _store_details(db, run_id: str, iteration: int,
+                   replay: Any | None) -> None:
+    """Persist full trades/equity for one iteration (best-effort, logged)."""
+    if replay is None:
+        return
+    try:
+        for row in _trade_rows(run_id, iteration,
+                               list(getattr(replay, "trades", None) or [])):
+            if db.insert(TRADES_TABLE, row) is None:
+                log.warning("opt %s iter %s: trade insert failed",
+                            run_id, iteration)
+                break
+        for row in _equity_rows(
+                run_id, iteration,
+                list(getattr(replay, "equity_curve", None) or [])):
+            if db.insert(EQUITY_TABLE, row) is None:
+                log.warning("opt %s iter %s: equity insert failed",
+                            run_id, iteration)
+                break
+    except Exception as exc:
+        log.warning("opt %s iter %s: detail persist failed: %s",
+                    run_id, iteration, exc)
+
+
+def _delete_details(db, run_id: str, iteration: int) -> None:
+    """Drop one iteration's detail rows (best-effort, logged)."""
+    for table in (TRADES_TABLE, EQUITY_TABLE):
+        try:
+            db.delete(table, {"run_id": run_id, "iteration": int(iteration)})
+        except Exception as exc:
+            log.debug("opt %s iter %s: detail delete %s failed: %s",
+                      run_id, iteration, table, exc)
+
+
+def _run_optimization(db, run_id: str, job: dict) -> None:
+    """Execute one optimization to a terminal done/failed/cancelled row.
+
+    Never raises and never leaves the version ``running``: every exit path
+    writes a verdict and clears the single-worker slot. Completed iteration
+    rows are preserved on every path, including cancellation.
+    """
+    cancel = _CANCEL.setdefault(run_id, threading.Event())
+    cfg: SearchConfig = job["search_config"]
+    baseline: AppSettings = job["baseline"]
+    assets: list[str] = job["assets"]
+    capital: float = job["starting_capital"]
+    version: str = job["dataset_version"]
+    iters_done = 0
+    best_train: float | None = None
+    best_detail_iter: int | None = None
+    detailed: set[int] = set()
+    live_result: dict[str, Any] = {"stage": "loading",
+                                   "best_train_pnl": None, "best": None,
+                                   "recommendation": None, "warnings": []}
+
+    def _progress_patch(stage: str) -> None:
+        live_result["stage"] = stage
+        live_result["best_train_pnl"] = best_train
+        _patch_run(db, run_id, {
+            "stage": stage,
+            "progress": min(1.0, iters_done / max(1, cfg.max_iterations)),
+            "result": dict(live_result),
+        })
+
+    try:
+        _patch_run(db, run_id, {"stage": "loading",
+                                "result": dict(live_result)})
+        data_hash = _read_data_hash(db, version)
+        if data_hash:
+            _patch_run(db, run_id, {"data_hash": data_hash})
+        try:
+            from app.services.sim_market_data import load_dataset
+            series = load_dataset(db, version, assets)
+        except Exception as exc:
+            _finish_run(db, run_id, "failed",
+                        result={**live_result, "stage": "failed"},
+                        error=f"dataset load failed: {exc}"[:300])
+            return
+        if not series:
+            _finish_run(db, run_id, "failed",
+                        result={**live_result, "stage": "failed"},
+                        error="dataset unavailable or incomplete "
+                              "(never partial replay)")
+            return
+        if cancel.is_set():
+            _finish_run(db, run_id, "cancelled",
+                        result={**live_result, "stage": "cancelled",
+                                "warnings": ["cancelled before search"]})
+            return
+        _progress_patch("searching")
+
+        def on_progress(entry: Any) -> None:
+            nonlocal iters_done, best_train, best_detail_iter
+            if cancel.is_set():
+                return
+            try:
+                train = getattr(entry, "train_result", None)
+                train_metrics = _metrics_dict(train)
+                try:
+                    diff = _json_safe(
+                        getattr(entry, "config_diff", None) or {})
+                    config = getattr(entry, "config", None)
+                    config_json = _json_safe(
+                        config.model_dump(mode="json")
+                        if isinstance(config, AppSettings)
+                        else (dict(config) if isinstance(config, dict)
+                              else {}))
+                except Exception:
+                    diff, config_json = {}, {}
+                db.insert(ITER_TABLE, {
+                    "run_id": run_id,
+                    "iteration": int(getattr(entry, "iteration", 0) or 0),
+                    "config": config_json,
+                    "config_diff": diff,
+                    "train_metrics": train_metrics,
+                    "validation_metrics": _metrics_dict(
+                        getattr(entry, "validation_result", None)),
+                    "improved": bool(getattr(entry, "improved", False)),
+                })
+            except Exception as exc:
+                log.warning("opt %s: iteration persist failed: %s",
+                            run_id, exc)
+            iters_done += 1
+            try:
+                net = float(train_metrics["net_pnl"]) \
+                    if train_metrics else None
+            except (TypeError, ValueError):
+                net = None
+            if net is not None and (best_train is None or net > best_train):
+                best_train = net
+            iteration = int(getattr(entry, "iteration", 0) or 0)
+            improved = bool(getattr(entry, "improved", False))
+            if iteration == 0 or improved:
+                if (best_detail_iter is not None
+                        and best_detail_iter != iteration
+                        and best_detail_iter != 0):
+                    _delete_details(db, run_id, best_detail_iter)
+                    detailed.discard(best_detail_iter)
+                _store_details(db, run_id, iteration, train)
+                detailed.add(iteration)
+                best_detail_iter = iteration
+            _progress_patch("searching")
+
+        outcome = optimize_settings(
+            series, baseline, starting_capital=capital,
+            search_config=cfg, progress_callback=on_progress,
+            cancel_event=cancel)
+        if cancel.is_set():
+            _finish_run(db, run_id, "cancelled",
+                        result={**live_result, "stage": "cancelled",
+                                "warnings": ["cancelled — completed "
+                                             "iterations preserved"]})
+            return
+        board = list(getattr(outcome, "validation_leaderboard", None) or [])
+        for entry in board[:max(1, cfg.top_n)]:
+            iteration = int(getattr(entry, "iteration", 0) or 0)
+            if iteration in detailed:
+                continue
+            _store_details(db, run_id, iteration,
+                           getattr(entry, "validation_result", None))
+            detailed.add(iteration)
+        best_entry = getattr(outcome, "best", None)
+        best = _best_summary(best_entry)
+        recommendation = None
+        if best_entry is not None:
+            config = getattr(best_entry, "config", None)
+            try:
+                config_json = _json_safe(
+                    config.model_dump(mode="json")
+                    if isinstance(config, AppSettings)
+                    else (dict(config) if isinstance(config, dict) else {}))
+            except Exception:
+                config_json = {}
+            recommendation = {
+                "iteration": int(getattr(best_entry, "iteration", 0) or 0),
+                "config": config_json,
+                "validation_metrics": _metrics_dict(
+                    getattr(best_entry, "validation_result", None)),
+                "note": ("highest validation net PnL among trade-eligible "
+                         "candidates — apply manually via Settings; the "
+                         "optimizer never writes live settings"),
+            }
+        final = {"stage": "done", "best_train_pnl": best_train,
+                 "best": best, "recommendation": recommendation,
+                 "warnings": list(getattr(outcome, "warnings", None) or [])}
+        _patch_run(db, run_id, {"progress": 1.0})
+        _finish_run(db, run_id, "complete", result=final)
+    except Exception as exc:                       # noqa: BLE001 - verdict, not a crash
+        log.exception("opt run %s failed", run_id)
+        try:
+            _finish_run(db, run_id, "failed",
+                        result={**live_result, "stage": "failed"},
+                        error=f"{type(exc).__name__}: {exc}"[:300])
+        except Exception:
+            pass
+    finally:
+        _release_active(run_id)
+        _CANCEL.pop(run_id, None)
+
+
+def _status_dict(row: dict) -> dict:
+    result = row.get("result") or {}
+    return {
+        "ok": True,
+        "run_id": str(row.get("id")),
+        "status": str(row.get("status") or "running"),
+        "stage": str(row.get("stage") or row.get("status") or "running"),
+        "progress": _finite(row.get("progress"), 0.0),
+        "seed": int(row.get("seed") or 0),
+        "starting_capital": _finite(row.get("starting_capital"), 1000.0),
+        "dataset_version": str(row.get("dataset_version") or ""),
+        "best_train_pnl": result.get("best_train_pnl"),
+        "best": result.get("best"),
+        "recommendation": result.get("recommendation"),
+        "warnings": list(result.get("warnings") or []),
+        "error": row.get("error"),
+    }
+
+
+def _run_row(db, run_id: str) -> dict | None:
+    try:
+        rows = db.select(RUNS_TABLE, filters={"id": str(run_id)}, limit=1)
+    except Exception:
+        return None
+    return rows[0] if rows else None
+
+
+def optimization_status(db, run_id: str) -> dict:
+    """Status + stage + partial verdict for one run. Never raises."""
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    row = _run_row(db, run_id)
+    if row is None:
+        return {"ok": False, "error": "unknown optimization run"}
+    return _status_dict(row)
+
+
+def list_optimizations(db, limit: int = 20) -> dict:
+    """Recent runs, newest first. Never raises."""
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    try:
+        page = max(1, min(int(limit or 20), 100))
+    except (TypeError, ValueError):
+        page = 20
+    try:
+        rows = db.select(RUNS_TABLE, order="created_at", desc=True,
+                         limit=page)
+    except Exception as exc:
+        return {"ok": False, "error": f"{exc}"[:200]}
+    try:
+        total = db.count(RUNS_TABLE)
+    except Exception:
+        total = None
+    return {"ok": True, "runs": [_status_dict(r) for r in rows or []],
+            "total": total if total is not None else len(rows or [])}
+
+
+def _iteration_dict(row: dict) -> dict:
+    return {
+        "iteration": int(row.get("iteration") or 0),
+        "config": row.get("config") or {},
+        "config_diff": row.get("config_diff") or {},
+        "train_metrics": row.get("train_metrics"),
+        "validation_metrics": row.get("validation_metrics"),
+        "improved": bool(row.get("improved", False)),
+    }
+
+
+def optimization_iterations(db, run_id: str, offset: int = 0,
+                            limit: int = 100) -> dict:
+    """Paged per-iteration summaries, chronological. Never raises."""
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    if _run_row(db, run_id) is None:
+        return {"ok": False, "error": "unknown optimization run"}
+    try:
+        page = max(1, min(int(limit or 100), 500))
+    except (TypeError, ValueError):
+        page = 100
+    try:
+        start = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        start = 0
+    try:
+        rows = db.select(ITER_TABLE, filters={"run_id": str(run_id)},
+                         order="iteration", desc=False,
+                         limit=page, offset=start)
+    except Exception as exc:
+        return {"ok": False, "error": f"{exc}"[:200]}
+    try:
+        total = db.count(ITER_TABLE, filters={"run_id": str(run_id)})
+    except Exception:
+        total = None
+    rows = rows or []
+    return {"ok": True, "run_id": str(run_id),
+            "rows": [_iteration_dict(r) for r in rows],
+            "total": total if total is not None else len(rows)}
+
+
+def optimization_equity(db, run_id: str,
+                        iteration: int | None = None) -> dict:
+    """Trades + equity curve for one iteration (default: best, else baseline).
+
+    Never raises. Unknown runs or iterations without evidence are refused
+    with ``ok: False`` instead of inventing a curve.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    row = _run_row(db, run_id)
+    if row is None:
+        return {"ok": False, "error": "unknown optimization run"}
+    if iteration is None:
+        best = (row.get("result") or {}).get("best") or {}
+        try:
+            iteration = int(best.get("iteration", 0))
+        except (TypeError, ValueError):
+            iteration = 0
+    try:
+        iteration = int(iteration)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "iteration must be an integer"}
+    if iteration < 0:
+        return {"ok": False, "error": "iteration must be >= 0"}
+    try:
+        it_rows = db.select(ITER_TABLE,
+                            filters={"run_id": str(run_id),
+                                     "iteration": iteration}, limit=1)
+        eq_rows = db.select(EQUITY_TABLE,
+                            filters={"run_id": str(run_id),
+                                     "iteration": iteration},
+                            order="date", desc=False, limit=5000)
+        trade_rows = db.select(TRADES_TABLE,
+                               filters={"run_id": str(run_id),
+                                        "iteration": iteration},
+                               order="trade_id", desc=False, limit=5000)
+    except Exception as exc:
+        return {"ok": False, "error": f"{exc}"[:200]}
+    if not it_rows and not (eq_rows or trade_rows):
+        return {"ok": False, "error": "unknown iteration"}
+    equity = [{
+        "date": r.get("date"),
+        "equity": r.get("equity"),
+        "realized_pnl": r.get("realized_pnl"),
+        "unrealized_pnl": r.get("unrealized_pnl"),
+        "drawdown_pct": r.get("drawdown_pct"),
+    } for r in (eq_rows or [])]
+    trades = [{
+        "trade_id": r.get("trade_id"),
+        "asset": r.get("asset"),
+        "direction": r.get("direction"),
+        "entry_date": r.get("entry_date"),
+        "entry_price": r.get("entry_price"),
+        "exit_date": r.get("exit_date"),
+        "exit_price": r.get("exit_price"),
+        "volume": r.get("volume"),
+        "pnl_usd": r.get("pnl_usd"),
+        "r_multiple": r.get("r_multiple"),
+        "exit_reason": r.get("exit_reason"),
+        "mae_r": r.get("mae_r"),
+        "mfe_r": r.get("mfe_r"),
+        "ambiguous": bool(r.get("ambiguous", False)),
+    } for r in (trade_rows or [])]
+    return {"ok": True, "run_id": str(run_id), "iteration": iteration,
+            "rows": equity, "trades": trades, "total": len(equity)}
+
+
+def cancel_optimization(db, run_id: str) -> dict:
+    """Cooperative stop — the worker checks the flag between iterations.
+
+    Cancelling an already-terminal run returns its status unchanged.
+    Completed iteration rows are always preserved. Never raises.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    row = _run_row(db, run_id)
+    if row is None:
+        return {"ok": False, "error": "unknown optimization run"}
+    if str(row.get("status")) in TERMINAL_STATUSES:
+        return _status_dict(row)
+    event = _CANCEL.setdefault(str(run_id), threading.Event())
+    try:
+        event.set()
+    except Exception:
+        pass
+    now = _now_iso()
+    patched = dict(row)
+    patched.update({"status": "cancelled", "stage": "cancelled",
+                    "finished_at": now, "error": "cancelled"})
+    _patch_run(db, str(run_id), {"status": "cancelled",
+                                 "stage": "cancelled",
+                                 "finished_at": now,
+                                 "error": "cancelled"})
+    return _status_dict(patched)

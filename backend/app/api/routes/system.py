@@ -1485,3 +1485,104 @@ async def sim_data_status(request: Request, version: str) -> dict:
     st["bars"] = sum(counts.values())
     st["per_asset_counts"] = counts
     return st
+
+
+# ---------------------------------------------------------------------------
+# Sandbox optimizer (Plan 3, Task 4)
+#
+# POST /api/system/optimize             -> start one run (single worker)
+# GET  /api/system/optimize             -> recent runs, newest first
+# GET  /api/system/optimize/{id}        -> status + stage + partial verdict
+# GET  /api/system/optimize/{id}/iterations -> paged per-iteration summaries
+# GET  /api/system/optimize/{id}/equity -> trades + equity (?iteration=N,
+#                                          default best else baseline)
+# POST /api/system/optimize/{id}/cancel -> cooperative stop
+#
+# Thin wrappers mirroring the /sim-data/* section above: check DB
+# availability, validate the body, delegate to app/services/sim_optimizer.py.
+# No broker/notifier/settings-write imports or calls here or in the service.
+# ---------------------------------------------------------------------------
+@router.post("/optimize")
+async def start_optimization(request: Request,
+                             payload: Optional[dict[str, Any]] = None) -> dict:
+    """Start an optimization run. Refused (ok: False) while one is live."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    body = payload or {}
+    version = body.get("dataset_version")
+    if not version or not str(version).strip():
+        return {"ok": False, "error": "dataset_version required"}
+    assets = body.get("assets")
+    if assets is not None and (not isinstance(assets, list) or not assets):
+        return {"ok": False, "error": "assets must be a non-empty list"}
+    search_config = body.get("search_config")
+    if search_config is not None and not isinstance(search_config, dict):
+        return {"ok": False, "error": "search_config must be an object"}
+    return sim_optimizer.start_optimization(
+        db,
+        dataset_version=str(version).strip(),
+        assets=assets,
+        starting_capital=body.get("starting_capital", 1000.0),
+        search_config=search_config)
+
+
+@router.get("/optimize")
+async def list_optimizations(request: Request, limit: int = 20) -> dict:
+    """Recent optimization runs, newest first."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return sim_optimizer.list_optimizations(db, limit=limit)
+
+
+@router.get("/optimize/{run_id}")
+async def optimization_status(request: Request, run_id: str) -> dict:
+    """Status + stage + partial verdict for one optimization run."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return sim_optimizer.optimization_status(db, run_id)
+
+
+@router.get("/optimize/{run_id}/iterations")
+async def optimization_iterations(request: Request, run_id: str,
+                                  offset: int = 0,
+                                  limit: int = 100) -> dict:
+    """Paged per-iteration summaries for one run, chronological."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return sim_optimizer.optimization_iterations(db, run_id, offset=offset,
+                                                 limit=limit)
+
+
+@router.get("/optimize/{run_id}/equity")
+async def optimization_equity(request: Request, run_id: str,
+                              iteration: Optional[int] = None) -> dict:
+    """Trades + equity curve for one iteration (default: best, else base)."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return sim_optimizer.optimization_equity(db, run_id, iteration=iteration)
+
+
+@router.post("/optimize/{run_id}/cancel")
+async def cancel_optimization(request: Request, run_id: str) -> dict:
+    """Cooperative stop — the worker checks the flag between iterations."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return sim_optimizer.cancel_optimization(db, run_id)
