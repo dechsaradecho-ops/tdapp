@@ -1858,4 +1858,144 @@ export interface PinLoginResponse {
   locked_until: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Sandbox optimizer (sim_opt_* tables) — Logs > Optimize tab
+// Shapes mirror backend/app/services/sim_optimizer.py JSON helpers:
+// _metrics_dict (profit_factor stays null, never NaN), _best_summary,
+// _iteration_dict, optimization_status/list/iterations/equity, apply.
+// ---------------------------------------------------------------------------
+
+/** Plan 2/3 metric semantics over one replay slice. profit_factor is null
+ *  (not 0, not NaN) when there is no losing trade to divide by — the UI
+ *  must render it as "—", never crash on it. */
+export interface OptMetrics {
+  net_pnl: number;
+  gross_pnl: number;
+  costs: number;
+  trades: number;
+  wins: number;
+  win_rate_pct: number;
+  profit_factor: number | null;
+  average_r: number;
+  max_drawdown_pct: number;
+  ambiguous_pct: number;
+}
+
+/** One {from, to} field change between baseline and a candidate. */
+export interface OptDiffEntry {
+  from: unknown;
+  to: unknown;
+}
+
+/** Current best of a run: iteration + train/validation metrics + diff. */
+export interface OptBest {
+  iteration: number;
+  train_metrics: OptMetrics | null;
+  validation_metrics: OptMetrics | null;
+  config_diff: Record<string, OptDiffEntry>;
+}
+
+/** Guarded recommendation: best iteration + its full config snapshot +
+ *  validation metrics + a human note. Applied only via explicit Apply. */
+export interface OptRecommendation {
+  iteration: number;
+  config: Record<string, unknown>;
+  validation_metrics: OptMetrics | null;
+  note: string;
+}
+
+/** GET /api/system/optimize/{id} — status + stage + partial verdict. */
+export interface OptRunStatus {
+  ok: true;
+  run_id: string;
+  status: string;
+  stage: string;
+  progress: number;
+  seed: number;
+  starting_capital: number;
+  dataset_version: string;
+  best_train_pnl: number | null;
+  best: OptBest | null;
+  recommendation: OptRecommendation | null;
+  warnings: string[];
+  error: string | null;
+}
+
+/** Shared refusal shape: every optimizer endpoint answers 200 with
+ *  {ok: false, error} instead of an HTTP error — narrow on `ok`. */
+export interface OptApiError {
+  ok: false;
+  error: string;
+  run_id?: string;
+}
+
+export type OptStatusResponse = OptRunStatus | OptApiError;
+
+/** GET /api/system/optimize — recent runs, newest first. */
+export type OptRunsResponse =
+  | { ok: true; runs: OptRunStatus[]; total: number }
+  | OptApiError;
+
+/** One paged row of GET /api/system/optimize/{id}/iterations. */
+export interface OptIterationRow {
+  iteration: number;
+  config: Record<string, unknown>;
+  config_diff: Record<string, OptDiffEntry>;
+  train_metrics: OptMetrics | null;
+  validation_metrics: OptMetrics | null;
+  improved: boolean;
+}
+
+export type OptIterationsResponse =
+  | { ok: true; run_id: string; rows: OptIterationRow[]; total: number }
+  | OptApiError;
+
+/** One equity-curve point of GET /api/system/optimize/{id}/equity. */
+export interface OptEquityPoint {
+  date: string | null;
+  equity: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  drawdown_pct: number;
+}
+
+/** One evidence trade of the same endpoint. */
+export interface OptTrade {
+  trade_id: string;
+  asset: string;
+  direction: string;
+  entry_date: string | null;
+  exit_date: string | null;
+  entry_price: number;
+  exit_price: number;
+  volume: number;
+  pnl_usd: number;
+  r_multiple: number;
+  exit_reason: string;
+  mae_r: number;
+  mfe_r: number;
+  ambiguous: boolean;
+}
+
+export type OptEquityResponse =
+  | { ok: true; run_id: string; iteration: number; rows: OptEquityPoint[]; trades: OptTrade[]; total: number }
+  | OptApiError;
+
+/** POST /api/system/optimize — refused (ok: false) while one is live. */
+export interface OptStartInput {
+  dataset_version: string;
+  assets?: string[];
+  starting_capital?: number;
+  search_config?: { max_iterations?: number };
+}
+
+export type OptStartResponse =
+  | { ok: true; run_id: string }
+  | OptApiError;
+
+/** POST /api/system/optimize/{id}/apply — guarded diff-only write. */
+export type OptApplyResponse =
+  | { ok: true; run_id: string; applied: Record<string, OptDiffEntry>; settings: Record<string, unknown> }
+  | OptApiError;
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";

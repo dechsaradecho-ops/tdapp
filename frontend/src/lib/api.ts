@@ -29,6 +29,13 @@ import {
   OrderPlan,
   PaperTrading,
   PauseStatus,
+  OptApplyResponse,
+  OptEquityResponse,
+  OptIterationsResponse,
+  OptRunsResponse,
+  OptStartInput,
+  OptStartResponse,
+  OptStatusResponse,
   PinLoginResponse,
   PinStatus,
   PortfolioRecommendation,
@@ -365,6 +372,36 @@ export const api = {
   simCancel: (id: string) =>
     post<{ ok: boolean; message?: string; error?: string }>(
       `/api/system/simulate/${encodeURIComponent(id)}/cancel`, {}),
+
+  // ---------- Sandbox optimizer (sim_opt_* — Logs > Optimize tab) ---------
+  // Thin typed wrappers over /api/system/optimize/* — existing simulation
+  // API methods above are unchanged.
+  // POST starts one run (single worker); refused while one is live.
+  optStart: (input: OptStartInput) =>
+    post<OptStartResponse>("/api/system/optimize", input),
+  // GET recent runs, newest first.
+  optRuns: (limit = 20) =>
+    get<OptRunsResponse>(`/api/system/optimize?limit=${limit}`),
+  // GET status + stage + partial verdict for one run.
+  optRun: (id: string) =>
+    get<OptStatusResponse>(`/api/system/optimize/${encodeURIComponent(id)}`),
+  // GET paged per-iteration summaries, chronological.
+  optIterations: (id: string, offset = 0, limit = 100) =>
+    get<OptIterationsResponse>(
+      `/api/system/optimize/${encodeURIComponent(id)}/iterations?offset=${offset}&limit=${limit}`),
+  // GET trades + equity curve for one iteration (omit = best else baseline).
+  optEquity: (id: string, iteration?: number) =>
+    get<OptEquityResponse>(
+      `/api/system/optimize/${encodeURIComponent(id)}/equity` +
+      (iteration === undefined ? "" : `?iteration=${iteration}`)),
+  // POST cooperative stop — completed iterations are preserved.
+  optCancel: (id: string) =>
+    post<OptStatusResponse>(
+      `/api/system/optimize/${encodeURIComponent(id)}/cancel`, {}),
+  // POST guarded diff-only apply — requires explicit {confirm: true}.
+  optApply: (id: string, confirm: boolean) =>
+    post<OptApplyResponse>(
+      `/api/system/optimize/${encodeURIComponent(id)}/apply`, { confirm }),
 
   // ---------- CSV export: same rows the tab streams, as a file ----------
   // Blob via the authed client (a plain <a href> would carry no token).

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import SimulateTab from "@/components/SimulateTab";
+import OptimizeTab from "@/components/OptimizeTab";
 import { fmtNum } from "@/lib/format";
 import Icon from "@/components/Icon";
 import LoadingGraphic from "@/components/LoadingGraphic";
@@ -876,7 +877,7 @@ function BucketCard({ label, bucket }: { label: string; bucket?: { total: number
 }
 
 export default function LogsPage() {
-  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate">("quotes");
+  const [tab, setTab] = useState<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate" | "optimize">("quotes");
   const [logs, setLogs] = useState<QuoteApiLog[]>([]);
   const [summary, setSummary] = useState<QuoteLogSummary | null>(null);
   const [newsLogs, setNewsLogs] = useState<NewsLog[]>([]);
@@ -892,7 +893,7 @@ export default function LogsPage() {
   const [filter, setFilter] = useState<"all" | "forex" | "gold">("all");
   const [page, setPage] = useState(1);
   // refs ให้ callbacks เสถียร (ไม่ต้องใส่ tab/filter ใน deps → ไม่โหลดซ้ำวน)
-  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate">("quotes");
+  const tabRef = useRef<"quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate" | "optimize">("quotes");
   const filterRef = useRef<"all" | "forex" | "gold">("all");
   // server paging: ขอทีละหน้า (500 แถว/ครั้ง) แล้วแบ่งแสดง 50/หน้า —
   // ตาราง 7 วันโตเกิน 500 ได้ จึงต้องเดิน offset ไปเรื่อย ๆ ไม่ใช่ดึงแค่ 500 ล่าสุด
@@ -976,7 +977,7 @@ export default function LogsPage() {
   // โหลดเฉพาะแท็บที่เปิดอยู่ (lazy) — เข้าหน้าครั้งแรกยิงแค่ 1 request
   // แทน 5 requests พร้อมกัน (quotes+news+scheduler+guard+gate) ทำให้หน้าแรกไวขึ้น ~5 เท่า
   const loadedRef = useRef<Set<string>>(new Set());
-  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate", flt?: "all" | "forex" | "gold") => {
+  const loadOne = useCallback(async (t: "quotes" | "news" | "scheduler" | "guard" | "gate" | "audit" | "settings" | "simulate" | "optimize", flt?: "all" | "forex" | "gold") => {
     setLoading(true);
     try {
       if (t === "quotes") {
@@ -1201,13 +1202,15 @@ export default function LogsPage() {
                         ? "ประวัติการเปลี่ยน Settings — ช่องไหน จากค่าเดิมอะไรเป็นค่าใหม่อะไร (เก็บถาวร ไม่มีอายุ)"
                         : tab === "simulate"
                           ? "จำลองสัญญาณย้อนหลังด้วย Triple Barrier — เล่นเครื่องสร้างสัญญาณตัวจริงบนราคาย้อนหลัง แล้ววัดว่า SL/TP แบบไหนได้ผลจริง"
-                          : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
+                          : tab === "optimize"
+                            ? "ค้นหา settings ที่ดีที่สุดบนข้อมูลย้อนหลัง (sandbox) — replay พอร์ตซ้ำๆ เก็บทุก iteration พร้อมกราฟและข้อเสนอ Apply แบบยืนยันเอง"
+                            : "ประวัติการทำงาน scheduler ทุก job — พิสูจน์ว่า worker ยังรันอยู่ (เก็บ 7 วัน)"}
             {updatedAt && ` · อัปเดต ${updatedAt}`}
           </p>
         </div>
-        {/* ปุ่มรีเฟรช/ทดสอบเป็นของแท็บราคา — ซ่อนไว้ตอนอยู่แท็บจำลอง
-            (แท็บนั้น poll ตัวเองและมีปุ่มจัดการงานของตัวเอง) */}
-        {tab !== "simulate" && (
+        {/* ปุ่มรีเฟรช/ทดสอบเป็นของแท็บราคา — ซ่อนไว้ตอนอยู่แท็บจำลอง/
+            optimize (แท็บนั้น poll ตัวเองและมีปุ่มจัดการงานของตัวเอง) */}
+        {tab !== "simulate" && tab !== "optimize" && (
         <div className="flex gap-2">
           <button onClick={() => loadOne(tabRef.current)} disabled={loading}
             aria-busy={loading} aria-live="polite"
@@ -1277,6 +1280,12 @@ export default function LogsPage() {
           title="จำลองสัญญาณย้อนหลังด้วย Triple Barrier — หา SL/TP ที่ให้ผลดีจริง"
           className={`px-2.5 sm:px-3 py-1 rounded ${tab === "simulate" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
           จำลอง
+        </button>
+        <button
+          onClick={() => { setTab("optimize"); tabRef.current = "optimize"; setPage(1); }}
+          title="ค้นหา settings ที่ดีที่สุดบนข้อมูลย้อนหลัง (sandbox) — ไม่แตะเทรดจริงจนกว่าจะ Apply เอง"
+          className={`px-2.5 sm:px-3 py-1 rounded ${tab === "optimize" ? "bg-accent text-white font-bold" : "bg-slate-800 text-slate-400"}`}>
+          Optimize
         </button>
       </div>
 
@@ -2216,6 +2225,7 @@ export default function LogsPage() {
       {/* ---------- Simulate: barrier simulation (no server paging needed —
            the panel owns its own polling + progress) ---------- */}
       {tab === "simulate" && <SimulateTab />}
+      {tab === "optimize" && <OptimizeTab />}
 
       {tab === "settings" && settingsHint && (
         <section className="panel border-amber-400/25">
