@@ -61,6 +61,8 @@ class ReplayTrade:
     mae_r: float
     mfe_r: float
     ambiguous: bool
+    gross_pnl_usd: float = 0.0
+    costs_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -80,7 +82,7 @@ class ReplayMetrics:
     trades: int = 0
     wins: int = 0
     win_rate_pct: float = 0.0
-    profit_factor: float = 0.0
+    profit_factor: float | None = None
     average_r: float = 0.0
     max_drawdown_pct: float = 0.0
     ambiguous_pct: float = 0.0
@@ -416,8 +418,6 @@ def replay_portfolio(
     entries_by_date: dict[date, int] = {}
     entries_by_week: dict[tuple[int, int], int] = {}
     realized = 0.0
-    gross_total = 0.0
-    cost_total = 0.0
     curve: list[EquityPoint] = []
     peak = capital
     prev_drawdown = 0.0
@@ -523,26 +523,22 @@ def replay_portfolio(
                     fs = _close_slice(pos, pos.volume_remaining, float(bar.c),
                                       day, "end_of_data", costs, rates_today)
                     if fs is not None:
-                        trade, d_real, d_gross, d_cost = fs
+                        trade, d_real, _d_gross, _d_cost = fs
                         slices.append((trade.exit_date, trade.entry_date,
                                        trade.asset, seq, trade))
                         seq += 1
                         realized += d_real
-                        gross_total += d_gross
-                        cost_total += d_cost
                         last_close[asset_u] = day
                     else:
                         survivors.append(pos)
                 else:
                     survivors.append(pos)
                 continue
-            new_slices, closed_all, new_realized, new_gross, new_costs = outcome
+            new_slices, closed_all, new_realized, _new_gross, _new_costs = outcome
             for sl in new_slices:
                 slices.append((sl.exit_date, sl.entry_date, sl.asset, seq, sl))
                 seq += 1
             realized += new_realized
-            gross_total += new_gross
-            cost_total += new_costs
             if closed_all:
                 last_close[asset_u] = day
             else:
@@ -553,13 +549,11 @@ def replay_portfolio(
                 fs = _close_slice(pos, pos.volume_remaining, float(bar.c),
                                   day, "end_of_data", costs, rates_today)
                 if fs is not None:
-                    trade, d_real, d_gross, d_cost = fs
+                    trade, d_real, _d_gross, _d_cost = fs
                     slices.append((trade.exit_date, trade.entry_date,
                                    trade.asset, seq, trade))
                     seq += 1
                     realized += d_real
-                    gross_total += d_gross
-                    cost_total += d_cost
                     last_close[asset_u] = day
                 else:
                     survivors.append(pos)
@@ -603,10 +597,11 @@ def replay_portfolio(
                     exit_price=t.exit_price, volume=t.volume,
                     pnl_usd=t.pnl_usd, r_multiple=t.r_multiple,
                     exit_reason=t.exit_reason, mae_r=t.mae_r,
-                    mfe_r=t.mfe_r, ambiguous=t.ambiguous)
+                    mfe_r=t.mfe_r, ambiguous=t.ambiguous,
+                    gross_pnl_usd=t.gross_pnl_usd, costs_usd=t.costs_usd)
         for i, (_, _, _, _, t) in enumerate(ordered)
     ]
-    metrics = _build_metrics(trades, curve, gross_total, cost_total)
+    metrics = _build_metrics(trades, curve)
     return ReplayResult(trades=trades, equity_curve=curve,
                         metrics=metrics, warnings=merged)
 
@@ -1243,6 +1238,7 @@ def _close_slice(
         exit_date=day, exit_price=round(exit_fill, 5),
         volume=round(vol, 8), pnl_usd=pnl, r_multiple=r_mult,
         exit_reason=reason, mae_r=mae_r, mfe_r=mfe_r, ambiguous=ambiguous,
+        gross_pnl_usd=gross, costs_usd=costs_slice,
     )
     pos.volume_remaining = round(pos.volume_remaining - vol, 8)
     if pos.volume_remaining < 1e-9:
@@ -1581,25 +1577,42 @@ def _unrealized_total(
 
 
 def _build_metrics(trades: list[ReplayTrade],
-                   curve: list[EquityPoint],
-                   gross_total: float = 0.0,
-                   cost_total: float = 0.0) -> ReplayMetrics:
+                   curve: list[EquityPoint]) -> ReplayMetrics:
+    """Aggregate run metrics purely from closed slices and the equity curve.
+
+    Every identity is by construction: ``net_pnl`` is the sum of slice net
+    PnL, ``gross_pnl``/``costs`` are the sums of the per-slice gross/cost
+    legs (each slice satisfies ``pnl = gross - costs``), and
+    ``max_drawdown_pct`` is the peak of the curve drawdowns (whose running
+    peak is seeded at starting capital in ``replay_portfolio``).
+    ``profit_factor`` is gross winning PnL over abs(gross losing PnL), and is
+    None when undefined (no trades or no losing PnL); no field is ever
+    non-finite.
+    """
     net = sum(t.pnl_usd for t in trades)
+    gross = sum(t.gross_pnl_usd for t in trades)
+    costs = sum(t.costs_usd for t in trades)
     wins = sum(1 for t in trades if t.pnl_usd > 0)
     win_rate = (wins / len(trades) * 100.0) if trades else 0.0
     win_sum = sum(t.pnl_usd for t in trades if t.pnl_usd > 0)
     loss_sum = sum(t.pnl_usd for t in trades if t.pnl_usd < 0)
+    profit_factor: float | None = None
     if loss_sum < 0:
-        profit_factor = win_sum / abs(loss_sum)
-    else:
-        profit_factor = 0.0
+        candidate = win_sum / abs(loss_sum)
+        if math.isfinite(candidate):
+            profit_factor = candidate
     average_r = (sum(t.r_multiple for t in trades) / len(trades)) if trades else 0.0
     ambiguous = sum(1 for t in trades if t.ambiguous)
     ambiguous_pct = (ambiguous / len(trades) * 100.0) if trades else 0.0
     max_dd = max((p.drawdown_pct for p in curve), default=0.0)
     return ReplayMetrics(
-        net_pnl=net, gross_pnl=gross_total, costs=cost_total,
-        trades=len(trades), wins=wins, win_rate_pct=win_rate,
-        profit_factor=profit_factor, average_r=average_r,
-        max_drawdown_pct=max_dd, ambiguous_pct=ambiguous_pct,
+        net_pnl=net if math.isfinite(net) else 0.0,
+        gross_pnl=gross if math.isfinite(gross) else 0.0,
+        costs=costs if math.isfinite(costs) else 0.0,
+        trades=len(trades), wins=wins,
+        win_rate_pct=win_rate if math.isfinite(win_rate) else 0.0,
+        profit_factor=profit_factor,
+        average_r=average_r if math.isfinite(average_r) else 0.0,
+        max_drawdown_pct=max_dd if math.isfinite(max_dd) else 0.0,
+        ambiguous_pct=ambiguous_pct if math.isfinite(ambiguous_pct) else 0.0,
     )

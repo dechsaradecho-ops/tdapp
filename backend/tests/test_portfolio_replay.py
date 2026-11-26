@@ -5,12 +5,15 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from app.engine.portfolio_replay import (
+    DAILY_BAR_WARNING,
+    NEWS_WARNING,
     CostConfig,
     EquityPoint,
     ReplayMetrics,
     ReplayResult,
     ReplaySignal,
     ReplayTrade,
+    _build_metrics,
     build_rate_map,
     build_timeline,
     default_cost_config,
@@ -72,7 +75,7 @@ def test_flat_replay_has_no_trades_zero_metrics_and_news_warning():
     assert result.trades == []
     assert result.metrics.net_pnl == 0
     assert result.metrics.trades == 0
-    assert result.metrics.profit_factor == 0
+    assert result.metrics.profit_factor is None
     assert result.warnings.count(
         "News-optimistic: historical news replay is unavailable."
     ) == 1
@@ -1273,3 +1276,157 @@ def test_sub_spread_stop_blocked_with_static_spread(monkeypatch):
     # Control: the same trend trades under default spreads.
     control = replay_portfolio(series, AppSettings(), starting_capital=1000)
     assert control.trades
+
+
+# ---------------------------------------------------------------------------
+# Task 5: metrics, equity curve, and parity verification (TDD)
+# ---------------------------------------------------------------------------
+
+def _t5_trade(pnl: float, gross: float | None = None,
+              costs: float | None = None, r: float = 0.0,
+              ambiguous: bool = False) -> ReplayTrade:
+    gross = pnl if gross is None else gross
+    costs = (gross - pnl) if costs is None else costs
+    return ReplayTrade(
+        trade_id="RT-000001", asset="EURUSD", direction="BUY",
+        entry_date=date(2026, 1, 1), entry_price=1.1000,
+        exit_date=date(2026, 1, 2), exit_price=1.1100,
+        volume=0.01, pnl_usd=pnl, r_multiple=r,
+        exit_reason="tp", mae_r=0.0, mfe_r=0.0, ambiguous=ambiguous,
+        gross_pnl_usd=gross, costs_usd=costs,
+    )
+
+
+def test_metrics_are_derived_from_trades_and_equity():
+    series = {"EURUSD": _t4_trend(n=230)}
+    result = replay_portfolio(series, AppSettings(), starting_capital=1000)
+    assert result.trades
+    assert result.metrics.net_pnl == pytest.approx(
+        sum(t.pnl_usd for t in result.trades))
+    peak = 1000.0
+    expected_drawdown = 0.0
+    for point in result.equity_curve:
+        peak = max(peak, point.equity)
+        if peak > 0:
+            expected_drawdown = max(
+                expected_drawdown, (peak - point.equity) / peak * 100.0)
+    assert result.metrics.max_drawdown_pct == pytest.approx(expected_drawdown)
+    assert result.equity_curve[-1].equity == pytest.approx(
+        1000 + result.metrics.net_pnl)
+
+
+def test_same_inputs_reproduce_same_result():
+    series = {"EURUSD": _t4_trend(n=230),
+              "GBPUSD": _t4_trend(n=230, start=1.2700)}
+    first = replay_portfolio(series, AppSettings(), starting_capital=1000)
+    second = replay_portfolio(series, AppSettings(), starting_capital=1000)
+    assert first == second
+    assert [p.equity for p in first.equity_curve] == [
+        p.equity for p in second.equity_curve]
+    assert first.warnings == second.warnings
+
+
+def test_per_trade_gross_cost_identity_and_aggregation():
+    settings = AppSettings(partial_close_pct=50, partial_trigger_r=1.0,
+                           smart_exit_enabled=False, max_hold_days=0,
+                           rr_target=10.0)
+    closes = [round(1.0800 + 0.0008 * i, 5) for i in range(200)]
+    closes += [round(closes[-1] + 0.0015 * i, 5) for i in range(1, 5)]
+    closes += [closes[-1]] * 6
+    result = replay_portfolio({"EURUSD": _t4_bars(closes)}, settings,
+                              starting_capital=1000)
+    assert len(result.trades) == 2
+    for trade in result.trades:
+        assert trade.pnl_usd == pytest.approx(
+            trade.gross_pnl_usd - trade.costs_usd)
+        assert trade.costs_usd >= 0
+    assert result.metrics.gross_pnl == pytest.approx(
+        sum(t.gross_pnl_usd for t in result.trades))
+    assert result.metrics.costs == pytest.approx(
+        sum(t.costs_usd for t in result.trades))
+    assert result.metrics.gross_pnl == pytest.approx(
+        result.metrics.net_pnl + result.metrics.costs)
+
+
+def test_profit_factor_with_wins_and_losses():
+    trades = [_t5_trade(10.0, gross=12.0, costs=2.0, r=1.0),
+              _t5_trade(20.0, gross=23.0, costs=3.0, r=2.0),
+              _t5_trade(-15.0, gross=-12.0, costs=3.0, r=-1.5)]
+    metrics = _build_metrics(trades, [])
+    assert metrics.trades == 3
+    assert metrics.wins == 2
+    assert metrics.net_pnl == pytest.approx(15.0)
+    assert metrics.profit_factor == pytest.approx(30.0 / 15.0)
+    assert metrics.win_rate_pct == pytest.approx(200.0 / 3.0)
+    assert metrics.average_r == pytest.approx(1.5 / 3.0)
+
+
+def test_profit_factor_undefined_without_losing_pnl():
+    assert _build_metrics([], []).profit_factor is None
+    assert _build_metrics([_t5_trade(10.0), _t5_trade(5.0)],
+                          []).profit_factor is None
+    assert _build_metrics([_t5_trade(0.0)], []).profit_factor is None
+    assert _build_metrics([_t5_trade(-5.0)], []).profit_factor == pytest.approx(
+        0.0)
+
+
+def test_zero_trade_metrics():
+    result = replay_portfolio({"EURUSD": [_candle(1), _candle(2)]},
+                              AppSettings(), starting_capital=1000)
+    metrics = result.metrics
+    assert metrics.net_pnl == 0
+    assert metrics.gross_pnl == 0
+    assert metrics.costs == 0
+    assert metrics.trades == 0
+    assert metrics.wins == 0
+    assert metrics.win_rate_pct == 0
+    assert metrics.average_r == 0
+    assert metrics.max_drawdown_pct == 0
+    assert metrics.ambiguous_pct == 0
+    assert metrics.profit_factor is None
+
+
+def test_equity_point_identities():
+    series = {"EURUSD": _t4_trend(n=235)}
+    capital = 1000.0
+    result = replay_portfolio(series, AppSettings(), starting_capital=capital)
+    assert result.equity_curve
+    peak = capital
+    for point in result.equity_curve:
+        assert point.equity == pytest.approx(
+            capital + point.realized_pnl + point.unrealized_pnl)
+        peak = max(peak, point.equity)
+        assert point.drawdown_pct == pytest.approx(
+            max(0.0, (peak - point.equity) / peak * 100.0))
+        assert point.drawdown_pct >= 0
+    assert result.equity_curve[-1].unrealized_pnl == pytest.approx(0.0)
+    assert result.equity_curve[-1].realized_pnl == pytest.approx(
+        result.metrics.net_pnl)
+
+
+def test_drawdown_peak_seeded_from_starting_capital():
+    flat = replay_portfolio({"EURUSD": [_candle(1), _candle(2)]},
+                            AppSettings(), starting_capital=1000)
+    assert flat.metrics.max_drawdown_pct == 0.0
+    assert all(p.drawdown_pct == 0.0 for p in flat.equity_curve)
+    naked = AppSettings(smart_exit_enabled=False, partial_close_pct=0,
+                        max_hold_days=0, rr_target=10.0,
+                        breakeven_trigger_r=0, trail_atr_mult=0)
+    result = replay_portfolio({"EURUSD": _t4_crash_series()}, naked,
+                              starting_capital=1000)
+    assert result.metrics.max_drawdown_pct > 0.0
+    assert result.metrics.max_drawdown_pct == pytest.approx(
+        max(p.drawdown_pct for p in result.equity_curve))
+
+
+def test_warnings_dedup_and_copy_behavior():
+    caller = ["custom-seam", NEWS_WARNING, DAILY_BAR_WARNING, "custom-seam"]
+    snapshot = list(caller)
+    result = replay_portfolio({"EURUSD": [_candle(1)]}, AppSettings(),
+                              starting_capital=1000, warnings=caller)
+    assert caller == snapshot
+    assert result.warnings.count(NEWS_WARNING) == 1
+    assert result.warnings.count(DAILY_BAR_WARNING) == 1
+    assert "custom-seam" in result.warnings
+    assert result.warnings.index("custom-seam") < result.warnings.index(
+        NEWS_WARNING)
