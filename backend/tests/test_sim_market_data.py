@@ -131,3 +131,48 @@ def test_validate_sim_bar_accepts_good_bar():
     bar = SimBar("EURUSD", "2021-01-04", 1.10, 1.11, 1.09, 1.105,
                  "biquote", None)
     assert validate_sim_bar(bar, previous_close=1.10) == []
+
+
+def test_clean_excludes_today_bar_from_both_providers():
+    from app.services import sim_market_data as smd
+
+    today = today_utc()
+    bq = [SimBar("EURUSD", today, 1.1, 1.11, 1.09, 1.10, "biquote", None),
+          SimBar("EURUSD", "2021-01-04", 1.1, 1.11, 1.09, 1.10,
+                 "biquote", None)]
+    td = [SimBar("EURUSD", today, 1.1, 1.11, 1.09, 1.10, "twelvedata", None),
+          SimBar("EURUSD", "2021-01-03", 1.1, 1.11, 1.09, 1.10,
+                 "twelvedata", None)]
+    clean_bq, _ = smd._clean_provider_bars(bq, "2021-01-01", today)
+    clean_td, _ = smd._clean_provider_bars(td, "2021-01-01", today)
+    assert all(b.bar_date < today for b in clean_bq)
+    assert all(b.bar_date < today for b in clean_td)
+    assert today not in [b.bar_date for b in clean_bq]
+    assert today not in [b.bar_date for b in clean_td]
+
+
+@pytest.mark.asyncio
+async def test_twelvedata_fetch_drops_today_bar(monkeypatch):
+    import app.services.sim_market_data as smd
+
+    monkeypatch.setattr(
+        smd, "get_settings",
+        lambda: SimpleNamespace(twelvedata_api_key="TESTKEY"),
+    )
+    today = today_utc()
+    values = [
+        {"datetime": f"{today} 00:00:00", "open": "1.10",
+         "high": "1.11", "low": "1.09", "close": "1.105"},
+        {"datetime": "2021-01-04 00:00:00", "open": "1.10",
+         "high": "1.11", "low": "1.09", "close": "1.105"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok", "values": values})
+
+    async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)) as client:
+        bars = await fetch_twelvedata_history("EURUSD", years=5,
+                                              client=client)
+    assert all(b.bar_date < today for b in bars)
+    assert [b.bar_date for b in bars] == ["2021-01-04"]

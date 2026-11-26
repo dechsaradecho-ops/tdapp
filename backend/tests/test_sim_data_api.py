@@ -85,7 +85,11 @@ async def fake_bq(asset, client):
 
 
 async def fake_td(asset, *, years, client):
-    return _drift_bars(asset, end_ago_days=301, n=300,
+    # Years-aware: reach the requested cutoff so the years>2 TD/earliest
+    # gate passes for the happy-path builds (real 5y history is ~1825
+    # calendar days; BQ covers the most recent 300).
+    n = max(300, int(years or 5) * 365)
+    return _drift_bars(asset, end_ago_days=301, n=n,
                        base=1.0500, source="twelvedata")
 
 
@@ -230,3 +234,300 @@ class TestDatasetBuildStages:
         assert (stages.index("fetching_biquote")
                 < stages.index("fetching_twelvedata")
                 < stages.index("validating"))
+
+
+# ---------------------------------------------------------------------------
+# Final fix wave: coverage gate (Finding 1)
+# ---------------------------------------------------------------------------
+class TestCoverageGateYears:
+    async def test_td_empty_years5_fails(
+            self, fake_db, inline_worker, monkeypatch):
+        async def bq_499(asset, client):
+            return _drift_bars(asset, end_ago_days=1, n=499,
+                               base=1.1000, source="biquote")
+
+        async def td_empty(asset, *, years, client):
+            return []
+
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", bq_499)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            td_empty)
+        res = await call("POST", "/api/system/sim-data/build",
+                         {"assets": ["EURUSD"], "years": 5})
+        assert res["ok"] is True
+        assert res["status"] == "failed"
+        version = res["version"]
+        st = await call("GET", f"/api/system/sim-data/{version}")
+        assert st["status"] == "failed"
+        assert st["report"]["complete"] is False
+        assert "EURUSD" in st["report"]["failed_assets"]
+
+    async def test_biquote_only_years1_passes(
+            self, fake_db, inline_worker, monkeypatch):
+        async def bq_499(asset, client):
+            return _drift_bars(asset, end_ago_days=1, n=499,
+                               base=1.1000, source="biquote")
+
+        async def td_empty(asset, *, years, client):
+            return []
+
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", bq_499)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            td_empty)
+        res = await call("POST", "/api/system/sim-data/build",
+                         {"assets": ["EURUSD"], "years": 1})
+        assert res["ok"] is True
+        assert res["status"] == "done"
+        st = await call("GET", f"/api/system/sim-data/{res['version']}")
+        assert st["status"] == "complete"
+        assert st["report"]["complete"] is True
+
+
+# ---------------------------------------------------------------------------
+# Final fix wave: load_dataset gating + DB errors (Finding 2)
+# ---------------------------------------------------------------------------
+class TestLoadDatasetGating:
+    def _seed_version(self, fake_db, version, status, complete,
+                      n_bars=5):
+        fake_db.insert(sim_market_data.META_TABLE, {
+            "dataset_version": version,
+            "status": status,
+            "years": 5,
+            "assets": ["EURUSD"],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": (datetime.now(timezone.utc).isoformat()
+                            if status in ("complete", "failed") else None),
+            "report": {"stage": status, "complete": complete,
+                       "version": version},
+            "data_hash": "abc",
+            "code_version": sim_market_data.CODE_VERSION,
+        })
+        for i in range(n_bars):
+            day = (datetime.now(timezone.utc).date()
+                   - timedelta(days=10 + i)).isoformat()
+            fake_db.insert(sim_market_data.BARS_TABLE, {
+                "dataset_version": version,
+                "asset": "EURUSD",
+                "bar_date": day,
+                "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05,
+                "source": "biquote",
+                "source_timestamp": None,
+            })
+
+    def test_complete_loads(self, fake_db):
+        self._seed_version(fake_db, "v-complete", "complete", True)
+        ds = sim_market_data.load_dataset(fake_db, "v-complete")
+        assert set(ds) == {"EURUSD"}
+        assert len(ds["EURUSD"]) == 5
+
+    def test_building_returns_empty(self, fake_db):
+        self._seed_version(fake_db, "v-building", "building", False)
+        assert sim_market_data.load_dataset(fake_db, "v-building") == {}
+
+    def test_failed_returns_empty(self, fake_db):
+        self._seed_version(fake_db, "v-failed", "failed", False)
+        assert sim_market_data.load_dataset(fake_db, "v-failed") == {}
+
+    def test_unknown_returns_empty(self, fake_db):
+        assert sim_market_data.load_dataset(fake_db, "v-nope") == {}
+
+    def test_status_complete_but_report_incomplete_returns_empty(
+            self, fake_db):
+        self._seed_version(fake_db, "v-mixed", "complete", False)
+        assert sim_market_data.load_dataset(fake_db, "v-mixed") == {}
+
+    def test_meta_db_error_raises(self, fake_db, monkeypatch):
+        self._seed_version(fake_db, "v-complete", "complete", True)
+
+        def boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(fake_db, "select_ex", boom)
+        monkeypatch.setattr(fake_db, "select", boom)
+        import pytest as _pt
+        with _pt.raises(sim_market_data.SimMarketDataError):
+            sim_market_data.load_dataset(fake_db, "v-complete")
+
+    def test_bars_db_error_raises(self, fake_db, monkeypatch):
+        self._seed_version(fake_db, "v-complete2", "complete", True)
+
+        orig_paged = fake_db.select_paged
+
+        def boom_paged(*a, **k):
+            raise RuntimeError("bars down")
+
+        monkeypatch.setattr(fake_db, "select_paged", boom_paged)
+        import pytest as _pt
+        with _pt.raises(sim_market_data.SimMarketDataError):
+            sim_market_data.load_dataset(fake_db, "v-complete2")
+        monkeypatch.setattr(fake_db, "select_paged", orig_paged)
+
+
+# ---------------------------------------------------------------------------
+# Final fix wave: _meta_patch safety (Finding 3)
+# ---------------------------------------------------------------------------
+class TestMetaPatchSafety:
+    def _seed_building(self, fake_db, version="v-meta"):
+        fake_db.insert(sim_market_data.META_TABLE, {
+            "dataset_version": version,
+            "status": "building",
+            "years": 5,
+            "assets": ["EURUSD"],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "report": {"stage": "persisting", "version": version},
+            "data_hash": None,
+            "code_version": sim_market_data.CODE_VERSION,
+        })
+        return version
+
+    def test_update_in_place_no_delete(self, fake_db):
+        v = self._seed_building(fake_db)
+        before = fake_db.count(sim_market_data.META_TABLE,
+                               {"dataset_version": v})
+        ok = sim_market_data._meta_patch(fake_db, v, {"status": "failed"})
+        assert ok is True
+        after = fake_db.count(sim_market_data.META_TABLE,
+                              {"dataset_version": v})
+        assert after == before == 1
+        rows = fake_db.select(sim_market_data.META_TABLE,
+                              filters={"dataset_version": v}, limit=1)
+        assert rows[0]["status"] == "failed"
+
+    def test_failed_write_preserves_row(self, fake_db, monkeypatch):
+        v = self._seed_building(fake_db)
+        monkeypatch.setattr(fake_db, "update", lambda *a, **k: False)
+        monkeypatch.setattr(fake_db, "insert", lambda *a, **k: None)
+        ok = sim_market_data._meta_patch(fake_db, v, {"status": "failed"})
+        assert ok is False
+        rows = [r for r in fake_db.rows.get(sim_market_data.META_TABLE, [])
+                if r.get("dataset_version") == v]
+        assert len(rows) == 1
+        assert rows[0]["status"] == "building"
+
+    def test_run_build_final_write_failure_ends_failed(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        real_patch = sim_market_data._meta_patch
+        calls = {"n": 0}
+
+        def flaky_patch(db, version, changes):
+            # Fail the first terminal verdict (has finished_at), then heal.
+            if changes.get("finished_at") and calls["n"] == 0:
+                calls["n"] += 1
+                return False
+            return real_patch(db, version, changes)
+
+        monkeypatch.setattr(sim_market_data, "_meta_patch", flaky_patch)
+        res = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert res.get("ok") is True
+        st = sim_market_data.dataset_build_status(fake_db, res["version"])
+        assert st["status"] == "failed"
+        assert st["report"]["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Final fix wave: paged fallback beyond 20k (Finding 5)
+# ---------------------------------------------------------------------------
+class _NoPagedFake:
+    """Minimal fake WITHOUT select_paged to force the offset/limit fallback."""
+
+    def __init__(self):
+        self.rows: dict[str, list[dict]] = {}
+        self.available = True
+
+    def insert(self, table, row):
+        self.rows.setdefault(table, []).insert(
+            0, {**row, "id": f"fake-{len(self.rows.get(table, []))}"})
+        return row
+
+    def select(self, table, filters=None, order="created_at", desc=True,
+               limit=50, offset=0, columns="*"):
+        rows = list(self.rows.get(table, []))
+        for col, val in (filters or {}).items():
+            rows = [r for r in rows if r.get(col) == val]
+        rev = desc
+        if order in rows[0] if rows else False:
+            pass
+        # bar_date ordering like the real query path
+        try:
+            rows.sort(key=lambda r: str(r.get(order) or ""), reverse=rev)
+        except Exception:
+            pass
+        return rows[offset:offset + limit]
+
+    def select_ex(self, table, filters=None, order="created_at", desc=True,
+                  limit=50, offset=0):
+        return self.select(table, filters=filters, order=order, desc=desc,
+                            limit=limit, offset=offset)
+
+    def update(self, table, row_id, changes):
+        for r in self.rows.get(table, []):
+            if r.get("id") == row_id:
+                r.update(changes)
+                return True
+        return False
+
+    def delete(self, table, filters):
+        rows = self.rows.get(table, [])
+        kept = [r for r in rows
+                if not all(r.get(c) == v for c, v in filters.items())]
+        self.rows[table] = kept
+        return len(kept) < len(rows)
+
+    def count(self, table, filters=None, **kw):
+        rows = list(self.rows.get(table, []))
+        for col, val in (filters or {}).items():
+            rows = [r for r in rows if r.get(col) == val]
+        return len(rows)
+
+
+def _seed_big_version(db, version, n=20500):
+    db.insert(sim_market_data.META_TABLE, {
+        "dataset_version": version,
+        "status": "complete",
+        "years": 5,
+        "assets": ["EURUSD"],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "report": {"stage": "done", "complete": True, "version": version},
+        "data_hash": "big",
+        "code_version": sim_market_data.CODE_VERSION,
+    })
+    base = datetime(2000, 1, 1, tzinfo=timezone.utc).date()
+    bars = []
+    for i in range(n):
+        day = (base + timedelta(days=i)).isoformat()
+        bars.append({
+            "dataset_version": version,
+            "asset": "EURUSD",
+            "bar_date": day,
+            "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05,
+            "source": "biquote" if i % 2 == 0 else "twelvedata",
+            "source_timestamp": None,
+        })
+    db.rows.setdefault(sim_market_data.BARS_TABLE, []).extend(bars)
+
+
+class TestPagedFallback:
+    def test_load_dataset_fallback_returns_all_rows(self):
+        db = _NoPagedFake()
+        assert not hasattr(db, "select_paged")
+        _seed_big_version(db, "v-big", n=20500)
+        ds = sim_market_data.load_dataset(db, "v-big")
+        assert len(ds["EURUSD"]) == 20500
+
+    async def test_status_endpoint_fallback_counts_all_rows(self):
+        db = _NoPagedFake()
+        _seed_big_version(db, "v-big2", n=20500)
+        set_state(db)  # type: ignore[arg-type]
+        try:
+            res = await call("GET", "/api/system/sim-data/v-big2")
+        finally:
+            set_state(FakeDatabase())
+        assert res["ok"] is True
+        assert res["bars"] == 20500
+        assert res["per_asset_counts"]["EURUSD"] == 20500

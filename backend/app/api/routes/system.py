@@ -1473,9 +1473,8 @@ async def sim_data_status(request: Request, version: str) -> dict:
                 filters={"dataset_version": st["version"]},
                 order="bar_date", desc=False)
         else:
-            rows = db.select(sim_market_data.BARS_TABLE,
-                             filters={"dataset_version": st["version"]},
-                             order="bar_date", desc=False, limit=20000)
+            rows = sim_market_data._select_all_bars_fallback(
+                db, st["version"])
         counts: dict[str, int] = {}
         for r in rows or []:
             key = str(r.get("asset") or "").upper()

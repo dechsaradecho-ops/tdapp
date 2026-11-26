@@ -75,11 +75,15 @@ async def fetch_biquote_recent(
     """
     symbol = str(asset or "").strip().upper()
     raw = await fetch_daily_bars(symbol, limit=500, client=client)
+    today = today_utc()
     bars: list[SimBar] = []
     for row in raw:
         if row.is_open:
             continue
         bar_date = row.open_time.astimezone(timezone.utc).date().isoformat()
+        if bar_date >= today:
+            # Forming/today bar must never seed frozen history.
+            continue
         bars.append(SimBar(
             asset=symbol,
             bar_date=bar_date,
@@ -130,6 +134,7 @@ async def fetch_twelvedata_history(
         raise SimMarketDataError(f"{symbol}: twelvedata invalid payload")
 
     bars: list[SimBar] = []
+    today = today_utc()
     for row in reversed(values):  # TD returns newest-first -> flip
         if not isinstance(row, dict):
             continue
@@ -146,6 +151,9 @@ async def fetch_twelvedata_history(
             bar_date = datetime.fromisoformat(
                 str(row.get("datetime") or "")[:10]).date().isoformat()
         except ValueError:
+            continue
+        if bar_date >= today:
+            # Today's forming bar is never immutable history.
             continue
         bars.append(SimBar(
             asset=symbol,
@@ -385,19 +393,54 @@ def _date_range(years: int) -> tuple[str, str]:
     return cutoff, today
 
 
+def _cutoff_plus_30d(cutoff: str) -> str:
+    """Requested cutoff + 30 calendar days (coverage tolerance window)."""
+    try:
+        day = datetime.fromisoformat(str(cutoff)[:10]).date()
+    except ValueError:
+        return str(cutoff)
+    return (day + timedelta(days=30)).isoformat()
+
+
+def _select_all_bars_fallback(db, version: str, page_size: int = 1000,
+                              max_rows: int = 200000) -> list[dict]:
+    """Page through bars with offset/limit until a short page arrives.
+
+    Replaces the old single ``limit=20000`` read which silently truncated
+    multi-asset datasets. Raises the underlying DB error so callers can
+    fail closed instead of replaying a truncated dataset.
+    """
+    out: list[dict] = []
+    offset = 0
+    while offset < max_rows:
+        page = db.select(BARS_TABLE,
+                         filters={"dataset_version": str(version)},
+                         order="bar_date", desc=False,
+                         limit=page_size, offset=offset)
+        if not page:
+            break
+        out.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return out
+
+
 def _clean_provider_bars(
     bars: list[SimBar], cutoff: str, today: str
 ) -> tuple[list[SimBar], list[str]]:
-    """Filter to [cutoff, today] and reject duplicate dates, first-seen wins.
+    """Filter to [cutoff, today) and reject duplicate dates, first-seen wins.
 
     Duplicates are rejected BEFORE merge so one provider can never silently
     overwrite itself — the merge only resolves biquote-vs-twelvedata seams.
+    ``today`` itself is excluded: only closed daily bars enter the immutable
+    dataset, from either provider.
     """
     seen: set[str] = set()
     clean: list[SimBar] = []
     dups: list[str] = []
     for b in bars or []:
-        if b.bar_date < cutoff or b.bar_date > today:
+        if b.bar_date < cutoff or b.bar_date >= today:
             continue
         if b.bar_date in seen:
             dups.append(b.bar_date)
@@ -508,25 +551,50 @@ def load_dataset(db, version: str,
                  assets: list[str] | None = None) -> dict[str, list]:
     """Persisted bars as ``Candle(o,h,l,c,t)`` per asset, oldest-first.
 
-    ``t`` is UTC epoch seconds of the bar date (midnight). Unknown versions
-    yield ``{}`` — never raises, so replays degrade instead of dying.
+    Plan 2 (portfolio replay / optimizer) must consume ONLY complete
+    immutable versions: this returns bars solely when the dataset meta row
+    is terminal complete (``status`` in ``("complete", "done")`` AND
+    ``report.complete is True``). Building, failed, or unknown versions
+    yield ``{}``.
+
+    Actual DB read failures raise :class:`SimMarketDataError` instead of
+    returning ``{}`` so callers never mistake an outage for an empty
+    dataset. Unknown/incomplete versions still return ``{}``.
     """
     from app.integrations.quotes import Candle
 
     want = ({str(a).strip().upper() for a in (assets or []) if str(a).strip()}
             or None)
+    # -- Meta gate: only terminal-complete versions are loadable. --
+    try:
+        if hasattr(db, "select_ex"):
+            meta_rows = db.select_ex(
+                META_TABLE, filters={"dataset_version": str(version)},
+                order="started_at", desc=True, limit=1)
+        else:
+            meta_rows = db.select(
+                META_TABLE, filters={"dataset_version": str(version)},
+                order="started_at", desc=True, limit=1)
+    except Exception as exc:
+        raise SimMarketDataError(
+            f"{version}: dataset meta read failed ({exc})") from exc
+    if not meta_rows:
+        return {}
+    meta = meta_rows[0] or {}
+    report = meta.get("report") or {}
+    status = str(meta.get("status") or "")
+    if status not in ("complete", "done") or report.get("complete") is not True:
+        return {}
     try:
         if hasattr(db, "select_paged"):
             rows = db.select_paged(BARS_TABLE,
                                    filters={"dataset_version": str(version)},
                                    order="bar_date", desc=False)
         else:
-            rows = db.select(BARS_TABLE,
-                             filters={"dataset_version": str(version)},
-                             order="bar_date", desc=False, limit=20000)
+            rows = _select_all_bars_fallback(db, str(version))
     except Exception as exc:
-        log.debug("sim-data load %s failed: %s", version, exc)
-        return {}
+        raise SimMarketDataError(
+            f"{version}: dataset bars read failed ({exc})") from exc
     out: dict[str, list] = {}
     for r in rows or []:
         asset = str(r.get("asset") or "").upper()
@@ -550,24 +618,82 @@ def load_dataset(db, version: str,
 
 
 def _meta_patch(db, version: str, changes: dict) -> bool:
-    """Update a meta row whose PK is dataset_version, not id.
+    """Patch a meta row whose PK is dataset_version, not id.
 
-    ``Database.update`` matches ``eq("id", ...)`` which this table has no
-    column for, so read-modify-write via select/delete/insert instead — the
-    same surface every test fake implements.
+    Update-in-place first; insert only when the update reports missing.
+    Never delete-then-insert: a failed insert after a delete would orphan
+    the version (row gone, build stuck at ``building``). Returns True on
+    success, False when the row is missing or the write failed (logged).
     """
     try:
         rows = db.select(META_TABLE, filters={"dataset_version": version},
                          order="started_at", desc=True, limit=1)
-        if not rows:
-            return False
-        row = dict(rows[0])
-        row.update(changes)
-        db.delete(META_TABLE, {"dataset_version": version})
-        return db.insert(META_TABLE, row) is not None
     except Exception as exc:
-        log.debug("sim-data meta patch %s failed: %s", version, exc)
+        log.warning("sim-data meta patch %s read failed: %s", version, exc)
         return False
+    if not rows:
+        return False
+    row = dict(rows[0])
+    row_id = row.get("id")
+    # 1. Fake/in-memory path: row carries an ``id`` so Database.update works.
+    if row_id is not None and hasattr(db, "update"):
+        try:
+            if db.update(META_TABLE, row_id, changes):
+                return True
+        except Exception as exc:
+            log.warning("sim-data meta patch %s update failed: %s",
+                        version, exc)
+            return False
+        # Update reported missing -> fall through to insert the merged row.
+        log.warning("sim-data meta patch %s update missed; inserting",
+                    version)
+    else:
+        # 2. Real Supabase path: no ``id`` column — update by PK directly
+        # so the row is never deleted. Only service_role reaches here.
+        client = getattr(db, "_client", None)
+        probe = None
+        if client is not None:
+            try:
+                probe = client.table(META_TABLE).update  # type: ignore[attr-defined]
+            except Exception:
+                probe = None
+        if callable(probe):
+            try:
+                resp = client.table(META_TABLE).update(changes).eq(
+                    "dataset_version", version).execute()
+                data = getattr(resp, "data", None)
+                if data:
+                    return True
+                log.warning(
+                    "sim-data meta patch %s update matched 0 rows; "
+                    "inserting", version)
+            except Exception as exc:
+                log.warning("sim-data meta patch %s update failed: %s",
+                            version, exc)
+                return False
+        else:
+            # No usable in-place path and the row exists: do NOT delete it.
+            # Merging + inserting would PK-conflict while the row lives, and
+            # deleting first risks total loss — report failure instead.
+            log.warning("sim-data meta patch %s no in-place path; "
+                        "leaving row untouched", version)
+            return False
+    # 3. Insert-only fallback: the update reported missing, so the row is
+    # gone — re-insert the merged row and CHECK the result.
+    merged = dict(row)
+    merged.update(changes)
+    try:
+        # Drop the fake-only ``id`` so a re-insert gets a fresh one.
+        merged.pop("id", None)
+        ok = db.insert(META_TABLE, merged)
+    except Exception as exc:
+        log.warning("sim-data meta patch %s insert failed: %s",
+                    version, exc)
+        return False
+    if ok is None:
+        log.warning("sim-data meta patch %s insert failed (None)", version)
+        return False
+    return True
 
 
 def _set_stage(db, version: str, stage: str) -> None:
@@ -663,6 +789,27 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                     valid.append(b)
                     prev = b.close
             if not valid or len(valid) < MIN_BARS_PER_ASSET:
+                coverage_error = (
+                    f"insufficient_bars: {len(valid)} "
+                    f"< {MIN_BARS_PER_ASSET}")
+            elif years > 2:
+                td_valid = sum(1 for b in valid
+                               if b.source == "twelvedata")
+                earliest = valid[0].bar_date if valid else None
+                if td_valid < 1:
+                    coverage_error = (
+                        "twelvedata_missing: years>2 requires at least "
+                        "one Twelve Data bar per asset")
+                elif (earliest is not None
+                      and earliest > _cutoff_plus_30d(cutoff)):
+                    coverage_error = (
+                        f"history_gap: earliest {earliest} after "
+                        f"{cutoff}+30d")
+                else:
+                    coverage_error = None
+            else:
+                coverage_error = None
+            if coverage_error is not None:
                 if asset not in failed_assets:
                     failed_assets.append(asset)
             kept.extend(valid)
@@ -671,12 +818,15 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                 "end": valid[-1].bar_date if valid else None,
                 "biquote": len(clean_bq),
                 "twelvedata": len(clean_td),
+                "twelvedata_valid": sum(
+                    1 for b in valid if b.source == "twelvedata"),
                 "merged": len(merged),
                 "persisted": len(valid),
                 "invalid": invalid,
                 "duplicate_dates": {"biquote": dup_bq, "twelvedata": dup_td},
                 "provider_errors": [e for e in (pack.get("bq_err"),
                                                 pack.get("td_err")) if e],
+                "coverage_error": coverage_error,
             }
         data_hash = hash_bars(kept)
         complete = not failed_assets
@@ -704,12 +854,17 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
             "data_hash": data_hash,
             "code_version": CODE_VERSION,
         }
-        _meta_patch(db, version, {
+        _meta_patch_ok = _meta_patch(db, version, {
             "status": "complete" if complete else "failed",
             "finished_at": _now_iso(),
             "report": report,
             "data_hash": data_hash,
         })
+        if not _meta_patch_ok:
+            log.error("sim-data build %s: final meta write failed; "
+                      "forcing failed verdict", version)
+            raise SimMarketDataError(
+                f"{version}: final meta write failed")
     except Exception as exc:                       # noqa: BLE001 - verdict, not a crash
         log.exception("sim-data build %s failed", version)
         try:
