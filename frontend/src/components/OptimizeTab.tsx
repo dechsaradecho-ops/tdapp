@@ -528,7 +528,7 @@ export default function OptimizeTab() {
                   <th className="py-1.5 pr-3">เปลี่ยน</th>
                   <th className="py-1.5 pr-3">Train net PnL</th>
                   <th className="py-1.5 pr-3">Val net PnL</th>
-                  <th className="py-1.5 pr-3">DD%</th>
+                  <th className="py-1.5 pr-3">Train DD%</th>
                   <th className="py-1.5 pr-3">Trades</th>
                   <th className="py-1.5 pr-3">Win%</th>
                   <th className="py-1.5 pr-3">PF</th>
@@ -627,6 +627,7 @@ export default function OptimizeTab() {
             <OptEquityChart
               base={equityBase && equityBase.ok ? equityBase.rows : []}
               best={equityBest && equityBest.ok ? equityBest.rows : []}
+              capital={run?.starting_capital ?? null}
             />
           )}
           {rows.length > 1 && (
@@ -803,12 +804,18 @@ function Kv({ k, v }: { k: string; v: ReactNode }) {
  * Baseline vs current-best equity, overlaid in one inline SVG.
  *
  * Hand-rolled like SimulateTab's EquityCurve (no chart library shipped):
- * a zero line, downsampled to ≤300 rendered nodes per curve, and a legend
- * that says which curve is which. Two curves matter here — the gap between
+ * downsampled to ≤300 rendered nodes per curve, and a legend that says
+ * which curve is which. Two curves matter here — the gap between
  * baseline and best IS the optimization result.
+ *
+ * DEVIATION FROM THE BRIEF (documented): the brief ruled a "zero line",
+ * but these curves are absolute equity denominated in starting capital
+ * (~1000 USD), so y=0 would render far off-chart and carry no
+ * information. The dashed starting-capital reference line serves the
+ * same honesty purpose instead: curve above = profit, below = loss.
  */
-function OptEquityChart({ base, best }: {
-  base: OptEquityPoint[]; best: OptEquityPoint[];
+function OptEquityChart({ base, best, capital }: {
+  base: OptEquityPoint[]; best: OptEquityPoint[]; capital: number | null;
 }) {
   const W = 900, H = 200, PAD = 28;
   const basePts = useMemo(
@@ -825,8 +832,12 @@ function OptEquityChart({ base, best }: {
     );
   }
   const all = [...basePts, ...bestPts];
-  const min = Math.min(...all);
-  const max = Math.max(...all);
+  // The capital reference line must always be visible, so the capital
+  // value joins the domain (curves alone may never touch it).
+  const cap = capital !== null && Number.isFinite(Number(capital))
+    ? Number(capital) : null;
+  const min = Math.min(...all, ...(cap !== null ? [cap] : []));
+  const max = Math.max(...all, ...(cap !== null ? [cap] : []));
   const span = (max - min) || 1;
   const x = (i: number, len: number) =>
     PAD + (len <= 1 ? 0 : (i / (len - 1)) * (W - PAD * 2));
@@ -842,6 +853,15 @@ function OptEquityChart({ base, best }: {
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded bg-surface/40"
         preserveAspectRatio="none" role="img"
         aria-label="equity baseline เทียบกับ best">
+        {cap !== null && (
+          <>
+            <line x1={PAD} x2={W - PAD} y1={y(cap)} y2={y(cap)}
+              stroke="#94a3b8" strokeWidth="1" strokeDasharray="4 4" />
+            <text x={PAD + 2} y={y(cap) - 4} fill="#94a3b8" fontSize="10">
+              ทุน {usdF(cap).replace("+", "")}
+            </text>
+          </>
+        )}
         {basePts.length > 1 && (
           <path d={toPath(basePts)} fill="none" stroke="#647b8b" strokeWidth="1.4" />
         )}
