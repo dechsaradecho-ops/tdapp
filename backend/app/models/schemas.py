@@ -1,6 +1,7 @@
 """Pydantic schemas for API requests/responses (mirrors DB design)."""
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from itertools import combinations
@@ -765,25 +766,53 @@ def effective_min_lot(settings: "AppSettings", asset: Optional[str]) -> float:
 SPREAD_SL_FLOOR_MULT: float  # rebound after AppSettings; do not assign here
 
 
-def spread_sl_floor(settings: "AppSettings", asset: Optional[str]) -> float:
+def _static_spread_value(spread) -> float | None:
+    """Validate an explicit spread override: finite non-negative float or None.
+
+    Returns None when no override was supplied (caller falls back to
+    ``effective_spread``); an explicitly supplied but unusable value resolves
+    to 0.0 (no floor) rather than crashing the caller or reintroducing a
+    live-quote read.
+    """
+    if spread is None:
+        return None
+    try:
+        v = float(spread)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v) or v < 0:
+        return 0.0
+    return v
+
+
+def spread_sl_floor(settings: "AppSettings", asset: Optional[str],
+                    *, spread: float | None = None) -> float:
     """Minimum sane SL distance (price units) = k × the symbol's spread.
 
     Returns 0.0 when the spread resolves to 0 (a symbol the user deliberately
     zeroed) or the settings are unusable — callers treat 0.0 as "no floor",
     exactly like ``sl_cap_distance`` treats 0.0 as "no cap".
+
+    ``spread`` is an optional static override (price units, full width).
+    Omitted (None) keeps byte-for-byte production behavior via
+    ``effective_spread`` (including its live XAUUSD branch); supplied values
+    are validated finite non-negative and used directly, which is what
+    deterministic offline replay passes.
     """
     try:
-        spread = effective_spread(settings, asset)
-        if spread <= 0:
+        static = _static_spread_value(spread)
+        resolved = effective_spread(settings, asset) if static is None else static
+        if resolved <= 0:
             return 0.0
-        return float(G(settings, "spread_sl_floor_mult", zero_as_missing=False) or 0) * float(spread)
+        return float(G(settings, "spread_sl_floor_mult", zero_as_missing=False) or 0) * float(resolved)
     except Exception:
         return 0.0
 
 
 def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
                     price: Optional[float] = None,
-                    rates: dict | None = None) -> float:
+                    rates: dict | None = None,
+                    *, spread: float | None = None) -> float:
     """Max SL distance (price units) that fits the risk budget at min lot.
 
     Even the SMALLEST allowed order (effective_min_lot) risks
@@ -806,6 +835,10 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
     When ``price`` is None or the quote's USD rate is not derivable (a cross
     like GBPJPY), the conversion factor is 1.0 — the historical behaviour —
     so every existing caller keeps working; pass ``price`` to get the fix.
+
+    ``spread`` is an optional static spread override forwarded to
+    ``spread_sl_floor`` (see it for semantics); omitted keeps production
+    behavior.
     """
     try:
         if not G(settings, "sl_cap_enabled"):
@@ -824,7 +857,7 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
             rate = usd_per_quote_unit(asset, price)
         rate = rate or 1.0
         cap = budget / (floor * contract * rate)
-        spread_floor = spread_sl_floor(settings, asset)
+        spread_floor = spread_sl_floor(settings, asset, spread=spread)
         return max(cap, spread_floor) if spread_floor > 0 else cap
     except Exception:
         return 0.0
@@ -866,7 +899,8 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
 
 def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
                  asset: Optional[str], direction: str = "BUY",
-                 rates: dict | None = None
+                 rates: dict | None = None,
+                 *, spread: float | None = None
                  ) -> tuple[float, float, bool]:
     """Tighten a wide SL down to the risk-budget cap. Returns (sl, dist, capped).
 
@@ -881,12 +915,17 @@ def apply_sl_cap(settings: "AppSettings", entry: float, stop_loss: float,
     43s). Callers detect that case with ``sl_cap_below_spread`` and BLOCK;
     this function keeps its tighten-only contract so a preview can never
     silently move a card's SL.
+
+    ``spread`` is an optional static spread override forwarded to
+    ``sl_cap_distance`` (see ``spread_sl_floor`` for semantics); omitted
+    keeps production behavior.
     """
     try:
         if not entry or not stop_loss:
             return stop_loss, 0.0, False
         # ``entry`` is the price the cap converts through (USDJPY budget ¥10≠$10).
-        cap = sl_cap_distance(settings, asset, price=entry, rates=rates)
+        cap = sl_cap_distance(settings, asset, price=entry, rates=rates,
+                              spread=spread)
         dist = abs(float(entry) - float(stop_loss))
         if cap <= 0 or dist <= cap:
             return stop_loss, dist, False
@@ -905,7 +944,8 @@ SL_TIER_MULT: dict[str, float] = {"short": 1.0, "medium": 1.5, "long": 2.0}
 def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
                     take_profit: float, asset: Optional[str],
                     direction: str = "BUY", apply_cap: bool = True,
-                    rates: dict | None = None
+                    rates: dict | None = None,
+                    *, spread: float | None = None
                     ) -> tuple[float, float, float, bool, bool]:
     """One shared math for tier + cap: card preview == real order.
 
@@ -926,6 +966,9 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
     passes the originals through so a preview never blocks a card.
     apply_cap=False skips step 2 (extended-open: explicit plan-leg volume
     the user reviewed — SL/TP belong to the plan).
+    ``spread`` is an optional static spread override forwarded to the cap
+    and floor steps (see ``spread_sl_floor`` for semantics); omitted keeps
+    production behavior.
     """
     try:
         if not entry or not stop_loss:
@@ -987,7 +1030,7 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
             # from the tier values so the two paths can never drift apart).
             new_sl, cap_dist, capped = apply_sl_cap(
                 settings, float(entry), sl, asset, direction,
-                rates=rates)
+                rates=rates, spread=spread)
             if capped:
                 rr_keep = (abs(tp - float(entry)) / abs(float(entry) - sl)
                            if tp and abs(float(entry) - sl) > 0 else 0.0)
@@ -996,7 +1039,7 @@ def effective_sl_tp(settings: "AppSettings", entry: float, stop_loss: float,
                 if tp and rr_keep > 0:
                     tp = round(float(entry) + sign * cap_dist * rr_keep, 5)
         # ---- step 3: spread sanity floor (the ONE sanctioned widening) ----
-        floor = spread_sl_floor(settings, asset)
+        floor = spread_sl_floor(settings, asset, spread=spread)
         if floor > 0 and dist < floor - 1e-12:
             rr_keep = (abs(tp - float(entry)) / dist
                        if tp and dist > 0 else 0.0)

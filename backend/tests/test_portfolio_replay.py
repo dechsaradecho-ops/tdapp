@@ -978,3 +978,262 @@ def test_entry_exit_costs_across_partial_slices():
     assert result.metrics.costs > 0
     assert result.metrics.gross_pnl - result.metrics.costs == pytest.approx(
         result.metrics.net_pnl)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 concern resolution: open-known entries, marked equity, strict rates
+# ---------------------------------------------------------------------------
+
+def test_entry_exit_costs_across_partial_slices():
+    settings = AppSettings(partial_close_pct=50, partial_trigger_r=1.0,
+                           smart_exit_enabled=False, max_hold_days=0,
+                           rr_target=10.0)
+    closes = [round(1.0800 + 0.0008 * i, 5) for i in range(200)]
+    closes += [round(closes[-1] + 0.0015 * i, 5) for i in range(1, 5)]
+    closes += [closes[-1]] * 6
+    result = replay_portfolio({"EURUSD": _t4_bars(closes)}, settings,
+                              starting_capital=1000)
+    assert len(result.trades) == 2
+    first, second = result.trades
+    assert first.exit_reason == "partial"
+    assert first.volume > 0 and second.volume > 0
+    assert abs(first.volume - second.volume) <= 0.01
+    assert result.metrics.costs > 0
+    assert result.metrics.gross_pnl - result.metrics.costs == pytest.approx(
+        result.metrics.net_pnl)
+
+
+def _t4_gold_breakout(n: int = 235, start: float = 2400.0,
+                      step: float = 2.0) -> list[Candle]:
+    closes = [round(start + step * i, 2) for i in range(n)]
+    return _t4_bars(closes, pad=1.0)
+
+
+def _t4_first_signal_day(asset: str, history: list[Candle],
+                         settings: AppSettings, lo: int = 199,
+                         hi: int = 210) -> int:
+    for di in range(lo, hi):
+        if signal_at(asset, history[:di + 1], settings, _t4_date(di)) is not None:
+            return di
+    raise AssertionError(f"no {asset} signal in days {lo}..{hi}")
+
+
+def test_entry_bar_close_cannot_change_entry_size_or_costs():
+    settings = AppSettings(allowed_assets=["GBPJPY"],
+                           reentry_cooldown_min=30 * 1440)
+    gbp = [round(190.0 + 0.12 * i, 3) for i in range(231)]
+    jpy = [round(160.0 + 0.02 * i, 3) for i in range(231)]
+    base_bars = _t4_bars(gbp, pad=0.05)
+    sig_day = _t4_first_signal_day("GBPJPY", base_bars, settings)
+    entry_idx = sig_day + 1
+    sig = signal_at("GBPJPY", base_bars[:sig_day + 1], settings,
+                    _t4_date(sig_day))
+    assert sig is not None
+    dip = Candle(o=round(gbp[entry_idx] + 0.05, 3),
+                 h=round(gbp[entry_idx] + 0.10, 3),
+                 l=round(sig.stop_loss - 0.05, 3),
+                 c=round(sig.stop_loss - 0.02, 3),
+                 t=_t4_ts(entry_idx + 1))
+    flat_gbp = _t4_bars([dip.c] * 4, first_index=entry_idx + 2)
+    gbp_series = base_bars[:entry_idx + 1] + [dip] + flat_gbp
+    jpy_bars = _t4_bars(jpy, pad=0.01)
+    spiked_jpy = list(jpy_bars)
+    spiked_jpy[entry_idx] = Candle(
+        o=jpy_bars[entry_idx].o, h=round(jpy_bars[entry_idx].c * 3, 3),
+        l=jpy_bars[entry_idx].l, c=round(jpy_bars[entry_idx].c * 3, 3),
+        t=jpy_bars[entry_idx].t)
+
+    def run(jpy_series):
+        return replay_portfolio({"GBPJPY": gbp_series, "USDJPY": jpy_series},
+                                settings, starting_capital=1000)
+
+    plain = run(jpy_bars)
+    spiked = run(spiked_jpy)
+    assert len(plain.trades) == 1 and len(spiked.trades) == 1
+    assert plain.trades[0].exit_reason == "sl"
+    assert spiked.trades[0].exit_reason == "sl"
+    assert spiked.trades[0].volume == pytest.approx(plain.trades[0].volume)
+    assert spiked.trades[0].entry_price == pytest.approx(
+        plain.trades[0].entry_price)
+    # Entry-spread conversion used the prior (normal) rate, not the spiked
+    # entry-bar close: back it out of the single trade's costs.
+    trade = spiked.trades[0]
+    vol = trade.volume
+    prior_rate = 1.0 / jpy[entry_idx - 1]
+    exit_rate = 1.0 / (jpy[entry_idx] * 3)
+    spread = DEFAULT_SPREADS["GBPJPY"]
+    expected_entry_spread = 0.5 * spread * 100000.0 * vol * prior_rate
+    expected_exit_spread = 0.5 * spread * 100000.0 * vol * exit_rate
+    assert spiked.metrics.costs - 7.0 * vol == pytest.approx(
+        expected_entry_spread + expected_exit_spread)
+
+
+def test_hard_exit_uses_prior_open_known_rate():
+    settings = AppSettings(allowed_assets=["GBPJPY"],
+                           reentry_cooldown_min=30 * 1440)
+    gbp = [round(190.0 + 0.12 * i, 3) for i in range(231)]
+    jpy = [round(160.0 + 0.02 * i, 3) for i in range(231)]
+    base_bars = _t4_bars(gbp, pad=0.05)
+    sig_day = _t4_first_signal_day("GBPJPY", base_bars, settings)
+    entry_idx = sig_day + 1
+    sig = signal_at("GBPJPY", base_bars[:sig_day + 1], settings,
+                    _t4_date(sig_day))
+    assert sig is not None
+    dip = Candle(o=round(gbp[entry_idx] + 0.05, 3),
+                 h=round(gbp[entry_idx] + 0.10, 3),
+                 l=round(sig.stop_loss - 0.05, 3),
+                 c=round(sig.stop_loss - 0.02, 3),
+                 t=_t4_ts(entry_idx + 1))
+    flat_gbp = _t4_bars([dip.c] * 4, first_index=entry_idx + 2)
+    gbp_series = base_bars[:entry_idx + 1] + [dip] + flat_gbp
+    jpy_bars = _t4_bars(jpy, pad=0.01)
+    spiked_jpy = list(jpy_bars)
+    spiked_jpy[entry_idx] = Candle(
+        o=jpy_bars[entry_idx].o, h=round(jpy_bars[entry_idx].c * 2, 3),
+        l=jpy_bars[entry_idx].l, c=round(jpy_bars[entry_idx].c * 2, 3),
+        t=jpy_bars[entry_idx].t)
+
+    def first_pnl(jpy_series):
+        result = replay_portfolio(
+            {"GBPJPY": gbp_series, "USDJPY": jpy_series}, settings,
+            starting_capital=1000)
+        assert len(result.trades) == 1
+        assert result.trades[0].exit_reason == "sl"
+        return result.trades[0]
+
+    plain_trade = first_pnl(jpy_bars)
+    spiked_trade = first_pnl(spiked_jpy)
+    spread = DEFAULT_SPREADS["GBPJPY"]
+    for trade, exit_close in ((plain_trade, jpy[entry_idx]),
+                               (spiked_trade, jpy[entry_idx] * 2)):
+        vol = trade.volume
+        rate_in = 1.0 / jpy[entry_idx - 1]
+        rate_out = 1.0 / exit_close
+        # Replay gross is mid-to-mid: the entry fill carries half the spread.
+        entry_mid = trade.entry_price - 0.5 * spread
+        gross = ((sig.stop_loss - entry_mid) * vol * 100000.0 * rate_out)
+        # BUY SL exit fill: intrabar touch at the SL level minus half exit
+        # spread; gross is mid-to-mid at the prior open-known rate.
+        costs = (0.5 * spread * 100000.0 * vol * rate_in + 3.5 * vol
+                 + 0.5 * spread * 100000.0 * vol * rate_out + 3.5 * vol)
+        assert trade.pnl_usd == pytest.approx(gross - costs)
+    assert spiked_trade.pnl_usd != pytest.approx(plain_trade.pnl_usd)
+
+
+def test_close_exit_uses_close_rate():
+    settings = AppSettings(allowed_assets=["GBPJPY"],
+                           reentry_cooldown_min=30 * 1440,
+                           smart_exit_enabled=False, max_hold_days=1,
+                           time_stop_min_r=0.0, rr_target=30.0)
+    gbp = [round(190.0 + 0.12 * i, 3) for i in range(231)]
+    jpy = [round(160.0 + 0.02 * i, 3) for i in range(231)]
+    base_bars = _t4_bars(gbp, pad=0.05)
+    sig_day = _t4_first_signal_day("GBPJPY", base_bars, settings)
+    entry_idx = sig_day + 1
+    flat_gbp = _t4_bars([gbp[entry_idx]] * 5, first_index=entry_idx + 1)
+    gbp_series = base_bars[:entry_idx + 1] + flat_gbp
+    jpy_bars = _t4_bars(jpy, pad=0.01)
+    spiked_jpy = list(jpy_bars)
+    spiked_jpy[entry_idx + 1] = Candle(
+        o=jpy_bars[entry_idx + 1].o,
+        h=round(jpy_bars[entry_idx + 1].c * 2, 3),
+        l=jpy_bars[entry_idx + 1].l,
+        c=round(jpy_bars[entry_idx + 1].c * 2, 3),
+        t=jpy_bars[entry_idx + 1].t)
+    result = replay_portfolio({"GBPJPY": gbp_series, "USDJPY": spiked_jpy},
+                              settings, starting_capital=1000)
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "time"
+    vol = trade.volume
+    rate_in = 1.0 / jpy[entry_idx - 1]
+    rate_out = 1.0 / (jpy[entry_idx + 1] * 2)
+    spread = DEFAULT_SPREADS["GBPJPY"]
+    exit_mid = gbp[entry_idx]
+    entry_mid = trade.entry_price - 0.5 * spread
+    gross = (exit_mid - entry_mid) * vol * 100000.0 * rate_out
+    costs = (0.5 * spread * 100000.0 * vol * rate_in + 3.5 * vol
+             + 0.5 * spread * 100000.0 * vol * rate_out + 3.5 * vol)
+    assert trade.pnl_usd == pytest.approx(gross - costs)
+
+
+def test_open_marked_equity_changes_subsequent_sizing():
+    jump_settings = AppSettings(allowed_assets=["EURUSD", "GBPUSD"],
+                                rr_target=30.0, smart_exit_enabled=False,
+                                max_hold_days=0, partial_close_pct=0)
+    closes = [round(1.0800 + 0.0008 * i, 5) for i in range(200)]
+    jump_open = closes[-1] + 0.0008
+    jump = Candle(o=round(jump_open, 5), h=round(jump_open + 0.032, 5),
+                  l=round(jump_open - 0.001, 5), c=round(jump_open + 0.030, 5),
+                  t=_t4_ts(200))
+    top = [round(jump.c + 0.0002 * i, 5) for i in range(1, 6)]
+    flat_eur = [top[-1]] * 30
+    gbp_closes = [round(1.2700 + 0.0008 * i, 5) for i in range(206)]
+    gbp_series = _t4_bars(gbp_closes, first_index=30)
+
+    def run(with_jump: bool):
+        if with_jump:
+            eur = (_t4_bars(closes) + [jump]
+                   + _t4_bars(top, first_index=201)
+                   + _t4_bars(flat_eur, first_index=206))
+        else:
+            eur = _t4_bars(closes) + _t4_bars([closes[-1]] * 36,
+                                              first_index=200)
+        return replay_portfolio({"EURUSD": eur, "GBPUSD": gbp_series},
+                                jump_settings, starting_capital=1000)
+
+    # GBPUSD bars start at day 30: 200-bar window completes at day 229, so
+    # its only entry is day ~230, long after the EURUSD jump profit accrues.
+    calm = run(False)
+    jumped = run(True)
+    calm_gbp = [t for t in calm.trades if t.asset == "GBPUSD"]
+    jumped_gbp = [t for t in jumped.trades if t.asset == "GBPUSD"]
+    assert calm_gbp and jumped_gbp
+    assert jumped_gbp[0].volume > calm_gbp[0].volume
+
+
+def test_underivable_cross_never_gets_accounting_rate():
+    from app.engine.portfolio_replay import (
+        _close_slice, _OpenPosition, _unrealized_total, default_cost_config,
+    )
+    settings = AppSettings()
+    gbp = [round(190.0 + 0.12 * i, 3) for i in range(225)]
+    result = replay_portfolio({"GBPJPY": _t4_bars(gbp, pad=0.05)},
+                              settings, starting_capital=1000)
+    assert result.trades == []
+    pos = _OpenPosition(
+        asset="GBPJPY", direction="BUY", signal_date=_t4_date(199),
+        entry_date=_t4_date(200), entry_mid=214.0, entry_fill=214.015,
+        volume_original=0.10, volume_remaining=0.10,
+        entry_spread_cost=0.0, entry_comm_cost=0.35, entry_rate=1.0,
+        full_spread=DEFAULT_SPREADS["GBPJPY"],
+        initial_sl=213.68, initial_tp=214.48,
+        current_sl=213.68, current_tp=214.48, risk_price=0.335)
+    costs = default_cost_config(settings)
+    with pytest.raises(ValueError):
+        _close_slice(pos, 0.10, 214.0, _t4_date(201), "sl", costs, {})
+    with pytest.raises(ValueError):
+        _unrealized_total([pos], {"GBPJPY": 214.0}, {}, costs)
+
+
+def test_gold_replay_ignores_live_spread(monkeypatch):
+    import app.integrations.quotes as quotes_mod
+    series = {"XAUUSD": _t4_gold_breakout()}
+    settings = AppSettings()
+    calm = replay_portfolio(series, settings, starting_capital=1000)
+    assert calm.trades, "expected gold entries on the breakout trend"
+    monkeypatch.setattr(quotes_mod, "live_spread", lambda asset: 500.0)
+    spiked = replay_portfolio(series, settings, starting_capital=1000)
+    assert spiked.trades == calm.trades
+    assert [p.equity for p in spiked.equity_curve] == [
+        p.equity for p in calm.equity_curve]
+    first = spiked.trades[0]
+    by_date = {
+        datetime.fromtimestamp(c.t, tz=timezone.utc).date(): c
+        for c in series["XAUUSD"]
+    }
+    entry_bar = by_date[first.entry_date]
+    static_half = DEFAULT_SPREADS["XAUUSD"] / 2
+    assert first.entry_price == pytest.approx(
+        entry_bar.o + (static_half if first.direction == "BUY"
+                       else -static_half))

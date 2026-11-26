@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from app.integrations.quotes import Candle, snapshot_from_candles
@@ -298,6 +298,7 @@ def signal_at(
             asset,
             direction,
             apply_cap=False,
+            spread=_static_spread(settings, asset),
         )
     except Exception:
         return None
@@ -425,8 +426,11 @@ def replay_portfolio(
         snap = snap_cache.get(key)
         if snap is None:
             try:
+                hist = histories.get(asset_u, [])
+                window = (hist[-REPLAY_WARMUP:]
+                          if len(hist) > REPLAY_WARMUP else hist)
                 snap = snapshot_from_candles(
-                    asset_u, histories.get(asset_u, []),
+                    asset_u, window,
                     news_sentiment=0.0, high_impact_event=False) or {}
             except Exception:
                 snap = {}
@@ -439,14 +443,23 @@ def replay_portfolio(
         for asset in sorted(row):
             asset_u = str(asset).upper()
             histories.setdefault(asset_u, []).append(row[asset])
-            try:
-                close_px = float(row[asset].c)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(close_px) and close_px > 0:
-                last_mid[asset_u] = close_px
 
         rates_today = _resolve_rates_snapshot(rate_map, day) or {}
+        # Strictly prior-date snapshot (never the current bar): the only rate
+        # source an open-known entry decision may use.
+        prior_rates = _resolve_rates_snapshot(
+            rate_map, day - timedelta(days=1)) or {}
+
+        # Entry marks are open-known: today's bar open where traded, else the
+        # last known mark. Current closes must not influence entries.
+        entry_marks = dict(last_mid)
+        for asset in sorted(row):
+            try:
+                open_px = float(row[asset].o)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(open_px) and open_px > 0:
+                entry_marks[str(asset).upper()] = open_px
 
         # ---- 1. prior-signal entries at this bar's open -------------------
         for asset in sorted(row):
@@ -456,9 +469,14 @@ def replay_portfolio(
                 continue
             if asset_u not in allowed:
                 continue
+            # Current marked equity, recomputed before each same-day entry so
+            # earlier entries' marks affect later ones. Missing post-entry
+            # rates fail the replay instead of booking raw quote PnL.
+            equity_now = (capital + realized + _unrealized_total(
+                opens, entry_marks, prior_rates, costs))
             opened = _try_enter(
                 settings, sig, asset_u, row[asset], day, opens, costs,
-                rate_map, rates_today, realized, capital,
+                prior_rates, equity_now,
                 entries_by_date, entries_by_week, last_close,
             )
             if opened is not None:
@@ -468,10 +486,18 @@ def replay_portfolio(
                 week_key = (int(iso[0]), int(iso[1]))
                 entries_by_week[week_key] = entries_by_week.get(week_key, 0) + 1
 
-        # ---- 2. mark + exits ----------------------------------------------
+        # ---- 2. mark + exits (close-known from here on) ---------------------
+        for asset in sorted(row):
+            asset_u = str(asset).upper()
+            try:
+                close_px = float(row[asset].c)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(close_px) and close_px > 0:
+                last_mid[asset_u] = close_px
         realized_equity = capital + realized
         marked_now = realized_equity + _unrealized_total(
-            opens, last_mid, rate_map, day, costs)
+            opens, last_mid, rates_today, costs)
         drawdown_in = prev_drawdown
         if marked_now > peak:
             drawdown_in = 0.0
@@ -486,14 +512,14 @@ def replay_portfolio(
                 continue
             bar = row[asset_u]
             outcome = _process_bar(
-                settings, pos, bar, day, costs, rate_map, rates_today,
+                settings, pos, bar, day, costs, prior_rates, rates_today,
                 discretionary, smart_on, avg_hold, drawdown_in,
                 snapshot_for, evaluate_exit,
             )
             if outcome is None:
                 if day == last_date_of.get(asset_u):
                     fs = _close_slice(pos, pos.volume_remaining, float(bar.c),
-                                      day, "end_of_data", costs, rate_map)
+                                      day, "end_of_data", costs, rates_today)
                     if fs is not None:
                         trade, d_real, d_gross, d_cost = fs
                         slices.append((trade.exit_date, trade.entry_date,
@@ -523,7 +549,7 @@ def replay_portfolio(
             # SL/TP check above already ran against the pre-management stop.
             if day == last_date_of.get(asset_u) and not closed_all:
                 fs = _close_slice(pos, pos.volume_remaining, float(bar.c),
-                                  day, "end_of_data", costs, rate_map)
+                                  day, "end_of_data", costs, rates_today)
                 if fs is not None:
                     trade, d_real, d_gross, d_cost = fs
                     slices.append((trade.exit_date, trade.entry_date,
@@ -553,7 +579,7 @@ def replay_portfolio(
 
         # ---- 4. daily equity point -----------------------------------------
         realized_pnl = realized
-        unrealized = _unrealized_total(opens, last_mid, rate_map, day, costs)
+        unrealized = _unrealized_total(opens, last_mid, rates_today, costs)
         equity = capital + realized_pnl + unrealized
         if equity > peak:
             peak = equity
@@ -911,20 +937,20 @@ def _full_spread_of(costs: CostConfig, asset_u: str) -> float:
         return 0.0
 
 
-def _quote_rate_or_unit(asset_u: str, price: float, snapshot: dict | None) -> float:
-    """Quote-currency → USD rate, failing safe to 1.0 for replay accounting.
+def _required_rate(asset_u: str, price: float, snapshot: dict | None) -> float:
+    """Quote-currency → USD rate, failing the replay when underivable.
 
-    Production fails closed (None) when a cross leg is underivable; replay
-    positions that far can only exist when sizing already converted them, so
-    the residual accounting risk is a missed leg here — 1.0 keeps the ledger
-    additive while every convertible asset still uses its exact rate.
+    Never substitutes ``1.0`` for an underivable cross: entry fails closed on
+    a missing open-known rate, and an unexpected missing rate after entry
+    raises instead of silently booking raw quote-currency PnL. A quote that
+    IS USD still resolves to exactly ``1.0`` through production math.
     """
     try:
         rate = quote_usd_rate(asset_u, price, snapshot)
-    except Exception:
-        rate = None
+    except Exception as exc:
+        raise ValueError(f"replay: quote-USD rate failed for {asset_u}: {exc}")
     if rate is None or not math.isfinite(rate) or rate <= 0:
-        return 1.0
+        raise ValueError(f"replay: no quote-USD rate for {asset_u}")
     return rate
 
 
@@ -936,20 +962,20 @@ def _try_enter(
     day: date,
     opens: list[_OpenPosition],
     costs: CostConfig,
-    rate_map: dict,
-    rates_today: dict,
-    realized: float,
-    capital: float,
+    prior_rates: dict,
+    equity_now: float,
     entries_by_date: dict[date, int],
     entries_by_week: dict[tuple[int, int], int],
     last_close: dict[str, date],
 ) -> _OpenPosition | None:
     """Next-open execution attempt for one pending signal.
 
-    Returns the opened position, or None when any gate blocks (the signal is
-    then discarded — sub-day TTL is not modeled). Gate order: duplicate asset
-    → max open → daily/weekly counts → cooldown → SL/TP cap + sizing →
-    correlation → currency exposure → spread guard.
+    Every decision input is open-known: the bar open for marks and levels,
+    the latest prior-date rate snapshot for conversion/sizing/exposure, and
+    current marked equity (starting capital + realized PnL + open marked
+    PnL). The entry fails closed when the open-known rate is unavailable.
+    Gate order: duplicate asset → max open → daily/weekly counts → cooldown
+    → SL/TP cap + sizing → correlation → currency exposure → spread guard.
     """
     direction = str(getattr(signal, "direction", "") or "").upper()
     if direction not in ("BUY", "SELL"):
@@ -993,8 +1019,9 @@ def _try_enter(
     if not math.isfinite(next_open) or next_open <= 0:
         return None
 
-    # Simulated equity for this run (realized only — marks are not spendable).
-    equity = capital + realized
+    # Simulated equity for this run is supplied by the caller (current
+    # marked equity, recomputed before each same-day entry).
+    equity = equity_now
     if not math.isfinite(equity) or equity <= 0:
         return None
     try:
@@ -1009,7 +1036,8 @@ def _try_enter(
     try:
         sl2, tp2, _dist, _tier, _capped = effective_sl_tp(
             scoped, next_open, sig_sl, sig_tp, asset_u, direction,
-            apply_cap=True, rates=rates_today)
+            apply_cap=True, rates=prior_rates,
+            spread=_full_spread_of(costs, asset_u))
     except Exception:
         return None
     if not sl2 or not tp2:
@@ -1029,7 +1057,7 @@ def _try_enter(
         confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
         snapshot=dict(getattr(signal, "snapshot", None) or {}),
     )
-    lots = size_for_replay(settings, adjusted, equity, rate_map, day)
+    lots = size_for_replay(settings, adjusted, equity, prior_rates, day)
     if not math.isfinite(lots) or lots <= 0:
         return None
 
@@ -1071,7 +1099,7 @@ def _try_enter(
                          "volume": lots, "entry_price": fill,
                          "stop_loss": sl2})
             res = ExposureEngine.currency_risk(
-                legs, capital, exp_cap, rates=rates_today)
+                legs, equity, exp_cap, rates=prior_rates)
             if res.get("over_cap"):
                 return None
         except Exception:
@@ -1093,9 +1121,10 @@ def _try_enter(
 
     contract = contract_value_for(asset_u)
     try:
-        rate_entry = _quote_rate_or_unit(asset_u, next_open, rates_today)
-    except Exception:
-        rate_entry = 1.0
+        rate_entry = _required_rate(asset_u, next_open, prior_rates)
+    except ValueError:
+        # Open-known rate unavailable: fail closed, no position.
+        return None
     entry_spread_cost = 0.5 * spread * contract * lots * rate_entry
     risk_price = abs(fill - sl2)
     return _OpenPosition(
@@ -1117,15 +1146,17 @@ def _close_slice(
     day: date,
     reason: str,
     costs: CostConfig,
-    rate_map: dict,
+    rates: dict,
     ambiguous: bool = False,
 ) -> tuple[ReplayTrade, float, float, float] | None:
     """Close one slice of ``pos`` at ``exit_mid`` (mid-scale).
 
     Returns (trade, delta_realized_net, delta_gross, delta_costs). Gross PnL
-    is mid-to-mid converted at the exit-date rate; entry spread converts at
-    the entry-date rate; commissions are already USD. R divides the slice net
-    by the original fill-to-initial-stop USD risk scaled to the slice.
+    is mid-to-mid converted at the caller-supplied rate snapshot (prior-date
+    for intrabar exits, close-date for bar-close exits); entry spread converts
+    at the entry-date rate; commissions are already USD. R divides the slice
+    net by the original fill-to-initial-stop USD risk scaled to the slice.
+    A missing quote rate raises instead of booking raw quote-currency PnL.
     """
     try:
         vol = float(slice_vol)
@@ -1142,8 +1173,7 @@ def _close_slice(
         return None
     sign = 1 if pos.direction == "BUY" else -1
     contract = contract_value_for(pos.asset)
-    rates_exit = _resolve_rates_snapshot(rate_map, day) or {}
-    rate_exit = _quote_rate_or_unit(pos.asset, mid, rates_exit)
+    rate_exit = _required_rate(pos.asset, mid, rates)
 
     gross = sign * (mid - pos.entry_mid) * vol * contract * rate_exit
     frac = vol / pos.volume_original
@@ -1214,8 +1244,8 @@ def _process_bar(
     bar: Candle,
     day: date,
     costs: CostConfig,
-    rate_map: dict,
-    rates_today: dict,
+    prior_rates: dict,
+    close_rates: dict,
     discretionary: bool,
     smart_on: bool,
     avg_hold: float,
@@ -1229,6 +1259,8 @@ def _process_bar(
     delta_net, delta_gross, delta_costs). Sequencing mirrors position_guard:
     hard SL/TP (pre-management, stop-first) → partial close → breakeven /
     trailing (+ ``smart_exit.ladder_sl``) → smart exit → time stop.
+    Intrabar exits (hard, partial) convert at the prior-date open-known
+    snapshot; bar-close exits (smart, time, end-of-data) at the close snapshot.
     """
     try:
         o, h, l, c = float(bar.o), float(bar.h), float(bar.l), float(bar.c)
@@ -1259,7 +1291,7 @@ def _process_bar(
         # gapped): stop-first is mandatory and the bar counts as ambiguous.
         fill_mid = o if sl_gap else sl
         done = _close_slice(pos, pos.volume_remaining, fill_mid, day, "sl",
-                            costs, rate_map, ambiguous=True)
+                            costs, prior_rates, ambiguous=True)
         if done is None:
             return None
         trade, d_net, d_gross, d_cost = done
@@ -1267,7 +1299,7 @@ def _process_bar(
     if sl_touch:
         fill_mid = o if sl_gap else sl
         done = _close_slice(pos, pos.volume_remaining, fill_mid, day, "sl",
-                            costs, rate_map)
+                            costs, prior_rates)
         if done is None:
             return None
         trade, d_net, d_gross, d_cost = done
@@ -1275,7 +1307,7 @@ def _process_bar(
     if tp_touch:
         fill_mid = o if tp_gap else tp
         done = _close_slice(pos, pos.volume_remaining, fill_mid, day, "tp",
-                            costs, rate_map)
+                            costs, prior_rates)
         if done is None:
             return None
         trade, d_net, d_gross, d_cost = done
@@ -1311,13 +1343,13 @@ def _process_bar(
             slice_vol = round(pos.volume_remaining * partial_pct / 100.0, 2)
             if slice_vol >= pos.volume_remaining and pos.volume_remaining > 0:
                 done = _close_slice(pos, pos.volume_remaining, exit_mid, day,
-                                    "tp", costs, rate_map)
+                                    "tp", costs, prior_rates)
                 if done is not None:
                     trade, n, g, co = done
                     return [trade], True, n, g, co
             elif slice_vol > 0:
                 done = _close_slice(pos, slice_vol, exit_mid, day, "partial",
-                                    costs, rate_map)
+                                    costs, prior_rates)
                 if done is not None:
                     trade, n, g, co = done
                     out.append(trade)
@@ -1409,7 +1441,7 @@ def _process_bar(
                 reason = f"smart_exit:{trigger}" if trigger else "smart_exit"
                 if rec == "CLOSE":
                     done = _close_slice(pos, pos.volume_remaining, c, day,
-                                        reason, costs, rate_map)
+                                        reason, costs, close_rates)
                     if done is not None:
                         trade, n, g, co = done
                         out.append(trade)
@@ -1421,7 +1453,7 @@ def _process_bar(
                         if (slice_vol >= pos.volume_remaining
                                 and pos.volume_remaining > 0):
                             done = _close_slice(pos, pos.volume_remaining, c,
-                                                day, reason, costs, rate_map)
+                                                day, reason, costs, close_rates)
                             if done is not None:
                                 trade, n, g, co = done
                                 out.append(trade)
@@ -1429,7 +1461,7 @@ def _process_bar(
                                         d_gross + g, d_cost + co)
                         elif slice_vol > 0:
                             done = _close_slice(pos, slice_vol, c, day, reason,
-                                                costs, rate_map)
+                                                costs, close_rates)
                             if done is not None:
                                 trade, n, g, co = done
                                 out.append(trade)
@@ -1464,7 +1496,7 @@ def _process_bar(
                 pass  # deferred — the trailed stop already locks profit
             elif ts_min_r <= 0 or r_now < ts_min_r:
                 done = _close_slice(pos, pos.volume_remaining, c, day, "time",
-                                    costs, rate_map)
+                                    costs, close_rates)
                 if done is not None:
                     trade, n, g, co = done
                     out.append(trade)
@@ -1476,12 +1508,14 @@ def _process_bar(
 
 def _unrealized_total(
     opens: list[_OpenPosition],
-    last_mid: dict[str, float],
-    rate_map: dict,
-    day: date,
+    marks: dict[str, float],
+    rates: dict,
     costs: CostConfig,
 ) -> float:
-    """Marked net PnL of open positions (mid PnL minus accrued costs)."""
+    """Marked net PnL of open positions (mid PnL minus accrued costs).
+
+    Raises on a missing quote rate instead of booking raw quote-currency PnL.
+    """
     try:
         exit_mult = float(costs.exit_spread_mult)
     except (TypeError, ValueError, AttributeError):
@@ -1494,19 +1528,19 @@ def _unrealized_total(
         commission = 0.0
     if not math.isfinite(commission) or commission < 0:
         commission = 0.0
-    snapshot = _resolve_rates_snapshot(rate_map, day) or {}
+    snapshot = rates if isinstance(rates, dict) else {}
     total = 0.0
     for pos in opens:
         if pos.volume_remaining <= 0:
             continue
-        mid = last_mid.get(pos.asset, pos.entry_mid)
+        mid = marks.get(pos.asset, pos.entry_mid)
         try:
             mid = float(mid)
         except (TypeError, ValueError):
             mid = pos.entry_mid
         if not math.isfinite(mid) or mid <= 0:
             mid = pos.entry_mid
-        rate = _quote_rate_or_unit(pos.asset, mid, snapshot)
+        rate = _required_rate(pos.asset, mid, snapshot)
         contract = contract_value_for(pos.asset)
         sign = 1 if pos.direction == "BUY" else -1
         rem = pos.volume_remaining
