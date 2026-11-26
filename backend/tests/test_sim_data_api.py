@@ -1218,3 +1218,124 @@ class TestLoadDatasetDedupe:
         candles = ds["AUDNZD"]
         assert len(candles) == 14
         assert [c.t for c in candles] == sorted(c.t for c in candles)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: deterministic per-asset dataset reads (prod incident 2026-11-27,
+# part 2 — identical configs replayed different bars because the global
+# date-ordered offset-paged read walks ~28 assets sharing each date: offset
+# pages over those heavy sort-key ties can return a row twice or skip it).
+# load_dataset must read per asset (bar_date is UNIQUE within one asset by
+# PK), never via a global date-ordered multi-asset page walk.
+# ---------------------------------------------------------------------------
+class _TieSkewFake(FakeDatabase):
+    """Models the incident: the GLOBAL date-ordered page walk is
+    tie-unstable (dupes one boundary row, skips another), while a
+    PER-ASSET read (unique bar_date order) is exact.
+
+    select_paged calls are recorded so tests can prove load_dataset never
+    issues a global (asset-less) bars read.
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.paged_calls: list[dict] = []
+
+    def select_paged(self, table, filters=None, order="created_at",
+                     desc=False, page_size=1000, max_rows=20000):
+        self.paged_calls.append(dict(filters or {}))
+        rows = [r for r in self.rows.get(table, [])
+                if all(r.get(c) == v for c, v in (filters or {}).items())]
+        if (table == sim_market_data.BARS_TABLE
+                and not (filters or {}).get("asset")
+                and len(rows) >= 2):
+            rows = [rows[0]] + rows  # dupe the first row ...
+            del rows[2]  # ... and skip the real second row
+        return rows
+
+
+def _seed_tie_version(db, version, assets, dates):
+    db.insert(sim_market_data.META_TABLE, {
+        "dataset_version": version,
+        "status": "complete",
+        "years": 5,
+        "assets": list(assets),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "report": {"stage": "done", "complete": True, "version": version},
+        "data_hash": "tie",
+        "code_version": sim_market_data.CODE_VERSION,
+    })
+    for asset in assets:
+        for i, day in enumerate(dates):
+            db.insert(sim_market_data.BARS_TABLE, {
+                "dataset_version": version,
+                "asset": asset,
+                "bar_date": day,
+                "open": 1.0 + i * 0.001,
+                "high": 1.1 + i * 0.001,
+                "low": 0.9 + i * 0.001,
+                "close": 1.05 + i * 0.001,
+                "source": "biquote",
+                "source_timestamp": None,
+            })
+
+
+class TestLoadDatasetPerAssetDeterministic:
+    _ASSETS = ["EURUSD", "GBPUSD", "AUDNZD"]
+    _DATES = [f"2022-03-{d:02d}" for d in range(1, 11)]
+
+    def test_global_tie_skew_cannot_corrupt_load(self, caplog):
+        """The old failure mode, simulated: the fake's GLOBAL page walk
+        dupes/skips rows, yet load_dataset returns exactly one Candle per
+        (asset, date) in sorted order with zero dedupe warnings."""
+        import logging as _logging
+        db = _TieSkewFake()
+        _seed_tie_version(db, "v-tie", self._ASSETS, self._DATES)
+        # Sanity: the fake really models the incident on the global path
+        # (same row count, but one pair duped and another pair missing).
+        skewed = db.select_paged(
+            sim_market_data.BARS_TABLE,
+            filters={"dataset_version": "v-tie"}, order="bar_date")
+        assert len({(r["asset"], r["bar_date"]) for r in skewed}) == (
+            len(self._ASSETS) * len(self._DATES) - 1)
+        db.paged_calls.clear()
+        with caplog.at_level(_logging.WARNING,
+                             logger="app.services.sim_market_data"):
+            ds = sim_market_data.load_dataset(db, "v-tie")
+        assert set(ds) == set(self._ASSETS)
+        for asset in self._ASSETS:
+            assert len(ds[asset]) == len(self._DATES)
+            assert [c.t for c in ds[asset]] == sorted(c.t for c in ds[asset])
+        assert not [r for r in caplog.records
+                    if r.levelno >= _logging.WARNING
+                    and r.name == "app.services.sim_market_data"], \
+            "clean per-asset reads must leave the Task 4 dedupe a no-op"
+        # No global bars read: every round-trip is scoped to one asset.
+        assert db.paged_calls, "expected per-asset DB round-trips"
+        assert all("asset" in call for call in db.paged_calls)
+        assert len(db.paged_calls) <= len(self._ASSETS) + 1
+
+    def test_explicit_assets_subset_reads_only_requested(self):
+        db = _TieSkewFake()
+        _seed_tie_version(db, "v-tie-sub", self._ASSETS, self._DATES)
+        ds = sim_market_data.load_dataset(db, "v-tie-sub", ["GBPUSD"])
+        assert set(ds) == {"GBPUSD"}
+        assert len(ds["GBPUSD"]) == len(self._DATES)
+        assert db.paged_calls == [
+            {"dataset_version": "v-tie-sub", "asset": "GBPUSD"}]
+
+    def test_discovery_without_meta_assets_still_exact(self):
+        """Meta rows predating the assets column: the set is learned from
+        the bars table (distinct-asset read, whole-version read only to
+        learn the set) — bars still come from per-asset reads."""
+        db = _TieSkewFake()
+        _seed_tie_version(db, "v-tie-nometa", self._ASSETS, self._DATES)
+        for row in db.rows[sim_market_data.META_TABLE]:
+            if row.get("dataset_version") == "v-tie-nometa":
+                row.pop("assets", None)
+        ds = sim_market_data.load_dataset(db, "v-tie-nometa")
+        assert set(ds) == set(self._ASSETS)
+        for asset in self._ASSETS:
+            assert len(ds[asset]) == len(self._DATES)
+        assert all("asset" in call for call in db.paged_calls)
