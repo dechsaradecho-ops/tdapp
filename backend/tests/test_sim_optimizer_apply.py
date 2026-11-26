@@ -360,3 +360,85 @@ class TestApplySuccess:
         assert second["ok"] is False
         assert "baseline" in second["error"]
         assert len(fake_db.settings_upserts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed pins (review round 1): corrupt/unreadable inputs refuse with
+# zero trading_settings writes AND zero audit rows for the run.
+# ---------------------------------------------------------------------------
+class BrokenReadClient(ApplySettingsClient):
+    """Supabase client whose reads fail — try_load_settings returns None."""
+
+    def execute(self) -> SimpleNamespace:
+        raise RuntimeError("connection reset by peer")
+
+
+class FailingUpsertClient(ApplySettingsClient):
+    """Supabase client whose writes fail with a non-PGRST204 error."""
+
+    def upsert(self, row: dict) -> "FailingUpsertClient":
+        raise RuntimeError("boom: upsert failed")
+
+
+class UnavailableDb(ApplyFakeDatabase):
+    """DB that reports unavailable — route and service must refuse."""
+
+    @property
+    def available(self) -> bool:
+        return False
+
+
+class TestFailClosedPins:
+    def _zero_writes(self, fake_db: ApplyFakeDatabase) -> None:
+        assert fake_db.saved_settings == {}
+        assert fake_db.settings_upserts == []
+        assert _audit_rows(fake_db) == []
+
+    async def test_corrupt_stored_baseline_refused(self, fake_db):
+        baseline, _ = _seed_run(fake_db)
+        row = fake_db.rows[sim_optimizer.RUNS_TABLE][0]
+        row["baseline_settings"] = {"min_confidence": "not-a-number"}
+        fake_db._client = ApplySettingsClient(fake_db, _live_row(baseline))
+        res = await call("POST", "/api/system/optimize/run-1/apply",
+                         {"confirm": True})
+        assert res["ok"] is False
+        self._zero_writes(fake_db)
+
+    async def test_unreadable_recommendation_config_refused(self, fake_db):
+        baseline, _ = _seed_run(fake_db)
+        row = fake_db.rows[sim_optimizer.RUNS_TABLE][0]
+        rec = dict(row["result"]["recommendation"])
+        rec["config"] = {"rr_target": "not-a-number"}
+        row["result"]["recommendation"] = rec
+        fake_db._client = ApplySettingsClient(fake_db, _live_row(baseline))
+        res = await call("POST", "/api/system/optimize/run-1/apply",
+                         {"confirm": True})
+        assert res["ok"] is False
+        self._zero_writes(fake_db)
+
+    async def test_unreadable_live_settings_refused(self, fake_db):
+        _seed_run(fake_db)
+        fake_db._client = BrokenReadClient(fake_db, None)
+        res = await call("POST", "/api/system/optimize/run-1/apply",
+                         {"confirm": True})
+        assert res["ok"] is False
+        self._zero_writes(fake_db)
+
+    async def test_failed_settings_write_refused(self, fake_db):
+        baseline, best = _seed_run(fake_db)
+        assert best != baseline  # non-empty diff, so the write is attempted
+        fake_db._client = FailingUpsertClient(
+            fake_db, _live_row(baseline))
+        res = await call("POST", "/api/system/optimize/run-1/apply",
+                         {"confirm": True})
+        assert res["ok"] is False
+        self._zero_writes(fake_db)
+
+    async def test_db_unavailable_refused(self):
+        db = UnavailableDb(_live_row(AppSettings()))
+        set_state(db)
+        res = await call("POST", "/api/system/optimize/run-1/apply",
+                         {"confirm": True})
+        assert res["ok"] is False
+        assert db.saved_settings == {}
+        assert db.settings_upserts == []
