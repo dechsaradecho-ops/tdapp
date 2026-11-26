@@ -58,9 +58,6 @@ import {
   SessionStatus,
   SettingsChangesResponse,
   SettingsSaveResult,
-  SimEventsResponse,
-  SimRunResponse,
-  SimRunsResponse,
   SignalLogsResponse,
   SignalReport,
   SimDataStatusResponse,
@@ -349,32 +346,6 @@ export const api = {
       `/api/system/settings-changes?limit=${limit}&offset=${offset}`
     ),
 
-  // ---------- Barrier simulation (migration 057 — Logs > จำลอง) ----------
-  // POST เริ่มงานแล้วคืน run_id ทันที (รันเบื้องหลัง ~บน thread เดียว)
-  // GET  รายการงาน + ไหนกำลังรันอยู่
-  // GET  สถานะ/ผลของงานหนึ่ง (ตั้ง progress bar)
-  // GET  event หลัง seq ที่ (สตรีมเข้า-ออก/TP/SL/PnL สด)
-  // กริด/เกณฑ์รอบหน้าส่งมาตรงนี้ได้เลย — ค่าเหล่านี้อยู่เฉพาะในงานจำลอง
-  // ไม่แตะ setting เทรดจริง
-  simStart: (input?: {
-    target_events?: number; cooldown?: number; days?: number; assets?: string[];
-    sl_multiples?: number[]; tp_rs?: number[]; max_bars?: number[];
-    gate_opps?: number[]; gate_confs?: number[];
-    optimizer?: { enabled: boolean; max_rounds: number };
-  }) =>
-    post<{ ok: boolean; run_id?: string; error?: string; config?: unknown }>(
-      "/api/system/simulate", input ?? {}),
-  simRuns: (limit = 20) =>
-    get<SimRunsResponse>(`/api/system/simulate?limit=${limit}`),
-  simRun: (id: string) =>
-    get<SimRunResponse>(`/api/system/simulate/${encodeURIComponent(id)}`),
-  simEvents: (id: string, after = 0, limit = 500) =>
-    get<SimEventsResponse>(
-      `/api/system/simulate/${encodeURIComponent(id)}/events?after=${after}&limit=${limit}`),
-  simCancel: (id: string) =>
-    post<{ ok: boolean; message?: string; error?: string }>(
-      `/api/system/simulate/${encodeURIComponent(id)}/cancel`, {}),
-
   // ---------- Sandbox optimizer (sim_opt_* — Logs > Optimize tab) ---------
   // Thin typed wrappers over /api/system/optimize/* — existing simulation
   // API methods above are unchanged.
@@ -421,27 +392,6 @@ export const api = {
   simDataStatus: (version: string) =>
     get<SimDataStatusResponse>(
       `/api/system/sim-data/${encodeURIComponent(version)}`),
-
-  // ---------- CSV export: same rows the tab streams, as a file ----------
-  // Blob via the authed client (a plain <a href> would carry no token).
-  simExport: async (id: string): Promise<Blob> => {
-    const res = await fetch(
-      `${API_BASE}/api/system/simulate/${encodeURIComponent(id)}/export`,
-      { cache: "no-store", headers: headers() });
-    if (!res.ok) handle401(res, "simulate/export");
-    return res.blob();
-  },
-
-  // ---------- Price history CSV: the daily candles the replay runs on -----
-  // Not stored in the DB (fetched fresh from Yahoo per run), so this pulls
-  // the same feed and streams it. (asset, bar_index) joins to the events file.
-  simHistoryExport: async (days = 1095): Promise<Blob> => {
-    const res = await fetch(
-      `${API_BASE}/api/system/simulate-history/export?days=${days}`,
-      { cache: "no-store", headers: headers() });
-    if (!res.ok) handle401(res, "simulate-history/export");
-    return res.blob();
-  },
 
   // ---------- LINE: notification targets + test button ----------
   lineTargets: () => get<LineTargetsResponse>("/api/line/targets"),
