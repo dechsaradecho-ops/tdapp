@@ -5,17 +5,27 @@ from datetime import date, datetime, timezone
 import pytest
 
 from app.engine.portfolio_replay import (
+    CostConfig,
     EquityPoint,
     ReplayMetrics,
     ReplayResult,
     ReplaySignal,
     ReplayTrade,
+    build_rate_map,
     build_timeline,
+    default_cost_config,
+    entry_fill,
     replay_portfolio,
     signal_at,
+    size_for_replay,
 )
 from app.integrations.quotes import Candle
-from app.models.schemas import AppSettings
+from app.models.schemas import (
+    AppSettings,
+    DEFAULT_SPREADS,
+    effective_spread,
+    risk_usd_of_distance,
+)
 
 
 def _candle(day: int, close: float = 100.0) -> Candle:
@@ -231,3 +241,229 @@ def test_signal_snapshot_is_deterministic_plain_data():
     for value in sig.snapshot.values():
         assert isinstance(value, (str, int, float, bool)) or value is None
     assert signal_at("EURUSD", history, settings, day) == sig
+
+
+# ---------------------------------------------------------------------------
+# Task 3: sizing, conversion, entry, and costs (TDD — RED before they exist)
+# ---------------------------------------------------------------------------
+
+def _replay_signal(
+    asset: str = "GBPJPY",
+    entry: float = 200.0,
+    stop_loss: float = 201.5,
+    day: date = date(2026, 1, 5),
+    direction: str = "SELL",
+) -> ReplaySignal:
+    return ReplaySignal(
+        asset=asset,
+        date=day,
+        direction=direction,
+        entry=entry,
+        stop_loss=stop_loss,
+        take_profit=entry,
+        opportunity=0.0,
+        confidence=0.0,
+        snapshot={},
+    )
+
+
+def test_gbpjpy_risk_and_pnl_are_usd():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal("GBPJPY", entry=200.0, stop_loss=201.5)
+    lots = size_for_replay(
+        settings, signal, equity=1000, rates={"USDJPY": 160.0},
+        date=date(2026, 1, 5),
+    )
+    assert lots > 0
+    assert risk_usd_of_distance(
+        1.5, lots, "GBPJPY", 200.0, rates={"USDJPY": 160.0}
+    ) <= 10.01
+
+
+def test_entry_uses_next_open_and_deducts_cost_once():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    costs = default_cost_config(settings)
+    signal = _replay_signal("GBPJPY", entry=200.0, stop_loss=201.5)
+    lots = size_for_replay(
+        settings, signal, equity=1000, rates={"USDJPY": 160.0},
+        date=date(2026, 1, 5),
+    )
+    assert lots > 0
+    spread = costs.spreads["GBPJPY"]
+    commission = costs.commission_per_lot_per_side
+    fill, cost = entry_fill(
+        signal, next_bar_open=201.0, direction="BUY", costs=costs, volume=lots
+    )
+    assert fill == pytest.approx(201.0 + spread / 2)
+    assert cost == pytest.approx(commission * lots)
+
+
+def test_sizing_direct_usd_quote_needs_no_rates():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    lots = size_for_replay(
+        settings, signal, equity=1000, rates={}, date=date(2026, 1, 5)
+    )
+    assert lots == pytest.approx(0.01)
+    assert risk_usd_of_distance(0.01, lots, "EURUSD", 1.10, rates={}) <= 10.01
+
+
+def test_sizing_usd_base_uses_inverse_conversion():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal(
+        "USDJPY", entry=160.0, stop_loss=158.5, direction="SELL"
+    )
+    lots = size_for_replay(
+        settings, signal, equity=1000, rates={}, date=date(2026, 1, 5)
+    )
+    assert lots == pytest.approx(0.01)
+    # Without the 1/price conversion the raw quote figure would read ~1500.
+    assert risk_usd_of_distance(
+        1.5, lots, "USDJPY", 160.0, rates={}
+    ) <= 10.01
+
+
+def test_sizing_cross_without_usd_leg_fails_closed():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal("GBPJPY", entry=200.0, stop_loss=201.5)
+    assert size_for_replay(
+        settings, signal, equity=1000, rates={}, date=date(2026, 1, 5)
+    ) == 0.0
+
+
+def test_sizing_never_selects_a_future_rate():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal("GBPJPY", entry=200.0, stop_loss=201.5)
+    by_date = {date(2026, 1, 10): {"USDJPY": 160.0}}
+    # Querying before any known rate: the cross cannot convert → 0.0,
+    # even though a future snapshot could price it.
+    assert size_for_replay(
+        settings, signal, equity=1000, rates=by_date, date=date(2026, 1, 5)
+    ) == 0.0
+    # Exact date and carry-forward from the latest prior date both resolve.
+    assert size_for_replay(
+        settings, signal, equity=1000, rates=by_date, date=date(2026, 1, 10)
+    ) > 0
+    assert size_for_replay(
+        settings, signal, equity=1000, rates=by_date, date=date(2026, 1, 20)
+    ) > 0
+
+
+def test_sizing_min_lot_breach_returns_zero():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0000)
+    assert size_for_replay(
+        settings, signal, equity=1000, rates={}, date=date(2026, 1, 5)
+    ) == 0.0
+
+
+def test_sizing_uses_simulated_equity_not_settings_capital():
+    rich = AppSettings(capital=1_000_000, risk_per_trade_pct=1)
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    lots = size_for_replay(
+        rich, signal, equity=1000, rates={}, date=date(2026, 1, 5)
+    )
+    assert lots == pytest.approx(0.01)
+
+
+def test_sizing_rejects_invalid_inputs():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    good = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    assert size_for_replay(
+        settings, good, equity=0, rates={}, date=date(2026, 1, 5)
+    ) == 0.0
+    assert size_for_replay(
+        settings, good, equity=float("nan"), rates={}, date=date(2026, 1, 5)
+    ) == 0.0
+    zero_dist = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.1000)
+    assert size_for_replay(
+        settings, zero_dist, equity=1000, rates={}, date=date(2026, 1, 5)
+    ) == 0.0
+
+
+def test_sell_entry_fills_below_next_open_and_charges_once():
+    costs = CostConfig(
+        spreads={"EURUSD": 0.0002},
+        commission_per_lot_per_side=3.5,
+        exit_spread_mult=0.5,
+    )
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    fill, cost = entry_fill(
+        signal, next_bar_open=1.1000, direction="SELL", costs=costs, volume=0.01
+    )
+    assert fill == pytest.approx(1.1000 - 0.0001)
+    assert cost == pytest.approx(3.5 * 0.01)
+
+
+def test_entry_fill_rejects_bad_inputs():
+    costs = default_cost_config(AppSettings())
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    with pytest.raises(ValueError):
+        entry_fill(signal, next_bar_open=1.1, direction="HOLD",
+                   costs=costs, volume=0.01)
+    with pytest.raises(ValueError):
+        entry_fill(signal, next_bar_open=1.1, direction="BUY",
+                   costs=costs, volume=-0.01)
+    with pytest.raises(ValueError):
+        entry_fill(signal, next_bar_open=float("nan"), direction="BUY",
+                   costs=costs, volume=0.01)
+
+
+def test_entry_fill_never_uses_signal_close_as_fill():
+    costs = CostConfig(
+        spreads={"EURUSD": 0.0002},
+        commission_per_lot_per_side=3.5,
+        exit_spread_mult=0.5,
+    )
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    fill, _ = entry_fill(
+        signal, next_bar_open=1.1050, direction="BUY", costs=costs, volume=0.01
+    )
+    assert fill == pytest.approx(1.1050 + 0.0001)
+    assert fill != pytest.approx(1.1000 + 0.0001)
+
+
+def test_static_spread_honors_overrides_then_defaults():
+    settings = default_cost_config(
+        AppSettings(spread_overrides={"EURUSD": 0.0002})
+    )
+    assert settings.spreads["EURUSD"] == pytest.approx(0.0002)
+    assert settings.spreads["GBPJPY"] == pytest.approx(DEFAULT_SPREADS["GBPJPY"])
+    assert settings.commission_per_lot_per_side == pytest.approx(3.5)
+    assert settings.exit_spread_mult == pytest.approx(0.5)
+
+
+def test_static_spread_matches_production_without_live_gold():
+    settings = AppSettings()
+    costs = default_cost_config(settings)
+    for asset in ("EURUSD", "GBPJPY", "USDJPY", "XAUUSD"):
+        assert costs.spreads[asset] == pytest.approx(
+            effective_spread(settings, asset)
+        )
+
+
+def test_default_cost_config_keeps_explicit_zero_commission():
+    costs = default_cost_config(AppSettings(paper_commission_per_lot=0))
+    assert costs.commission_per_lot_per_side == 0.0
+
+
+def test_build_rate_map_carries_forward_without_future_leakage():
+    d1, d2, d3 = date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)
+    eurusd = [_candle(1, close=1.10), _candle(3, close=1.12)]
+    usdjpy = [_candle(2, close=160.0), _candle(3, close=161.0)]
+    rate_map = build_rate_map({"EURUSD": eurusd, "USDJPY": usdjpy})
+    assert rate_map[d1] == {"EURUSD": pytest.approx(1.10)}
+    assert rate_map[d2] == {
+        "EURUSD": pytest.approx(1.10),
+        "USDJPY": pytest.approx(160.0),
+    }
+    assert rate_map[d3]["EURUSD"] == pytest.approx(1.12)
+    assert rate_map[d3]["USDJPY"] == pytest.approx(161.0)
+
+
+def test_build_rate_map_omits_bad_closes():
+    bad = Candle(o=1.0, h=1.0, l=1.0, c=float("nan"),
+                 t=int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()))
+    rate_map = build_rate_map({"EURUSD": [bad, _candle(2, close=1.10)]})
+    assert rate_map[date(2026, 1, 1)] == {}
+    assert rate_map[date(2026, 1, 2)] == {"EURUSD": pytest.approx(1.10)}

@@ -7,14 +7,26 @@ skeleton without changing these model field names.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from app.integrations.quotes import Candle, snapshot_from_candles
-from app.models.schemas import AppSettings
+from app.models.schemas import (
+    DEFAULT_SPREADS,
+    G,
+    AppSettings,
+    quote_usd_rate,
+    usd_per_quote_unit,
+)
 
 NEWS_WARNING = "News-optimistic: historical news replay is unavailable."
+
+#: Module-level alias for the ``datetime.date`` class: ``size_for_replay``
+#: names a parameter ``date``, which shadows the imported class inside that
+#: function body, so date-indexed rate lookups use this alias instead.
+_DATE = date
 
 #: Closed bars of history the indicators need before a snapshot is
 #: meaningful — mirrors ``strategy_replay.DEFAULT_WARMUP`` (EMA50/EMA100
@@ -316,7 +328,7 @@ def replay_portfolio(
     settings: AppSettings,
     *,
     starting_capital: float = 1000.0,
-    cost_config: Any | None = None,
+    cost_config: CostConfig | None = None,
     warnings: list[str] | None = None,
 ) -> ReplayResult:
     """Minimal flat skeleton (Task 1): no signals or exits yet.
@@ -351,3 +363,253 @@ def replay_portfolio(
     return ReplayResult(
         trades=[], equity_curve=curve, metrics=ReplayMetrics(), warnings=merged
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3: sizing, conversion, entry, and costs
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CostConfig:
+    """Static replay cost table (offline mirror of production paper costs).
+
+    ``spreads`` maps UPPER-case asset → full bid-ask width in price units.
+    ``commission_per_lot_per_side`` is USD per 1.00 lot, charged once per
+    side (entry commission at fill; the exit side is aggregated later).
+    ``exit_spread_mult`` scales the exit half-spread during later PnL
+    aggregation (0.5 completes one full round-trip spread).
+    """
+
+    spreads: dict[str, float]
+    commission_per_lot_per_side: float
+    exit_spread_mult: float
+
+
+def _static_spread(settings: AppSettings, asset: str) -> float:
+    """Per-symbol spread for replay fills, without any live quote branch.
+
+    Offline mirror of ``effective_spread`` (production ``schemas`` helper):
+    finite non-negative ``settings.spread_overrides[ASSET]`` first, then
+    ``DEFAULT_SPREADS[ASSET]``, then the legacy global ``paper_spread``.
+    The live XAUUSD quote-cache branch is deliberately excluded — replay
+    must be deterministic and offline, so every test and run sees the same
+    static width for an asset.
+    """
+    a = str(asset or "").upper()
+    overrides = getattr(settings, "spread_overrides", None) or {}
+    if a in overrides and overrides[a] is not None:
+        try:
+            v = float(overrides[a])
+        except (TypeError, ValueError):
+            v = None
+        if v is not None and math.isfinite(v) and v >= 0:
+            return v
+    if a in DEFAULT_SPREADS:
+        return float(DEFAULT_SPREADS[a])
+    try:
+        return max(0.0, float(getattr(settings, "paper_spread", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _nonneg_finite(value, default: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(v) or v < 0:
+        return default
+    return v
+
+
+def default_cost_config(settings: AppSettings) -> CostConfig:
+    """Build the static replay cost table from ``settings``.
+
+    Commission and exit-spread multiplier come from
+    ``paper_commission_per_lot`` / ``paper_exit_spread_mult`` with the
+    production canonical defaults (3.5 / 0.5) when absent; an explicit 0 is
+    kept (commission-free / no exit spread). Spreads resolve every
+    ``DEFAULT_SPREADS`` symbol plus any valid override via ``_static_spread``.
+    """
+    spreads = {
+        a: _static_spread(settings, a)
+        for a in set(DEFAULT_SPREADS) | {
+            str(k).upper()
+            for k in (getattr(settings, "spread_overrides", None) or {})
+        }
+    }
+    commission = _nonneg_finite(
+        G(settings, "paper_commission_per_lot", zero_as_missing=False), 3.5
+    )
+    exit_mult = _nonneg_finite(
+        G(settings, "paper_exit_spread_mult", zero_as_missing=False), 0.5
+    )
+    return CostConfig(
+        spreads=spreads,
+        commission_per_lot_per_side=commission,
+        exit_spread_mult=exit_mult,
+    )
+
+
+def build_rate_map(series: dict[str, list[Candle]]) -> dict[date, dict[str, float]]:
+    """Per-date snapshot of each asset's last known close (carry-forward).
+
+    Walks the shared timeline oldest-first; each date's map holds only
+    closes known on or before that date (never a future bar). Missing bars
+    are never invented — an asset simply keeps its previous close.
+    Non-finite / non-positive closes are omitted.
+    """
+    timeline = build_timeline(series)
+    rate_map: dict[date, dict[str, float]] = {}
+    last: dict[str, float] = {}
+    for day, row in timeline:
+        for asset in sorted(row):
+            try:
+                close = float(row[asset].c)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(close) and close > 0:
+                last[str(asset).upper()] = close
+        rate_map[day] = dict(last)
+    return rate_map
+
+
+def _resolve_rates_snapshot(
+    rates: dict | None, wanted: date
+) -> dict | None:
+    """Resolve ``rates`` to the flat snapshot valid on ``wanted``.
+
+    Accepts a flat ``{ASSET: price}`` unit-test snapshot (returned as-is)
+    or a date-indexed ``{date: {ASSET: price}}`` map from ``build_rate_map``
+    (exact date, else latest prior date — never a future date). Returns an
+    empty snapshot when no prior date exists, and None when ``rates`` is
+    not a usable map (production legacy conversion applies).
+    """
+    if rates is None or not isinstance(rates, dict):
+        return None if rates is None else {}
+    if rates and all(isinstance(k, _DATE) for k in rates):
+        norm = {k.date() if isinstance(k, datetime) else k: v for k, v in rates.items()}
+        best: Optional[date] = None
+        for day in norm:
+            if day <= wanted and (best is None or day > best):
+                best = day
+        if best is None:
+            return {}
+        snap = norm[best]
+        return dict(snap) if isinstance(snap, dict) else {}
+    return dict(rates)
+
+
+def size_for_replay(
+    settings: AppSettings,
+    signal: ReplaySignal,
+    equity: float,
+    rates: dict | None,
+    date: date,
+) -> float:
+    """Replay lots for ``signal`` against simulated ``equity`` (USD).
+
+    Uses the simulated ``equity`` — not ``settings.capital`` — by sizing on
+    an equity-adjusted settings copy through the production path:
+    ``size_position`` (risk_to_lot + effective min-lot floor + per-asset
+    contract value + quote→USD conversion), then ``min_lot_budget_breach``
+    on the same copy — a breach returns 0.0 (no valid size). ``rates`` is a
+    flat snapshot or a date-indexed map (exact date or latest prior, never
+    future). Returns 0.0 for invalid inputs, zero stop distance, a cross
+    that cannot derive its quote-to-USD rate (fail closed), non-positive
+    equity, or non-finite results.
+    """
+    from app.services.execution import min_lot_budget_breach, size_position
+
+    try:
+        eq = float(equity)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(eq) or eq <= 0:
+        return 0.0
+    try:
+        entry = float(signal.entry)
+        stop = float(signal.stop_loss)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    if not (math.isfinite(entry) and math.isfinite(stop)):
+        return 0.0
+    stop_distance = abs(entry - stop)
+    if not math.isfinite(stop_distance) or stop_distance <= 0:
+        return 0.0
+    asset = str(getattr(signal, "asset", "") or "").upper()
+    if not asset:
+        return 0.0
+    wanted = date.date() if isinstance(date, datetime) else date
+    snapshot = _resolve_rates_snapshot(rates, wanted)
+    if snapshot is None:
+        rate = usd_per_quote_unit(asset, entry)
+    else:
+        rate = quote_usd_rate(asset, entry, snapshot)
+    if rate is None:
+        return 0.0
+    try:
+        scoped = settings.model_copy(update={"capital": eq})
+    except Exception:
+        return 0.0
+    try:
+        lots = float(size_position(scoped, entry, stop, asset, rates=snapshot))
+    except Exception:
+        return 0.0
+    if not math.isfinite(lots) or lots <= 0:
+        return 0.0
+    try:
+        breach = min_lot_budget_breach(scoped, entry, stop, asset, rates=snapshot)
+    except Exception:
+        breach = None
+    if breach:
+        return 0.0
+    return lots
+
+
+def entry_fill(
+    signal: ReplaySignal,
+    next_bar_open: float,
+    direction: str,
+    costs: CostConfig,
+    *,
+    volume: float,
+) -> tuple[float, float]:
+    """Next-bar-open execution fill plus entry commission cost (USD).
+
+    BUY pays ``open + full_spread/2``, SELL receives ``open - full_spread/2``
+    — the fill never uses the signal close as a price. The half-spread cost
+    is embodied in the fill exactly once; the returned cost is entry
+    commission only (``commission_per_lot_per_side × volume``), so later
+    aggregation must not subtract the spread again. Raises ValueError for
+    unknown direction, negative volume, or non-finite prices/costs.
+    """
+    try:
+        px = float(next_bar_open)
+    except (TypeError, ValueError):
+        raise ValueError("next_bar_open must be a finite price")
+    try:
+        vol = float(volume)
+    except (TypeError, ValueError):
+        raise ValueError("volume must be a finite non-negative lot size")
+    if not math.isfinite(px) or not math.isfinite(vol) or vol < 0:
+        raise ValueError("non-finite price/volume or negative volume")
+    side = str(direction or "").upper()
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"unknown direction: {direction!r}")
+    asset = str(getattr(signal, "asset", "") or "").upper()
+    try:
+        spread = float((costs.spreads or {}).get(asset, 0.0))
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError(f"unusable spread for {asset or '?'}")
+    try:
+        commission = float(costs.commission_per_lot_per_side)
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError("unusable commission_per_lot_per_side")
+    if not math.isfinite(spread) or spread < 0:
+        raise ValueError(f"unusable spread for {asset or '?'}")
+    if not math.isfinite(commission) or commission < 0:
+        raise ValueError("unusable commission_per_lot_per_side")
+    half = spread / 2.0
+    fill = round(px + half, 5) if side == "BUY" else round(px - half, 5)
+    return fill, commission * vol
