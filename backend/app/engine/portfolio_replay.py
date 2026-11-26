@@ -17,11 +17,20 @@ from app.models.schemas import (
     DEFAULT_SPREADS,
     G,
     AppSettings,
+    CorrelationEngine,
+    ExposureEngine,
+    contract_value_for,
+    effective_sl_tp,
     quote_usd_rate,
     usd_per_quote_unit,
 )
 
 NEWS_WARNING = "News-optimistic: historical news replay is unavailable."
+
+DAILY_BAR_WARNING = (
+    "Daily-bar replay: no intrabar tick ordering; "
+    "bars touching both SL and TP resolve stop-first."
+)
 
 #: Module-level alias for the ``datetime.date`` class: ``size_for_replay``
 #: names a parameter ``date``, which shadows the imported class inside that
@@ -331,38 +340,247 @@ def replay_portfolio(
     cost_config: CostConfig | None = None,
     warnings: list[str] | None = None,
 ) -> ReplayResult:
-    """Minimal flat skeleton (Task 1): no signals or exits yet.
+    """Deterministic daily portfolio replay (Task 4: full constraint/exit loop).
 
-    Validates the shared timeline, then returns no trades, zero metrics,
-    and an equity curve starting at the user-supplied capital. Later tasks
-    replace the flat body with the full replay loop.
+    Walks the shared timeline oldest-first. At each date: executes pending
+    prior signals at that asset's bar open (next-open entry, never the signal
+    close), marks open positions, evaluates hard SL/TP (gap-aware,
+    stop-first on ambiguity), then discretionary management / smart exits /
+    time stops (bar-close decisions), then generates new close-date signals
+    for the next available bar. Remaining positions are force-closed at their
+    last available close (``end_of_data``).
+
+    Entry gates mirror production execution: one open position per asset,
+    max-open / daily / ISO-weekly counts, per-asset cooldown from the final
+    close, allowed-asset universe, portfolio correlation cap, currency
+    exposure cap, and the spread-guard. Before sizing, the signal SL/TP is
+    re-run through ``effective_sl_tp`` with ``apply_cap=True`` on an
+    equity-adjusted settings copy — this is where ``sl_cap_enabled`` takes
+    effect (``signal_at`` deliberately mirrors generation with
+    ``apply_cap=False``).
+
+    Costs follow the Task 4 clarification: entry spread converts at the
+    entry-date quote rate, gross PnL and exit spread convert at the exit-date
+    quote rate, open marks use the current date's rate; commissions are USD.
+    Pure function: no network, DB, broker, notifications, or settings writes.
     """
-    _ = settings
-    _ = cost_config
+    from app.engine.smart_exit import evaluate_exit
+
     timeline = build_timeline(series)
+    costs = cost_config if cost_config is not None else default_cost_config(settings)
+    rate_map = build_rate_map(series)
 
     merged = list(warnings) if warnings else []
     if NEWS_WARNING not in merged:
         merged.append(NEWS_WARNING)
+    if DAILY_BAR_WARNING not in merged:
+        merged.append(DAILY_BAR_WARNING)
 
     if not timeline:
         return ReplayResult(
             trades=[], equity_curve=[], metrics=ReplayMetrics(), warnings=merged
         )
 
-    first_day = timeline[0][0]
-    curve = [
-        EquityPoint(
-            date=first_day,
-            equity=starting_capital,
-            realized_pnl=0.0,
-            unrealized_pnl=0.0,
-            drawdown_pct=0.0,
-        )
+    try:
+        capital = float(starting_capital)
+    except (TypeError, ValueError):
+        capital = 1000.0
+    if not math.isfinite(capital) or capital <= 0:
+        capital = 1000.0
+
+    allowed = set(settings.effective_assets())
+    discretionary = bool(settings.management_allows_discretionary())
+    smart_on = bool(G(settings, "smart_exit_enabled"))
+    try:
+        avg_hold = float(G(settings, "avg_hold_fallback_days") or 4.0)
+    except (TypeError, ValueError):
+        avg_hold = 4.0
+    if not math.isfinite(avg_hold) or avg_hold <= 0:
+        avg_hold = 4.0
+
+    last_date_of: dict[str, date] = {}
+    for day, row in timeline:
+        for asset in row:
+            last_date_of[str(asset).upper()] = day
+
+    histories: dict[str, list[Candle]] = {}
+    last_mid: dict[str, float] = {}
+    pending: dict[str, ReplaySignal] = {}
+    opens: list[_OpenPosition] = []
+    slices: list[tuple[date, date, str, int, ReplayTrade]] = []
+    seq = 0
+    last_close: dict[str, date] = {}
+    entries_by_date: dict[date, int] = {}
+    entries_by_week: dict[tuple[int, int], int] = {}
+    realized = 0.0
+    gross_total = 0.0
+    cost_total = 0.0
+    curve: list[EquityPoint] = []
+    peak = capital
+    prev_drawdown = 0.0
+    snap_cache: dict[tuple[date, str], dict] = {}
+
+    def snapshot_for(asset_u: str, day: date) -> dict:
+        key = (day, asset_u)
+        snap = snap_cache.get(key)
+        if snap is None:
+            try:
+                snap = snapshot_from_candles(
+                    asset_u, histories.get(asset_u, []),
+                    news_sentiment=0.0, high_impact_event=False) or {}
+            except Exception:
+                snap = {}
+            if not isinstance(snap, dict):
+                snap = {}
+            snap_cache[key] = snap
+        return snap
+
+    for day, row in timeline:
+        for asset in sorted(row):
+            asset_u = str(asset).upper()
+            histories.setdefault(asset_u, []).append(row[asset])
+            try:
+                close_px = float(row[asset].c)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(close_px) and close_px > 0:
+                last_mid[asset_u] = close_px
+
+        rates_today = _resolve_rates_snapshot(rate_map, day) or {}
+
+        # ---- 1. prior-signal entries at this bar's open -------------------
+        for asset in sorted(row):
+            asset_u = str(asset).upper()
+            sig = pending.pop(asset_u, None)
+            if sig is None:
+                continue
+            if asset_u not in allowed:
+                continue
+            opened = _try_enter(
+                settings, sig, asset_u, row[asset], day, opens, costs,
+                rate_map, rates_today, realized, capital,
+                entries_by_date, entries_by_week, last_close,
+            )
+            if opened is not None:
+                opens.append(opened)
+                entries_by_date[day] = entries_by_date.get(day, 0) + 1
+                iso = day.isocalendar()
+                week_key = (int(iso[0]), int(iso[1]))
+                entries_by_week[week_key] = entries_by_week.get(week_key, 0) + 1
+
+        # ---- 2. mark + exits ----------------------------------------------
+        realized_equity = capital + realized
+        marked_now = realized_equity + _unrealized_total(
+            opens, last_mid, rate_map, day, costs)
+        drawdown_in = prev_drawdown
+        if marked_now > peak:
+            drawdown_in = 0.0
+        elif peak > 0:
+            drawdown_in = max(0.0, (peak - marked_now) / peak * 100.0)
+
+        survivors: list[_OpenPosition] = []
+        for pos in opens:
+            asset_u = pos.asset
+            if asset_u not in row:
+                survivors.append(pos)
+                continue
+            bar = row[asset_u]
+            outcome = _process_bar(
+                settings, pos, bar, day, costs, rate_map, rates_today,
+                discretionary, smart_on, avg_hold, drawdown_in,
+                snapshot_for, evaluate_exit,
+            )
+            if outcome is None:
+                if day == last_date_of.get(asset_u):
+                    fs = _close_slice(pos, pos.volume_remaining, float(bar.c),
+                                      day, "end_of_data", costs, rate_map)
+                    if fs is not None:
+                        trade, d_real, d_gross, d_cost = fs
+                        slices.append((trade.exit_date, trade.entry_date,
+                                       trade.asset, seq, trade))
+                        seq += 1
+                        realized += d_real
+                        gross_total += d_gross
+                        cost_total += d_cost
+                        last_close[asset_u] = day
+                    else:
+                        survivors.append(pos)
+                else:
+                    survivors.append(pos)
+                continue
+            new_slices, closed_all, new_realized, new_gross, new_costs = outcome
+            for sl in new_slices:
+                slices.append((sl.exit_date, sl.entry_date, sl.asset, seq, sl))
+                seq += 1
+            realized += new_realized
+            gross_total += new_gross
+            cost_total += new_costs
+            if closed_all:
+                last_close[asset_u] = day
+            else:
+                survivors.append(pos)
+            # A stop moved by management applies from the next bar: the hard
+            # SL/TP check above already ran against the pre-management stop.
+            if day == last_date_of.get(asset_u) and not closed_all:
+                fs = _close_slice(pos, pos.volume_remaining, float(bar.c),
+                                  day, "end_of_data", costs, rate_map)
+                if fs is not None:
+                    trade, d_real, d_gross, d_cost = fs
+                    slices.append((trade.exit_date, trade.entry_date,
+                                   trade.asset, seq, trade))
+                    seq += 1
+                    realized += d_real
+                    gross_total += d_gross
+                    cost_total += d_cost
+                    last_close[asset_u] = day
+                else:
+                    survivors.append(pos)
+        opens = survivors
+
+        # ---- 3. new close-date signals for the next available bar ---------
+        for asset in sorted(row):
+            asset_u = str(asset).upper()
+            if asset_u not in allowed:
+                continue
+            hist = histories.get(asset_u, [])
+            window = hist[-REPLAY_WARMUP:] if len(hist) > REPLAY_WARMUP else hist
+            try:
+                sig = signal_at(asset_u, window, settings, day)
+            except Exception:
+                sig = None
+            if sig is not None:
+                pending[asset_u] = sig
+
+        # ---- 4. daily equity point -----------------------------------------
+        realized_pnl = realized
+        unrealized = _unrealized_total(opens, last_mid, rate_map, day, costs)
+        equity = capital + realized_pnl + unrealized
+        if equity > peak:
+            peak = equity
+        if peak > 0:
+            drawdown_pct = max(0.0, (peak - equity) / peak * 100.0)
+        else:
+            drawdown_pct = 0.0
+        prev_drawdown = drawdown_pct
+        curve.append(EquityPoint(date=day, equity=equity,
+                                 realized_pnl=realized_pnl,
+                                 unrealized_pnl=unrealized,
+                                 drawdown_pct=drawdown_pct))
+
+    ordered = sorted(slices, key=lambda s: (s[0], s[1], s[2], s[3]))
+    trades = [
+        ReplayTrade(trade_id=f"RT-{i + 1:06d}", asset=t.asset,
+                    direction=t.direction, entry_date=t.entry_date,
+                    entry_price=t.entry_price, exit_date=t.exit_date,
+                    exit_price=t.exit_price, volume=t.volume,
+                    pnl_usd=t.pnl_usd, r_multiple=t.r_multiple,
+                    exit_reason=t.exit_reason, mae_r=t.mae_r,
+                    mfe_r=t.mfe_r, ambiguous=t.ambiguous)
+        for i, (_, _, _, _, t) in enumerate(ordered)
     ]
-    return ReplayResult(
-        trades=[], equity_curve=curve, metrics=ReplayMetrics(), warnings=merged
-    )
+    metrics = _build_metrics(trades, curve, gross_total, cost_total)
+    return ReplayResult(trades=trades, equity_curve=curve,
+                        metrics=metrics, warnings=merged)
 
 
 # ---------------------------------------------------------------------------
@@ -634,3 +852,693 @@ def entry_fill(
     half = spread / 2.0
     fill = round(px + half, 5) if side == "BUY" else round(px - half, 5)
     return fill, commission * vol
+
+
+# ---------------------------------------------------------------------------
+# Task 4: portfolio constraints and exit stack (internal state + helpers)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _OpenPosition:
+    """Mutable position state for one open replay leg.
+
+    ``entry_mid`` is the next-bar-open mid the signal executed at;
+    ``entry_fill`` is the spread-adjusted fill. ``risk_price`` is the original
+    entry-fill-to-initial-stop distance (price units) — every R computation
+    (partial trigger, breakeven/trailing, smart-exit R, time-stop R, trade R,
+    MAE/MFE) divides by this, never by the trailed stop. Entry costs are
+    stored as run totals and allocated to each closed slice in proportion to
+    its volume so partial slices plus the final remainder sum to exactly one
+    entry side and one exit side.
+    """
+
+    asset: str
+    direction: str
+    signal_date: date
+    entry_date: date
+    entry_mid: float
+    entry_fill: float
+    volume_original: float
+    volume_remaining: float
+    entry_spread_cost: float
+    entry_comm_cost: float
+    entry_rate: float
+    full_spread: float
+    initial_sl: float
+    initial_tp: float
+    current_sl: float
+    current_tp: float
+    risk_price: float
+    partial_done: bool = False
+    adv_exc: float = 0.0
+    fav_exc: float = 0.0
+    snapshot: dict = field(default_factory=dict)
+
+
+def _full_spread_of(costs: CostConfig, asset_u: str) -> float:
+    try:
+        table = costs.spreads or {}
+    except AttributeError:
+        table = {}
+    if asset_u in table:
+        try:
+            return max(0.0, float(table[asset_u]))
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return max(0.0, float(getattr(costs, "default_spread", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _quote_rate_or_unit(asset_u: str, price: float, snapshot: dict | None) -> float:
+    """Quote-currency → USD rate, failing safe to 1.0 for replay accounting.
+
+    Production fails closed (None) when a cross leg is underivable; replay
+    positions that far can only exist when sizing already converted them, so
+    the residual accounting risk is a missed leg here — 1.0 keeps the ledger
+    additive while every convertible asset still uses its exact rate.
+    """
+    try:
+        rate = quote_usd_rate(asset_u, price, snapshot)
+    except Exception:
+        rate = None
+    if rate is None or not math.isfinite(rate) or rate <= 0:
+        return 1.0
+    return rate
+
+
+def _try_enter(
+    settings: AppSettings,
+    signal: ReplaySignal,
+    asset_u: str,
+    bar: Candle,
+    day: date,
+    opens: list[_OpenPosition],
+    costs: CostConfig,
+    rate_map: dict,
+    rates_today: dict,
+    realized: float,
+    capital: float,
+    entries_by_date: dict[date, int],
+    entries_by_week: dict[tuple[int, int], int],
+    last_close: dict[str, date],
+) -> _OpenPosition | None:
+    """Next-open execution attempt for one pending signal.
+
+    Returns the opened position, or None when any gate blocks (the signal is
+    then discarded — sub-day TTL is not modeled). Gate order: duplicate asset
+    → max open → daily/weekly counts → cooldown → SL/TP cap + sizing →
+    correlation → currency exposure → spread guard.
+    """
+    direction = str(getattr(signal, "direction", "") or "").upper()
+    if direction not in ("BUY", "SELL"):
+        return None
+    for pos in opens:
+        if pos.asset == asset_u:
+            return None
+    try:
+        max_open = int(getattr(settings, "max_open_positions", 0) or 0)
+    except (TypeError, ValueError):
+        max_open = 0
+    if len(opens) >= max_open:
+        return None
+    try:
+        max_daily = int(getattr(settings, "max_trades_daily", 0) or 0)
+    except (TypeError, ValueError):
+        max_daily = 0
+    if entries_by_date.get(day, 0) >= max_daily:
+        return None
+    iso = day.isocalendar()
+    week_key = (int(iso[0]), int(iso[1]))
+    try:
+        max_weekly = int(getattr(settings, "max_trades_weekly", 0) or 0)
+    except (TypeError, ValueError):
+        max_weekly = 0
+    if entries_by_week.get(week_key, 0) >= max_weekly:
+        return None
+    try:
+        cooldown_min = float(getattr(settings, "reentry_cooldown_min", 0) or 0)
+    except (TypeError, ValueError):
+        cooldown_min = 0.0
+    if cooldown_min > 0 and asset_u in last_close:
+        elapsed_min = (day - last_close[asset_u]).days * 1440.0
+        if elapsed_min < cooldown_min:
+            return None
+
+    try:
+        next_open = float(bar.o)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(next_open) or next_open <= 0:
+        return None
+
+    # Simulated equity for this run (realized only — marks are not spendable).
+    equity = capital + realized
+    if not math.isfinite(equity) or equity <= 0:
+        return None
+    try:
+        scoped = settings.model_copy(update={"capital": equity})
+    except Exception:
+        return None
+    try:
+        sig_sl = float(signal.stop_loss)
+        sig_tp = float(signal.take_profit or 0)
+    except (TypeError, ValueError):
+        return None
+    try:
+        sl2, tp2, _dist, _tier, _capped = effective_sl_tp(
+            scoped, next_open, sig_sl, sig_tp, asset_u, direction,
+            apply_cap=True, rates=rates_today)
+    except Exception:
+        return None
+    if not sl2 or not tp2:
+        return None
+    try:
+        sl2 = float(sl2)
+        tp2 = float(tp2)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(sl2) and math.isfinite(tp2)) or sl2 <= 0 or tp2 <= 0:
+        return None
+
+    adjusted = ReplaySignal(
+        asset=asset_u, date=signal.date, direction=direction,
+        entry=next_open, stop_loss=sl2, take_profit=tp2,
+        opportunity=float(getattr(signal, "opportunity", 0.0) or 0.0),
+        confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
+        snapshot=dict(getattr(signal, "snapshot", None) or {}),
+    )
+    lots = size_for_replay(settings, adjusted, equity, rate_map, day)
+    if not math.isfinite(lots) or lots <= 0:
+        return None
+
+    try:
+        fill, entry_comm = entry_fill(
+            adjusted, next_bar_open=next_open, direction=direction,
+            costs=costs, volume=lots)
+    except ValueError:
+        return None
+
+    # Correlation gate (production portfolio_correlation over open + candidate).
+    try:
+        corr_cap = float(G(settings, "correlation_cap",
+                           zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        corr_cap = 0.0
+    if corr_cap > 0:
+        try:
+            book = sorted({p.asset for p in opens} | {asset_u})
+            if CorrelationEngine.portfolio_correlation(book) > corr_cap:
+                return None
+        except Exception:
+            return None
+
+    # Currency-exposure gate (risk-at-stop per currency/direction vs capital).
+    try:
+        exp_cap = float(G(settings, "max_currency_exposure_pct",
+                          zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        exp_cap = 0.0
+    if exp_cap > 0:
+        try:
+            legs = [{
+                "asset": p.asset, "direction": p.direction,
+                "volume": p.volume_remaining, "entry_price": p.entry_fill,
+                "stop_loss": p.current_sl,
+            } for p in opens]
+            legs.append({"asset": asset_u, "direction": direction,
+                         "volume": lots, "entry_price": fill,
+                         "stop_loss": sl2})
+            res = ExposureEngine.currency_risk(
+                legs, capital, exp_cap, rates=rates_today)
+            if res.get("over_cap"):
+                return None
+        except Exception:
+            return None
+
+    # Spread guard: full spread as % of the execution SL distance.
+    try:
+        spread_cap = float(G(settings, "spread_guard_max_pct",
+                             zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        spread_cap = 0.0
+    spread = _full_spread_of(costs, asset_u)
+    exec_dist = abs(fill - sl2)
+    if spread_cap > 0 and exec_dist > 0 and spread > 0:
+        if spread / exec_dist * 100.0 > spread_cap:
+            return None
+    if exec_dist <= 0:
+        return None
+
+    contract = contract_value_for(asset_u)
+    try:
+        rate_entry = _quote_rate_or_unit(asset_u, next_open, rates_today)
+    except Exception:
+        rate_entry = 1.0
+    entry_spread_cost = 0.5 * spread * contract * lots * rate_entry
+    risk_price = abs(fill - sl2)
+    return _OpenPosition(
+        asset=asset_u, direction=direction, signal_date=signal.date,
+        entry_date=day, entry_mid=next_open, entry_fill=fill,
+        volume_original=lots, volume_remaining=lots,
+        entry_spread_cost=entry_spread_cost, entry_comm_cost=entry_comm,
+        entry_rate=rate_entry, full_spread=spread,
+        initial_sl=sl2, initial_tp=tp2, current_sl=sl2, current_tp=tp2,
+        risk_price=risk_price,
+        snapshot=dict(getattr(signal, "snapshot", None) or {}),
+    )
+
+
+def _close_slice(
+    pos: _OpenPosition,
+    slice_vol: float,
+    exit_mid: float,
+    day: date,
+    reason: str,
+    costs: CostConfig,
+    rate_map: dict,
+    ambiguous: bool = False,
+) -> tuple[ReplayTrade, float, float, float] | None:
+    """Close one slice of ``pos`` at ``exit_mid`` (mid-scale).
+
+    Returns (trade, delta_realized_net, delta_gross, delta_costs). Gross PnL
+    is mid-to-mid converted at the exit-date rate; entry spread converts at
+    the entry-date rate; commissions are already USD. R divides the slice net
+    by the original fill-to-initial-stop USD risk scaled to the slice.
+    """
+    try:
+        vol = float(slice_vol)
+        mid = float(exit_mid)
+    except (TypeError, ValueError):
+        return None
+    if (not math.isfinite(vol) or not math.isfinite(mid)
+            or vol <= 0 or mid <= 0):
+        return None
+    vol = min(vol, pos.volume_remaining)
+    if vol <= 0:
+        return None
+    if pos.volume_original <= 0:
+        return None
+    sign = 1 if pos.direction == "BUY" else -1
+    contract = contract_value_for(pos.asset)
+    rates_exit = _resolve_rates_snapshot(rate_map, day) or {}
+    rate_exit = _quote_rate_or_unit(pos.asset, mid, rates_exit)
+
+    gross = sign * (mid - pos.entry_mid) * vol * contract * rate_exit
+    frac = vol / pos.volume_original
+    alloc_entry_spread = pos.entry_spread_cost * frac
+    alloc_entry_comm = pos.entry_comm_cost * frac
+    try:
+        exit_mult = float(costs.exit_spread_mult)
+    except (TypeError, ValueError, AttributeError):
+        exit_mult = 0.5
+    if not math.isfinite(exit_mult) or exit_mult < 0:
+        exit_mult = 0.5
+    try:
+        commission = float(costs.commission_per_lot_per_side)
+    except (TypeError, ValueError, AttributeError):
+        commission = 0.0
+    if not math.isfinite(commission) or commission < 0:
+        commission = 0.0
+    exit_spread = exit_mult * pos.full_spread * contract * vol * rate_exit
+    exit_comm = commission * vol
+    costs_slice = alloc_entry_spread + alloc_entry_comm + exit_spread + exit_comm
+    pnl = gross - costs_slice
+
+    risk_slice = pos.risk_price * vol * contract * pos.entry_rate
+    if risk_slice and risk_slice > 0 and math.isfinite(risk_slice):
+        r_mult = pnl / risk_slice
+    else:
+        r_mult = 0.0
+    if not math.isfinite(r_mult):
+        r_mult = 0.0
+    if pos.risk_price > 0 and math.isfinite(pos.risk_price):
+        mae_r = min(0.0, pos.adv_exc) / pos.risk_price
+        mfe_r = max(0.0, pos.fav_exc) / pos.risk_price
+    else:
+        mae_r, mfe_r = 0.0, 0.0
+
+    exit_fill = mid - sign * exit_mult * pos.full_spread
+    trade = ReplayTrade(
+        trade_id="", asset=pos.asset, direction=pos.direction,
+        entry_date=pos.entry_date, entry_price=pos.entry_fill,
+        exit_date=day, exit_price=round(exit_fill, 5),
+        volume=round(vol, 8), pnl_usd=pnl, r_multiple=r_mult,
+        exit_reason=reason, mae_r=mae_r, mfe_r=mfe_r, ambiguous=ambiguous,
+    )
+    pos.volume_remaining = round(pos.volume_remaining - vol, 8)
+    if pos.volume_remaining < 1e-9:
+        pos.volume_remaining = 0.0
+    return trade, pnl, gross, costs_slice
+
+
+def _update_excursions(pos: _OpenPosition, bar: Candle) -> None:
+    try:
+        high, low = float(bar.h), float(bar.l)
+    except (TypeError, ValueError):
+        return
+    if not (math.isfinite(high) and math.isfinite(low)):
+        return
+    if pos.direction == "BUY":
+        pos.adv_exc = min(pos.adv_exc, low - pos.entry_mid)
+        pos.fav_exc = max(pos.fav_exc, high - pos.entry_mid)
+    else:
+        pos.adv_exc = min(pos.adv_exc, pos.entry_mid - high)
+        pos.fav_exc = max(pos.fav_exc, pos.entry_mid - low)
+
+
+def _process_bar(
+    settings: AppSettings,
+    pos: _OpenPosition,
+    bar: Candle,
+    day: date,
+    costs: CostConfig,
+    rate_map: dict,
+    rates_today: dict,
+    discretionary: bool,
+    smart_on: bool,
+    avg_hold: float,
+    drawdown_pct: float,
+    snapshot_for,
+    evaluate_exit,
+) -> tuple[list[ReplayTrade], bool, float, float, float] | None:
+    """Evaluate one daily bar for one open position.
+
+    Returns None when the position stays open, else (slices, closed_all,
+    delta_net, delta_gross, delta_costs). Sequencing mirrors position_guard:
+    hard SL/TP (pre-management, stop-first) → partial close → breakeven /
+    trailing (+ ``smart_exit.ladder_sl``) → smart exit → time stop.
+    """
+    try:
+        o, h, l, c = float(bar.o), float(bar.h), float(bar.l), float(bar.c)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) and v > 0 for v in (o, h, l, c)):
+        return None
+    if pos.volume_remaining <= 0 or pos.risk_price <= 0:
+        return None
+
+    _update_excursions(pos, bar)
+    sign = 1 if pos.direction == "BUY" else -1
+    sl, tp = pos.current_sl, pos.current_tp
+
+    # ---- hard SL/TP (adverse gap fills at the open; stop-first) ------------
+    if pos.direction == "BUY":
+        sl_gap = o <= sl
+        tp_gap = o >= tp
+        sl_touch = sl_gap or l <= sl
+        tp_touch = tp_gap or h >= tp
+    else:
+        sl_gap = o >= sl
+        tp_gap = o <= tp
+        sl_touch = sl_gap or h >= sl
+        tp_touch = tp_gap or l <= tp
+    if sl_touch and tp_touch:
+        # Both levels inside one bar (neither gapped through at the open, or
+        # gapped): stop-first is mandatory and the bar counts as ambiguous.
+        fill_mid = o if sl_gap else sl
+        done = _close_slice(pos, pos.volume_remaining, fill_mid, day, "sl",
+                            costs, rate_map, ambiguous=True)
+        if done is None:
+            return None
+        trade, d_net, d_gross, d_cost = done
+        return [trade], True, d_net, d_gross, d_cost
+    if sl_touch:
+        fill_mid = o if sl_gap else sl
+        done = _close_slice(pos, pos.volume_remaining, fill_mid, day, "sl",
+                            costs, rate_map)
+        if done is None:
+            return None
+        trade, d_net, d_gross, d_cost = done
+        return [trade], True, d_net, d_gross, d_cost
+    if tp_touch:
+        fill_mid = o if tp_gap else tp
+        done = _close_slice(pos, pos.volume_remaining, fill_mid, day, "tp",
+                            costs, rate_map)
+        if done is None:
+            return None
+        trade, d_net, d_gross, d_cost = done
+        return [trade], True, d_net, d_gross, d_cost
+
+    if not discretionary:
+        return None
+
+    risk = pos.risk_price
+    r_close = sign * (c - pos.entry_fill) / risk
+    out: list[ReplayTrade] = []
+    d_net = d_gross = d_cost = 0.0
+
+    # ---- partial close (TP1) — favorable extreme, trigger-or-open fill -----
+    try:
+        partial_pct = float(G(settings, "partial_close_pct",
+                              zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        partial_pct = 0.0
+    try:
+        partial_trigger = float(G(settings, "partial_trigger_r",
+                                  zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        partial_trigger = 0.0
+    if (partial_pct > 0 and partial_trigger > 0 and not pos.partial_done):
+        trigger = pos.entry_fill + sign * partial_trigger * risk
+        touched = (h >= trigger) if pos.direction == "BUY" else (l <= trigger)
+        if touched:
+            if pos.direction == "BUY":
+                exit_mid = o if o > trigger else trigger
+            else:
+                exit_mid = o if o < trigger else trigger
+            slice_vol = round(pos.volume_remaining * partial_pct / 100.0, 2)
+            if slice_vol >= pos.volume_remaining and pos.volume_remaining > 0:
+                done = _close_slice(pos, pos.volume_remaining, exit_mid, day,
+                                    "tp", costs, rate_map)
+                if done is not None:
+                    trade, n, g, co = done
+                    return [trade], True, n, g, co
+            elif slice_vol > 0:
+                done = _close_slice(pos, slice_vol, exit_mid, day, "partial",
+                                    costs, rate_map)
+                if done is not None:
+                    trade, n, g, co = done
+                    out.append(trade)
+                    d_net += n
+                    d_gross += g
+                    d_cost += co
+                    pos.partial_done = True
+            if pos.volume_remaining <= 0:
+                return out, True, d_net, d_gross, d_cost
+
+    # ---- breakeven / trailing (+ R-ladder floor) ---------------------------
+    try:
+        be_trigger = float(G(settings, "breakeven_trigger_r",
+                             zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        be_trigger = 0.0
+    try:
+        trail_mult = float(G(settings, "trail_atr_mult",
+                             zero_as_missing=False) or 0.0)
+    except (TypeError, ValueError):
+        trail_mult = 0.0
+    if be_trigger > 0 and r_close >= be_trigger:
+        snap = snapshot_for(pos.asset, day)
+        atr_price = 0.0
+        try:
+            atr_pct = float((snap or {}).get("atr_pct") or 0.0)
+        except (TypeError, ValueError):
+            atr_pct = 0.0
+        if atr_pct > 0 and math.isfinite(atr_pct):
+            atr_price = atr_pct / 100.0 * c
+        if not (atr_price > 0 and math.isfinite(atr_price)):
+            try:
+                proxy_mult = float(G(settings, "guard_atr_proxy_mult",
+                                     zero_as_missing=False) or 0.0)
+            except (TypeError, ValueError):
+                proxy_mult = 0.0
+            if not (proxy_mult > 0):
+                proxy_mult = 0.2
+            atr_price = risk * proxy_mult
+        new_sl: float | None = None
+        if trail_mult > 0:
+            trail_price = c - sign * trail_mult * atr_price
+            if pos.direction == "BUY":
+                new_sl = max(pos.entry_fill, trail_price)
+            else:
+                new_sl = min(pos.entry_fill, trail_price)
+            try:
+                if bool(G(settings, "trailing_ladder")):
+                    from app.engine.smart_exit import ladder_sl
+                    ladder = ladder_sl(
+                        entry_price=pos.entry_fill, direction=pos.direction,
+                        r_distance=risk, r_multiple=r_close)
+                    if ladder is not None:
+                        if pos.direction == "BUY":
+                            new_sl = max(new_sl, ladder)
+                        else:
+                            new_sl = min(new_sl, ladder)
+            except Exception:
+                pass
+        else:
+            new_sl = pos.entry_fill
+        if new_sl is not None and math.isfinite(new_sl):
+            improves = (new_sl > pos.current_sl) if sign == 1 else (
+                new_sl < pos.current_sl)
+            if improves and abs(new_sl - pos.current_sl) > 1e-9:
+                pos.current_sl = round(new_sl, 5)
+
+    # ---- smart exit (production evaluate_exit, bar-close decisions) --------
+    if smart_on:
+        snap = snapshot_for(pos.asset, day)
+        if snap:
+            try:
+                age_days = float((day - pos.entry_date).days)
+            except Exception:
+                age_days = 0.0
+            try:
+                decision = evaluate_exit(
+                    asset=pos.asset, direction=pos.direction,
+                    entry_price=pos.entry_fill, price=c,
+                    stop_loss=pos.current_sl, age_days=age_days,
+                    settings=settings, snapshot=dict(snap),
+                    news_status="SAFE", news_event="",
+                    avg_hold_days=avg_hold, drawdown_pct=drawdown_pct)
+            except Exception:
+                decision = None
+            if decision is not None:
+                rec = str(getattr(decision, "recommendation", "HOLD") or "HOLD")
+                trigger = str(getattr(decision, "trigger", "") or "")
+                reason = f"smart_exit:{trigger}" if trigger else "smart_exit"
+                if rec == "CLOSE":
+                    done = _close_slice(pos, pos.volume_remaining, c, day,
+                                        reason, costs, rate_map)
+                    if done is not None:
+                        trade, n, g, co = done
+                        out.append(trade)
+                        return out, True, d_net + n, d_gross + g, d_cost + co
+                elif rec in ("PARTIAL_25", "PARTIAL_50"):
+                    if not pos.partial_done:
+                        pct = 25.0 if rec == "PARTIAL_25" else 50.0
+                        slice_vol = round(pos.volume_remaining * pct / 100.0, 2)
+                        if (slice_vol >= pos.volume_remaining
+                                and pos.volume_remaining > 0):
+                            done = _close_slice(pos, pos.volume_remaining, c,
+                                                day, reason, costs, rate_map)
+                            if done is not None:
+                                trade, n, g, co = done
+                                out.append(trade)
+                                return (out, True, d_net + n,
+                                        d_gross + g, d_cost + co)
+                        elif slice_vol > 0:
+                            done = _close_slice(pos, slice_vol, c, day, reason,
+                                                costs, rate_map)
+                            if done is not None:
+                                trade, n, g, co = done
+                                out.append(trade)
+                                d_net += n
+                                d_gross += g
+                                d_cost += co
+                                pos.partial_done = True
+                # MOVE_SL belongs to the breakeven/trailing pass above.
+            if pos.volume_remaining <= 0:
+                return out, True, d_net, d_gross, d_cost
+
+    # ---- time stop (original-stop R; locked-profit exemption) --------------
+    try:
+        max_hold = int(G(settings, "max_hold_days",
+                         zero_as_missing=False) or 0)
+    except (TypeError, ValueError):
+        max_hold = 0
+    if max_hold > 0:
+        try:
+            age_days = float((day - pos.entry_date).days)
+        except Exception:
+            age_days = 0.0
+        if age_days >= max_hold:
+            try:
+                ts_min_r = float(G(settings, "time_stop_min_r",
+                                   zero_as_missing=False) or 0.0)
+            except (TypeError, ValueError):
+                ts_min_r = 0.0
+            r_now = sign * (c - pos.entry_fill) / risk
+            locked = sign * (pos.current_sl - pos.entry_fill) / risk
+            if locked >= 0.25:
+                pass  # deferred — the trailed stop already locks profit
+            elif ts_min_r <= 0 or r_now < ts_min_r:
+                done = _close_slice(pos, pos.volume_remaining, c, day, "time",
+                                    costs, rate_map)
+                if done is not None:
+                    trade, n, g, co = done
+                    out.append(trade)
+                    return out, True, d_net + n, d_gross + g, d_cost + co
+    if out:
+        return out, False, d_net, d_gross, d_cost
+    return None
+
+
+def _unrealized_total(
+    opens: list[_OpenPosition],
+    last_mid: dict[str, float],
+    rate_map: dict,
+    day: date,
+    costs: CostConfig,
+) -> float:
+    """Marked net PnL of open positions (mid PnL minus accrued costs)."""
+    try:
+        exit_mult = float(costs.exit_spread_mult)
+    except (TypeError, ValueError, AttributeError):
+        exit_mult = 0.5
+    if not math.isfinite(exit_mult) or exit_mult < 0:
+        exit_mult = 0.5
+    try:
+        commission = float(costs.commission_per_lot_per_side)
+    except (TypeError, ValueError, AttributeError):
+        commission = 0.0
+    if not math.isfinite(commission) or commission < 0:
+        commission = 0.0
+    snapshot = _resolve_rates_snapshot(rate_map, day) or {}
+    total = 0.0
+    for pos in opens:
+        if pos.volume_remaining <= 0:
+            continue
+        mid = last_mid.get(pos.asset, pos.entry_mid)
+        try:
+            mid = float(mid)
+        except (TypeError, ValueError):
+            mid = pos.entry_mid
+        if not math.isfinite(mid) or mid <= 0:
+            mid = pos.entry_mid
+        rate = _quote_rate_or_unit(pos.asset, mid, snapshot)
+        contract = contract_value_for(pos.asset)
+        sign = 1 if pos.direction == "BUY" else -1
+        rem = pos.volume_remaining
+        mid_pnl = sign * (mid - pos.entry_mid) * rem * contract * rate
+        frac = rem / pos.volume_original if pos.volume_original > 0 else 0.0
+        entry_costs = (pos.entry_spread_cost + pos.entry_comm_cost) * frac
+        exit_costs = exit_mult * pos.full_spread * contract * rem * rate
+        exit_costs += commission * rem
+        total += mid_pnl - entry_costs - exit_costs
+    return total
+
+
+def _build_metrics(trades: list[ReplayTrade],
+                   curve: list[EquityPoint],
+                   gross_total: float = 0.0,
+                   cost_total: float = 0.0) -> ReplayMetrics:
+    net = sum(t.pnl_usd for t in trades)
+    wins = sum(1 for t in trades if t.pnl_usd > 0)
+    win_rate = (wins / len(trades) * 100.0) if trades else 0.0
+    win_sum = sum(t.pnl_usd for t in trades if t.pnl_usd > 0)
+    loss_sum = sum(t.pnl_usd for t in trades if t.pnl_usd < 0)
+    if loss_sum < 0:
+        profit_factor = win_sum / abs(loss_sum)
+    else:
+        profit_factor = 0.0
+    average_r = (sum(t.r_multiple for t in trades) / len(trades)) if trades else 0.0
+    ambiguous = sum(1 for t in trades if t.ambiguous)
+    ambiguous_pct = (ambiguous / len(trades) * 100.0) if trades else 0.0
+    max_dd = max((p.drawdown_pct for p in curve), default=0.0)
+    return ReplayMetrics(
+        net_pnl=net, gross_pnl=gross_total, costs=cost_total,
+        trades=len(trades), wins=wins, win_rate_pct=win_rate,
+        profit_factor=profit_factor, average_r=average_r,
+        max_drawdown_pct=max_dd, ambiguous_pct=ambiguous_pct,
+    )
