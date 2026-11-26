@@ -1130,3 +1130,81 @@ class TestBulkPersist:
         st = sim_market_data.dataset_build_status(db, res["version"])
         assert st["status"] == "failed"
         assert st["report"]["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 4: defensive date-unique load (prod incident 2026-11-27 — duplicate
+# AUDNZD 2022-03-09 bar on a `complete` version failed replay at
+# build_timeline). Read path (select_paged multi-page 20k+ reads) must be
+# robust to dupe rows from any source: first-in-order wins, loud warning,
+# never raise, never partial {}.
+# ---------------------------------------------------------------------------
+def _seed_complete_with_rows(fake_db, version, rows):
+    fake_db.insert(sim_market_data.META_TABLE, {
+        "dataset_version": version,
+        "status": "complete",
+        "years": 5,
+        "assets": ["AUDNZD"],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "report": {"stage": "done", "complete": True, "version": version},
+        "data_hash": "seed",
+        "code_version": sim_market_data.CODE_VERSION,
+    })
+    fake_db.rows.setdefault(sim_market_data.BARS_TABLE, []).extend(rows)
+
+
+def _bar(version, date, o=1.0, h=1.1, l=0.9, c=1.05, source="biquote"):
+    return {
+        "dataset_version": version,
+        "asset": "AUDNZD",
+        "bar_date": date,
+        "open": o, "high": h, "low": l, "close": c,
+        "source": source,
+        "source_timestamp": None,
+    }
+
+
+class TestLoadDatasetDedupe:
+    def test_identical_duplicate_rows_single_candle(self, fake_db):
+        dup = _bar("v-dupe", "2022-03-09")
+        _seed_complete_with_rows(fake_db, "v-dupe", [
+            _bar("v-dupe", "2022-03-08"),
+            dict(dup),
+            dict(dup),
+            _bar("v-dupe", "2022-03-10"),
+        ])
+        ds = sim_market_data.load_dataset(fake_db, "v-dupe")
+        assert set(ds) == {"AUDNZD"}
+        assert len(ds["AUDNZD"]) == 3
+
+    def test_conflicting_duplicate_first_wins_and_warns(
+            self, fake_db, caplog):
+        import logging as _logging
+        _seed_complete_with_rows(fake_db, "v-conflict", [
+            _bar("v-conflict", "2022-03-09", c=1.05),
+            _bar("v-conflict", "2022-03-09", c=1.99,
+                 o=1.9, source="twelvedata"),
+        ])
+        with caplog.at_level(_logging.WARNING,
+                             logger="app.services.sim_market_data"):
+            ds = sim_market_data.load_dataset(fake_db, "v-conflict")
+        assert len(ds["AUDNZD"]) == 1
+        assert ds["AUDNZD"][0].c == 1.05
+        assert any("2022-03-09" in (r.getMessage() or "")
+                   and "AUDNZD" in (r.getMessage() or "")
+                   for r in caplog.records)
+
+    def test_multi_page_shaped_sorted_input_order_preserved(
+            self, fake_db):
+        rows = ([_bar("v-pages", f"2022-03-{d:02d}")
+                 for d in range(1, 9)]
+                + [_bar("v-pages", "2022-03-09")]
+                + [_bar("v-pages", "2022-03-09")]
+                + [_bar("v-pages", f"2022-03-{d:02d}")
+                   for d in range(10, 15)])
+        _seed_complete_with_rows(fake_db, "v-pages", rows)
+        ds = sim_market_data.load_dataset(fake_db, "v-pages")
+        candles = ds["AUDNZD"]
+        assert len(candles) == 14
+        assert [c.t for c in candles] == sorted(c.t for c in candles)

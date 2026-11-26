@@ -823,6 +823,15 @@ def load_dataset(db, version: str,
         raise SimMarketDataError(
             f"{version}: dataset bars read failed ({exc})") from exc
     out: dict[str, list] = {}
+    # Defensive date-unique load (prod incident 2026-11-27): a `complete`
+    # version failed replay at build_timeline with `AUDNZD: duplicate bars
+    # for date 2022-03-09`, though the write path is date-keyed at every
+    # step. The dupe must enter at the READ path (select_paged multi-page
+    # read of 20k+ rows or otherwise unexpected row content), so the read
+    # path drops it here: rows arrive ordered by bar_date, first-in-order
+    # wins deterministically. build_timeline stays strict (unchanged) — this
+    # guarantees it always sees unique dates per asset.
+    seen: dict[tuple[str, str], tuple] = {}
     for r in rows or []:
         asset = str(r.get("asset") or "").upper()
         if want is not None and asset not in want:
@@ -838,6 +847,20 @@ def load_dataset(db, version: str,
                          l=float(r["low"]), c=float(r["close"]), t=t)
         except (KeyError, TypeError, ValueError):
             continue
+        key = (asset, day.isoformat())
+        prev = seen.get(key)
+        if prev is not None:
+            identical = (prev == (cnd.o, cnd.h, cnd.l, cnd.c,
+                                 str(r.get("source") or "")))
+            log.warning(
+                "sim-data %s: duplicate bar for %s on %s dropped "
+                "(%s; first-in-order wins)",
+                version, asset, day.isoformat(),
+                "byte-identical read artifact" if identical
+                else "conflicting values — data anomaly")
+            continue
+        seen[key] = (cnd.o, cnd.h, cnd.l, cnd.c,
+                     str(r.get("source") or ""))
         out.setdefault(asset, []).append(cnd)
     for candles in out.values():
         candles.sort(key=lambda c: c.t)
