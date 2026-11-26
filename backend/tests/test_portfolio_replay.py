@@ -987,25 +987,6 @@ def test_entry_exit_costs_across_partial_slices():
 # Task 4 concern resolution: open-known entries, marked equity, strict rates
 # ---------------------------------------------------------------------------
 
-def test_entry_exit_costs_across_partial_slices():
-    settings = AppSettings(partial_close_pct=50, partial_trigger_r=1.0,
-                           smart_exit_enabled=False, max_hold_days=0,
-                           rr_target=10.0)
-    closes = [round(1.0800 + 0.0008 * i, 5) for i in range(200)]
-    closes += [round(closes[-1] + 0.0015 * i, 5) for i in range(1, 5)]
-    closes += [closes[-1]] * 6
-    result = replay_portfolio({"EURUSD": _t4_bars(closes)}, settings,
-                              starting_capital=1000)
-    assert len(result.trades) == 2
-    first, second = result.trades
-    assert first.exit_reason == "partial"
-    assert first.volume > 0 and second.volume > 0
-    assert abs(first.volume - second.volume) <= 0.01
-    assert result.metrics.costs > 0
-    assert result.metrics.gross_pnl - result.metrics.costs == pytest.approx(
-        result.metrics.net_pnl)
-
-
 def _t4_gold_breakout(n: int = 235, start: float = 2400.0,
                       step: float = 2.0) -> list[Candle]:
     closes = [round(start + step * i, 2) for i in range(n)]
@@ -1430,3 +1411,191 @@ def test_warnings_dedup_and_copy_behavior():
     assert "custom-seam" in result.warnings
     assert result.warnings.index("custom-seam") < result.warnings.index(
         NEWS_WARNING)
+
+
+# ---------------------------------------------------------------------------
+# Final-fix wave: production-parity hardening and fail-closed inputs
+# ---------------------------------------------------------------------------
+
+def test_zero_daily_limit_blocks_all_entries():
+    # Production parity: schemas.frequency_decision blocks via
+    # `trades_today >= max_trades_daily`, so 0 blocks every entry (0 >= 0) —
+    # it never means "unlimited". The search space starts at 1 because 0
+    # disables entries.
+    settings = AppSettings(max_trades_daily=0, max_open_positions=12)
+    result = replay_portfolio({"EURUSD": _t4_trend(n=230)}, settings,
+                              starting_capital=1000)
+    assert result.trades == []
+    assert result.metrics.net_pnl == 0
+
+
+def test_zero_weekly_limit_blocks_all_entries():
+    settings = AppSettings(max_trades_weekly=0, max_open_positions=12)
+    result = replay_portfolio({"EURUSD": _t4_trend(n=230)}, settings,
+                              starting_capital=1000)
+    assert result.trades == []
+    assert result.metrics.net_pnl == 0
+
+
+def _time_stop_pos(locked_r: float):
+    from app.engine.portfolio_replay import _OpenPosition
+    entry_fill = 100.0
+    risk = 2.0
+    return _OpenPosition(
+        asset="EURUSD", direction="BUY", signal_date=date(2026, 1, 5),
+        entry_date=date(2026, 1, 6), entry_mid=100.0, entry_fill=entry_fill,
+        volume_original=0.01, volume_remaining=0.01,
+        entry_spread_cost=0.0, entry_comm_cost=0.0, entry_rate=1.0,
+        full_spread=DEFAULT_SPREADS["EURUSD"],
+        initial_sl=98.0, initial_tp=110.0,
+        current_sl=entry_fill + locked_r * risk, current_tp=110.0,
+        risk_price=risk)
+
+
+def _time_stop_bar(day_index: int) -> Candle:
+    return Candle(o=101.0, h=101.5, l=100.8, c=101.0, t=_t4_ts(day_index))
+
+
+def test_time_stop_locked_profit_exemption_boundary():
+    from app.engine.portfolio_replay import _process_bar
+    settings = AppSettings(smart_exit_enabled=False, partial_close_pct=0,
+                           breakeven_trigger_r=0, trail_atr_mult=0,
+                           max_hold_days=4, time_stop_min_r=0.0)
+    costs = default_cost_config(settings)
+    day = date(2026, 1, 10)
+    # Exactly +0.25R locked (inclusive boundary): the rigid time stop defers
+    # to the trailed stop, mirroring workers/position_guard.py.
+    held = _time_stop_pos(0.25)
+    assert _process_bar(settings, held, _time_stop_bar(10), day, costs,
+                        {}, {}, True, False, 4.0, 0.0,
+                        lambda asset, d: {}, None) is None
+    # Just below the boundary the time stop still fires.
+    cut = _time_stop_pos(0.245)
+    outcome = _process_bar(settings, cut, _time_stop_bar(10), day, costs,
+                           {}, {}, True, False, 4.0, 0.0,
+                           lambda asset, d: {}, None)
+    assert outcome is not None
+    slices, closed_all, _n, _g, _c = outcome
+    assert closed_all is True
+    assert [s.exit_reason for s in slices] == ["time"]
+
+
+def test_sizing_malformed_date_fails_closed():
+    settings = AppSettings(capital=1000, risk_per_trade_pct=1)
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    assert size_for_replay(
+        settings, signal, equity=1000, rates={}, date="2026-01-05") == 0.0
+    assert size_for_replay(
+        settings, signal, equity=1000, rates={}, date=None) == 0.0
+    # Date-indexed lookup compares dates: a string date used to raise a raw
+    # TypeError (`date <= str`) instead of failing closed.
+    by_date = {date(2026, 1, 10): {"EURUSD": 1.10}}
+    assert size_for_replay(
+        settings, signal, equity=1000, rates=by_date,
+        date="2026-01-05") == 0.0
+
+
+def test_entry_fill_malformed_spreads_table_raises_value_error():
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    for bad_table in ("EURUSD", ["EURUSD"], 123):
+        costs = CostConfig(
+            spreads=bad_table, commission_per_lot_per_side=3.5,
+            exit_spread_mult=0.5)
+        with pytest.raises(ValueError):
+            entry_fill(signal, next_bar_open=1.1000, direction="BUY",
+                       costs=costs, volume=0.01)
+
+
+def _signal_day_index(history, day=None):
+    return _day_of(history, len(history) - 1)
+
+
+def test_signal_atr_ceiling_failure_degrades_offline(monkeypatch):
+    import app.core.gold_policy as gold_policy
+    history = _fx_trend()
+    day = _signal_day_index(history)
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+    baseline = signal_at("EURUSD", history, settings, day)
+    assert baseline is not None
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("offline: no live gold policy")
+
+    # The snapshot default ceiling admits this signal, so the offline
+    # degradation must preserve it instead of blocking.
+    monkeypatch.setattr(gold_policy, "effective_max_atr_pct", _boom)
+    degraded = signal_at("EURUSD", history, settings, day)
+    assert degraded is not None
+    assert degraded == baseline
+
+
+def test_signal_missing_snapshot_returns_none(monkeypatch):
+    import app.engine.portfolio_replay as replay_mod
+    history = _fx_trend()
+    day = _signal_day_index(history)
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+    monkeypatch.setattr(replay_mod, "snapshot_from_candles",
+                        lambda *a, **k: {})
+    assert signal_at("EURUSD", history, settings, day) is None
+    monkeypatch.setattr(replay_mod, "snapshot_from_candles",
+                        lambda *a, **k: {"atr_pct": 1.0})
+    assert signal_at("EURUSD", history, settings, day) is None
+
+
+def test_signal_bad_snapshot_shape_returns_none(monkeypatch):
+    import app.engine.portfolio_replay as replay_mod
+    history = _fx_trend()
+    day = _signal_day_index(history)
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+    # Unexpected kwarg: IndicatorSnapshot(**snap) raises TypeError offline.
+    monkeypatch.setattr(replay_mod, "snapshot_from_candles",
+                        lambda *a, **k: {"price": 1.1, "bogus_kwarg_xyz": 1})
+    assert signal_at("EURUSD", history, settings, day) is None
+    # Zero ATR: the `not ind.price or not ind.atr_pct` guard fails closed.
+    monkeypatch.setattr(
+        replay_mod, "snapshot_from_candles",
+        lambda *a, **k: {"asset": "EURUSD", "price": 1.1, "atr_pct": 0.0})
+    assert signal_at("EURUSD", history, settings, day) is None
+
+
+def test_signal_scoring_failure_returns_none(monkeypatch):
+    from app.engine.strategy_engine import StrategyEngine
+    history = _fx_trend()
+    day = _signal_day_index(history)
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("offline scoring failure")
+
+    monkeypatch.setattr(StrategyEngine, "opportunity_score", _boom)
+    assert signal_at("EURUSD", history, settings, day) is None
+
+
+def test_signal_gold_helper_failure_returns_none(monkeypatch):
+    import app.core.gold_policy as gold_policy
+    history = _fx_trend()
+    day = _signal_day_index(history)
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("offline gold-policy failure")
+
+    monkeypatch.setattr(gold_policy, "gold_entry_block_reason", _boom)
+    assert signal_at("EURUSD", history, settings, day) is None
+
+
+def test_signal_level_failure_returns_none(monkeypatch):
+    import app.models.schemas as schemas_mod
+    history = _fx_trend()
+    day = _signal_day_index(history)
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("offline SL/TP failure")
+
+    monkeypatch.setattr(schemas_mod, "effective_sl_tp", _boom)
+    assert signal_at("EURUSD", history, settings, day) is None
+    # Falsy levels also fail closed without raising.
+    monkeypatch.setattr(schemas_mod, "effective_sl_tp",
+                        lambda *a, **k: (0.0, 0.0, 0.0, "", False))
+    assert signal_at("EURUSD", history, settings, day) is None

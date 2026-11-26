@@ -232,12 +232,18 @@ def signal_at(
         return None
 
     # Per-asset volatility ceiling rides on the snapshot (scanner parity).
+    # Offline degradation (explicit, not silent): when the production
+    # gold-policy helper is unavailable or fails offline, the snapshot keeps
+    # its own default ceiling instead of blocking the signal — replay never
+    # touches live/DB-coupled gold policy paths.
     try:
         from app.core.gold_policy import effective_max_atr_pct
 
-        ind.atr_threshold_pct = effective_max_atr_pct(settings, asset)
+        ceiling = effective_max_atr_pct(settings, asset)
     except Exception:
-        pass
+        ceiling = None
+    if ceiling is not None:
+        ind.atr_threshold_pct = ceiling
 
     # Direction exactly as market_scanner picks it (EMA spread, else Supertrend).
     if ind.ema_fast and ind.ema_slow:
@@ -791,7 +797,15 @@ def size_for_replay(
     asset = str(getattr(signal, "asset", "") or "").upper()
     if not asset:
         return 0.0
-    wanted = date.date() if isinstance(date, datetime) else date
+    # Fail closed on a malformed date: date-indexed rate lookup compares
+    # dates, so a non-date (e.g. a string) would raise TypeError. A signal
+    # that cannot be dated cannot be sized — return 0.0, never raise.
+    try:
+        wanted = date.date() if isinstance(date, datetime) else date
+    except Exception:
+        return 0.0
+    if not isinstance(wanted, _DATE):
+        return 0.0
     snapshot = _resolve_rates_snapshot(rates, wanted)
     if snapshot is None:
         rate = usd_per_quote_unit(asset, entry)
@@ -853,8 +867,15 @@ def entry_fill(
         table = costs.spreads or {}
     except AttributeError:
         raise ValueError("unusable cost spreads")
+    # A malformed spreads table (e.g. a string or list) has no usable
+    # per-asset lookup: raise the documented ValueError, never a raw
+    # AttributeError from `.get`.
     _MISSING = object()
-    raw = table.get(asset, _MISSING)
+    try:
+        get = table.get
+    except AttributeError:
+        raise ValueError(f"unusable spread for {asset or '?'}")
+    raw = get(asset, _MISSING)
     if raw is _MISSING:
         try:
             raw = float(getattr(costs, "default_spread", 0.0))
@@ -974,6 +995,12 @@ def _try_enter(
     Gate order: duplicate asset → max open → daily/weekly counts → cooldown
     → open-known rate required → SL/TP cap + sizing → correlation →
     currency exposure → sub-spread-stop guard → spread guard.
+
+    Production parity for zero limits: ``schemas.frequency_decision`` blocks
+    via ``trades_today >= max_trades_daily`` (and the weekly analogue), so a
+    configured 0 blocks every entry (0 >= 0) — it never means "unlimited".
+    The ``>=`` comparisons below mirror that exactly. The Plan 2 search space
+    starts at 1 precisely because 0 disables entries.
     """
     direction = str(getattr(signal, "direction", "") or "").upper()
     if direction not in ("BUY", "SELL"):
@@ -1515,6 +1542,15 @@ def _process_bar(
                 ts_min_r = 0.0
             r_now = sign * (c - pos.entry_fill) / risk
             locked = sign * (pos.current_sl - pos.entry_fill) / risk
+            # Locked-profit exemption mirrors production
+            # `workers/position_guard.py` (locked-profit check): a trailed SL
+            # that already locks >= +0.25R means the downside is capped and
+            # the position is a winner-pending, so the rigid time stop must
+            # not cut it. The 0.25 threshold is hardcoded in production too —
+            # documented there as sim evidence (expired trades averaged
+            # +0.34R), not tuned — and is intentionally NOT
+            # `profit_protect_r` (the separate smart-exit R-guard). The
+            # boundary is inclusive (`>=`) on both sides.
             if locked >= 0.25:
                 pass  # deferred — the trailed stop already locks profit
             elif ts_min_r <= 0 or r_now < ts_min_r:
@@ -1585,9 +1621,9 @@ def _build_metrics(trades: list[ReplayTrade],
     legs (each slice satisfies ``pnl = gross - costs``), and
     ``max_drawdown_pct`` is the peak of the curve drawdowns (whose running
     peak is seeded at starting capital in ``replay_portfolio``).
-    ``profit_factor`` is gross winning PnL over abs(gross losing PnL), and is
-    None when undefined (no trades or no losing PnL); no field is ever
-    non-finite.
+    ``profit_factor`` is total winning net PnL over abs(total losing net
+    PnL), and is None when undefined (no trades or no losing PnL); no field
+    is ever non-finite.
     """
     net = sum(t.pnl_usd for t in trades)
     gross = sum(t.gross_pnl_usd for t in trades)
