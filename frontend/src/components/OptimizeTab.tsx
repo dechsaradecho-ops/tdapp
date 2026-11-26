@@ -3,8 +3,8 @@
 /**
  * Logs > Optimize — sandbox settings optimizer panel.
  *
- * WHY A SEPARATE COMPONENT (mirrors SimulateTab)
- * ------------------------------------------------
+ * WHY A SEPARATE COMPONENT
+ * --------------------------
  * Job control (start/poll/cancel), a live iteration log, overlaid equity
  * curves, and a guarded recommendation card are four concerns that would
  * drown the 2,200-line logs page, so this lives in its own file and the
@@ -991,7 +991,7 @@ function Kv({ k, v }: { k: string; v: ReactNode }) {
 /**
  * Baseline vs current-best equity, overlaid in one inline SVG.
  *
- * Hand-rolled like SimulateTab's EquityCurve (no chart library shipped):
+ * Hand-rolled inline SVG equity curve (no chart library shipped):
  * downsampled to ≤300 rendered nodes per curve, and a legend that says
  * which curve is which. Two curves matter here — the gap between
  * baseline and best IS the optimization result.
@@ -1074,7 +1074,7 @@ function OptEquityChart({ base, best, capital }: {
   );
 }
 
-/** Downsample to ≤300 rendered nodes like SimulateTab's EquityCurve. */
+/** Downsample to ≤300 rendered nodes for the inline SVG equity curve. */
 function downsample(pts: number[]): number[] {
   if (pts.length <= 300) return pts;
   const step = Math.max(1, Math.floor(pts.length / 300));
