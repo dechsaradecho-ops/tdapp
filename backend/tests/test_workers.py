@@ -68,9 +68,19 @@ class FakeDatabase:
         self.inserted: list[tuple[str, dict]] = []
         self._client = _FakeKVClient(self)  # strict settings loader reads this
 
-    def insert(self, table: str, row: dict) -> dict | None:
+    def insert(self, table: str, row: dict | list[dict]) -> dict | list | None:
         if table in self.fail_tables:
             return None  # mimics Database.insert swallowing the error
+        if isinstance(row, list):
+            # Bulk path mirrors Database.insert(list): one call, one list
+            # back, each row stored with its own id.
+            stored: list[dict] = []
+            for single in row:
+                self.inserted.append((table, dict(single)))
+                rec = {**single, "id": f"fake-{len(self.inserted)}"}
+                self.rows.setdefault(table, []).insert(0, rec)
+                stored.append(rec)
+            return stored
         self.inserted.append((table, dict(row)))
         self.rows.setdefault(table, []).insert(0, {**row, "id": f"fake-{len(self.inserted)}"})
         return row

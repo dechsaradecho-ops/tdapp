@@ -303,6 +303,22 @@ CODE_VERSION = "sim-data-v2-1"
 #: A dataset asset is usable only with this many closed valid bars.
 MIN_BARS_PER_ASSET = 250
 
+#: Persist flush size: rows are accumulated per build and written in chunks
+#: of this many. 500 rows per POST is the sane starting point (36k bars ≈
+#: 72 requests instead of 36k — at ~0.2 s per PostgREST round trip that is
+#: minutes, not hours). ``_persist_batch`` POSTs each chunk as one JSON
+#: array; a failed chunk raises loudly and fails the version.
+_PERSIST_BATCH_SIZE = 500
+
+#: Bulk-persist switch: True = one array-POST per batch; False = legacy
+#: per-row loop (identical rows, for test comparison only).
+_BULK_PERSIST = True
+
+#: Read page size for the offset/limit bars fallback (no select_paged).
+#: Larger pages = fewer SELECT round trips on big versions; rows are
+#: concatenated in page order so the result is identical at any size.
+_BARS_PAGE_SIZE = 5000
+
 #: Twelve Data free tier: 8 req/min and 800/day. Stay below both — minimum
 #: 7.5 s between request starts, hard daily cap at 750 for safety.
 _TD_MIN_GAP_S = 7.5
@@ -402,7 +418,7 @@ def _cutoff_plus_30d(cutoff: str) -> str:
     return (day + timedelta(days=30)).isoformat()
 
 
-def _select_all_bars_fallback(db, version: str, page_size: int = 1000,
+def _select_all_bars_fallback(db, version: str, page_size: int = _BARS_PAGE_SIZE,
                               max_rows: int = 200000) -> list[dict]:
     """Page through bars with offset/limit until a short page arrives.
 
@@ -475,11 +491,16 @@ def _await_sync(coro):
 
 
 def start_dataset_build(db, *, assets: list[str],
-                        years: int = 5) -> dict:
+                        years: int = 5,
+                        base_version: str | None = None) -> dict:
     """Mint a new dataset version and hand it to the worker. Returns at once.
 
     One build at a time: a second start while one is live is refused with
     ``ok: False`` instead of queueing, so Twelve Data pressure stays flat.
+
+    ``base_version`` reuses a terminal-complete version's bars (validated up
+    front; unknown/incomplete bases refuse with zero writes). ``None``
+    preserves the original full-build behavior exactly.
     """
     if not db or not getattr(db, "available", False):
         return {"ok": False, "error": "DB unavailable"}
@@ -487,11 +508,74 @@ def start_dataset_build(db, *, assets: list[str],
                     if str(a).strip()})
     if not clean:
         return {"ok": False, "error": "assets required"}
+    if len(clean) > 40:
+        return {"ok": False, "error": "assets required (1-40)"}
     try:
         yrs = int(years or 5)
     except (TypeError, ValueError):
         yrs = 5
     yrs = max(1, min(yrs, 10))
+    cutoff, today = _date_range(yrs)
+    try:
+        bv, base_map, _ = _resolve_base(db, base_version, cutoff, today)
+    except _BaseRefused as exc:
+        return {"ok": False, "error": str(exc)}
+    return _start_build_inner(db, assets=clean, years=yrs,
+                              base_version=bv, base_bars=base_map)
+
+
+def update_dataset(db, *, assets: list[str] | None = None,
+                   years: int = 5,
+                   base_version: str | None = None) -> dict:
+    """Start a dataset update: same worker, same verdicts, shared CAS slot.
+
+    ``assets`` omitted defaults to the newest complete version's asset set
+    (explicit base's set when ``base_version`` is given); with no complete
+    version at all this is a full build (same as no base). ``years`` is
+    validated 1-10 like the build path. Refusals write nothing.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    try:
+        yrs = int(years or 5)
+    except (TypeError, ValueError):
+        yrs = 5
+    yrs = max(1, min(yrs, 10))
+    given = sorted({str(a).strip().upper() for a in (assets or [])
+                    if str(a).strip()})
+    if len(given) > 40:
+        return {"ok": False, "error": "assets required (1-40)"}
+    cutoff, today = _date_range(yrs)
+    bv_raw = (base_version or "").strip() or None
+    if bv_raw is not None:
+        try:
+            bv, base_map, meta_assets = _resolve_base(
+                db, bv_raw, cutoff, today)
+        except _BaseRefused as exc:
+            return {"ok": False, "error": str(exc)}
+        clean = given or meta_assets
+    else:
+        latest = _latest_complete_row(db)
+        if latest is None:
+            bv, base_map, clean = None, {}, given
+        else:
+            try:
+                bv, base_map, meta_assets = _resolve_base(
+                    db, str(latest.get("dataset_version") or ""),
+                    cutoff, today)
+            except _BaseRefused as exc:
+                return {"ok": False, "error": str(exc)}
+            clean = given or meta_assets
+    if not clean:
+        return {"ok": False, "error": "assets required"}
+    return _start_build_inner(db, assets=clean, years=yrs,
+                              base_version=bv, base_bars=base_map)
+
+
+def _start_build_inner(db, *, assets: list[str], years: int,
+                       base_version: str | None,
+                       base_bars: dict) -> dict:
+    """Claim the single-worker slot, write the meta row, submit the worker."""
     version = _new_version()
     if not _try_start_active(version):
         live = active_build()
@@ -501,12 +585,12 @@ def start_dataset_build(db, *, assets: list[str],
         row = {
             "dataset_version": version,
             "status": "building",
-            "years": yrs,
-            "assets": clean,
+            "years": years,
+            "assets": assets,
             "started_at": _now_iso(),
             "finished_at": None,
             "report": {"stage": "queued", "version": version,
-                       "assets": clean, "years": yrs},
+                       "assets": assets, "years": years},
             "data_hash": None,
             "code_version": CODE_VERSION,
         }
@@ -517,8 +601,140 @@ def start_dataset_build(db, *, assets: list[str],
         log.error("sim-data: could not create dataset row: %s", exc)
         _release_active(version)
         return {"ok": False, "error": "could not create dataset row"}
-    _POOL.submit(_run_build, db, version, clean, yrs)
+    _POOL.submit(_run_build, db, version, assets, years,
+                 base_version, base_bars)
     return {"ok": True, "version": version, "status": "building"}
+
+
+class _BaseRefused(Exception):
+    """A requested base version cannot be reused (unknown/incomplete/unreadable)."""
+
+
+def _is_terminal_complete(meta: dict) -> bool:
+    """Terminal-complete gate shared by load_dataset, update, and latest."""
+    report = meta.get("report") or {}
+    return (str(meta.get("status") or "") in ("complete", "done")
+            and report.get("complete") is True)
+
+
+def _latest_complete_row(db) -> dict | None:
+    """Newest COMPLETE meta row, or None. Read-only; never raises.
+
+    Newest = lexicographic max of ``dataset_version`` (versions embed a UTC
+    ``YYYYMMDD-HHMMSS`` stamp, so max == newest). Compared in Python so the
+    answer is stable regardless of DB ordering support. A read failure
+    yields None — callers treat that as "no base", which can only trigger a
+    fresh full build (same gates), never a stale/incomplete serve.
+    """
+    try:
+        rows = db.select(META_TABLE, order="started_at", desc=True,
+                         limit=1000)
+    except Exception as exc:
+        log.warning("sim-data latest-complete lookup failed: %s", exc)
+        return None
+    best: dict | None = None
+    for r in rows or []:
+        if not isinstance(r, dict) or not _is_terminal_complete(r):
+            continue
+        if best is None or (str(r.get("dataset_version") or "")
+                            > str(best.get("dataset_version") or "")):
+            best = r
+    return best
+
+
+def latest_complete_version(db) -> dict | None:
+    """Public wrapper for the /sim-data/latest route. Read-only."""
+    return _latest_complete_row(db)
+
+
+def _resolve_base(db, base_version: str | None, cutoff: str,
+                  today: str) -> tuple[str | None, dict, list[str]]:
+    """Validate a base version and snapshot its in-range bars.
+
+    Returns ``(base_version, {asset: [SimBar]}, meta_assets)`` with bars
+    already filtered to ``[cutoff, today)``, deduplicated, oldest-first, and
+    keeping their original ``source``/``source_timestamp``. Raises
+    :class:`_BaseRefused` for unknown/incomplete/unreadable bases — callers
+    refuse with zero writes, never fall back silently. ``None`` base passes
+    through as ``(None, {}, [])``.
+    """
+    bv = (base_version or "").strip() or None
+    if bv is None:
+        return None, {}, []
+    try:
+        rows = db.select(META_TABLE, filters={"dataset_version": bv},
+                         order="started_at", desc=True, limit=1)
+    except Exception as exc:
+        raise _BaseRefused(f"base dataset {bv} unreadable") from exc
+    if not rows:
+        raise _BaseRefused(f"unknown base version {bv}")
+    meta = rows[0] or {}
+    if not _is_terminal_complete(meta):
+        raise _BaseRefused(f"base version {bv} is not complete")
+    meta_assets = sorted({str(a).strip().upper()
+                          for a in (meta.get("assets") or [])
+                          if str(a).strip()})
+    try:
+        if hasattr(db, "select_paged"):
+            bar_rows = db.select_paged(BARS_TABLE,
+                                       filters={"dataset_version": bv},
+                                       order="bar_date", desc=False)
+        else:
+            bar_rows = _select_all_bars_fallback(db, bv)
+    except Exception as exc:
+        raise _BaseRefused(f"base dataset {bv} bars unreadable") from exc
+    grouped: dict[str, list[SimBar]] = {}
+    for r in bar_rows or []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            bar = SimBar(
+                asset=str(r.get("asset") or "").upper(),
+                bar_date=str(r.get("bar_date") or ""),
+                open=float(r["open"]), high=float(r["high"]),
+                low=float(r["low"]), close=float(r["close"]),
+                source=str(r.get("source") or ""),
+                source_timestamp=r.get("source_timestamp"),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not bar.asset or bar.source not in ("biquote", "twelvedata"):
+            continue
+        grouped.setdefault(bar.asset, []).append(bar)
+    # One paged read, filtered in memory per asset: no per-asset re-reads.
+    cleaned: dict[str, list[SimBar]] = {}
+    for asset, bars in grouped.items():
+        keep, _dups = _clean_provider_bars(bars, cutoff, today)
+        if keep:
+            cleaned[asset] = keep
+    return bv, cleaned, meta_assets
+
+
+def _td_needed(base_asset_bars: list[SimBar] | None, cutoff: str,
+               today: str, bq_start: str | None) -> bool:
+    """True unless base Twelve Data bars fully cover [cutoff, bq_start).
+
+    ``bq_start`` is the earliest fresh Biquote date (fresh Biquote always
+    covers everything newer); with no fresh Biquote the gap runs to today.
+    Conservative by design: any doubt fetches, which is always safe because
+    the final merge + gates apply either way.
+    """
+    if not base_asset_bars:
+        return True
+    td_dates = sorted(b.bar_date for b in base_asset_bars
+                      if b.source == "twelvedata")
+    if not td_dates:
+        return True
+    try:
+        if bq_start:
+            need_end = (datetime.fromisoformat(bq_start[:10]).date()
+                        - timedelta(days=1)).isoformat()
+        else:
+            need_end = (datetime.fromisoformat(today[:10]).date()
+                        - timedelta(days=1)).isoformat()
+    except ValueError:
+        return True
+    return not (td_dates[0] <= cutoff and td_dates[-1] >= need_end)
 
 
 def dataset_build_status(db, version: str) -> dict:
@@ -707,17 +923,30 @@ def _set_stage(db, version: str, stage: str) -> None:
         log.debug("sim-data stage %s/%s failed: %s", version, stage, exc)
 
 
-def _run_build(db, version: str, assets: list[str], years: int) -> None:
+def _run_build(db, version: str, assets: list[str], years: int,
+               base_version: str | None = None,
+               base_bars: dict | None = None) -> None:
     """Execute one dataset build to a terminal complete/failed row.
 
     Never raises and never leaves the version `building`: every exit path
     writes a verdict and clears the single-worker slot.
+
+    With ``base_bars`` (snapshot from a terminal-complete ``base_version``),
+    fresh Biquote is still fetched for every asset and wins every overlap;
+    the Twelve Data fetch is skipped per asset iff base TD bars fully cover
+    ``[cutoff, bq_start)``; remaining base bars fill dates neither fresh
+    provider covers. All gates apply unchanged to the final set.
     """
     cutoff, today = _date_range(years)
+    base_map: dict[str, list[SimBar]] = dict(base_bars or {})
     per_asset: dict[str, dict] = {}
     seam_all: list[dict] = []
     kept: list[SimBar] = []
     failed_assets: list[str] = []
+    base_ids = {id(b) for bars in base_map.values() for b in bars}
+    fetched_bars = 0
+    reused_bars = 0
+    reused_per_asset: dict[str, int] = {}
     try:
         _set_stage(db, version, "fetching_biquote")
 
@@ -736,12 +965,27 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                             f"{type(exc).__name__}: {exc}"[:200])
             return out
 
-        async def _fetch_td() -> dict:
+        bq_data = _await_sync(_fetch_bq())
+        # Clean Biquote first: its earliest date bounds the TD gap per
+        # asset, so the skip decision is made before any TD request.
+        clean_bq_map: dict[str, list[SimBar]] = {}
+        dup_bq_map: dict[str, list[str]] = {}
+        need_td: dict[str, bool] = {}
+        for asset in assets:
+            cb, dup_bq = _clean_provider_bars(
+                bq_data.get(asset) or [], cutoff, today)
+            clean_bq_map[asset] = cb
+            dup_bq_map[asset] = dup_bq
+            bq_start = cb[0].bar_date if cb else None
+            need_td[asset] = _td_needed(base_map.get(asset), cutoff,
+                                       today, bq_start)
+
+        async def _fetch_td(only: list[str]) -> dict:
             import httpx as _httpx
 
             out: dict = {}
             async with _httpx.AsyncClient() as client:
-                for asset in assets:
+                for asset in only:
                     if _td_over_daily_cap():
                         out[asset] = []
                         out[asset + ":err"] = (
@@ -758,9 +1002,9 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                             f"{type(exc).__name__}: {exc}"[:200])
             return out
 
-        bq_data = _await_sync(_fetch_bq())
         _set_stage(db, version, "fetching_twelvedata")
-        td_data = _await_sync(_fetch_td())
+        td_needed_assets = [a for a in assets if need_td.get(a, True)]
+        td_data = _await_sync(_fetch_td(td_needed_assets))
         _set_stage(db, version, "validating")
         fetched = {
             asset: {"bq": bq_data.get(asset) or [],
@@ -771,12 +1015,52 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
         }
         for asset in assets:
             pack = fetched.get(asset) or {}
-            raw_bq = pack.get("bq") or []
             raw_td = pack.get("td") or []
-            clean_bq, dup_bq = _clean_provider_bars(raw_bq, cutoff, today)
+            clean_bq = clean_bq_map.get(asset) or []
+            dup_bq = dup_bq_map.get(asset) or []
             clean_td, dup_td = _clean_provider_bars(raw_td, cutoff, today)
             merged, discrepancies = merge_history(asset, clean_bq, clean_td)
             seam_all.extend(discrepancies)
+            # Union base bars for dates neither fresh provider covers.
+            # Source priority on collision: fresh-BQ > base-BQ >
+            # fresh-TD > base-TD; a Biquote winner over a Twelve Data
+            # bar records a seam discrepancy under the current rules.
+            base_asset_bars = base_map.get(asset) or []
+            if base_asset_bars:
+                fresh_by_date = {b.bar_date: b for b in merged}
+                base_by_date: dict[str, SimBar] = {}
+                for bb in base_asset_bars:
+                    base_by_date.setdefault(bb.bar_date, bb)
+                for bar_date in sorted(base_by_date):
+                    bb = base_by_date[bar_date]
+                    f = fresh_by_date.get(bar_date)
+                    if f is None:
+                        merged.append(bb)
+                        fresh_by_date[bar_date] = bb
+                    elif (f.source == "biquote"
+                          and bb.source == "twelvedata"):
+                        discrepancies.append({
+                            "asset": asset,
+                            "bar_date": bar_date,
+                            "biquote": _ohlc(f),
+                            "twelvedata": _ohlc(bb),
+                            "selected_source": "biquote",
+                        })
+                        seam_all.append(discrepancies[-1])
+                    elif (f.source == "twelvedata"
+                          and bb.source == "biquote"):
+                        merged[merged.index(f)] = bb
+                        fresh_by_date[bar_date] = bb
+                        discrepancies.append({
+                            "asset": asset,
+                            "bar_date": bar_date,
+                            "biquote": _ohlc(bb),
+                            "twelvedata": _ohlc(f),
+                            "selected_source": "biquote",
+                        })
+                        seam_all.append(discrepancies[-1])
+                merged.sort(key=lambda b: b.bar_date)
+            fetched_bars += len(clean_bq) + len(clean_td)
             valid: list[SimBar] = []
             invalid: list[dict] = []
             prev: float | None = None
@@ -813,6 +1097,9 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                 if asset not in failed_assets:
                     failed_assets.append(asset)
             kept.extend(valid)
+            reused_n = sum(1 for b in valid if id(b) in base_ids)
+            reused_bars += reused_n
+            reused_per_asset[asset] = reused_n
             per_asset[asset] = {
                 "start": valid[0].bar_date if valid else None,
                 "end": valid[-1].bar_date if valid else None,
@@ -822,6 +1109,8 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                     1 for b in valid if b.source == "twelvedata"),
                 "merged": len(merged),
                 "persisted": len(valid),
+                "reused": reused_n,
+                "td_skipped_reuse": not need_td.get(asset, True),
                 "invalid": invalid,
                 "duplicate_dates": {"biquote": dup_bq, "twelvedata": dup_td},
                 "provider_errors": [e for e in (pack.get("bq_err"),
@@ -834,7 +1123,7 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
         batch: list[SimBar] = []
         for b in kept:
             batch.append(b)
-            if len(batch) >= 500:
+            if len(batch) >= _PERSIST_BATCH_SIZE:
                 _persist_batch(db, version, batch)
                 batch = []
         if batch:
@@ -845,6 +1134,10 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
             "assets": assets,
             "years": years,
             "bars": len(kept),
+            "base_version": base_version,
+            "reused_bars": reused_bars,
+            "reused_per_asset": reused_per_asset,
+            "fetched_bars": fetched_bars,
             "per_asset": per_asset,
             "seam_discrepancies": sorted(
                 seam_all, key=lambda d: (d.get("asset") or "",
@@ -873,6 +1166,7 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
                 "finished_at": _now_iso(),
                 "report": {"stage": "failed", "version": version,
                            "assets": assets, "years": years,
+                           "base_version": base_version,
                            "complete": False,
                            "error": f"{type(exc).__name__}: {exc}"[:300],
                            "per_asset": per_asset,
@@ -885,19 +1179,39 @@ def _run_build(db, version: str, assets: list[str], years: int) -> None:
 
 
 def _persist_batch(db, version: str, batch: list[SimBar]) -> None:
-    """Insert one batch; a swallowed None insert fails the build loudly."""
-    for b in batch:
-        row = {
-            "dataset_version": version,
-            "asset": b.asset,
-            "bar_date": b.bar_date,
-            "open": b.open,
-            "high": b.high,
-            "low": b.low,
-            "close": b.close,
-            "source": b.source,
-            "source_timestamp": b.source_timestamp,
-        }
+    """Insert one batch; a failed batch fails the build loudly.
+
+    Bulk by default (``_BULK_PERSIST``): one ``db.insert`` carrying the row
+    array — one PostgREST request per batch instead of one per bar. A falsy
+    or short response raises :class:`SimMarketDataError`, so a failed batch
+    can never leave a silently partial version: the worker marks the
+    version failed. ``_BULK_PERSIST = False`` restores the legacy per-row
+    loop (identical rows) for test comparison.
+    """
+    rows = [{
+        "dataset_version": version,
+        "asset": b.asset,
+        "bar_date": b.bar_date,
+        "open": b.open,
+        "high": b.high,
+        "low": b.low,
+        "close": b.close,
+        "source": b.source,
+        "source_timestamp": b.source_timestamp,
+    } for b in batch]
+    if _BULK_PERSIST:
+        try:
+            result = db.insert(BARS_TABLE, rows)
+        except Exception as exc:
+            raise SimMarketDataError(
+                f"{version}: persist failed for batch of {len(rows)} "
+                f"({type(exc).__name__})") from exc
+        if result is None or (isinstance(result, list)
+                              and len(result) != len(rows)):
+            raise SimMarketDataError(
+                f"{version}: persist failed for batch of {len(rows)}")
+        return
+    for b, row in zip(batch, rows):
         if db.insert(BARS_TABLE, row) is None:
             raise SimMarketDataError(
                 f"{version}: persist failed at {b.asset} {b.bar_date}")

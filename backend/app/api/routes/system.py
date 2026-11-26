@@ -1445,7 +1445,10 @@ async def sim_data_build(request: Request,
         years = int(body.get("years") if body.get("years") is not None else 5)
     except (TypeError, ValueError):
         return {"ok": False, "error": "years must be a number"}
-    res = sim_market_data.start_dataset_build(db, assets=clean, years=years)
+    base = body.get("base_version")
+    base = str(base).strip() or None if base is not None else None
+    res = sim_market_data.start_dataset_build(db, assets=clean, years=years,
+                                              base_version=base)
     if not res.get("ok"):
         return res
     st = sim_market_data.dataset_build_status(db, res["version"])
@@ -1455,14 +1458,53 @@ async def sim_data_build(request: Request,
             "report": st.get("report") or {}}
 
 
-@router.get("/sim-data/{version}")
-async def sim_data_status(request: Request, version: str) -> dict:
-    """Status + report + per-asset bar counts for one dataset version."""
+@router.post("/sim-data/update")
+async def sim_data_update(request: Request,
+                          payload: Optional[dict[str, Any]] = None) -> dict:
+    """Start a dataset update (reuse newest complete bars). Same slot/guard.
+
+    ``assets`` omitted defaults to the newest complete version's asset set;
+    ``base_version`` omitted defaults to the newest complete version. With
+    no complete version at all this is a full build (same as no base).
+    Refused (ok: False, zero writes) while a build/update is live.
+    """
     from app.services import sim_market_data
 
     db: Database = request.app.state.db
     if not db or not db.available:
         return {"ok": False, "error": "DB unavailable"}
+    body = payload or {}
+    raw_assets = body.get("assets")
+    if raw_assets is None:
+        clean = None
+    else:
+        if not isinstance(raw_assets, list) or not raw_assets:
+            return {"ok": False, "error": "assets must be a non-empty list"}
+        clean = sorted({str(a).strip().upper() for a in raw_assets
+                        if str(a).strip()})
+        if not clean or len(clean) > 40:
+            return {"ok": False, "error": "assets required (1-40)"}
+    try:
+        years = int(body.get("years") if body.get("years") is not None else 5)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "years must be a number"}
+    base = body.get("base_version")
+    base = str(base).strip() or None if base is not None else None
+    res = sim_market_data.update_dataset(db, assets=clean, years=years,
+                                         base_version=base)
+    if not res.get("ok"):
+        return res
+    st = sim_market_data.dataset_build_status(db, res["version"])
+    return {"ok": True, "version": res["version"],
+            "status": st.get("stage", "building"),
+            "db_status": st.get("status", "building"),
+            "report": st.get("report") or {}}
+
+
+def _sim_data_status_with_counts(db: Database, version: str) -> dict:
+    """Status + report + per-asset bar counts for one dataset version."""
+    from app.services import sim_market_data
+
     st = sim_market_data.dataset_build_status(db, version)
     if not st.get("ok"):
         return st
@@ -1485,6 +1527,35 @@ async def sim_data_status(request: Request, version: str) -> dict:
     st["bars"] = sum(counts.values())
     st["per_asset_counts"] = counts
     return st
+
+
+@router.get("/sim-data/latest")
+async def sim_data_latest(request: Request) -> dict:
+    """Newest COMPLETE dataset version. Never a building/failed one.
+
+    ``{ok: False, error: "no complete dataset"}`` with zero writes when no
+    complete version exists. Registered before ``/sim-data/{version}`` so
+    "latest" is not swallowed as a version parameter.
+    """
+    from app.services import sim_market_data
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    row = sim_market_data.latest_complete_version(db)
+    if row is None:
+        return {"ok": False, "error": "no complete dataset"}
+    return _sim_data_status_with_counts(
+        db, str(row.get("dataset_version") or ""))
+
+
+@router.get("/sim-data/{version}")
+async def sim_data_status(request: Request, version: str) -> dict:
+    """Status + report + per-asset bar counts for one dataset version."""
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return _sim_data_status_with_counts(db, version)
 
 
 # ---------------------------------------------------------------------------

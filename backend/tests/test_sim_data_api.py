@@ -531,3 +531,501 @@ class TestPagedFallback:
         assert res["ok"] is True
         assert res["bars"] == 20500
         assert res["per_asset_counts"]["EURUSD"] == 20500
+
+
+# ---------------------------------------------------------------------------
+# Task 1: base-version reuse + updatable datasets (RED first)
+# ---------------------------------------------------------------------------
+def _writes(db: FakeDatabase) -> tuple[int, int]:
+    return (db.count(sim_market_data.META_TABLE) or 0,
+            db.count(sim_market_data.BARS_TABLE) or 0)
+
+
+def _seed_complete(db: FakeDatabase, version: str, assets: list[str],
+                   n_bars: int = 300, source: str = "biquote",
+                   base: float = 1.1000, status: str = "complete",
+                   complete: bool = True,
+                   started_at: str = "2026-11-27T00:00:00+00:00") -> None:
+    db.insert(sim_market_data.META_TABLE, {
+        "dataset_version": version,
+        "status": status,
+        "years": 5,
+        "assets": list(assets),
+        "started_at": started_at,
+        "finished_at": (started_at if status in ("complete", "failed")
+                        else None),
+        "report": {"stage": status, "complete": complete,
+                   "version": version},
+        "data_hash": "seed",
+        "code_version": sim_market_data.CODE_VERSION,
+    })
+    for asset in assets:
+        for b in _drift_bars(asset, end_ago_days=1, n=n_bars,
+                             base=base, source=source):
+            db.insert(sim_market_data.BARS_TABLE, {
+                "dataset_version": version,
+                "asset": b.asset,
+                "bar_date": b.bar_date,
+                "open": b.open, "high": b.high, "low": b.low,
+                "close": b.close,
+                "source": b.source,
+                "source_timestamp": b.source_timestamp,
+            })
+
+
+class TestBaseVersionRefusal:
+    @pytest.mark.asyncio
+    async def test_unknown_base_refused_zero_writes(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        before = _writes(fake_db)
+        res = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5, base_version="v-nope")
+        assert res["ok"] is False
+        assert _writes(fake_db) == before
+
+    @pytest.mark.asyncio
+    async def test_incomplete_base_refused_zero_writes(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        _seed_complete(fake_db, "v-building", ["EURUSD"], status="building",
+                       complete=False)
+        before = _writes(fake_db)
+        res = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5, base_version="v-building")
+        assert res["ok"] is False
+        assert _writes(fake_db) == before
+
+    @pytest.mark.asyncio
+    async def test_complete_status_but_report_incomplete_refused(
+            self, fake_db):
+        _seed_complete(fake_db, "v-mixed", ["EURUSD"], status="complete",
+                       complete=False)
+        before = _writes(fake_db)
+        res = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5, base_version="v-mixed")
+        assert res["ok"] is False
+        assert _writes(fake_db) == before
+
+    @pytest.mark.asyncio
+    async def test_route_build_unknown_base_refused_zero_writes(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        before = _writes(fake_db)
+        res = await call("POST", "/api/system/sim-data/build",
+                         {"assets": ["EURUSD"], "years": 5,
+                          "base_version": "v-nope"})
+        assert res["ok"] is False
+        assert _writes(fake_db) == before
+
+
+class TestBaseReuse:
+    @pytest.mark.asyncio
+    async def test_reuse_skips_td_fetch_and_hash_stable(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        v1 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD"], "years": 5})
+        assert v1["ok"] is True and v1["status"] == "done"
+        st1 = await call("GET", f"/api/system/sim-data/{v1['version']}")
+        assert st1["status"] == "complete"
+
+        td_calls: list = []
+        bq_calls: list = []
+
+        async def spy_td(asset, *, years, client):
+            td_calls.append(asset)
+            return await fake_td(asset, years=years, client=client)
+
+        async def spy_bq(asset, client):
+            bq_calls.append(asset)
+            return await fake_bq(asset, client)
+
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", spy_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            spy_td)
+        v2 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD"], "years": 5,
+                         "base_version": v1["version"]})
+        assert v2["ok"] is True, v2
+        assert v2["status"] == "done", v2["report"]
+        assert td_calls == []
+        assert bq_calls == ["EURUSD"]
+        st2 = await call("GET", f"/api/system/sim-data/{v2['version']}")
+        rep = st2["report"]
+        assert rep["base_version"] == v1["version"]
+        assert rep["reused_bars"] > 0
+        assert rep["reused_per_asset"]["EURUSD"] == rep["reused_bars"]
+        assert rep["fetched_bars"] > 0
+        assert st2["data_hash"] == st1["data_hash"]
+        ds = sim_market_data.load_dataset(fake_db, v2["version"])
+        dates = [c.t for c in ds["EURUSD"]]
+        assert len(dates) == len(set(dates))
+        assert len(dates) >= 250
+
+    @pytest.mark.asyncio
+    async def test_td_fetched_when_base_lacks_old_coverage(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        v1 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD", "GBPUSD"], "years": 5})
+        assert v1["ok"] is True
+        # Wipe old-range (twelvedata) base bars for EURUSD only.
+        for r in list(fake_db.rows.get(sim_market_data.BARS_TABLE, [])):
+            if (r.get("dataset_version") == v1["version"]
+                    and r.get("asset") == "EURUSD"
+                    and r.get("source") == "twelvedata"):
+                fake_db.rows[sim_market_data.BARS_TABLE].remove(r)
+
+        td_calls: list = []
+
+        async def spy_td(asset, *, years, client):
+            td_calls.append(asset)
+            return await fake_td(asset, years=years, client=client)
+
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            spy_td)
+        v2 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD", "GBPUSD"], "years": 5,
+                         "base_version": v1["version"]})
+        assert v2["ok"] is True
+        assert v2["status"] == "done", v2["report"]
+        assert "EURUSD" in td_calls
+        assert "GBPUSD" not in td_calls
+
+    @pytest.mark.asyncio
+    async def test_fresh_biquote_overrides_base_same_date(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        v1 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD"], "years": 5})
+        assert v1["ok"] is True
+
+        async def bq_shifted(asset, client):
+            # One day older than fake_bq (overlaps base TD newest date)
+            # with a ~1% level shift (well under the 20% spike gate).
+            return _drift_bars(asset, end_ago_days=1, n=301,
+                               base=1.1111, source="biquote")
+
+        td_calls: list = []
+
+        async def spy_td(asset, *, years, client):
+            td_calls.append(asset)
+            return await fake_td(asset, years=years, client=client)
+
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent",
+                            bq_shifted)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            spy_td)
+        v2 = await call("POST", "/api/system/sim-data/build",
+                        {"assets": ["EURUSD"], "years": 5,
+                         "base_version": v1["version"]})
+        assert v2["ok"] is True
+        assert v2["status"] == "done", v2["report"]
+        ds = sim_market_data.load_dataset(fake_db, v2["version"])
+        by_t = {c.t: c for c in ds["EURUSD"]}
+        import datetime as _dt
+        overlap = _drift_bars("EURUSD", end_ago_days=1, n=301,
+                              base=1.1111, source="biquote")[0]
+        day = overlap.bar_date
+        d = _dt.date.fromisoformat(day)
+        t = int(_dt.datetime(d.year, d.month, d.day,
+                             tzinfo=_dt.timezone.utc).timestamp())
+        assert by_t[t].c == overlap.close
+        rows = [r for r in fake_db.rows[sim_market_data.BARS_TABLE]
+                if r.get("dataset_version") == v2["version"]
+                and r.get("bar_date") == day]
+        assert len(rows) == 1
+        assert rows[0]["source"] == "biquote"
+        seams = [s for s in v2["report"]["seam_discrepancies"]
+                 if s["bar_date"] == day]
+        assert seams and seams[0]["selected_source"] == "biquote"
+
+
+class TestUpdateDataset:
+    @pytest.mark.asyncio
+    async def test_update_no_history_full_build(
+            self, fake_db, inline_worker, monkeypatch):
+        td_calls: list = []
+
+        async def spy_td(asset, *, years, client):
+            td_calls.append(asset)
+            return await fake_td(asset, years=years, client=client)
+
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            spy_td)
+        res = sim_market_data.update_dataset(
+            fake_db, assets=["EURUSD"], years=5)
+        assert res["ok"] is True
+        st = sim_market_data.dataset_build_status(fake_db, res["version"])
+        assert st["status"] == "complete"
+        assert td_calls == ["EURUSD"]
+        assert st["report"]["base_version"] is None
+
+    def test_update_no_history_no_assets_refused_zero_writes(
+            self, fake_db):
+        before = _writes(fake_db)
+        res = sim_market_data.update_dataset(fake_db)
+        assert res["ok"] is False
+        assert _writes(fake_db) == before
+
+    @pytest.mark.asyncio
+    async def test_update_resolves_latest_complete(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        _seed_complete(fake_db, "v20261127-100000-aaaaaa", ["EURUSD"],
+                       started_at="2026-11-26T00:00:00+00:00")
+        _seed_complete(fake_db, "v20261127-110000-bbbbbb",
+                       ["EURUSD", "GBPUSD"],
+                       started_at="2026-11-27T00:00:00+00:00")
+        res = sim_market_data.update_dataset(fake_db, years=1)
+        assert res["ok"] is True, res
+        st = sim_market_data.dataset_build_status(fake_db, res["version"])
+        assert st["status"] == "complete", st["report"]
+        assert sorted(st["report"]["assets"]) == ["EURUSD", "GBPUSD"]
+        assert st["report"]["base_version"] == "v20261127-110000-bbbbbb"
+
+    @pytest.mark.asyncio
+    async def test_update_unknown_base_refused_zero_writes(self, fake_db):
+        before = _writes(fake_db)
+        res = sim_market_data.update_dataset(
+            fake_db, assets=["EURUSD"], base_version="v-nope")
+        assert res["ok"] is False
+        assert _writes(fake_db) == before
+
+    def test_update_refused_while_build_active(self, fake_db):
+        sim_market_data._set_active("live-build")
+        before = _writes(fake_db)
+        res = sim_market_data.update_dataset(fake_db, assets=["EURUSD"])
+        assert res["ok"] is False
+        assert res["version"] == "live-build"
+        assert _writes(fake_db) == before
+
+    @pytest.mark.asyncio
+    async def test_route_update_mirrors_build(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        res = await call("POST", "/api/system/sim-data/update",
+                         {"assets": ["EURUSD"], "years": 5})
+        assert res["ok"] is True
+        assert res["status"] == "done"
+        assert res["db_status"] == "complete"
+        assert res["report"]["complete"] is True
+
+    @pytest.mark.asyncio
+    async def test_route_update_validation(self, fake_db):
+        res = await call("POST", "/api/system/sim-data/update",
+                         {"assets": [], "years": 5})
+        assert res["ok"] is False
+        res = await call("POST", "/api/system/sim-data/update",
+                         {"assets": ["EURUSD"], "years": "many"})
+        assert res["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_route_update_refused_while_active(self, fake_db):
+        sim_market_data._set_active("live-build")
+        res = await call("POST", "/api/system/sim-data/update",
+                         {"assets": ["EURUSD"]})
+        assert res["ok"] is False
+
+
+class TestPersistTuning:
+    @pytest.mark.asyncio
+    async def test_identical_rows_across_batch_sizes(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+
+        def dump(version):
+            rows = [r for r in fake_db.rows[sim_market_data.BARS_TABLE]
+                    if r.get("dataset_version") == version]
+            return sorted(
+                (r["asset"], r["bar_date"], r["open"], r["high"],
+                 r["low"], r["close"], r["source"],
+                 r.get("source_timestamp"))
+                for r in rows)
+
+        monkeypatch.setattr(sim_market_data, "_PERSIST_BATCH_SIZE", 500)
+        r1 = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert r1.get("ok") is True
+        monkeypatch.setattr(sim_market_data, "_PERSIST_BATCH_SIZE", 5000)
+        r2 = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert r2.get("ok") is True
+        assert dump(r1["version"]) == dump(r2["version"])
+        h1 = sim_market_data.dataset_build_status(
+            fake_db, r1["version"])["data_hash"]
+        h2 = sim_market_data.dataset_build_status(
+            fake_db, r2["version"])["data_hash"]
+        assert h1 == h2
+
+
+class TestLatestComplete:
+    def _seed(self, fake_db, version, status="complete",
+              complete=True):
+        fake_db.insert(sim_market_data.META_TABLE, {
+            "dataset_version": version,
+            "status": status,
+            "years": 5,
+            "assets": ["EURUSD"],
+            "started_at": "2026-11-27T00:00:00+00:00",
+            "finished_at": "2026-11-27T00:00:00+00:00",
+            "report": {"stage": status, "complete": complete,
+                       "version": version},
+            "data_hash": "seed",
+            "code_version": sim_market_data.CODE_VERSION,
+        })
+
+    @pytest.mark.asyncio
+    async def test_latest_of_several_complete_wins(self, fake_db):
+        self._seed(fake_db, "v20261127-100000-aaaaaa")
+        self._seed(fake_db, "v20261127-110000-bbbbbb")
+        res = await call("GET", "/api/system/sim-data/latest")
+        assert res["ok"] is True
+        assert res["version"] == "v20261127-110000-bbbbbb"
+        assert res["status"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_newer_building_and_failed_ignored(self, fake_db):
+        self._seed(fake_db, "v20261127-100000-aaaaaa")
+        self._seed(fake_db, "v20261127-120000-cccccc",
+                   status="building", complete=False)
+        self._seed(fake_db, "v20261127-130000-dddddd",
+                   status="failed", complete=False)
+        self._seed(fake_db, "v20261127-140000-eeeeee",
+                   status="complete", complete=False)
+        res = await call("GET", "/api/system/sim-data/latest")
+        assert res["ok"] is True
+        assert res["version"] == "v20261127-100000-aaaaaa"
+
+    @pytest.mark.asyncio
+    async def test_empty_db_refuses_cleanly(self, fake_db):
+        before = _writes(fake_db)
+        res = await call("GET", "/api/system/sim-data/latest")
+        assert res["ok"] is False
+        assert res["error"] == "no complete dataset"
+        assert _writes(fake_db) == before
+
+
+# ---------------------------------------------------------------------------
+# Directed fix: bulk persist (one array-POST per batch, not per bar)
+# ---------------------------------------------------------------------------
+def _version_dump(db: FakeDatabase, version: str) -> list[tuple]:
+    rows = [r for r in db.rows.get(sim_market_data.BARS_TABLE, [])
+            if r.get("dataset_version") == version]
+    return sorted(
+        (r["asset"], r["bar_date"], r["open"], r["high"],
+         r["low"], r["close"], r["source"], r.get("source_timestamp"))
+        for r in rows)
+
+
+def _counting_db(db: FakeDatabase, monkeypatch,
+                 counter: dict) -> FakeDatabase:
+    orig = db.insert
+
+    def spy(table: str, row):
+        if table == sim_market_data.BARS_TABLE:
+            counter["calls"] += 1
+            counter["rows"] += (len(row) if isinstance(row, list) else 1)
+        return orig(table, row)
+
+    monkeypatch.setattr(db, "insert", spy)
+    return db
+
+
+class TestBulkPersist:
+    """Bulk (array-POST per batch) vs legacy (per-row) persist paths."""
+
+    @pytest.mark.asyncio
+    async def test_bulk_matches_legacy_rows_and_hash(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        monkeypatch.setattr(sim_market_data, "_BULK_PERSIST", False)
+        legacy = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert legacy.get("ok") is True
+        monkeypatch.setattr(sim_market_data, "_BULK_PERSIST", True)
+        bulk = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert bulk.get("ok") is True
+        assert (_version_dump(fake_db, bulk["version"])
+                == _version_dump(fake_db, legacy["version"]))
+        assert (sim_market_data.dataset_build_status(
+                    fake_db, bulk["version"])["data_hash"]
+                == sim_market_data.dataset_build_status(
+                    fake_db, legacy["version"])["data_hash"])
+        st = sim_market_data.dataset_build_status(
+            fake_db, bulk["version"])
+        assert st["status"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_bulk_cuts_insert_calls(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        import math as _math
+        n_bars = len(_version_dump(fake_db, "v-none"))  # 0; sizes below
+        assert n_bars == 0
+        # Legacy: exactly one insert call per bar.
+        counter: dict = {"calls": 0, "rows": 0}
+        _counting_db(fake_db, monkeypatch, counter)
+        monkeypatch.setattr(sim_market_data, "_BULK_PERSIST", False)
+        legacy = sim_market_data.start_dataset_build(
+            fake_db, assets=["EURUSD"], years=5)
+        assert legacy.get("ok") is True
+        bars = len(_version_dump(fake_db, legacy["version"]))
+        assert bars > 500  # multi-batch version
+        assert counter["calls"] == bars == counter["rows"]
+        # Bulk: one call per 500-row batch, same rows.
+        db2 = _counting_db(FakeDatabase(), monkeypatch,
+                           counter := {"calls": 0, "rows": 0})
+        set_state(db2)
+        monkeypatch.setattr(sim_market_data, "_BULK_PERSIST", True)
+        bulk = sim_market_data.start_dataset_build(
+            db2, assets=["EURUSD"], years=5)
+        assert bulk.get("ok") is True
+        assert counter["rows"] == bars
+        assert counter["calls"] == _math.ceil(bars / 500)
+        assert counter["calls"] < bars
+        assert (_version_dump(db2, bulk["version"])
+                == _version_dump(fake_db, legacy["version"]))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bulk", [True, False])
+    async def test_failed_batch_fails_version_loudly(
+            self, inline_worker, monkeypatch, bulk):
+        from tests.test_workers import FakeDatabase as _Fake
+        db = _Fake(fail_tables={sim_market_data.BARS_TABLE})
+        set_state(db)
+        monkeypatch.setattr(sim_market_data, "fetch_biquote_recent", fake_bq)
+        monkeypatch.setattr(sim_market_data, "fetch_twelvedata_history",
+                            fake_td)
+        monkeypatch.setattr(sim_market_data, "_BULK_PERSIST", bulk)
+        res = sim_market_data.start_dataset_build(
+            db, assets=["EURUSD"], years=5)
+        assert res.get("ok") is True  # build starts; persist then fails
+        st = sim_market_data.dataset_build_status(db, res["version"])
+        assert st["status"] == "failed"
+        assert st["report"]["complete"] is False

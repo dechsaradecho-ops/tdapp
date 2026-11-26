@@ -79,13 +79,25 @@ class Database:
         return self._client is not None
 
     # ------------------------------------------------------------------
-    def insert(self, table: str, row: dict[str, Any]) -> Optional[dict]:
+    def insert(self, table: str,
+               row: dict[str, Any] | list[dict[str, Any]]) -> Optional[Any]:
+        """Insert one row (dict) or a batch (list of dicts). Never raises.
+
+        A list is POSTed as a single JSON array — one PostgREST request per
+        batch, written in one transaction — and the response data list is
+        returned as-is. Single-dict behavior is unchanged (first row or
+        None). Any failure (single or batch) is logged and yields None so
+        callers fail closed.
+        """
         if not self._client:
             log.debug("DB unavailable — skip insert into %s", table)
             return None
         try:
             resp = self._client.table(table).insert(row).execute()
-            return resp.data[0] if resp.data else None
+            data = resp.data or []
+            if isinstance(row, list):
+                return data if data else None
+            return data[0] if data else None
         except Exception as exc:
             log.error("insert %s failed: %s", table, exc)
             return None
