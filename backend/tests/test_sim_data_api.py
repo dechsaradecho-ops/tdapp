@@ -1166,7 +1166,8 @@ def _bar(version, date, o=1.0, h=1.1, l=0.9, c=1.05, source="biquote"):
 
 
 class TestLoadDatasetDedupe:
-    def test_identical_duplicate_rows_single_candle(self, fake_db):
+    def test_identical_duplicate_rows_single_candle(self, fake_db, caplog):
+        import logging as _logging
         dup = _bar("v-dupe", "2022-03-09")
         _seed_complete_with_rows(fake_db, "v-dupe", [
             _bar("v-dupe", "2022-03-08"),
@@ -1174,9 +1175,16 @@ class TestLoadDatasetDedupe:
             dict(dup),
             _bar("v-dupe", "2022-03-10"),
         ])
-        ds = sim_market_data.load_dataset(fake_db, "v-dupe")
+        with caplog.at_level(_logging.WARNING,
+                             logger="app.services.sim_market_data"):
+            ds = sim_market_data.load_dataset(fake_db, "v-dupe")
         assert set(ds) == {"AUDNZD"}
         assert len(ds["AUDNZD"]) == 3
+        assert any("v-dupe" in (r.getMessage() or "")
+                   and "2022-03-09" in (r.getMessage() or "")
+                   and "AUDNZD" in (r.getMessage() or "")
+                   and "byte-identical read artifact" in (r.getMessage() or "")
+                   for r in caplog.records)
 
     def test_conflicting_duplicate_first_wins_and_warns(
             self, fake_db, caplog):
@@ -1191,8 +1199,10 @@ class TestLoadDatasetDedupe:
             ds = sim_market_data.load_dataset(fake_db, "v-conflict")
         assert len(ds["AUDNZD"]) == 1
         assert ds["AUDNZD"][0].c == 1.05
-        assert any("2022-03-09" in (r.getMessage() or "")
+        assert any("v-conflict" in (r.getMessage() or "")
+                   and "2022-03-09" in (r.getMessage() or "")
                    and "AUDNZD" in (r.getMessage() or "")
+                   and "conflicting values" in (r.getMessage() or "")
                    for r in caplog.records)
 
     def test_multi_page_shaped_sorted_input_order_preserved(
