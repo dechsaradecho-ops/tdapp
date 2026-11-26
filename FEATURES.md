@@ -116,6 +116,13 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 - จังหวะรีเฟรช: monitor/signals ดีฟอลต์ 2s (DB `refresh_interval`); การ์ดราคาเรืองแสง (glow) เขียว/แดงตามทิศ tick + ป้าย freshness (LIVE/STALE/CLOSED)
 - `supported assets` (28) + `allowed_assets` (DB, migration 021) คุมจักรวาลเทรด; SL/TP re-anchor ด้วย `fetch_trusted_spot` ก่อนเปิดจริง; gold gate `gold_max_atr_pct = 0` = ห้ามเทรดทอง (ไม่เปลี่ยน)
 
+### Simulation price-data dataset (v2, migration 062)
+- Build API: `POST /api/system/sim-data/build` (`assets` 1–40 ตัว, `years` 1–10, default 5) → mint version ใหม่ (`vYYYYMMDD-HHMMSS-xxxxxx`) แล้ว fetch บน single-worker background job; `GET /api/system/sim-data/{version}` ดู stage/report/bar counts; ตาราง `sim_price_bars_v2` (PK: `dataset_version, asset, bar_date`) + `sim_dataset_meta_v2` (report, `data_hash`); dataset เป็น immutable — build ใหม่ = version ใหม่ ไม่ update ของเก่า
+- Source precedence: Biquote = authoritative สำหรับ ~500 แท่ง D1 ล่าสุด (ตัดแท่งที่ยังเปิดค้าง `is_open` ทิ้ง) → Twelve Data (`/time_series` interval=1day, outputsize=5000) เติมประวัติด้านหลัง; วันที่ซ้ำกัน Biquote ชนะเสมอ และทุก overlap ถูกบันทึกใน `seam_discrepancies` (OHLC ทั้งสองฝั่ง + `selected_source: biquote`) ไม่มีการเฉลี่ย
+- Validation/quarantine: ทุกแท่งผ่าน `validate_sim_bar` (OHLC geometry + spike >20% vs close ก่อนหน้า + future-bar) — แท่งเสียถูก quarantine ไม่ persist; asset ใดมี valid bars < 250 = build จบแบบ `failed` พร้อม `failed_assets`; เก่า `price_history_daily` ไม่ถูกแตะ
+- Twelve Data throttle (free tier 8 req/min, 800/day): หน่วง ≥7.5s ระหว่าง request + daily cap 750; build ซ้อนกันถูกปฏิเสธ (`ok: False` "มีงาน build รันอยู่แล้ว")
+- Readiness probe 2026-11-26 (read-only, ไม่แตะ trading/settings): Biquote live คืน 500 raw / **499 closed D1 bars** ทั้ง EURUSD (2025-04-21→2026-11-25) และ XAUUSD (2025-04-20→2026-11-25); Twelve Data live ตรวจไม่ได้ (ไม่มี `TWELVEDATA_API_KEY` ใน worktree) จึงใช้ mocked TD fixture (ประวัติด้านหลัง + overlap 30 วันราคาต่าง +0.1%) — merge แล้วไม่มี duplicate dates, เรียง oldest-first, overlap 30 จุดถูกรายงานครบ, invalid 0, `data_hash` (SHA-256) เสถียรเมื่อ build ซ้ำด้วยข้อมูลชุดเดิม
+
 ## 11. Auth + ข้อมูล
 
 - PIN 6 หลัก hash ฝั่ง server (`008_pin_auth.sql`), token ใน `localStorage`, session ใน memory (deploy backend ใหม่ = login ใหม่, 401 พร้อมกันหลัง deploy = ปกติ)
@@ -131,7 +138,7 @@ Route เก่า `/market` `/risk` `/signal-logs` `/performance` = redirect st
 
 ## 14. คุณภาพ + Deploy
 
-- Backend pytest (**882 tests** ใน `backend/tests/` — cooldown 7 เคส, ticket-recycling, ticket seed, realized stats, smart-exit, RR, costs, web-push 26 เคส ฯลฯ) · frontend `npx tsc --noEmit` + `next build` (13/13 routes)
+- Backend pytest (**1577 tests** ใน `backend/tests/` — cooldown 7 เคส, ticket-recycling, ticket seed, realized stats, smart-exit, RR, costs, web-push 26 เคส ฯลฯ) · frontend `npx tsc --noEmit` + `next build` (13/13 routes)
 - `backend/scripts/` มี probe ตรวจ prod (check_*, e2e_probe_post_deploy, probe_line_*) + `gen_vapid_keys.py` (สร้างคู่คีย์ Web Push)
 - Web Push ต้องตั้ง env `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (ไม่มี = ฟีเจอร์นิ่ง ไม่พัง: `/api/push/key` ตอบ `enabled: false`); `pywebpush` เพิ่มใน `requirements.txt` → api service ต้อง redeploy; หมุน private key = subscription เดิมทุกเครื่องใช้ไม่ได้ ต้องกดเปิดใหม่
 - Deploy: push `master` → Render build api (pip + uvicorn, health `/health` มี commit/workers/ai_config) + static web (`out/` ~5–10 นาที); ตรวจ deploy ด้วย ASCII marker ใน JS chunk (ไทยโดน \\u-escape, hash เปลี่ยนทุก build)
