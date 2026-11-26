@@ -1339,3 +1339,37 @@ class TestLoadDatasetPerAssetDeterministic:
         for asset in self._ASSETS:
             assert len(ds[asset]) == len(self._DATES)
         assert all("asset" in call for call in db.paged_calls)
+
+    def test_base_snapshot_survives_tie_skew(self):
+        """Review round 1: `_resolve_base` snapshots base bars through the
+        same per-asset deterministic read, so a tie-unstable global page
+        walk cannot bake skewed bars into a new immutable version."""
+        db = _TieSkewFake()
+        _seed_tie_version(db, "v-tie-base", self._ASSETS, self._DATES)
+        bv, cleaned, meta_assets = sim_market_data._resolve_base(
+            db, "v-tie-base", "2022-01-01", "2026-01-01")
+        assert bv == "v-tie-base"
+        assert meta_assets == sorted(self._ASSETS)
+        assert set(cleaned) == set(self._ASSETS)
+        for asset in self._ASSETS:
+            assert [b.bar_date for b in cleaned[asset]] == self._DATES
+        assert db.paged_calls, "expected per-asset DB round-trips"
+        assert all("asset" in call for call in db.paged_calls)
+
+    def test_base_snapshot_without_meta_assets_still_exact(self):
+        """Base meta rows predating the assets column: the set is learned
+        from the bars table — the snapshot itself still comes from
+        per-asset reads, never the skewed global walk."""
+        db = _TieSkewFake()
+        _seed_tie_version(db, "v-tie-base-nometa", self._ASSETS, self._DATES)
+        for row in db.rows[sim_market_data.META_TABLE]:
+            if row.get("dataset_version") == "v-tie-base-nometa":
+                row.pop("assets", None)
+        bv, cleaned, meta_assets = sim_market_data._resolve_base(
+            db, "v-tie-base-nometa", "2022-01-01", "2026-01-01")
+        assert bv == "v-tie-base-nometa"
+        assert meta_assets == []
+        assert set(cleaned) == set(self._ASSETS)
+        for asset in self._ASSETS:
+            assert [b.bar_date for b in cleaned[asset]] == self._DATES
+        assert all("asset" in call for call in db.paged_calls)

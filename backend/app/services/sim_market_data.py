@@ -455,6 +455,35 @@ def _select_all_bars_fallback(db, version: str, page_size: int = _BARS_PAGE_SIZE
     return out
 
 
+def _select_bars_per_asset(db, version: str, assets: list[str]) -> list[dict]:
+    """Read one version's bars deterministically, one asset at a time.
+
+    A global ``select_paged(order="bar_date")`` pages across ~28 assets
+    sharing each date: offset pages over those heavy sort-key ties can
+    return a row twice or skip it (prod incident 2026-11-27, part 2), so
+    identical configs replayed different bars. Within ONE asset
+    ``bar_date`` is UNIQUE (PK), so a per-asset page walk is
+    deterministic. Each per-asset read is small (<= ~2000 rows), so
+    round-trips stay at (#assets + small constant). Raises
+    :class:`SimMarketDataError` on DB read failure so callers fail closed.
+    """
+    rows: list[dict] = []
+    for asset in assets or []:
+        try:
+            if hasattr(db, "select_paged"):
+                part = db.select_paged(
+                    BARS_TABLE,
+                    filters={"dataset_version": str(version), "asset": asset},
+                    order="bar_date", desc=False)
+            else:
+                part = _select_all_bars_fallback(db, str(version), asset=asset)
+        except Exception as exc:
+            raise SimMarketDataError(
+                f"{version}: dataset bars read failed ({exc})") from exc
+        rows.extend(part or [])
+    return rows
+
+
 def _discover_dataset_assets(db, version: str, meta: dict) -> list[str]:
     """Asset set of a version, WITHOUT paging bars globally.
 
@@ -748,13 +777,14 @@ def _resolve_base(db, base_version: str | None, cutoff: str,
     meta_assets = sorted({str(a).strip().upper()
                           for a in (meta.get("assets") or [])
                           if str(a).strip()})
+    # Per-asset deterministic snapshot (prod incident 2026-11-27, part 2,
+    # review round 1): the old global date-ordered page walk over tie-heavy
+    # pages could dupe/skip rows and bake a skewed snapshot into a new
+    # immutable version. `bar_date` is UNIQUE within one asset, so the
+    # shared per-asset helper reads each asset deterministically.
     try:
-        if hasattr(db, "select_paged"):
-            bar_rows = db.select_paged(BARS_TABLE,
-                                       filters={"dataset_version": bv},
-                                       order="bar_date", desc=False)
-        else:
-            bar_rows = _select_all_bars_fallback(db, bv)
+        targets = meta_assets or _discover_dataset_assets(db, bv, meta)
+        bar_rows = _select_bars_per_asset(db, bv, targets)
     except Exception as exc:
         raise _BaseRefused(f"base dataset {bv} bars unreadable") from exc
     grouped: dict[str, list[SimBar]] = {}
@@ -775,7 +805,8 @@ def _resolve_base(db, base_version: str | None, cutoff: str,
         if not bar.asset or bar.source not in ("biquote", "twelvedata"):
             continue
         grouped.setdefault(bar.asset, []).append(bar)
-    # One paged read, filtered in memory per asset: no per-asset re-reads.
+    # Bars arrived via deterministic per-asset reads (unique bar_date
+    # order), grouped in memory per asset: no global page walk anywhere.
     cleaned: dict[str, list[SimBar]] = {}
     for asset, bars in grouped.items():
         keep, _dups = _clean_provider_bars(bars, cutoff, today)
@@ -895,20 +926,7 @@ def load_dataset(db, version: str,
         targets = sorted(want)
     else:
         targets = _discover_dataset_assets(db, str(version), meta)
-    rows: list[dict] = []
-    for asset in targets:
-        try:
-            if hasattr(db, "select_paged"):
-                part = db.select_paged(
-                    BARS_TABLE,
-                    filters={"dataset_version": str(version), "asset": asset},
-                    order="bar_date", desc=False)
-            else:
-                part = _select_all_bars_fallback(db, str(version), asset=asset)
-        except Exception as exc:
-            raise SimMarketDataError(
-                f"{version}: dataset bars read failed ({exc})") from exc
-        rows.extend(part or [])
+    rows = _select_bars_per_asset(db, str(version), targets)
     out: dict[str, list] = {}
     # Defensive date-unique load (prod incident 2026-11-27): a `complete`
     # version failed replay at build_timeline with `AUDNZD: duplicate bars
