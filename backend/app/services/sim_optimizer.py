@@ -505,6 +505,14 @@ def optimize_settings(
 #   live settings row and never touches broker/notifier/orders.
 # * Primary objective is highest net simulated PnL; drawdown is reported,
 #   not penalized (inherited from optimize_settings).
+# * Evidence phases: every detailed non-baseline iteration consistently
+#   carries validation-phase trades/equity. Baseline (iteration 0) details
+#   are stored once at search start from its train slice and are PINNED —
+#   the final top-N pass never replaces them. The top-N pass deletes then
+#   re-inserts detail rows for its non-baseline iterations, so a best
+#   iteration first stored train-phase during the search ends
+#   validation-phase. Iterations are summary rows always; detail rows are
+#   evidence for baseline, the moving best, and the final top-N only.
 # * Progress writes are throttled to at most one run-row patch per
 #   iteration (a cheap dict update, no extra tables).
 # * Cancellation is cooperative: the worker's cancel event is checked
@@ -808,7 +816,8 @@ def start_optimization(db, *, dataset_version: str,
     One run at a time: a second start while one is live is refused with
     ``ok: False``. ``search_config`` may be a SearchConfig or a plain dict
     (validated — ``max_iterations > 500`` is refused). Assets default to the
-    baseline's ``effective_assets()`` when omitted. Never writes live
+    baseline's ``effective_assets()`` when omitted; at most 40 assets per run
+    (same bound as the Plan 1 dataset-build job). Never writes live
     settings; the baseline is a read-only snapshot.
     """
     if not db or not getattr(db, "available", False):
@@ -847,7 +856,8 @@ def start_optimization(db, *, dataset_version: str,
     run_id = _new_run_id()
     if not _try_start_active(run_id):
         live = active_optimization()
-        return {"ok": False, "error": "มีการ optimize รันอยู่แล้ว",
+        return {"ok": False,
+                "error": "an optimization run is already live",
                 "run_id": live}
     now = _now_iso()
     try:
@@ -1044,9 +1054,18 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
             return
         board = list(getattr(outcome, "validation_leaderboard", None) or [])
         for entry in board[:max(1, cfg.top_n)]:
+            if cancel.is_set():
+                _finish_run(
+                    db, run_id, "cancelled",
+                    result={**live_result, "stage": "cancelled",
+                            "warnings": ["cancelled during validation — "
+                                         "completed iterations preserved"]})
+                return
             iteration = int(getattr(entry, "iteration", 0) or 0)
-            if iteration in detailed:
-                continue
+            if iteration == 0:
+                continue  # pinned: baseline evidence stays train-phase
+            _delete_details(db, run_id, iteration)
+            detailed.discard(iteration)
             _store_details(db, run_id, iteration,
                            getattr(entry, "validation_result", None))
             detailed.add(iteration)
@@ -1275,11 +1294,16 @@ def cancel_optimization(db, run_id: str) -> dict:
     except Exception:
         pass
     now = _now_iso()
-    patched = dict(row)
-    patched.update({"status": "cancelled", "stage": "cancelled",
-                    "finished_at": now, "error": "cancelled"})
     _patch_run(db, str(run_id), {"status": "cancelled",
                                  "stage": "cancelled",
                                  "finished_at": now,
                                  "error": "cancelled"})
+    # Return the fresh row, not the pre-patch in-memory copy: the worker may
+    # have advanced progress/stage between our read and our patch.
+    fresh = _run_row(db, str(run_id))
+    if fresh is not None:
+        return _status_dict(fresh)
+    patched = dict(row)
+    patched.update({"status": "cancelled", "stage": "cancelled",
+                    "finished_at": now, "error": "cancelled"})
     return _status_dict(patched)

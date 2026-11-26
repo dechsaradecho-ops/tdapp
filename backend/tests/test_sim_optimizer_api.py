@@ -25,15 +25,22 @@ from tests.test_workers import FakeDatabase
 # Harness (mirrors tests/test_sim_data_api.py)
 # ---------------------------------------------------------------------------
 class OptFakeDatabase(FakeDatabase):
-    """Stock fake + id preservation + live-settings write tripwire.
+    """Stock fake + id-preservation shim + live-settings write tripwire.
 
-    The stock FakeDatabase overwrites every row's ``id`` with a generated
-    value, which would orphan ``sim_opt_runs`` rows (PK ``id`` == run id).
-    The real Supabase keeps a client-supplied text PK, so this fake keeps a
-    supplied ``id`` and only mints one when absent. Any insert/update/delete
-    touching ``trading_settings`` is recorded in ``saved_settings`` — the
-    optimizer must never write live settings (reads via ``_client`` are
-    untouched and stay free).
+    DIVERGENCE FROM STOCK (deliberate, documented): the stock
+    ``FakeDatabase.insert`` overwrites every row's ``id`` with a generated
+    ``fake-N`` value. Production Supabase preserves a client-supplied text
+    PK (insert returns the row with the given id), and the optimizer reads
+    and patches ``sim_opt_runs`` by run id — so under the stock fake every
+    run-row lookup would miss and every test using ``sim_opt_runs`` would
+    fail for harness reasons, not code reasons. This shim therefore keeps a
+    supplied ``id`` and only mints one when absent. Stock-fake users must
+    preserve ids the same way for ``sim_opt_runs`` reads/writes to work;
+    every other table behaves exactly like the stock fake.
+
+    Any insert/update/delete touching ``trading_settings`` is recorded in
+    ``saved_settings`` — the optimizer must never write live settings
+    (reads via ``_client`` are untouched and stay free).
     """
 
     def __init__(self, rows=None, fail_tables=None):
@@ -293,6 +300,8 @@ class TestOptimizerGuards:
         res = await call("POST", "/api/system/optimize",
                          {"dataset_version": "v1", "assets": ["EURUSD"]})
         assert res["ok"] is False
+        assert res["run_id"] == "opt-live"
+        assert "already live" in str(res.get("error", ""))
 
     async def test_start_rejects_bad_capital(self, fake_db):
         for bad in (0, -5, "lots", float("nan"), float("inf")):
@@ -418,3 +427,82 @@ class TestOptimizerShapes:
         equity = fake_db.select("sim_opt_equity", {"run_id": run_id})
         assert trades and equity
         assert {t["direction"] for t in trades} <= {"long", "short"}
+
+    @staticmethod
+    def _train_cutoff_iso(fake_db, version: str = "v1") -> str:
+        bars = fake_db.select(sim_market_data.BARS_TABLE,
+                              {"dataset_version": version}, limit=100000)
+        days = sorted({r["bar_date"] for r in bars})
+        assert len(days) >= 2
+        return days[int(len(days) * 0.7)]
+
+    async def test_topn_validation_replaces_best_train_details(
+            self, fake_db, inline_worker, monkeypatch):
+        """Phase rule: baseline (iter 0) keeps train-phase details; every
+        other detailed iteration ends with validation-phase details only."""
+        run_id = await self._done_run(fake_db, monkeypatch)
+        st = await call("GET", f"/api/system/optimize/{run_id}")
+        assert st["ok"] is True and st["status"] == "complete"
+        best_iter = st["best"]["iteration"]
+        cutoff = self._train_cutoff_iso(fake_db)
+        trades = fake_db.select("sim_opt_trades", {"run_id": run_id},
+                                limit=100000)
+        by_iter: dict[int, list] = {}
+        for t in trades:
+            by_iter.setdefault(t["iteration"], []).append(t)
+        # All search iterations are in the top-N board, so all are detailed.
+        assert set(by_iter) == {0, 1, 2}
+        # Pinned baseline: full train-slice replay, incl. pre-cutoff dates.
+        assert any(t["exit_date"] < cutoff for t in by_iter[0])
+        # Non-baseline: validation-phase only, pre-cutoff rows replaced.
+        for it, rows in by_iter.items():
+            if it == 0:
+                continue
+            assert rows, it
+            assert all(t["exit_date"] >= cutoff for t in rows), it
+        if best_iter != 0:
+            assert all(t["exit_date"] >= cutoff
+                       for t in by_iter[best_iter])
+
+    async def test_cancel_during_topn_validation_preserves_rows(
+            self, fake_db, inline_worker, monkeypatch):
+        """Cancel landing mid-validation-persist stops further replays and
+        marks the run cancelled with all completed rows intact."""
+        state = {"search_done": False}
+
+        def fake_then_flag(series, baseline, *, starting_capital=1000.0,
+                           search_config=None, progress_callback=None,
+                           cancel_event=None):
+            out = fast_fake_optimizer(
+                series, baseline, starting_capital=starting_capital,
+                search_config=search_config,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event)
+            state["search_done"] = True
+            return out
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fake_then_flag)
+        real_store = sim_optimizer._store_details
+
+        def flaky_store(db, run_id, iteration, replay):
+            out = real_store(db, run_id, iteration, replay)
+            if state["search_done"]:
+                ev = sim_optimizer._CANCEL.get(run_id)
+                if ev is not None:
+                    ev.set()
+            return out
+
+        monkeypatch.setattr(sim_optimizer, "_store_details", flaky_store)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        st = await call("GET",
+                        f"/api/system/optimize/{res['run_id']}")
+        assert st["ok"] is True
+        assert st["status"] == "cancelled"
+        assert st["error"] == "cancelled"
+        iters = fake_db.select("sim_opt_iterations",
+                               {"run_id": res["run_id"]}, limit=100000)
+        assert len(iters) == 3
