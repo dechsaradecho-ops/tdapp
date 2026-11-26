@@ -506,3 +506,73 @@ class TestOptimizerShapes:
         iters = fake_db.select("sim_opt_iterations",
                                {"run_id": res["run_id"]}, limit=100000)
         assert len(iters) == 3
+
+    async def test_cancel_just_before_terminal_write_wins(
+            self, fake_db, inline_worker, monkeypatch):
+        """Race guard: a cancel landing during best-summary computation —
+        after the last validation check, just before the terminal
+        ``complete`` write — must end the run ``cancelled`` (completed
+        rows preserved), never silently overwritten to ``complete``."""
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        real_best = sim_optimizer._best_summary
+
+        def hooked_best(entry):
+            for ev in list(sim_optimizer._CANCEL.values()):
+                try:
+                    ev.set()
+                except Exception:
+                    pass
+            return real_best(entry)
+
+        monkeypatch.setattr(sim_optimizer, "_best_summary", hooked_best)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        st = await call("GET",
+                        f"/api/system/optimize/{res['run_id']}")
+        assert st["ok"] is True
+        assert st["status"] == "cancelled"
+        assert st["stage"] == "cancelled"
+        assert st["error"] == "cancelled"
+        iters = fake_db.select("sim_opt_iterations",
+                               {"run_id": res["run_id"]}, limit=100000)
+        assert len(iters) == 3
+
+    async def test_finish_run_refuses_cancelled_to_complete(
+            self, fake_db, inline_worker, monkeypatch):
+        """Unit guard: _finish_run(complete) after cancel_optimization
+        patched the row (event set + row cancelled) must write
+        ``cancelled``, preserving completed rows."""
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        real_finish = sim_optimizer._finish_run
+
+        def racing_finish(db, run_id, status, **kw):
+            if status == "complete":
+                ev = sim_optimizer._CANCEL.get(run_id)
+                if ev is not None:
+                    try:
+                        ev.set()
+                    except Exception:
+                        pass
+                sim_optimizer._patch_run(db, run_id, {
+                    "status": "cancelled", "stage": "cancelled",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error": "cancelled"})
+            return real_finish(db, run_id, status, **kw)
+
+        monkeypatch.setattr(sim_optimizer, "_finish_run", racing_finish)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        st = await call("GET",
+                        f"/api/system/optimize/{res['run_id']}")
+        assert st["ok"] is True
+        assert st["status"] == "cancelled"
+        assert st["error"] == "cancelled"
+        iters = fake_db.select("sim_opt_iterations",
+                               {"run_id": res["run_id"]}, limit=100000)
+        assert len(iters) == 3

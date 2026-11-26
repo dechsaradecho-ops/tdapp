@@ -775,6 +775,36 @@ def _read_data_hash(db, dataset_version: str) -> str | None:
     return row.get("data_hash") or report.get("data_hash")
 
 
+def _cancel_requested(db, run_id: str, cancel=None) -> bool:
+    """True if a cancel landed via the worker event or the run row itself.
+
+    Checked immediately before the terminal ``complete`` write so a cancel
+    landing during best-summary computation — or between the last
+    validation check and the terminal write — cannot be silently
+    overwritten to ``complete``. The row read covers the case where
+    ``cancel_optimization`` patched the row but the worker's in-flight
+    event handle is stale.
+    """
+    try:
+        if cancel is not None and bool(cancel.is_set()):
+            return True
+    except Exception:
+        pass
+    try:
+        live = _CANCEL.get(str(run_id))
+        if live is not None and live is not cancel and bool(live.is_set()):
+            return True
+    except Exception:
+        pass
+    try:
+        row = _run_row(db, str(run_id))
+        if row is not None and str(row.get("status")) == "cancelled":
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _finish_run(db, run_id: str, status: str, *,
                 result: dict | None = None, error: str | None = None) -> None:
     """Write the terminal verdict.
@@ -783,7 +813,21 @@ def _finish_run(db, run_id: str, status: str, *,
     (pending/running/complete/failed/cancelled); ``stage`` carries the
     worker vocabulary (done/failed/cancelled), mirroring the Plan 1
     dataset-build job (status complete + report stage done).
+
+    Cancel wins the terminal race: a ``complete`` write requested after a
+    cancel landed (event set or row already ``cancelled``) is downgraded
+    to ``cancelled`` so the worker can never silently overwrite a
+    cancellation. Completed iteration rows are untouched on every path.
     """
+    if status == "complete" and _cancel_requested(
+            db, run_id, _CANCEL.get(str(run_id))):
+        status = "cancelled"
+        base = dict(result or {})
+        warnings = list(base.get("warnings") or [])
+        warnings.append("cancelled before completion — "
+                        "completed iterations preserved")
+        result = {**base, "stage": "cancelled", "warnings": warnings}
+        error = "cancelled"
     stage = {"complete": "done", "failed": "failed",
              "cancelled": "cancelled"}.get(status, status)
     _patch_run(db, run_id, {
@@ -1093,6 +1137,13 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
         final = {"stage": "done", "best_train_pnl": best_train,
                  "best": best, "recommendation": recommendation,
                  "warnings": list(getattr(outcome, "warnings", None) or [])}
+        if _cancel_requested(db, run_id, cancel):
+            _finish_run(db, run_id, "cancelled",
+                        result={**live_result, "stage": "cancelled",
+                                "warnings": ["cancelled before completion — "
+                                             "completed iterations "
+                                             "preserved"]})
+            return
         _patch_run(db, run_id, {"progress": 1.0})
         _finish_run(db, run_id, "complete", result=final)
     except Exception as exc:                       # noqa: BLE001 - verdict, not a crash
