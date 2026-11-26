@@ -374,15 +374,20 @@ class CostConfig:
     """Static replay cost table (offline mirror of production paper costs).
 
     ``spreads`` maps UPPER-case asset → full bid-ask width in price units.
+    Assets absent from ``spreads`` fall back to ``default_spread`` (the
+    legacy global ``paper_spread``), so an unknown symbol still fills with
+    a configured width instead of silently trading at mid.
     ``commission_per_lot_per_side`` is USD per 1.00 lot, charged once per
     side (entry commission at fill; the exit side is aggregated later).
-    ``exit_spread_mult`` scales the exit half-spread during later PnL
-    aggregation (0.5 completes one full round-trip spread).
+    ``exit_spread_mult`` scales the full exit spread cost during later PnL
+    aggregation (0.5 completes the entry half-spread into one full
+    round-trip spread).
     """
 
     spreads: dict[str, float]
     commission_per_lot_per_side: float
     exit_spread_mult: float
+    default_spread: float = 0.0
 
 
 def _static_spread(settings: AppSettings, asset: str) -> float:
@@ -429,7 +434,9 @@ def default_cost_config(settings: AppSettings) -> CostConfig:
     ``paper_commission_per_lot`` / ``paper_exit_spread_mult`` with the
     production canonical defaults (3.5 / 0.5) when absent; an explicit 0 is
     kept (commission-free / no exit spread). Spreads resolve every
-    ``DEFAULT_SPREADS`` symbol plus any valid override via ``_static_spread``.
+    ``DEFAULT_SPREADS`` symbol plus any valid override via ``_static_spread``;
+    ``default_spread`` carries the finite non-negative legacy global
+    ``paper_spread`` for symbols outside that table (invalid values → 0.0).
     """
     spreads = {
         a: _static_spread(settings, a)
@@ -448,6 +455,9 @@ def default_cost_config(settings: AppSettings) -> CostConfig:
         spreads=spreads,
         commission_per_lot_per_side=commission,
         exit_spread_mult=exit_mult,
+        default_spread=_nonneg_finite(
+            G(settings, "paper_spread", zero_as_missing=False), 0.0
+        ),
     )
 
 
@@ -599,8 +609,19 @@ def entry_fill(
         raise ValueError(f"unknown direction: {direction!r}")
     asset = str(getattr(signal, "asset", "") or "").upper()
     try:
-        spread = float((costs.spreads or {}).get(asset, 0.0))
-    except (TypeError, ValueError, AttributeError):
+        table = costs.spreads or {}
+    except AttributeError:
+        raise ValueError("unusable cost spreads")
+    _MISSING = object()
+    raw = table.get(asset, _MISSING)
+    if raw is _MISSING:
+        try:
+            raw = float(getattr(costs, "default_spread", 0.0))
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError(f"unusable spread for {asset or '?'}")
+    try:
+        spread = float(raw)
+    except (TypeError, ValueError):
         raise ValueError(f"unusable spread for {asset or '?'}")
     try:
         commission = float(costs.commission_per_lot_per_side)

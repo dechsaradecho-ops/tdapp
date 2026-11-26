@@ -447,6 +447,64 @@ def test_default_cost_config_keeps_explicit_zero_commission():
     assert costs.commission_per_lot_per_side == 0.0
 
 
+def test_unknown_asset_entry_uses_global_default_spread():
+    costs = CostConfig(
+        spreads={"EURUSD": 0.0002},
+        commission_per_lot_per_side=3.5,
+        exit_spread_mult=0.5,
+        default_spread=0.0004,
+    )
+    signal = _replay_signal("USDSEK", entry=10.0000, stop_loss=9.9000)
+    fill, cost = entry_fill(
+        signal, next_bar_open=10.0000, direction="BUY", costs=costs, volume=0.01
+    )
+    assert fill == pytest.approx(10.0000 + 0.0004 / 2)
+    assert cost == pytest.approx(3.5 * 0.01)
+
+
+def test_per_asset_spread_wins_over_global_default():
+    costs = CostConfig(
+        spreads={"EURUSD": 0.0002},
+        commission_per_lot_per_side=3.5,
+        exit_spread_mult=0.5,
+        default_spread=0.0004,
+    )
+    signal = _replay_signal("EURUSD", entry=1.1000, stop_loss=1.0900)
+    fill, _ = entry_fill(
+        signal, next_bar_open=1.1000, direction="BUY", costs=costs, volume=0.01
+    )
+    assert fill == pytest.approx(1.1000 + 0.0002 / 2)
+
+
+def test_default_cost_config_carries_legacy_global_spread():
+    costs = default_cost_config(AppSettings(paper_spread=0.0005))
+    assert costs.default_spread == pytest.approx(0.0005)
+    signal = _replay_signal("USDSEK", entry=10.0000, stop_loss=9.9000)
+    fill, _ = entry_fill(
+        signal, next_bar_open=10.0000, direction="SELL", costs=costs, volume=0.01
+    )
+    assert fill == pytest.approx(10.0000 - 0.0005 / 2)
+
+
+def test_default_cost_config_sanitizes_bad_global_spread():
+    assert default_cost_config(AppSettings()).default_spread == 0.0
+    assert default_cost_config(AppSettings(paper_spread=-0.1)).default_spread == 0.0
+
+
+def test_entry_fill_rejects_bad_fallback_spread():
+    signal = _replay_signal("USDSEK", entry=10.0000, stop_loss=9.9000)
+    for bad in (-0.0001, float("nan"), float("inf")):
+        costs = CostConfig(
+            spreads={},
+            commission_per_lot_per_side=3.5,
+            exit_spread_mult=0.5,
+            default_spread=bad,
+        )
+        with pytest.raises(ValueError):
+            entry_fill(signal, next_bar_open=10.0, direction="BUY",
+                       costs=costs, volume=0.01)
+
+
 def test_build_rate_map_carries_forward_without_future_leakage():
     d1, d2, d3 = date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)
     eurusd = [_candle(1, close=1.10), _candle(3, close=1.12)]
