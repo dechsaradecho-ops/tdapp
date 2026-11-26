@@ -22,6 +22,8 @@ from app.models.schemas import (
     contract_value_for,
     effective_sl_tp,
     quote_usd_rate,
+    sl_cap_below_spread,
+    spread_sl_floor,
     usd_per_quote_unit,
 )
 
@@ -975,7 +977,8 @@ def _try_enter(
     current marked equity (starting capital + realized PnL + open marked
     PnL). The entry fails closed when the open-known rate is unavailable.
     Gate order: duplicate asset → max open → daily/weekly counts → cooldown
-    → SL/TP cap + sizing → correlation → currency exposure → spread guard.
+    → open-known rate required → SL/TP cap + sizing → correlation →
+    currency exposure → sub-spread-stop guard → spread guard.
     """
     direction = str(getattr(signal, "direction", "") or "").upper()
     if direction not in ("BUY", "SELL"):
@@ -1019,6 +1022,17 @@ def _try_enter(
     if not math.isfinite(next_open) or next_open <= 0:
         return None
 
+    # Open-known quote rate is required BEFORE any cap/sizing math: the
+    # production helpers fall back to 1.0 for an underivable cross, so the
+    # entry fails closed here and replay cap math never runs on the fallback.
+    static_spread = _full_spread_of(costs, asset_u)
+    try:
+        open_rate = quote_usd_rate(asset_u, next_open, prior_rates)
+    except Exception:
+        open_rate = None
+    if open_rate is None or not math.isfinite(open_rate) or open_rate <= 0:
+        return None
+
     # Simulated equity for this run is supplied by the caller (current
     # marked equity, recomputed before each same-day entry).
     equity = equity_now
@@ -1037,7 +1051,7 @@ def _try_enter(
         sl2, tp2, _dist, _tier, _capped = effective_sl_tp(
             scoped, next_open, sig_sl, sig_tp, asset_u, direction,
             apply_cap=True, rates=prior_rates,
-            spread=_full_spread_of(costs, asset_u))
+            spread=static_spread)
     except Exception:
         return None
     if not sl2 or not tp2:
@@ -1105,18 +1119,31 @@ def _try_enter(
         except Exception:
             return None
 
+    # Sub-spread-stop guard (production P0-6): a stop that cannot clear
+    # the deterministic static spread is not a stop. Block when the
+    # equity-adjusted budget cannot fund a spread-wide min-lot stop, or when
+    # the effective SL distance itself sits below the spread floor.
+    try:
+        if sl_cap_below_spread(scoped, asset_u, price=next_open,
+                               rates=prior_rates, spread=static_spread):
+            return None
+        floor = spread_sl_floor(scoped, asset_u, spread=static_spread)
+    except Exception:
+        return None
     # Spread guard: full spread as % of the execution SL distance.
     try:
         spread_cap = float(G(settings, "spread_guard_max_pct",
                              zero_as_missing=False) or 0.0)
     except (TypeError, ValueError):
         spread_cap = 0.0
-    spread = _full_spread_of(costs, asset_u)
+    spread = static_spread
     exec_dist = abs(fill - sl2)
     if spread_cap > 0 and exec_dist > 0 and spread > 0:
         if spread / exec_dist * 100.0 > spread_cap:
             return None
     if exec_dist <= 0:
+        return None
+    if floor > 0 and exec_dist < floor - 1e-12:
         return None
 
     contract = contract_value_for(asset_u)

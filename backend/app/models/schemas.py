@@ -864,8 +864,10 @@ def sl_cap_distance(settings: "AppSettings", asset: Optional[str],
 
 
 def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
-                        price: Optional[float] = None,
-                        rates: dict | None = None) -> bool:
+                         price: Optional[float] = None,
+                         rates: dict | None = None,
+                         *, spread: float | None = None,
+                         ) -> bool:
     """True when the risk budget cannot fund a stop wider than the spread.
 
     This is the fail-closed condition behind ``sl_narrower_than_spread``: the
@@ -879,9 +881,12 @@ def sl_cap_below_spread(settings: "AppSettings", asset: Optional[str],
     both agree on what the budget can actually buy (USDJPY: ¥10 ≠ $10).
     ``rates`` (a trusted spot map) lets the cross-through chain price a JPY
     cross leg (CHFJPY via USDJPY); None keeps the exact legacy math.
+    ``spread`` is an optional static spread override forwarded to
+    ``spread_sl_floor`` (see it for semantics); omitted keeps production
+    behavior.
     """
     try:
-        spread_floor = spread_sl_floor(settings, asset)
+        spread_floor = spread_sl_floor(settings, asset, spread=spread)
         if spread_floor <= 0:
             return False
         budget = float(getattr(settings, "capital", 0) or 0) \

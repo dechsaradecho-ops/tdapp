@@ -1237,3 +1237,39 @@ def test_gold_replay_ignores_live_spread(monkeypatch):
     assert first.entry_price == pytest.approx(
         entry_bar.o + (static_half if first.direction == "BUY"
                        else -static_half))
+
+
+def test_underivable_cross_with_cap_enabled_opens_nothing():
+    from app.models.schemas import quote_usd_rate
+    settings = AppSettings(sl_cap_enabled=True)
+    gbp = [round(190.0 + 0.12 * i, 3) for i in range(225)]
+    # No USD leg anywhere: the quote rate is underivable, so cap math must
+    # never run on a 1.0 fallback — the entry fails closed with no accounting.
+    assert quote_usd_rate("GBPJPY", 200.0, {}) is None
+    result = replay_portfolio({"GBPJPY": _t4_bars(gbp, pad=0.05)},
+                              settings, starting_capital=1000)
+    assert result.trades == []
+    assert result.metrics.costs == 0
+    assert result.metrics.gross_pnl == 0
+    assert result.metrics.net_pnl == 0
+
+
+def test_sub_spread_stop_blocked_with_static_spread(monkeypatch):
+    import app.integrations.quotes as quotes_mod
+    series = {"XAUUSD": _t4_gold_breakout()}
+    tight = AppSettings(risk_per_trade_pct=1.0,
+                        spread_overrides={"XAUUSD": 5.0})
+    # Static floor (3 × 5.0 = 15.0) exceeds what the $10 budget funds at the
+    # min lot — the candidate is blocked before any fill.
+    blocked = replay_portfolio(series, tight, starting_capital=1000)
+    assert blocked.trades == []
+    assert blocked.metrics.costs == 0
+    # A tiny live spread cannot rescue the verdict: replay uses the static
+    # spread for the cap/floor math, never the live quote cache.
+    monkeypatch.setattr(quotes_mod, "live_spread", lambda asset: 0.00001)
+    still_blocked = replay_portfolio(series, tight, starting_capital=1000)
+    assert still_blocked.trades == []
+    assert still_blocked.metrics.costs == 0
+    # Control: the same trend trades under default spreads.
+    control = replay_portfolio(series, AppSettings(), starting_capital=1000)
+    assert control.trades
