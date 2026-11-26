@@ -7,6 +7,9 @@ from __future__ import annotations
 import pytest
 
 from app.services.sim_optimizer import (
+    BOOLEAN_SEARCH_DIMS,
+    SEARCH_BOUNDS,
+    SL_DISTANCE_MODES,
     IterationResult,
     OptimizationResult,
     SearchConfig,
@@ -16,6 +19,7 @@ from app.services.sim_optimizer import (
     config_diff,
 )
 from app.models.schemas import AppSettings
+import math
 import random
 
 
@@ -102,3 +106,44 @@ def test_candidate_hash_deterministic_for_same_config():
     candidate = candidate_from_baseline(AppSettings(), rng, 1)
     assert canonical_config_hash(candidate) == canonical_config_hash(candidate)
     assert len(canonical_config_hash(candidate)) == 64
+
+
+@pytest.mark.parametrize("seed", [7, 42, 123])
+def test_candidate_all_search_dims_within_spec_table(seed):
+    """Every MUTATED value sits inside its spec table bound and on its step grid.
+
+    Bounds/grids come from SEARCH_BOUNDS / BOOLEAN_SEARCH_DIMS /
+    SL_DISTANCE_MODES directly (no second copy of the table). Unmutated
+    fields keep baseline values and are out of scope here; the diff tells us
+    exactly what the candidate changed. Also asserts full coverage: every
+    search dim is exercised at least once per seed.
+    """
+    rng = random.Random(seed)
+    seen: set[str] = set()
+    for i in range(300):
+        baseline = AppSettings()
+        candidate = candidate_from_baseline(baseline, rng, i)
+        for field, change in config_diff(baseline, candidate).items():
+            seen.add(field)
+            value = change["to"]
+            if field in SEARCH_BOUNDS:
+                lo, hi, step = SEARCH_BOUNDS[field]
+                if value is None:
+                    assert field == "min_confidence_gold"  # inherit-base only
+                    continue
+                assert lo - 1e-9 <= value <= hi + 1e-9, (field, value)
+                n_steps = int(round((hi - lo) / step))
+                k = round((value - lo) / step)
+                assert 0 <= k <= n_steps, (field, value)
+                assert math.isclose(value, lo + k * step, abs_tol=1e-6), (field, value)
+                baseline_value = getattr(baseline, field)
+                if isinstance(baseline_value, int) and not isinstance(baseline_value, bool):
+                    assert isinstance(value, int) and not isinstance(value, bool), (field, value)
+            elif field in BOOLEAN_SEARCH_DIMS:
+                assert isinstance(value, bool), (field, value)
+            elif field == "sl_distance_mode":
+                assert value in SL_DISTANCE_MODES, (field, value)
+            else:
+                pytest.fail(f"candidate mutated non-search dim: {field}")
+    expected = set(SEARCH_BOUNDS) | set(BOOLEAN_SEARCH_DIMS) | {"sl_distance_mode"}
+    assert expected <= seen, f"unexercised dims: {sorted(expected - seen)}"
