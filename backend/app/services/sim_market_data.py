@@ -11,9 +11,10 @@ no batching, so the throttle point stays in one place.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import httpx
@@ -153,6 +154,65 @@ async def fetch_twelvedata_history(
         ))
     bars.sort(key=lambda b: b.bar_date)
     return bars
+
+
+@dataclass(frozen=True)
+class DatasetBuildReport:
+    version: int
+    assets: list[str] = field(default_factory=list)
+    bars: int = 0
+    per_asset: dict[str, int] = field(default_factory=dict)
+    seam_discrepancies: list[dict] = field(default_factory=list)
+    invalid: list[dict] = field(default_factory=list)
+    complete: bool = False
+    data_hash: str = ""
+
+
+def _ohlc(bar: SimBar) -> dict:
+    return {"open": bar.open, "high": bar.high, "low": bar.low,
+            "close": bar.close}
+
+
+def merge_history(
+    asset: str, biquote: list[SimBar], twelvedata: list[SimBar]
+) -> tuple[list[SimBar], list[dict]]:
+    """Merge Twelve Data history with Biquote recents, oldest-first.
+
+    Biquote wins every overlapping date; each overlap is recorded with
+    both OHLC sets and never averaged. Output is deterministic.
+    """
+    by_date: dict[str, SimBar] = {}
+    td_by_date: dict[str, SimBar] = {}
+    for bar in twelvedata or []:
+        by_date.setdefault(bar.bar_date, bar)
+        td_by_date.setdefault(bar.bar_date, bar)
+    discrepancies: list[dict] = []
+    for bar in biquote or []:
+        old = by_date.get(bar.bar_date)
+        if old is not None:
+            td_bar = td_by_date.get(bar.bar_date, old)
+            discrepancies.append({
+                "asset": asset,
+                "bar_date": bar.bar_date,
+                "biquote": _ohlc(bar),
+                "twelvedata": _ohlc(td_bar),
+                "selected_source": "biquote",
+            })
+        by_date[bar.bar_date] = bar
+    merged = [by_date[k] for k in sorted(by_date)]
+    discrepancies.sort(key=lambda d: d["bar_date"])
+    return merged, discrepancies
+
+
+def hash_bars(bars: list[SimBar]) -> str:
+    """Canonical SHA-256 over sorted (asset, bar_date, OHLC, source) rows."""
+    rows = sorted(bars or [], key=lambda b: (b.asset, b.bar_date))
+    digest = hashlib.sha256()
+    for b in rows:
+        digest.update(
+            f"{b.asset}|{b.bar_date}|{b.open!r}|{b.high!r}|{b.low!r}"
+            f"|{b.close!r}|{b.source}\n".encode("utf-8"))
+    return digest.hexdigest()
 
 
 def validate_sim_bar(

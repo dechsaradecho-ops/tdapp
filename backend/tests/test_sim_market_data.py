@@ -11,13 +11,42 @@ import httpx
 import pytest
 
 from app.services.sim_market_data import (
+    DatasetBuildReport,
     SimBar,
     fetch_biquote_recent,
     fetch_twelvedata_history,
+    hash_bars,
+    merge_history,
     twelvedata_symbol,
     validate_sim_bar,
 )
 from app.services.price_history import today_utc
+
+
+def bar(bar_date: str, close: float) -> SimBar:
+    return SimBar("EURUSD", bar_date, 1.10, 1.11, 1.09, close, "biquote", None)
+
+
+def _sample_bars() -> list[SimBar]:
+    return [
+        SimBar("EURUSD", "2026-01-02", 1.19, 1.21, 1.18, 1.20, "biquote", None),
+        SimBar("EURUSD", "2026-01-01", 1.09, 1.11, 1.08, 1.10, "twelvedata", None),
+    ]
+
+
+def test_biquote_wins_overlap_and_reports_discrepancy():
+    bq = [bar("2026-01-02", close=1.20)]
+    td = [bar("2026-01-01", close=1.10), bar("2026-01-02", close=1.21)]
+    merged, discrepancies = merge_history("EURUSD", bq, td)
+    assert [b.bar_date for b in merged] == ["2026-01-01", "2026-01-02"]
+    assert merged[-1].close == 1.20
+    assert discrepancies[0]["bar_date"] == "2026-01-02"
+
+
+def test_hash_is_canonical_and_stable():
+    bars = _sample_bars()
+    assert hash_bars(bars) == hash_bars(list(reversed(bars)))
+    assert hash_bars(bars) == hash_bars(bars)
 
 
 def _biquote_transport() -> httpx.MockTransport:
