@@ -32,6 +32,9 @@ import type {
 } from "@/lib/types";
 
 const POLL_MS = 1000;
+/** Consecutive transient poll failures tolerated before an update is
+ *  abandoned — a flaky network must not orphan a live backend job. */
+const DS_MAX_RETRIES = 5;
 const ITER_PAGE = 100;
 const TERMINAL = ["complete", "failed", "cancelled"];
 
@@ -141,6 +144,9 @@ export default function OptimizeTab() {
   // update (or unmount) so a late response can't flip dsUpdating back on.
   const dsInFlightRef = useRef(false);
   const dsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Consecutive transient poll-error count — reset on every successful
+  // poll and on each new update; abort only past DS_MAX_RETRIES.
+  const dsErrRef = useRef(0);
   const dsTargetRef = useRef<string | null>(null);
   dsTargetRef.current = dsTarget;
   const dsResolveRef = useRef(false);
@@ -202,6 +208,25 @@ export default function OptimizeTab() {
   useEffect(() => {
     if (!dsUpdating || !dsTarget) return;
     const target = dsTarget;
+    // Abort helper: the tracked version is provably gone or terminally
+    // refused — stop polling and surface the backend string verbatim.
+    const abortDs = (msg: string) => {
+      setErr(msg);
+      setDsMsg("");
+      setDsUpdating(false);
+      setDsTarget(null);
+    };
+    // Retry helper: transient failure (network throw, DB outage) — keep
+    // polling through DS_MAX_RETRIES consecutive errors, with the retry
+    // count visible so a flaky network is not silent.
+    const retryDs = (msg: string) => {
+      dsErrRef.current += 1;
+      if (dsErrRef.current > DS_MAX_RETRIES) {
+        abortDs(msg);
+        return;
+      }
+      setDsMsg(`กำลังอัปเดต dataset ${target}… (ติดต่อไม่ได้ ครั้งที่ ${dsErrRef.current}/${DS_MAX_RETRIES} — ยังรอต่อ)`);
+    };
     const tick = async () => {
       if (dsInFlightRef.current) return;
       if (dsTargetRef.current !== target) return;
@@ -210,12 +235,16 @@ export default function OptimizeTab() {
         const st = await api.simDataStatus(target);
         if (dsTargetRef.current !== target) return;
         if (!st.ok) {
-          // Verbatim: unknown version / DB outage mid-poll.
-          setErr(st.error || "อ่านสถานะ dataset ไม่สำเร็จ");
-          setDsUpdating(false);
-          setDsTarget(null);
+          // Only "unknown dataset version" proves the run is gone — abort
+          // at once. Anything else may be transient: keep polling.
+          if (/unknown dataset version/i.test(st.error || "")) {
+            abortDs(st.error || "unknown dataset version");
+            return;
+          }
+          retryDs(st.error || "อ่านสถานะ dataset ไม่สำเร็จ");
           return;
         }
+        dsErrRef.current = 0;
         const rep = (st.report || {}) as SimDataReport;
         const stage = st.stage || st.status || "";
         if (stage === "done" || st.status === "complete" || rep.complete === true) {
@@ -240,9 +269,7 @@ export default function OptimizeTab() {
         setDsMsg(`กำลังอัปเดต dataset ${target}… (${stage || "building"})`);
       } catch (e) {
         if (dsTargetRef.current !== target) return;
-        setErr(String(e));
-        setDsUpdating(false);
-        setDsTarget(null);
+        retryDs(String(e));
       } finally {
         dsInFlightRef.current = false;
       }
@@ -398,6 +425,7 @@ export default function OptimizeTab() {
       }
       setDsUpdating(true);
       setDsTarget(v);
+      dsErrRef.current = 0;
       setDsMsg(`เริ่มอัปเดต dataset ${v}…`);
     } catch (e) {
       setErr(String(e));
@@ -526,8 +554,10 @@ export default function OptimizeTab() {
             />
             <span className="mt-1 flex gap-1">
               <button type="button" onClick={() => void updateDataset()}
-                disabled={dsUpdating}
-                title="ดึงราคาล่าสุดต่อจาก dataset ที่ใหม่สุด (สินทรัพย์ตามช่องข้างๆ ว่าง = ชุดเดิม, ย้อนหลัง 5 ปี)"
+                disabled={dsUpdating || live}
+                title={live
+                  ? "ปิดการอัปเดตระหว่าง optimization รันอยู่ — รอให้รันจบก่อน"
+                  : "ดึงราคาล่าสุดต่อจาก dataset ที่ใหม่สุด (สินทรัพย์ตามช่องข้างๆ ว่าง = ชุดเดิม, ย้อนหลัง 5 ปี)"}
                 className="px-2 py-1 rounded border border-slate-700 text-slate-300 text-xs disabled:opacity-50 min-h-[32px]">
                 {dsUpdating ? "กำลังอัปเดต…" : "อัปเดต dataset"}
               </button>
