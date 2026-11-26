@@ -13,16 +13,16 @@ import json
 import math
 import random
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
-try:
-    from typing import TYPE_CHECKING
-except ImportError:  # pragma: no cover - typing always has this
-    TYPE_CHECKING = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:
-    from app.engine.portfolio_replay import ReplayResult
-    from app.models.schemas import AppSettings
+from app.engine.portfolio_replay import (
+    ReplayMetrics,
+    ReplayResult,
+    default_cost_config,
+    replay_portfolio,
+)
+from app.models.schemas import AppSettings
 
 MAX_ITERATIONS_HARD_MAX = 500
 
@@ -209,3 +209,271 @@ class OptimizationResult:
     iterations: list[IterationResult] = field(default_factory=list)
     validation_leaderboard: list[IterationResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+# Search-loop tunables (Task 3 controller rulings).
+_STALL_LIMIT = 20
+_MAX_DUP_RETRIES = 100
+
+
+def _bar_date_utc(bar: Any) -> date:
+    """UTC calendar date of one series bar (never invents or guesses)."""
+    raw = getattr(bar, "t", None)
+    try:
+        stamp = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("series bar is missing its UTC timestamp")
+    if not math.isfinite(stamp) or stamp <= 0:
+        raise ValueError("series bar is missing its UTC timestamp")
+    return datetime.fromtimestamp(stamp, tz=timezone.utc).date()
+
+
+def split_series(series: dict, train_ratio: float = 0.7) -> tuple[dict, Optional[date]]:
+    """Chronological train/validation split shared by the whole search.
+
+    Unions every asset's bar dates (UTC), sorts them, and takes the cutoff
+    index ``int(len(dates) * train_ratio)`` clamped to ``[1, len-1]``; the
+    train series holds bars with ``date < cutoff``. Empty (or dateless)
+    input fails closed as ``({}, None)`` — never a wall-clock date.
+    """
+    if not series:
+        return {}, None
+    try:
+        ratio = float(train_ratio)
+    except (TypeError, ValueError):
+        raise ValueError("train_ratio must be in (0, 1)")
+    if not math.isfinite(ratio) or not 0.0 < ratio < 1.0:
+        raise ValueError("train_ratio must be in (0, 1)")
+    dates = sorted(
+        {_bar_date_utc(bar) for bars in series.values() for bar in (bars or [])}
+    )
+    if len(dates) < 2:
+        return {}, None
+    idx = int(len(dates) * ratio)
+    idx = max(1, min(idx, len(dates) - 1))
+    cutoff = dates[idx]
+    train = {
+        asset: [bar for bar in (bars or []) if _bar_date_utc(bar) < cutoff]
+        for asset, bars in series.items()
+    }
+    return train, cutoff
+
+
+def _slice_metrics(trades: list, curve: list) -> ReplayMetrics:
+    """Plan 2 metric semantics recomputed over one slice of a replay."""
+    net = sum(t.pnl_usd for t in trades)
+    gross = sum(t.gross_pnl_usd for t in trades)
+    costs = sum(t.costs_usd for t in trades)
+    wins = sum(1 for t in trades if t.pnl_usd > 0)
+    win_rate = (wins / len(trades) * 100.0) if trades else 0.0
+    win_sum = sum(t.pnl_usd for t in trades if t.pnl_usd > 0)
+    loss_sum = sum(t.pnl_usd for t in trades if t.pnl_usd < 0)
+    profit_factor: float | None = None
+    if loss_sum < 0:
+        candidate = win_sum / abs(loss_sum)
+        if math.isfinite(candidate):
+            profit_factor = candidate
+    average_r = (sum(t.r_multiple for t in trades) / len(trades)) if trades else 0.0
+    ambiguous = sum(1 for t in trades if t.ambiguous)
+    ambiguous_pct = (ambiguous / len(trades) * 100.0) if trades else 0.0
+    max_dd = max((p.drawdown_pct for p in curve), default=0.0)
+    return ReplayMetrics(
+        net_pnl=net if math.isfinite(net) else 0.0,
+        gross_pnl=gross if math.isfinite(gross) else 0.0,
+        costs=costs if math.isfinite(costs) else 0.0,
+        trades=len(trades),
+        wins=wins,
+        win_rate_pct=win_rate if math.isfinite(win_rate) else 0.0,
+        profit_factor=profit_factor,
+        average_r=average_r if math.isfinite(average_r) else 0.0,
+        max_drawdown_pct=max_dd if math.isfinite(max_dd) else 0.0,
+        ambiguous_pct=ambiguous_pct if math.isfinite(ambiguous_pct) else 0.0,
+    )
+
+
+def slice_replay_result(
+    result: ReplayResult, cutoff_date: Optional[date]
+) -> tuple[ReplayResult, ReplayResult]:
+    """Split one full-timeline replay into train/validation slices.
+
+    Train holds trades with ``exit_date < cutoff`` and equity points with
+    ``date < cutoff``; validation holds the rest with absolute equity values
+    preserved (no reset). Slice metrics are recomputed with Plan 2 semantics;
+    warnings are preserved on both slices.
+    """
+    if isinstance(cutoff_date, datetime):
+        cutoff_date = cutoff_date.date()
+    warnings = list(result.warnings or [])
+    if cutoff_date is None:
+        empty = ReplayResult(
+            trades=[], equity_curve=[],
+            metrics=ReplayMetrics(), warnings=warnings,
+        )
+        rest = ReplayResult(
+            trades=list(result.trades),
+            equity_curve=list(result.equity_curve),
+            metrics=_slice_metrics(result.trades, result.equity_curve),
+            warnings=warnings,
+        )
+        return empty, rest
+    train_trades = [t for t in result.trades if t.exit_date < cutoff_date]
+    val_trades = [t for t in result.trades if t.exit_date >= cutoff_date]
+    train_curve = [p for p in result.equity_curve if p.date < cutoff_date]
+    val_curve = [p for p in result.equity_curve if p.date >= cutoff_date]
+    train_slice = ReplayResult(
+        trades=train_trades, equity_curve=train_curve,
+        metrics=_slice_metrics(train_trades, train_curve), warnings=warnings,
+    )
+    val_slice = ReplayResult(
+        trades=val_trades, equity_curve=val_curve,
+        metrics=_slice_metrics(val_trades, val_curve), warnings=warnings,
+    )
+    return train_slice, val_slice
+
+
+def _train_net_pnl(iteration: IterationResult) -> float:
+    try:
+        return float(iteration.train_result.metrics.net_pnl)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def _validation_net_pnl(entry: IterationResult) -> float:
+    try:
+        return float(entry.validation_result.metrics.net_pnl)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def optimize_settings(
+    series: dict,
+    baseline: AppSettings,
+    *,
+    starting_capital: float = 1000.0,
+    search_config: Optional[SearchConfig] = None,
+    progress_callback=None,
+    cancel_event=None,
+) -> OptimizationResult:
+    """Profit-max search with chronological validation (synchronous).
+
+    Evaluates the baseline on the train split, then iterates candidates from
+    the original baseline on train only — tracking best by train net PnL,
+    deduplicating by config hash, stopping on max iterations / cancel /
+    stall (20 candidate iterations without train improvement). Validation
+    replays the top-N distinct candidates once over the full timeline,
+    slices each full replay at the cutoff, and recommends the highest
+    validation net PnL among trade-eligible configs. Never touches DB,
+    broker, network, notifications, or live settings writes.
+    """
+    cfg = search_config if search_config is not None else SearchConfig()
+    rng = random.Random(cfg.seed)
+    try:
+        capital = float(starting_capital)
+    except (TypeError, ValueError):
+        capital = 1000.0
+    if not math.isfinite(capital) or capital <= 0:
+        capital = 1000.0
+
+    def _cancelled() -> bool:
+        try:
+            return cancel_event is not None and bool(cancel_event.is_set())
+        except Exception:
+            return False
+
+    def _emit(entry: IterationResult) -> None:
+        if progress_callback is not None:
+            progress_callback(entry)
+
+    train_series, cutoff = split_series(series, train_ratio=cfg.train_ratio)
+    if cutoff is None:
+        return OptimizationResult(
+            best=None, baseline=None, iterations=[],
+            validation_leaderboard=[],
+            warnings=["optimizer: empty series, nothing to search"],
+        )
+
+    iterations: list[IterationResult] = []
+    seen: set[str] = set()
+
+    # Iteration 0: the baseline itself. Sets the initial best by train net.
+    baseline_train = replay_portfolio(
+        train_series, baseline, starting_capital=capital,
+        cost_config=default_cost_config(baseline),
+    )
+    seen.add(canonical_config_hash(baseline))
+    best_train_net = float(baseline_train.metrics.net_pnl)
+    baseline_entry = IterationResult(
+        iteration=0, config=baseline, config_diff=config_diff(baseline, baseline),
+        train_result=baseline_train, validation_result=None, improved=False,
+    )
+    iterations.append(baseline_entry)
+    _emit(baseline_entry)
+
+    # Iterations 1..N: candidates cloned from the original baseline.
+    stall = 0
+    dup_retries = 0
+    while len(iterations) < cfg.max_iterations:
+        if _cancelled():
+            break
+        candidate = candidate_from_baseline(baseline, rng, len(iterations))
+        digest = canonical_config_hash(candidate)
+        if digest in seen:
+            dup_retries += 1
+            if dup_retries > _MAX_DUP_RETRIES:
+                break
+            continue
+        dup_retries = 0
+        seen.add(digest)
+        train_result = replay_portfolio(
+            train_series, candidate, starting_capital=capital,
+            cost_config=default_cost_config(candidate),
+        )
+        net = float(train_result.metrics.net_pnl)
+        improved = net > best_train_net
+        if improved:
+            best_train_net = net
+            stall = 0
+        else:
+            stall += 1
+        entry = IterationResult(
+            iteration=len(iterations), config=candidate,
+            config_diff=config_diff(baseline, candidate),
+            train_result=train_result, validation_result=None,
+            improved=improved,
+        )
+        iterations.append(entry)
+        _emit(entry)
+        if stall >= _STALL_LIMIT:
+            break
+
+    # Validation: top-N distinct configs by train net, one full replay each.
+    ranked = sorted(iterations, key=_train_net_pnl, reverse=True)[: max(1, cfg.top_n)]
+    board: list[IterationResult] = []
+    for source in ranked:
+        if _cancelled():
+            break
+        full = replay_portfolio(
+            series, source.config, starting_capital=capital,
+            cost_config=default_cost_config(source.config),
+        )
+        _train_slice, val_slice = slice_replay_result(full, cutoff)
+        board.append(
+            IterationResult(
+                iteration=source.iteration, config=source.config,
+                config_diff=dict(source.config_diff),
+                train_result=source.train_result,
+                validation_result=val_slice, improved=source.improved,
+            )
+        )
+    board.sort(key=_validation_net_pnl, reverse=True)
+    eligible = [
+        entry for entry in board
+        if (entry.train_result.metrics.trades
+            + entry.validation_result.metrics.trades) >= cfg.min_trades
+        and entry.validation_result.metrics.trades >= cfg.min_validation_trades
+    ]
+    best = eligible[0] if eligible else None
+    return OptimizationResult(
+        best=best, baseline=iterations[0], iterations=iterations,
+        validation_leaderboard=board, warnings=[],
+    )
