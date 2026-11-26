@@ -11,11 +11,16 @@ no batching, so the throttle point stays in one place.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -267,3 +272,435 @@ def _validate(bar: SimBar, previous_close: float | None) -> list[str]:
         except (TypeError, ValueError):
             pass
     return errs
+
+
+# ---------------------------------------------------------------------------
+# Background dataset build + persistence (Task 4).
+#
+# WHY A JOB AND NOT A REQUEST
+# ---------------------------
+# A five-year two-provider fetch plus validation/persistence is slow (Twelve
+# Data alone is throttled to one request per 7.5 s), so it cannot live inside
+# a request/response cycle. It runs on a single-worker thread pool mirroring
+# app/services/simulation.py: one build at a time, progress stages on the
+# meta row, and a terminal complete/failed verdict. Datasets are immutable —
+# every build mints a new version and old versions are never updated.
+# ---------------------------------------------------------------------------
+
+BARS_TABLE = "sim_price_bars_v2"
+META_TABLE = "sim_dataset_meta_v2"
+
+CODE_VERSION = "sim-data-v2-1"
+
+#: A dataset asset is usable only with this many closed valid bars.
+MIN_BARS_PER_ASSET = 250
+
+#: Twelve Data free tier: 8 req/min and 800/day. Stay below both — minimum
+#: 7.5 s between request starts, hard daily cap at 750 for safety.
+_TD_MIN_GAP_S = 7.5
+_TD_DAILY_CAP = 750
+
+#: One worker on purpose — a second concurrent build would double Twelve
+#: Data pressure and interleave progress on the meta rows.
+_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sim-data")
+
+#: The live build version, so a second start is refused while one runs.
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE: str | None = None
+
+_TD_LOCK = threading.Lock()
+_TD_LAST_START = 0.0
+_TD_DAY = ""
+_TD_COUNT = 0
+
+
+def _set_active(version: str | None) -> None:
+    global _ACTIVE
+    with _ACTIVE_LOCK:
+        _ACTIVE = version
+
+
+def active_build() -> str | None:
+    with _ACTIVE_LOCK:
+        return _ACTIVE
+
+
+def _new_version() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"v{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _td_throttle() -> None:
+    """Wait until a Twelve Data request may start. Never raises."""
+    global _TD_LAST_START, _TD_DAY, _TD_COUNT
+    day = datetime.now(timezone.utc).date().isoformat()
+    with _TD_LOCK:
+        if _TD_DAY != day:
+            _TD_DAY, _TD_COUNT = day, 0
+        gap = _TD_MIN_GAP_S
+        wait = gap - (time.monotonic() - _TD_LAST_START) if _TD_LAST_START else 0.0
+    if wait and wait > 0:
+        await asyncio.sleep(wait)
+    with _TD_LOCK:
+        _TD_LAST_START = time.monotonic()
+        _TD_COUNT += 1
+
+
+def _td_over_daily_cap() -> bool:
+    day = datetime.now(timezone.utc).date().isoformat()
+    with _TD_LOCK:
+        return _TD_DAY == day and _TD_COUNT >= _TD_DAILY_CAP
+
+
+def _date_range(years: int) -> tuple[str, str]:
+    today = today_utc()
+    cutoff = (datetime.now(timezone.utc).date()
+              - timedelta(days=max(1, int(years)) * 365)).isoformat()
+    return cutoff, today
+
+
+def _clean_provider_bars(
+    bars: list[SimBar], cutoff: str, today: str
+) -> tuple[list[SimBar], list[str]]:
+    """Filter to [cutoff, today] and reject duplicate dates, first-seen wins.
+
+    Duplicates are rejected BEFORE merge so one provider can never silently
+    overwrite itself — the merge only resolves biquote-vs-twelvedata seams.
+    """
+    seen: set[str] = set()
+    clean: list[SimBar] = []
+    dups: list[str] = []
+    for b in bars or []:
+        if b.bar_date < cutoff or b.bar_date > today:
+            continue
+        if b.bar_date in seen:
+            dups.append(b.bar_date)
+            continue
+        seen.add(b.bar_date)
+        clean.append(b)
+    clean.sort(key=lambda b: b.bar_date)
+    return clean, sorted(set(dups))
+
+
+def _await_sync(coro):
+    """Run a coroutine to completion from sync worker code.
+
+    The worker normally has no running loop, but tests may drive the build
+    inline from inside one — so the coroutine always runs on a helper thread
+    with its own fresh loop instead of assuming either case.
+    """
+    out: dict = {}
+
+    def _target() -> None:
+        try:
+            out["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            out["error"] = exc
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join()
+    if "error" in out:
+        raise out["error"]
+    return out.get("value")
+
+
+def start_dataset_build(db, *, assets: list[str],
+                        years: int = 5) -> dict:
+    """Mint a new dataset version and hand it to the worker. Returns at once.
+
+    One build at a time: a second start while one is live is refused with
+    ``ok: False`` instead of queueing, so Twelve Data pressure stays flat.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    clean = sorted({str(a).strip().upper() for a in (assets or [])
+                    if str(a).strip()})
+    if not clean:
+        return {"ok": False, "error": "assets required"}
+    try:
+        yrs = int(years or 5)
+    except (TypeError, ValueError):
+        yrs = 5
+    yrs = max(1, min(yrs, 10))
+    live = active_build()
+    if live is not None:
+        return {"ok": False, "error": "มีงาน build รันอยู่แล้ว",
+                "version": live}
+    version = _new_version()
+    try:
+        row = {
+            "dataset_version": version,
+            "status": "building",
+            "years": yrs,
+            "assets": clean,
+            "started_at": _now_iso(),
+            "finished_at": None,
+            "report": {"stage": "queued", "version": version,
+                       "assets": clean, "years": yrs},
+            "data_hash": None,
+            "code_version": CODE_VERSION,
+        }
+        if db.insert(META_TABLE, row) is None:
+            return {"ok": False, "error": "could not create dataset row"}
+    except Exception as exc:
+        log.error("sim-data: could not create dataset row: %s", exc)
+        return {"ok": False, "error": "could not create dataset row"}
+    _set_active(version)
+    _POOL.submit(_run_build, db, version, clean, yrs)
+    return {"ok": True, "version": version, "status": "building"}
+
+
+def dataset_build_status(db, version: str) -> dict:
+    """Status + stage + report for one dataset version. Never raises."""
+    try:
+        rows = db.select(META_TABLE, filters={"dataset_version": str(version)},
+                         order="started_at", desc=True, limit=1)
+    except Exception as exc:
+        return {"ok": False, "error": f"{exc}"[:200]}
+    if not rows:
+        return {"ok": False, "error": "unknown dataset version"}
+    row = rows[0]
+    report = row.get("report") or {}
+    status = str(row.get("status") or "building")
+    return {
+        "ok": True,
+        "version": str(row.get("dataset_version") or version),
+        "status": status,
+        "stage": str(report.get("stage") or status),
+        "report": report,
+        "data_hash": row.get("data_hash"),
+        "assets": row.get("assets") or [],
+        "years": row.get("years"),
+        "started_at": row.get("started_at"),
+        "finished_at": row.get("finished_at"),
+    }
+
+
+def load_dataset(db, version: str,
+                 assets: list[str] | None = None) -> dict[str, list]:
+    """Persisted bars as ``Candle(o,h,l,c,t)`` per asset, oldest-first.
+
+    ``t`` is UTC epoch seconds of the bar date (midnight). Unknown versions
+    yield ``{}`` — never raises, so replays degrade instead of dying.
+    """
+    from app.integrations.quotes import Candle
+
+    want = ({str(a).strip().upper() for a in (assets or []) if str(a).strip()}
+            or None)
+    try:
+        if hasattr(db, "select_paged"):
+            rows = db.select_paged(BARS_TABLE,
+                                   filters={"dataset_version": str(version)},
+                                   order="bar_date", desc=False)
+        else:
+            rows = db.select(BARS_TABLE,
+                             filters={"dataset_version": str(version)},
+                             order="bar_date", desc=False, limit=20000)
+    except Exception as exc:
+        log.debug("sim-data load %s failed: %s", version, exc)
+        return {}
+    out: dict[str, list] = {}
+    for r in rows or []:
+        asset = str(r.get("asset") or "").upper()
+        if want is not None and asset not in want:
+            continue
+        try:
+            day = datetime.fromisoformat(str(r.get("bar_date"))[:10]).date()
+        except ValueError:
+            continue
+        t = int(datetime(day.year, day.month, day.day,
+                         tzinfo=timezone.utc).timestamp())
+        try:
+            cnd = Candle(o=float(r["open"]), h=float(r["high"]),
+                         l=float(r["low"]), c=float(r["close"]), t=t)
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.setdefault(asset, []).append(cnd)
+    for candles in out.values():
+        candles.sort(key=lambda c: c.t)
+    return out
+
+
+def _meta_patch(db, version: str, changes: dict) -> bool:
+    """Update a meta row whose PK is dataset_version, not id.
+
+    ``Database.update`` matches ``eq("id", ...)`` which this table has no
+    column for, so read-modify-write via select/delete/insert instead — the
+    same surface every test fake implements.
+    """
+    try:
+        rows = db.select(META_TABLE, filters={"dataset_version": version},
+                         order="started_at", desc=True, limit=1)
+        if not rows:
+            return False
+        row = dict(rows[0])
+        row.update(changes)
+        db.delete(META_TABLE, {"dataset_version": version})
+        return db.insert(META_TABLE, row) is not None
+    except Exception as exc:
+        log.debug("sim-data meta patch %s failed: %s", version, exc)
+        return False
+
+
+def _set_stage(db, version: str, stage: str) -> None:
+    try:
+        rows = db.select(META_TABLE, filters={"dataset_version": version},
+                         order="started_at", desc=True, limit=1)
+        report = dict((rows[0].get("report") or {}) if rows else {})
+        report["stage"] = stage
+        _meta_patch(db, version, {"report": report})
+    except Exception as exc:
+        log.debug("sim-data stage %s/%s failed: %s", version, stage, exc)
+
+
+def _run_build(db, version: str, assets: list[str], years: int) -> None:
+    """Execute one dataset build to a terminal complete/failed row.
+
+    Never raises and never leaves the version `building`: every exit path
+    writes a verdict and clears the single-worker slot.
+    """
+    cutoff, today = _date_range(years)
+    per_asset: dict[str, dict] = {}
+    seam_all: list[dict] = []
+    kept: list[SimBar] = []
+    failed_assets: list[str] = []
+    try:
+        _set_stage(db, version, "fetching_biquote")
+
+        async def _go() -> dict:
+            import httpx as _httpx
+
+            fetched: dict = {}
+            async with _httpx.AsyncClient() as client:
+                for asset in assets:
+                    try:
+                        bq = await fetch_biquote_recent(asset, client)
+                        bq_err: str | None = None
+                    except Exception as exc:
+                        bq, bq_err = [], f"{type(exc).__name__}: {exc}"[:200]
+                    if _td_over_daily_cap():
+                        td, td_err = [], "twelvedata daily cap reached (750)"
+                    else:
+                        try:
+                            await _td_throttle()
+                            td = await fetch_twelvedata_history(
+                                asset, years=years, client=client)
+                            td_err = None
+                        except Exception as exc:
+                            td = []
+                            td_err = f"{type(exc).__name__}: {exc}"[:200]
+                    fetched[asset] = {"bq": bq, "td": td,
+                                      "bq_err": bq_err, "td_err": td_err}
+            return fetched
+
+        fetched = _await_sync(_go())
+        _set_stage(db, version, "fetching_twelvedata")
+        _set_stage(db, version, "validating")
+        for asset in assets:
+            pack = fetched.get(asset) or {}
+            raw_bq = pack.get("bq") or []
+            raw_td = pack.get("td") or []
+            clean_bq, dup_bq = _clean_provider_bars(raw_bq, cutoff, today)
+            clean_td, dup_td = _clean_provider_bars(raw_td, cutoff, today)
+            merged, discrepancies = merge_history(asset, clean_bq, clean_td)
+            seam_all.extend(discrepancies)
+            valid: list[SimBar] = []
+            invalid: list[dict] = []
+            prev: float | None = None
+            for b in merged:
+                errs = validate_sim_bar(b, prev)
+                if errs:
+                    invalid.append({"asset": asset, "bar_date": b.bar_date,
+                                    "source": b.source, "reasons": errs})
+                else:
+                    valid.append(b)
+                    prev = b.close
+            if not valid or len(valid) < MIN_BARS_PER_ASSET:
+                if asset not in failed_assets:
+                    failed_assets.append(asset)
+            kept.extend(valid)
+            per_asset[asset] = {
+                "start": valid[0].bar_date if valid else None,
+                "end": valid[-1].bar_date if valid else None,
+                "biquote": len(clean_bq),
+                "twelvedata": len(clean_td),
+                "merged": len(merged),
+                "persisted": len(valid),
+                "invalid": invalid,
+                "duplicate_dates": {"biquote": dup_bq, "twelvedata": dup_td},
+                "provider_errors": [e for e in (pack.get("bq_err"),
+                                                pack.get("td_err")) if e],
+            }
+        data_hash = hash_bars(kept)
+        complete = not failed_assets
+        _set_stage(db, version, "persisting")
+        batch: list[SimBar] = []
+        for b in kept:
+            batch.append(b)
+            if len(batch) >= 500:
+                _persist_batch(db, version, batch)
+                batch = []
+        if batch:
+            _persist_batch(db, version, batch)
+        report = {
+            "stage": "done" if complete else "failed",
+            "version": version,
+            "assets": assets,
+            "years": years,
+            "bars": len(kept),
+            "per_asset": per_asset,
+            "seam_discrepancies": sorted(
+                seam_all, key=lambda d: (d.get("asset") or "",
+                                         d.get("bar_date") or "")),
+            "complete": complete,
+            "failed_assets": sorted(failed_assets),
+            "data_hash": data_hash,
+            "code_version": CODE_VERSION,
+        }
+        _meta_patch(db, version, {
+            "status": "complete" if complete else "failed",
+            "finished_at": _now_iso(),
+            "report": report,
+            "data_hash": data_hash,
+        })
+    except Exception as exc:                       # noqa: BLE001 - verdict, not a crash
+        log.exception("sim-data build %s failed", version)
+        try:
+            _meta_patch(db, version, {
+                "status": "failed",
+                "finished_at": _now_iso(),
+                "report": {"stage": "failed", "version": version,
+                           "assets": assets, "years": years,
+                           "complete": False,
+                           "error": f"{type(exc).__name__}: {exc}"[:300],
+                           "per_asset": per_asset,
+                           "seam_discrepancies": seam_all[-50:]},
+            })
+        except Exception:
+            pass
+    finally:
+        _set_active(None)
+
+
+def _persist_batch(db, version: str, batch: list[SimBar]) -> None:
+    """Insert one batch; a swallowed None insert fails the build loudly."""
+    for b in batch:
+        row = {
+            "dataset_version": version,
+            "asset": b.asset,
+            "bar_date": b.bar_date,
+            "open": b.open,
+            "high": b.high,
+            "low": b.low,
+            "close": b.close,
+            "source": b.source,
+            "source_timestamp": b.source_timestamp,
+        }
+        if db.insert(BARS_TABLE, row) is None:
+            raise SimMarketDataError(
+                f"{version}: persist failed at {b.asset} {b.bar_date}")

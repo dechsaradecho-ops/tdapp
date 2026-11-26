@@ -1414,3 +1414,75 @@ def _sim_live_stats(db, run_id: str) -> dict[str, Any]:
             return out
         out["n"] += out[label]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Sim price-data V2 dataset build (migration 062)
+#
+# POST /api/system/sim-data/build -> mint a version, fetch both providers on
+# the single worker, validate/merge, persist bars + report/hash to
+# sim_dataset_meta_v2. GET /api/system/sim-data/{version} reports the status
+# and per-asset bar counts. See app/services/sim_market_data.py for why the
+# build is a background job, not a request.
+# ---------------------------------------------------------------------------
+@router.post("/sim-data/build")
+async def sim_data_build(request: Request,
+                         payload: Optional[dict[str, Any]] = None) -> dict:
+    """Start a dataset build. Refused (ok: False) while one is live."""
+    from app.services import sim_market_data
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    body = payload or {}
+    assets = body.get("assets")
+    if not isinstance(assets, list) or not assets:
+        return {"ok": False, "error": "assets required"}
+    clean = sorted({str(a).strip().upper() for a in assets if str(a).strip()})
+    if not clean or len(clean) > 40:
+        return {"ok": False, "error": "assets required (1-40)"}
+    try:
+        years = int(body.get("years") if body.get("years") is not None else 5)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "years must be a number"}
+    res = sim_market_data.start_dataset_build(db, assets=clean, years=years)
+    if not res.get("ok"):
+        return res
+    st = sim_market_data.dataset_build_status(db, res["version"])
+    return {"ok": True, "version": res["version"],
+            "status": st.get("stage", "building"),
+            "db_status": st.get("status", "building"),
+            "report": st.get("report") or {}}
+
+
+@router.get("/sim-data/{version}")
+async def sim_data_status(request: Request, version: str) -> dict:
+    """Status + report + per-asset bar counts for one dataset version."""
+    from app.services import sim_market_data
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    st = sim_market_data.dataset_build_status(db, version)
+    if not st.get("ok"):
+        return st
+    try:
+        if hasattr(db, "select_paged"):
+            rows = db.select_paged(
+                sim_market_data.BARS_TABLE,
+                filters={"dataset_version": st["version"]},
+                order="bar_date", desc=False)
+        else:
+            rows = db.select(sim_market_data.BARS_TABLE,
+                             filters={"dataset_version": st["version"]},
+                             order="bar_date", desc=False, limit=20000)
+        counts: dict[str, int] = {}
+        for r in rows or []:
+            key = str(r.get("asset") or "").upper()
+            counts[key] = counts.get(key, 0) + 1
+    except Exception as exc:
+        st["bars_error"] = f"{exc}"[:200]
+        counts = {}
+    st["bars"] = sum(counts.values())
+    st["per_asset_counts"] = counts
+    return st
