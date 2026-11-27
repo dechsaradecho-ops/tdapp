@@ -1347,10 +1347,49 @@ def _best_summary(entry: Any) -> dict[str, Any] | None:
     }
 
 
+def _resolve_warm_start(db, base_run_id: Any,
+                      ) -> tuple[str | None, AppSettings | None, str | None]:
+    """Validate an optional warm-start base run (read-only, never writes).
+
+    Returns ``(warm_run_id, warm_settings, error)``: ``(None, None, None)``
+    when no base was requested; otherwise the completed run's id and its
+    validated recommendation settings, or ``(None, None, error)`` when the
+    base is blank, unknown, incomplete, recommendation-less, or unreadable
+    (``AppSettings.model_validate`` of ``recommendation["config"]`` fails).
+    """
+    if base_run_id is None:
+        return None, None, None
+    if not isinstance(base_run_id, str) or not base_run_id.strip():
+        return None, None, "base_run_id must be a non-empty string"
+    warm_id = base_run_id.strip()
+    row = _run_row(db, warm_id)
+    if row is None:
+        return None, None, "unknown optimization run"
+    if str(row.get("status")) != "complete":
+        return None, None, (
+            f"base run {warm_id} is not complete "
+            f"(status={row.get('status')}) — warm-start refused")
+    result = row.get("result")
+    if not isinstance(result, dict):
+        result = {}
+    rec = result.get("recommendation")
+    if not isinstance(rec, dict) or not rec.get("config"):
+        return None, None, (
+            f"base run {warm_id} has no recommendation "
+            "to warm-start from")
+    try:
+        warm_settings = AppSettings.model_validate(rec.get("config") or {})
+    except Exception:
+        return None, None, (
+            f"base run {warm_id} recommendation is unreadable")
+    return warm_id, warm_settings, None
+
+
 def start_optimization(db, *, dataset_version: str,
                        assets: list[str] | None = None,
                        starting_capital: float = 1000.0,
-                       search_config: Any = None) -> dict:
+                       search_config: Any = None,
+                       base_run_id: str | None = None) -> dict:
     """Queue one optimization run and hand it to the worker. Returns at once.
 
     One run at a time: a second start while one is live is refused with
@@ -1359,6 +1398,15 @@ def start_optimization(db, *, dataset_version: str,
     baseline's ``effective_assets()`` when omitted; at most 40 assets per run
     (same bound as the Plan 1 dataset-build job). Never writes live
     settings; the baseline is a read-only snapshot.
+
+    ``base_run_id`` optionally names a completed run whose recommendation
+    becomes the search baseline for the new run: the worker searches from
+    the prior recommendation while the new run row still stores the actual
+    live baseline in ``baseline_settings`` (apply safety unchanged) and
+    records ``warm_start_run_id``/``warm_start_settings`` in
+    ``search_config`` for audit. Blank, unknown, incomplete, or
+    recommendation-less bases are refused with ``ok: False`` and zero new
+    run rows.
     """
     if not db or not getattr(db, "available", False):
         return {"ok": False, "error": "DB unavailable"}
@@ -1381,6 +1429,12 @@ def start_optimization(db, *, dataset_version: str,
         baseline = AppSettings()
     if not isinstance(baseline, AppSettings):
         baseline = AppSettings()
+    warm_run_id, warm_settings, warm_error = _resolve_warm_start(
+        db, base_run_id)
+    if warm_error is not None:
+        return {"ok": False, "error": warm_error}
+    search_baseline = (warm_settings if warm_settings is not None
+                       else baseline)
     clean = sorted({str(a).strip().upper() for a in (assets or [])
                     if str(a).strip()})
     if not clean:
@@ -1400,6 +1454,11 @@ def start_optimization(db, *, dataset_version: str,
                 "error": "an optimization run is already live",
                 "run_id": live}
     now = _now_iso()
+    search_json = _search_config_json(cfg)
+    if warm_run_id is not None and warm_settings is not None:
+        search_json["warm_start_run_id"] = warm_run_id
+        search_json["warm_start_settings"] = _json_safe(
+            warm_settings.model_dump(mode="json"))
     try:
         row = {
             "id": run_id,
@@ -1408,7 +1467,7 @@ def start_optimization(db, *, dataset_version: str,
             "progress": 0.0,
             "seed": int(cfg.seed),
             "starting_capital": capital,
-            "search_config": _search_config_json(cfg),
+            "search_config": search_json,
             "baseline_settings": _json_safe(
                 baseline.model_dump(mode="json")),
             "dataset_version": version,
@@ -1434,7 +1493,7 @@ def start_optimization(db, *, dataset_version: str,
         "assets": clean,
         "starting_capital": capital,
         "search_config": cfg,
-        "baseline": baseline,
+        "baseline": search_baseline,
     })
     return {"ok": True, "run_id": run_id}
 

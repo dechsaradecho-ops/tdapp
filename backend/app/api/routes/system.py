@@ -1578,7 +1578,11 @@ async def sim_data_status(request: Request, version: str) -> dict:
 @router.post("/optimize")
 async def start_optimization(request: Request,
                              payload: Optional[dict[str, Any]] = None) -> dict:
-    """Start an optimization run. Refused (ok: False) while one is live."""
+    """Start an optimization run. Refused (ok: False) while one is live.
+
+    Optional ``base_run_id`` names a completed run whose recommendation
+    becomes the search baseline; the new row still stores the live
+    baseline for apply safety."""
     from app.services import sim_optimizer
 
     db: Database = request.app.state.db
@@ -1594,12 +1598,19 @@ async def start_optimization(request: Request,
     search_config = body.get("search_config")
     if search_config is not None and not isinstance(search_config, dict):
         return {"ok": False, "error": "search_config must be an object"}
+    base_run_id = body.get("base_run_id")
+    if base_run_id is not None:
+        if not isinstance(base_run_id, str) or not base_run_id.strip():
+            return {"ok": False,
+                    "error": "base_run_id must be a non-empty string"}
+        base_run_id = base_run_id.strip()
     return sim_optimizer.start_optimization(
         db,
         dataset_version=str(version).strip(),
         assets=assets,
         starting_capital=body.get("starting_capital", 1000.0),
-        search_config=search_config)
+        search_config=search_config,
+        base_run_id=base_run_id)
 
 
 @router.get("/optimize")
