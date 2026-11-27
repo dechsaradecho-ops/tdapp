@@ -162,12 +162,29 @@ def run_walk_forward(
     exit_spread_mult: float = 0.5,
     progress_callback=None,
 ) -> dict:
+    if isinstance(warmup_days, bool) or not isinstance(warmup_days, int) or warmup_days < 0:
+        raise ValueError("warmup_days must be a non-negative integer")
+    try:
+        capital = float(starting_capital)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("starting_capital must be a finite number > 0") from exc
+    if not math.isfinite(capital) or capital <= 0:
+        raise ValueError("starting_capital must be a finite number > 0")
+    cfg_template = SearchConfig(
+        max_iterations=max_iterations,
+        seed=seed_start,
+        workers=workers,
+        commission_per_lot_per_side=commission_per_lot_per_side,
+        exit_spread_mult=exit_spread_mult,
+    )
+
     series = load_dataset(db, dataset_version, assets)
     if not series:
         raise ValueError("dataset unavailable or empty")
     dataset_start, dataset_end = series_date_bounds(series)
+    dataset_end_exclusive = dataset_end + timedelta(days=1)
     folds = build_walk_forward_folds(
-        dataset_start, dataset_end,
+        dataset_start, dataset_end_exclusive,
         fold_count=fold_count, train_days=train_days, test_days=test_days,
     )
 
@@ -176,6 +193,8 @@ def run_walk_forward(
         "dataset_version": dataset_version,
         "dataset_start": dataset_start.isoformat(),
         "dataset_end": dataset_end.isoformat(),
+        "dataset_end_exclusive": dataset_end_exclusive.isoformat(),
+        "date_range_semantics": "fold end dates are exclusive",
         "assets": sorted({str(asset).upper() for asset in assets}),
         "baseline_config": baseline_config.model_dump(mode="json"),
         "folds": [],
@@ -190,16 +209,10 @@ def run_walk_forward(
     for fold in folds:
         train_series = slice_series_by_date(
             series, fold.train_start, fold.train_end)
-        cfg = SearchConfig(
-            max_iterations=max_iterations,
-            seed=seed_start + fold.index,
-            workers=workers,
-            commission_per_lot_per_side=commission_per_lot_per_side,
-            exit_spread_mult=exit_spread_mult,
-        )
+        cfg = replace(cfg_template, seed=seed_start + fold.index)
         outcome = optimize_settings(
             train_series, current_config,
-            starting_capital=starting_capital,
+            starting_capital=capital,
             search_config=cfg,
             progress_callback=progress_callback,
         )
@@ -218,7 +231,7 @@ def run_walk_forward(
         )
         test_result = replay_test_fold(
             series, fold, selected,
-            starting_capital=starting_capital,
+            starting_capital=capital,
             cost_config=test_costs,
             warmup_days=warmup_days,
         )

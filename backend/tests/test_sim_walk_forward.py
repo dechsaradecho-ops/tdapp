@@ -155,6 +155,7 @@ def test_run_walk_forward_refits_only_on_training_windows(monkeypatch):
     ]
     assert result["total_net_pnl"] == 40
     assert result["pass_overall_profit"] is True
+    assert result["folds"][-1]["test_end"] == "2026-11-26"
 
 
 def test_run_walk_forward_stops_when_refit_has_no_recommendation(monkeypatch):
@@ -171,3 +172,19 @@ def test_run_walk_forward_stops_when_refit_has_no_recommendation(monkeypatch):
     )
     assert result["status"] == "stopped_no_recommendation"
     assert result["pass_overall_profit"] is False
+
+
+def test_run_walk_forward_rejects_invalid_warmup_before_search(monkeypatch):
+    monkeypatch.setattr(
+        sim_walk_forward, "load_dataset",
+        lambda *a: make_series(date(2020, 1, 1), date(2026, 11, 25)),
+    )
+    monkeypatch.setattr(
+        sim_walk_forward, "optimize_settings",
+        lambda *a, **k: SimpleNamespace(best=None),
+    )
+    with pytest.raises(ValueError, match="warmup_days"):
+        sim_walk_forward.run_walk_forward(
+            object(), "v20261126-120951-1d5254", ["EURUSD"], AppSettings(),
+            warmup_days=-1,
+        )
