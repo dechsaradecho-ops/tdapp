@@ -27,6 +27,8 @@ import type {
   OptEquityPoint,
   OptEquityResponse,
   OptIterationRow,
+  OptMetaFilterSummary,
+  OptRunLogEntry,
   OptRunStatus,
   SimDataReport,
 } from "@/lib/types";
@@ -36,6 +38,9 @@ const POLL_MS = 1000;
  *  abandoned — a flaky network must not orphan a live backend job. */
 const DS_MAX_RETRIES = 5;
 const ITER_PAGE = 100;
+/** Client-side run-log view cap — oldest rows drop first; the server
+ *  keeps every row (clear/paging here never deletes anything). */
+const LOG_MAX = 500;
 const TERMINAL = ["complete", "failed", "cancelled"];
 
 /** Two headline settings + RR target for the parameter-movement multiples. */
@@ -112,6 +117,15 @@ export default function OptimizeTab() {
   const [confirming, setConfirming] = useState(false);
   const [applying, setApplying] = useState(false);
 
+  // ---- run log (per-run events; diagnostic only) ----
+  // Appended by last_seq inside pull() under the same no-overlap guard;
+  // pause only stops appending (nothing is lost — resume polls from the
+  // same seq), clear only empties this view (server rows stay, next poll
+  // re-pages from offset 0).
+  const [logs, setLogs] = useState<OptRunLogEntry[]>([]);
+  const [logOpen, setLogOpen] = useState(true);
+  const [logPaused, setLogPaused] = useState(false);
+
   // ---- run controls (capital fixed for the run, never optimized) ----
   const [datasetVersion, setDatasetVersion] = useState("");
   const [capital, setCapital] = useState(1000);
@@ -137,6 +151,10 @@ export default function OptimizeTab() {
   followRef.current = followLatest;
   const loadedIdRef = useRef<string | null>(null);
   const eqKeyRef = useRef<string>("");
+  const logsRef = useRef<OptRunLogEntry[]>([]);
+  logsRef.current = logs;
+  const logPausedRef = useRef(false);
+  logPausedRef.current = logPaused;
   const confirmingRef = useRef(false);
   confirmingRef.current = confirming;
   // Dataset-update poll guard — mirrors the run poll's inFlightRef: never
@@ -319,6 +337,8 @@ export default function OptimizeTab() {
         setRows([]);
         setItOffset(0);
         offRef.current = 0;
+        logsRef.current = [];
+        setLogs([]);
         setEquityBest(null);
         setEquityBase(null);
         eqKeyRef.current = "";
@@ -353,6 +373,29 @@ export default function OptimizeTab() {
         setRows(page.rows || []);
         setItTotal(page.total ?? (page.rows || []).length);
       }
+      // Run-log streams under this same no-overlap guard. Offset is the
+      // last seen seq + 1; late/duplicate rows (seq already present) are
+      // dropped, the view is capped at LOG_MAX, and a `more` page drains
+      // inline so a terminal run shows the full log after one pull.
+      // Paused = skip the fetch; resume continues from the same seq.
+      if (!logPausedRef.current) {
+        let seen = logsRef.current;
+        // At the LOG_MAX cap the window still slides: append + slice drops
+        // the oldest. An empty batch returns `seen` unchanged → break.
+        for (let p = 0; p < 3; p++) {
+          const lg = await api.optLogs(id, nextOptLogOffset(seen), 200);
+          if (runIdRef.current !== id) return;
+          if (!lg.ok) break;
+          const merged = appendOptLogRows(seen, lg.rows || []);
+          if (merged === seen) break;
+          seen = merged;
+          if (!lg.more) break;
+        }
+        if (seen !== logsRef.current) {
+          logsRef.current = seen;
+          setLogs(seen);
+        }
+      }
       // Equity curves move only when the best iteration (or terminal
       // state) changes — refetching every second would churn for nothing.
       const key = `${id}:${st.best?.iteration ?? "-"}:${st.status}`;
@@ -374,6 +417,8 @@ export default function OptimizeTab() {
     setItTotal(0);
     setItOffset(0);
     offRef.current = 0;
+    logsRef.current = [];
+    setLogs([]);
     setRun(null);
     setEquityBest(null);
     setEquityBase(null);
@@ -461,6 +506,8 @@ export default function OptimizeTab() {
       setItTotal(0);
       setItOffset(0);
       offRef.current = 0;
+      logsRef.current = [];
+      setLogs([]);
       setRun(null);
       setEquityBest(null);
       setEquityBase(null);
@@ -695,6 +742,88 @@ export default function OptimizeTab() {
         </section>
       )}
 
+      {/* ---------------- run log (per-run events, diagnostic) ------ */}
+      {run && (
+        <section className="panel p-4">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <button type="button" onClick={() => setLogOpen((o) => !o)}
+              className="panel-title mb-0 cursor-pointer select-none"
+              aria-expanded={logOpen}
+              title="พับ/ขยาย log ของรันนี้">
+              {logOpen ? "▾" : "▸"} Run log ({intF(logs.length)})
+              {logs.length >= LOG_MAX && (
+                <span className="text-[10px] text-slate-500 font-normal ml-1">
+                  — เก็บ {LOG_MAX} แถวล่าสุด (แถวเก่ากว่าถูกปัดทิ้งเฉพาะหน้าจอ)
+                </span>
+              )}
+            </button>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setLogPaused((p) => !p)}
+                title={logPaused
+                  ? "กลับมารับ log ใหม่ต่อจาก seq เดิม (ไม่สูญหาย)"
+                  : "หยุดรับ log ชั่วคราว (เซิร์ฟเวอร์ยังบันทึกต่อ)"}
+                className="px-2 py-1 rounded border border-slate-700 text-slate-300 text-xs min-h-[32px]">
+                {logPaused ? "▶ ต่อ" : "⏸ พัก"}
+              </button>
+              <button type="button"
+                onClick={() => { logsRef.current = []; setLogs([]); }}
+                title="ล้างเฉพาะหน้าจอฝั่งนี้ — แถวบนเซิร์ฟเวอร์ไม่ถูกลบ (poll ถัดไปดึงกลับมา)"
+                className="px-2 py-1 rounded border border-slate-700 text-slate-300 text-xs min-h-[32px]">
+                ล้างหน้าจอ
+              </button>
+            </div>
+          </div>
+          {logPaused && (
+            <p className="text-[11px] text-amber-200/80 mb-1">
+              พักไว้ — เซิร์ฟเวอร์ยังบันทึกต่อ กด “ต่อ” เพื่อรับ log ใหม่จาก seq เดิม
+            </p>
+          )}
+          {logOpen && (
+            logs.length ? (
+              <div className="overflow-x-auto scroll-x-thin max-h-72 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-surface">
+                    <tr className="text-left text-slate-500 border-b border-slate-800">
+                      <th className="py-1.5 pr-3">เวลา</th>
+                      <th className="py-1.5 pr-3">ระดับ</th>
+                      <th className="py-1.5 pr-3">ขั้นตอน</th>
+                      <th className="py-1.5 pr-3">รอบ</th>
+                      <th className="py-1.5 pr-3">เหตุการณ์</th>
+                      <th className="py-1.5">ข้อความ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {logs.map((l) => (
+                      <tr key={l.seq} className="border-b border-slate-800/50">
+                        <td className="py-1 pr-3 text-slate-500 whitespace-nowrap"
+                          title={String(l.created_at || "")}>
+                          {fmtLogTime(l.created_at)}
+                        </td>
+                        <td className="py-1 pr-3">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${logLevelTone(l.level)}`}>
+                            {String(l.level || "info").toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="py-1 pr-3 text-slate-300 whitespace-nowrap">{l.stage || "—"}</td>
+                        <td className="py-1 pr-3 text-slate-400">
+                          {l.iteration === null || l.iteration === undefined ? "—" : `#${intF(l.iteration)}`}
+                        </td>
+                        <td className="py-1 pr-3 text-slate-200 whitespace-nowrap">{l.event || "—"}</td>
+                        <td className="py-1 text-slate-300">{l.message || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-500 py-2">
+                {live ? "รอ log แรกจาก worker…" : "รันนี้ยังไม่มี log"}
+              </p>
+            )
+          )}
+        </section>
+      )}
+
       {/* ---------------- iteration log ---------------- */}
       {run && rows.length > 0 && (
         <section className="panel p-4">
@@ -855,6 +984,7 @@ export default function OptimizeTab() {
             profit factor (val): <b>{pfF(rec.validation_metrics?.profit_factor)}</b>
             {" · "}avg R: {numF(rec.validation_metrics?.average_r, 2)}
           </div>
+          <MetaFilterBlock mf={run?.meta_filter ?? rec?.meta_filter ?? null} />
           {rec.note && <p className="text-[11px] text-slate-400 mb-2">{rec.note}</p>}
           {best && Object.keys(best.config_diff || {}).length > 0 && (
             <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
@@ -965,6 +1095,86 @@ export default function OptimizeTab() {
 /* ------------------------------------------------------------------ */
 /* pieces                                                             */
 /* ------------------------------------------------------------------ */
+
+/** Next log offset = last seen seq + 1 (0 when the view is empty).
+ *  Exported for the mocked render trace — pull() uses this verbatim. */
+export function nextOptLogOffset(rows: OptRunLogEntry[]): number {
+  return rows.length ? rows[rows.length - 1].seq + 1 : 0;
+}
+
+/** Append one fetched page: drop late/duplicate rows (seq already
+ *  present), cap the view at LOG_MAX (oldest first). Returns `seen`
+ *  unchanged when the batch adds nothing. Clearing the view is just
+ *  `appendOptLogRows([], [])` → `[]`; server rows are never touched. */
+export function appendOptLogRows(
+  seen: OptRunLogEntry[], batch: OptRunLogEntry[]): OptRunLogEntry[] {
+  const fresh = (batch || []).filter(
+    (r) => !seen.length || r.seq > seen[seen.length - 1].seq);
+  if (!fresh.length) return seen;
+  return [...seen, ...fresh].slice(-LOG_MAX);
+}
+
+/** HH:MM:SS (MM-DD) from an ISO timestamp; raw string when unparseable. */
+export function fmtLogTime(v: string | null | undefined): string {
+  const t = String(v || "");
+  if (t.length >= 19) return `${t.slice(5, 10)} ${t.slice(11, 19)}`;
+  return t || "—";
+}
+
+/** Level badge tone — backend emits info/error today; unknown stays neutral. */
+export function logLevelTone(level: string | null | undefined): string {
+  const l = String(level || "info").toLowerCase();
+  if (l === "error") return "bg-loss/20 text-loss";
+  if (l === "warn" || l === "warning") return "bg-amber-400/20 text-amber-200";
+  return "bg-slate-700/60 text-slate-300";
+}
+
+/**
+ * Post-run meta-filter diagnostic inside the recommendation card.
+ *
+ * Diagnostic only — the tally never affected ranking, eligibility, or
+ * replay (backend `ranking_effect: "none"`). Renders `unavailable`
+ * honestly when there is no report at all (run predates the field),
+ * when the backend marks it unavailable (no valid artifact, e.g. never
+ * trained, or no recommendation to score), or when the counts are absent.
+ */
+export function MetaFilterBlock({ mf }: { mf: OptMetaFilterSummary | null | undefined }) {
+  const hasCounts = !!mf && typeof mf.evaluated === "number";
+  if (!hasCounts || mf?.status === "unavailable") {
+    const reason = (mf && mf.reason)
+      || "ยังไม่มีรายงาน (ไม่มี recommendation/artifact ที่ใช้ได้)";
+    return (
+      <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
+        <div className="text-xs font-bold text-slate-300 mb-1">
+          Meta-filter <span className="font-normal text-slate-500">(วินิจฉัยหลังรัน — ไม่มีผลต่อการจัดอันดับ)</span>
+        </div>
+        <p className="text-[11px] text-slate-400">ไม่พร้อมใช้งาน: {reason}</p>
+      </div>
+    );
+  }
+  const art = mf.artifact_run_id ? String(mf.artifact_run_id).slice(0, 8) : "—";
+  const trained = mf.trained_at ? String(mf.trained_at).slice(0, 10) : "—";
+  return (
+    <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
+      <div className="text-xs font-bold text-slate-300 mb-1">
+        Meta-filter <span className="font-normal text-slate-500">(วินิจฉัยหลังรัน — ไม่มีผลต่อการจัดอันดับ)</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+        <Kv k="ประเมิน" v={intF(mf.evaluated)} />
+        <Kv k="Take" v={<span className="text-profit">{intF(mf.take)}</span>} />
+        <Kv k="Skip" v={<span className="text-loss">{intF(mf.skip)}</span>} />
+        <Kv k="Unavailable" v={intF(mf.unavailable)} />
+      </div>
+      <div className="text-[11px] text-slate-300">
+        skip rate: <b>{numF(mf.skip_rate_pct, 1)}%</b>
+        {" · "}threshold: <b>{mf.threshold === null || mf.threshold === undefined ? "—" : numF(mf.threshold, 3)}</b>
+        {" · "}artifact: <b>{art}</b>
+        {" · "}trained: <b>{trained}</b>
+      </div>
+      {mf.note && <p className="text-[10px] text-slate-500 mt-1">{mf.note}</p>}
+    </div>
+  );
+}
 
 function Metric({ label, value, tone = "", bold }: {
   label: string; value: string; tone?: string; bold?: boolean;

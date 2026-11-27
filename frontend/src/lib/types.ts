@@ -1607,13 +1607,51 @@ export interface OptBest {
 }
 
 /** Guarded recommendation: best iteration + its full config snapshot +
- *  validation metrics + a human note. Applied only via explicit Apply. */
+ *  validation metrics + a human note. Applied only via explicit Apply.
+ *  `meta_filter` is the post-run diagnostic tally (Task 4) — it never
+ *  affected ranking, eligibility, or replay. */
 export interface OptRecommendation {
   iteration: number;
   config: Record<string, unknown>;
   validation_metrics: OptMetrics | null;
   note: string;
+  meta_filter?: OptMetaFilterSummary | null;
 }
+
+/** Post-run meta-filter tally (diagnostic only — never affects ranking).
+ *  Full shape (`evaluated`/`take`/`skip`/…) when a recommendation exists;
+ *  `{status: "unavailable", reason}` when no valid artifact/recommendation
+ *  exists or the summary failed — the UI must render that honestly. */
+export interface OptMetaFilterSummary {
+  evaluated?: number;
+  take?: number;
+  skip?: number;
+  unavailable?: number;
+  skip_rate_pct?: number;
+  threshold?: number | null;
+  artifact_run_id?: string | null;
+  trained_at?: string | null;
+  note?: string;
+  ranking_effect?: string;
+  status?: string;
+  reason?: string;
+}
+
+/** One row of GET /api/system/optimize/{id}/logs, seq ascending. */
+export interface OptRunLogEntry {
+  seq: number;
+  level: string;
+  stage: string;
+  iteration: number | null;
+  event: string;
+  message: string;
+  data: Record<string, unknown>;
+  created_at: string | null;
+}
+
+export type OptLogsResponse =
+  | { ok: true; run_id: string; rows: OptRunLogEntry[]; last_seq: number | null; more: boolean }
+  | OptApiError;
 
 /** GET /api/system/optimize/{id} — status + stage + partial verdict. */
 export interface OptRunStatus {
@@ -1628,6 +1666,7 @@ export interface OptRunStatus {
   best_train_pnl: number | null;
   best: OptBest | null;
   recommendation: OptRecommendation | null;
+  meta_filter: OptMetaFilterSummary | null;
   warnings: string[];
   error: string | null;
 }

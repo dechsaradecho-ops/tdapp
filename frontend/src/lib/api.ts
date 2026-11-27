@@ -32,6 +32,7 @@ import {
   OptApplyResponse,
   OptEquityResponse,
   OptIterationsResponse,
+  OptLogsResponse,
   OptRunsResponse,
   OptStartInput,
   OptStartResponse,
@@ -367,6 +368,12 @@ export const api = {
     get<OptEquityResponse>(
       `/api/system/optimize/${encodeURIComponent(id)}/equity` +
       (iteration === undefined ? "" : `?iteration=${iteration}`)),
+  // GET paged per-run event log, seq ascending — offset is the next
+  // unseen seq (last seen seq + 1). Clearing the local view never
+  // deletes server rows; the next poll simply re-pages from offset 0.
+  optLogs: (id: string, offset = 0, limit = 200) =>
+    get<OptLogsResponse>(
+      `/api/system/optimize/${encodeURIComponent(id)}/logs?offset=${offset}&limit=${limit}`),
   // POST cooperative stop — completed iterations are preserved.
   optCancel: (id: string) =>
     post<OptStatusResponse>(
