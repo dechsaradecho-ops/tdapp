@@ -1144,3 +1144,128 @@ class TestMetaFilterReport:
         assert report["skip_rate_pct"] == 0.0
         reco = st.get("recommendation") or {}
         assert (reco.get("meta_filter") or {})["evaluated"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 1: warm-start from a previous recommendation (RED first)
+# ---------------------------------------------------------------------------
+def _seed_completed_run_with_recommendation(fake_db, run_id: str) -> None:
+    """One terminal run row whose recommendation sets min_opportunity=85."""
+    from app.models.schemas import AppSettings
+
+    now = datetime.now(timezone.utc).isoformat()
+    config = AppSettings(min_opportunity=85).model_dump(mode="json")
+    fake_db.insert(sim_optimizer.RUNS_TABLE, {
+        "id": run_id,
+        "status": "complete",
+        "stage": "done",
+        "progress": 1.0,
+        "seed": 0,
+        "starting_capital": 1000.0,
+        "search_config": {},
+        "baseline_settings": {},
+        "dataset_version": "v1",
+        "data_hash": None,
+        "result": {
+            "stage": "done",
+            "best_train_pnl": 10.0,
+            "best": {"iteration": 1, "train_metrics": None,
+                     "validation_metrics": None, "config_diff": {}},
+            "recommendation": {"iteration": 1, "config": config,
+                               "validation_metrics": None,
+                               "note": "seeded warm-start base"},
+            "warnings": [],
+        },
+        "error": None,
+        "created_at": now,
+        "started_at": now,
+        "finished_at": now,
+    })
+
+
+class TestWarmStart:
+    async def test_start_from_previous_recommendation_uses_search_baseline(
+            self, fake_db, inline_worker, monkeypatch):
+        from app.models.schemas import AppSettings
+
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["baseline"] = baseline
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        monkeypatch.setattr(sim_optimizer, "capture_live_baseline",
+                            lambda db: AppSettings(min_opportunity=0))
+        _seed_completed_run_with_recommendation(fake_db, "old-run")
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+            "base_run_id": "old-run",
+        })
+        assert res["ok"] is True
+        assert captured["baseline"].min_opportunity == 85
+        row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["baseline_settings"]["min_opportunity"] == 0
+        assert row["search_config"]["warm_start_run_id"] == "old-run"
+        assert (row["search_config"]["warm_start_settings"]
+                ["min_opportunity"] == 85)
+
+    @pytest.mark.parametrize("row", [None, {"status": "running"},
+                                     {"status": "complete", "result": {}}])
+    async def test_warm_start_refuses_unusable_base_run(
+            self, fake_db, inline_worker, row):
+        if row:
+            fake_db.insert("sim_opt_runs", {"id": "old-run", **row})
+        before = len(fake_db.select("sim_opt_runs", limit=100))
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+            "base_run_id": "old-run",
+        })
+        assert res["ok"] is False
+        assert len(fake_db.select("sim_opt_runs", limit=100)) == before
+
+    async def test_normal_start_without_base_run_id_is_unchanged(
+            self, fake_db, inline_worker, monkeypatch):
+        """No `base_run_id` means a pure live-baseline run: the worker
+        receives the captured live baseline itself, the stored
+        `baseline_settings` equals it, `search_config` carries no warm
+        keys, and a prior completed run is neither read nor mutated."""
+        from app.models.schemas import AppSettings
+
+        live = AppSettings(min_opportunity=0)
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["baseline"] = baseline
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        monkeypatch.setattr(sim_optimizer, "capture_live_baseline",
+                            lambda db: live)
+        _seed_completed_run_with_recommendation(fake_db, "old-run")
+        _seed_dataset(fake_db, "v1")
+        before_old = dict(
+            fake_db.select("sim_opt_runs", {"id": "old-run"})[0])
+        touched: list = []
+        real_select = fake_db.select
+
+        def spy_select(table, filters=None, **kw):
+            if (table == sim_optimizer.RUNS_TABLE
+                    and (filters or {}).get("id") == "old-run"):
+                touched.append((table, dict(filters or {})))
+            return real_select(table, filters=filters, **kw)
+
+        monkeypatch.setattr(fake_db, "select", spy_select)
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+        })
+        assert res["ok"] is True
+        assert captured["baseline"] is live
+        row = real_select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["baseline_settings"] == live.model_dump(mode="json")
+        assert "warm_start_run_id" not in row["search_config"]
+        assert "warm_start_settings" not in row["search_config"]
+        assert touched == []
+        assert real_select("sim_opt_runs", {"id": "old-run"})[0] \
+            == before_old
