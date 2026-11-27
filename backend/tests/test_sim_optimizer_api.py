@@ -1319,3 +1319,112 @@ class TestRunLevelCosts:
         })
         assert res["ok"] is False
         assert len(fake_db.select("sim_opt_runs", limit=100)) == before
+
+
+# ---------------------------------------------------------------------------
+# Max-search plan Task 3 (RED): tradable universe separate from dataset.
+# ---------------------------------------------------------------------------
+class TestTradableUniverse:
+    async def test_full_dataset_plus_restricted_tradable_reaches_worker(
+            self, fake_db, inline_worker, monkeypatch):
+        """Dataset loads both assets; the worker baseline trades only the
+        override. Stored live baseline keeps the full snapshot; the override
+        is persisted on search_config for audit."""
+        from app.models.schemas import AppSettings
+
+        live = AppSettings(
+            allowed_assets=["EURUSD", "GBPUSD", "XAUUSD"])
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["series_assets"] = sorted(series)
+            captured["baseline"] = baseline
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        monkeypatch.setattr(sim_optimizer, "capture_live_baseline",
+                            lambda db: live)
+        _seed_dataset(fake_db, "v1", assets=("EURUSD", "GBPUSD"))
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD", "GBPUSD"],
+            "tradable_assets": ["eurusd", "EURUSD "],
+        })
+        assert res["ok"] is True
+        # Dataset series untouched by the override.
+        assert captured["series_assets"] == ["EURUSD", "GBPUSD"]
+        # Worker baseline carries only the normalized override ...
+        assert captured["baseline"].allowed_assets == ["EURUSD"]
+        # ... as a copy, never the live object itself.
+        assert captured["baseline"] is not live
+        assert live.allowed_assets == ["EURUSD", "GBPUSD", "XAUUSD"]
+        row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["baseline_settings"] == live.model_dump(mode="json")
+        assert row["search_config"]["tradable_assets_override"] == ["EURUSD"]
+
+    async def test_warm_start_recommendation_is_copied_not_mutated(
+            self, fake_db, inline_worker, monkeypatch):
+        """Override on a warm-started run copies the prior recommendation;
+        the prior run row (and its recommendation config) is unchanged."""
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["baseline"] = baseline
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        _seed_completed_run_with_recommendation(fake_db, "old-run")
+        before_old = dict(
+            fake_db.select("sim_opt_runs", {"id": "old-run"})[0])
+        _seed_dataset(fake_db, "v1", assets=("EURUSD", "GBPUSD"))
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD", "GBPUSD"],
+            "base_run_id": "old-run", "tradable_assets": ["GBPUSD"],
+        })
+        assert res["ok"] is True
+        assert captured["baseline"].allowed_assets == ["GBPUSD"]
+        assert captured["baseline"].min_opportunity == 85
+        row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["search_config"]["tradable_assets_override"] == ["GBPUSD"]
+        assert row["search_config"]["warm_start_run_id"] == "old-run"
+        assert (fake_db.select("sim_opt_runs", {"id": "old-run"})[0]
+                == before_old)
+
+    @pytest.mark.parametrize("bad", [
+        [], ["   "], [""], "EURUSD", {"a": 1}, 5, "?",
+        ["EURUSD", "FAKEUSD"], ["EURUSD"] * 41, ["XAUUSD"] * 39 + ["NOPE", "X"],
+        ["EURUSD", 7],
+    ])
+    async def test_bad_tradable_refused_before_row_insert(
+            self, fake_db, bad):
+        before = len(fake_db.select("sim_opt_runs", limit=100))
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+            "tradable_assets": bad,
+        })
+        assert res["ok"] is False, bad
+        assert len(fake_db.select("sim_opt_runs", limit=100)) == before
+
+    async def test_omitted_override_preserves_normal_behavior(
+            self, fake_db, inline_worker, monkeypatch):
+        """No tradable_assets: worker gets the live baseline itself, the
+        stored snapshot equals it, and search_config carries no override."""
+        from app.models.schemas import AppSettings
+
+        live = AppSettings(min_opportunity=0)
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["baseline"] = baseline
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        monkeypatch.setattr(sim_optimizer, "capture_live_baseline",
+                            lambda db: live)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        assert captured["baseline"] is live
+        row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["baseline_settings"] == live.model_dump(mode="json")
+        assert "tradable_assets_override" not in row["search_config"]

@@ -1582,7 +1582,9 @@ async def start_optimization(request: Request,
 
     Optional ``base_run_id`` names a completed run whose recommendation
     becomes the search baseline; the new row still stores the live
-    baseline for apply safety."""
+    baseline for apply safety. Optional ``tradable_assets`` overrides only
+    the run's tradable whitelist (``assets`` still controls the dataset
+    series loaded)."""
     from app.services import sim_optimizer
 
     db: Database = request.app.state.db
@@ -1610,7 +1612,8 @@ async def start_optimization(request: Request,
         assets=assets,
         starting_capital=body.get("starting_capital", 1000.0),
         search_config=search_config,
-        base_run_id=base_run_id)
+        base_run_id=base_run_id,
+        tradable_assets=body.get("tradable_assets"))
 
 
 @router.get("/optimize")

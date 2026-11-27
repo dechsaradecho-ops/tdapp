@@ -1392,6 +1392,40 @@ def _best_summary(entry: Any) -> dict[str, Any] | None:
     }
 
 
+def _normalize_tradable_assets(
+        value: Any) -> tuple[list[str] | None, str | None]:
+    """Validate an optional per-run tradable-universe override.
+
+    Returns ``(normalized, None)``: ``(None, None)`` when omitted (``None`` —
+    normal behavior, the search baseline is used as-is); otherwise the
+    trim/uppercased/deduped/sorted symbol list. Anything else — a non-list,
+    an empty list, a blank/non-string entry, more than 40 raw entries, or a
+    symbol outside ``SUPPORTED_ASSETS`` — returns ``(None, error)`` so the
+    caller refuses before inserting a run row.
+    """
+    if value is None:
+        return None, None
+    if not isinstance(value, list) or not value:
+        return None, "tradable_assets must be a non-empty list"
+    if len(value) > 40:
+        return None, "tradable_assets must be a non-empty list (1-40)"
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return None, "tradable_assets must be a non-empty list"
+    clean = sorted({item.strip().upper() for item in value})
+    if not clean:
+        return None, "tradable_assets must be a non-empty list"
+    try:
+        from app.integrations.quotes import SUPPORTED_ASSETS
+    except Exception:
+        SUPPORTED_ASSETS = []
+    unknown = [a for a in clean if a not in SUPPORTED_ASSETS]
+    if unknown:
+        return None, ("tradable_assets contains unknown symbols: "
+                      + ", ".join(unknown))
+    return clean, None
+
+
 def _resolve_warm_start(db, base_run_id: Any,
                       ) -> tuple[str | None, AppSettings | None, str | None]:
     """Validate an optional warm-start base run (read-only, never writes).
@@ -1434,7 +1468,8 @@ def start_optimization(db, *, dataset_version: str,
                        assets: list[str] | None = None,
                        starting_capital: float = 1000.0,
                        search_config: Any = None,
-                       base_run_id: str | None = None) -> dict:
+                       base_run_id: str | None = None,
+                       tradable_assets: list[str] | None = None) -> dict:
     """Queue one optimization run and hand it to the worker. Returns at once.
 
     One run at a time: a second start while one is live is refused with
@@ -1452,6 +1487,15 @@ def start_optimization(db, *, dataset_version: str,
     ``search_config`` for audit. Blank, unknown, incomplete, or
     recommendation-less bases are refused with ``ok: False`` and zero new
     run rows.
+
+    ``tradable_assets`` optionally overrides ONLY the run's tradable
+    whitelist: the resolved search baseline (live or warm-start) is copied
+    with ``allowed_assets`` set to the normalized override, while
+    ``assets`` still controls which dataset series are loaded. The override
+    is persisted as ``search_config["tradable_assets_override"]`` for audit;
+    the stored ``baseline_settings`` stays the captured live snapshot and
+    the prior warm-start run is never mutated. Invalid overrides are refused
+    with ``ok: False`` and zero new run rows.
     """
     if not db or not getattr(db, "available", False):
         return {"ok": False, "error": "DB unavailable"}
@@ -1478,8 +1522,14 @@ def start_optimization(db, *, dataset_version: str,
         db, base_run_id)
     if warm_error is not None:
         return {"ok": False, "error": warm_error}
+    tradable, tradable_error = _normalize_tradable_assets(tradable_assets)
+    if tradable_error is not None:
+        return {"ok": False, "error": tradable_error}
     search_baseline = (warm_settings if warm_settings is not None
                        else baseline)
+    if tradable is not None:
+        search_baseline = search_baseline.model_copy(deep=True)
+        search_baseline.allowed_assets = list(tradable)
     clean = sorted({str(a).strip().upper() for a in (assets or [])
                     if str(a).strip()})
     if not clean:
@@ -1504,6 +1554,8 @@ def start_optimization(db, *, dataset_version: str,
         search_json["warm_start_run_id"] = warm_run_id
         search_json["warm_start_settings"] = _json_safe(
             warm_settings.model_dump(mode="json"))
+    if tradable is not None:
+        search_json["tradable_assets_override"] = list(tradable)
     try:
         row = {
             "id": run_id,
