@@ -374,7 +374,7 @@ def test_search_config_workers_defaults_to_sequential():
     assert SearchConfig().workers == 1
 
 
-@pytest.mark.parametrize("bad", [0, -1, -8])
+@pytest.mark.parametrize("bad", [0, -1, -8, True, False, "4", 2.5])
 def test_search_config_rejects_bad_workers(bad):
     with pytest.raises(ValueError):
         SearchConfig(workers=bad)
