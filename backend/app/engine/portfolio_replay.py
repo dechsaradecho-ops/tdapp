@@ -159,6 +159,7 @@ def signal_at(
     history: list[Candle],
     settings: AppSettings,
     date: date,
+    snapshot_cache: dict | None = None,
 ) -> Optional[ReplaySignal]:
     """Production-parity candidate signal for ``asset`` as of ``date``.
 
@@ -179,6 +180,12 @@ def signal_at(
     production direction. Never touches the network, DB, broker, or live
     settings writes. ``history`` must be oldest-first (as in
     ``build_timeline``); dateless candles raise ``ValueError`` like Task 1.
+
+    ``snapshot_cache`` is an optional caller-owned per-(asset, date) cache
+    for the ``snapshot_from_candles`` result: on a hit the cached snapshot
+    is reused (identical inputs → identical signal, no recompute); on a
+    miss the computed snapshot is stored. The cached snapshot is treated
+    as read-only. ``None`` (default) preserves the uncached behavior.
     """
     from app.core.gold_policy import gold_entry_block_reason
     from app.engine.strategy_engine import (
@@ -218,9 +225,18 @@ def signal_at(
         if len(ordered) < REPLAY_WARMUP:
             return None
 
-    snap = snapshot_from_candles(
-        asset, ordered, news_sentiment=0.0, high_impact_event=False
-    )
+    snap: dict
+    cache_key = (str(asset), wanted)
+    if snapshot_cache is not None and cache_key in snapshot_cache:
+        cached = snapshot_cache[cache_key]
+        snap = cached if isinstance(cached, dict) else {}
+    else:
+        snap = snapshot_from_candles(
+            asset, ordered, news_sentiment=0.0, high_impact_event=False
+        )
+        if snapshot_cache is not None:
+            snap = snap if isinstance(snap, dict) else {}
+            snapshot_cache[cache_key] = snap
     if not snap or not snap.get("price"):
         return None
 
@@ -350,6 +366,7 @@ def replay_portfolio(
     starting_capital: float = 1000.0,
     cost_config: CostConfig | None = None,
     warnings: list[str] | None = None,
+    use_snapshot_cache: bool = True,
 ) -> ReplayResult:
     """Deterministic daily portfolio replay (Task 4: full constraint/exit loop).
 
@@ -374,6 +391,14 @@ def replay_portfolio(
     entry-date quote rate, gross PnL and exit spread convert at the exit-date
     quote rate, open marks use the current date's rate; commissions are USD.
     Pure function: no network, DB, broker, notifications, or settings writes.
+
+    ``use_snapshot_cache`` (default True) shares one per-(asset, date)
+    snapshot cache between signal generation and exits: the same
+    ``snapshot_from_candles`` inputs computed for a signal are reused by
+    the exit stack instead of being recomputed, and repeated
+    ``signal_at`` calls for the same bar hit the cache. ``False`` bypasses
+    the cache (recomputes every snapshot) with identical outputs — the
+    slow path used to prove production-parity equality.
     """
     from app.engine.smart_exit import evaluate_exit
 
@@ -427,25 +452,35 @@ def replay_portfolio(
     curve: list[EquityPoint] = []
     peak = capital
     prev_drawdown = 0.0
-    snap_cache: dict[tuple[date, str], dict] = {}
+    # ONE per-(asset, date) snapshot cache shared by signal generation
+    # (``signal_at``) and the exit stack (``snapshot_for``): both call
+    # ``snapshot_from_candles`` on the same last-``REPLAY_WARMUP`` window
+    # for the same bar, so the second caller reuses the first caller's
+    # result instead of recomputing. Keyed ``(asset, date)`` — never
+    # wall-clock/random content — so replay stays deterministic.
+    snap_cache: dict[tuple[str, date], dict] = {}
+
+    def _compute_snapshot(asset_u: str, day: date) -> dict:
+        try:
+            hist = histories.get(asset_u, [])
+            window = (hist[-REPLAY_WARMUP:]
+                      if len(hist) > REPLAY_WARMUP else hist)
+            snap = snapshot_from_candles(
+                asset_u, window,
+                news_sentiment=0.0, high_impact_event=False) or {}
+        except Exception:
+            snap = {}
+        if not isinstance(snap, dict):
+            snap = {}
+        return snap
 
     def snapshot_for(asset_u: str, day: date) -> dict:
-        key = (day, asset_u)
-        snap = snap_cache.get(key)
-        if snap is None:
-            try:
-                hist = histories.get(asset_u, [])
-                window = (hist[-REPLAY_WARMUP:]
-                          if len(hist) > REPLAY_WARMUP else hist)
-                snap = snapshot_from_candles(
-                    asset_u, window,
-                    news_sentiment=0.0, high_impact_event=False) or {}
-            except Exception:
-                snap = {}
-            if not isinstance(snap, dict):
-                snap = {}
-            snap_cache[key] = snap
-        return snap
+        if not use_snapshot_cache:
+            return _compute_snapshot(asset_u, day)
+        key = (asset_u, day)
+        if key not in snap_cache:
+            snap_cache[key] = _compute_snapshot(asset_u, day)
+        return snap_cache[key]
 
     for day, row in timeline:
         for asset in sorted(row):
@@ -573,7 +608,9 @@ def replay_portfolio(
             hist = histories.get(asset_u, [])
             window = hist[-REPLAY_WARMUP:] if len(hist) > REPLAY_WARMUP else hist
             try:
-                sig = signal_at(asset_u, window, settings, day)
+                sig = signal_at(asset_u, window, settings, day,
+                                snapshot_cache=(snap_cache
+                                                if use_snapshot_cache else None))
             except Exception:
                 sig = None
             if sig is not None:
@@ -763,6 +800,8 @@ def size_for_replay(
     equity: float,
     rates: dict | None,
     date: date,
+    *,
+    rates_snapshot: dict | None = None,
 ) -> float:
     """Replay lots for ``signal`` against simulated ``equity`` (USD).
 
@@ -775,6 +814,12 @@ def size_for_replay(
     future). Returns 0.0 for invalid inputs, zero stop distance, a cross
     that cannot derive its quote-to-USD rate (fail closed), non-positive
     equity, or non-finite results.
+
+    ``rates_snapshot`` is an already-resolved flat per-date snapshot (what
+    the replay loop holds as its once-per-date ``prior_rates``): when given
+    it is used directly and the date-indexed re-resolution is skipped —
+    same conversion math, no per-position recompute. ``None`` (default)
+    preserves the resolving behavior for existing callers.
     """
     from app.services.execution import min_lot_budget_breach, size_position
 
@@ -806,7 +851,12 @@ def size_for_replay(
         return 0.0
     if not isinstance(wanted, _DATE):
         return 0.0
-    snapshot = _resolve_rates_snapshot(rates, wanted)
+    # Hoisted fast path: the replay loop already resolved the once-per-date
+    # open-known snapshot — reuse it instead of re-resolving per position.
+    if rates_snapshot is not None:
+        snapshot = rates_snapshot if isinstance(rates_snapshot, dict) else {}
+    else:
+        snapshot = _resolve_rates_snapshot(rates, wanted)
     if snapshot is None:
         rate = usd_per_quote_unit(asset, entry)
     else:
@@ -1093,7 +1143,8 @@ def _try_enter(
         confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
         snapshot=dict(getattr(signal, "snapshot", None) or {}),
     )
-    lots = size_for_replay(settings, adjusted, equity, prior_rates, day)
+    lots = size_for_replay(settings, adjusted, equity, prior_rates, day,
+                             rates_snapshot=prior_rates)
     if not math.isfinite(lots) or lots <= 0:
         return None
 

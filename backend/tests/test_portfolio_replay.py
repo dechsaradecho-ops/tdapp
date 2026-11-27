@@ -1599,3 +1599,77 @@ def test_signal_level_failure_returns_none(monkeypatch):
     monkeypatch.setattr(schemas_mod, "effective_sl_tp",
                         lambda *a, **k: (0.0, 0.0, 0.0, "", False))
     assert signal_at("EURUSD", history, settings, day) is None
+
+
+# ---------------------------------------------------------------------------
+# Task A: shared snapshot cache + hoisted rate resolution (TDD)
+# ---------------------------------------------------------------------------
+
+def _taskA_series():
+    return {"EURUSD": _t4_trend(n=230),
+            "GBPUSD": _t4_trend(n=230, start=1.2700)}
+
+
+def test_signal_cache_matches_uncached_signals():
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+    history = _fx_trend()
+    day = _day_of(history, len(history) - 1)
+    plain = signal_at("EURUSD", history, settings, day)
+    assert plain is not None
+    cache: dict = {}
+    cached = signal_at("EURUSD", history, settings, day, snapshot_cache=cache)
+    assert cached == plain
+    assert len(cache) == 1
+    again = signal_at("EURUSD", history, settings, day, snapshot_cache=cache)
+    assert again == plain
+    assert len(cache) == 1
+
+
+def test_signal_cache_avoids_snapshot_recompute(monkeypatch):
+    import app.engine.portfolio_replay as replay_mod
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+    history = _fx_trend()
+    day = _day_of(history, len(history) - 1)
+    calls = {"n": 0}
+    real = replay_mod.snapshot_from_candles
+
+    def _counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(replay_mod, "snapshot_from_candles", _counting)
+    cache: dict = {}
+    first = signal_at("EURUSD", history, settings, day, snapshot_cache=cache)
+    assert first is not None
+    assert calls["n"] == 1
+    second = signal_at("EURUSD", history, settings, day, snapshot_cache=cache)
+    assert second == first
+    assert calls["n"] == 1
+
+
+def test_replay_shared_cache_matches_bypassed_run():
+    series = _taskA_series()
+    settings = AppSettings()
+    cached = replay_portfolio(series, settings, starting_capital=1000)
+    assert cached.trades, "seeded scenario must open positions"
+    bypassed = replay_portfolio(series, settings, starting_capital=1000,
+                                use_snapshot_cache=False)
+    assert bypassed == cached
+
+
+def test_rate_resolution_happens_once_per_snapshot_per_date(monkeypatch):
+    import app.engine.portfolio_replay as replay_mod
+    series = _taskA_series()
+    settings = AppSettings()
+    seen: dict = {}
+    real = replay_mod._resolve_rates_snapshot
+
+    def _counting(rates, wanted):
+        seen[wanted] = seen.get(wanted, 0) + 1
+        return real(rates, wanted)
+
+    monkeypatch.setattr(replay_mod, "_resolve_rates_snapshot", _counting)
+    result = replay_portfolio(series, settings, starting_capital=1000)
+    assert result.trades, "seeded scenario must open positions"
+    assert seen, "expected rate resolution during replay"
+    assert max(seen.values()) <= 2
