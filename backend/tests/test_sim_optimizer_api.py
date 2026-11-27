@@ -88,14 +88,19 @@ class OptFakeDatabase(FakeDatabase):
 
     def select(self, table: str, filters: dict | None = None,
                order: str = "created_at", desc: bool = True, limit: int = 50,
-               offset: int = 0, columns: str = "*") -> list[dict]:
+               offset: int = 0, columns: str = "*",
+               after: dict | None = None) -> list[dict]:
         # Production Database.select orders server-side before slicing, so
         # seq/iteration pages are chronological. The stock fake ignores
         # `order` (returning newest-first storage order), which would slice
         # the wrong window for offset > 0 — honor `order`/`desc` here.
+        # `after` mirrors the production gap-safe keyset filter (strict >).
         rows = list(self.rows.get(table, []))
         for col, val in (filters or {}).items():
             rows = [r for r in rows if r.get(col) == val]
+        for col, val in (after or {}).items():
+            rows = [r for r in rows
+                    if r.get(col) is not None and r.get(col) > val]
         try:
             rows = sorted(rows,
                           key=lambda r: (r.get(order) is None,
@@ -301,6 +306,40 @@ class TestRunEventLog:
         assert second["rows"][0]["seq"] > first["rows"][-1]["seq"]
         missing = await call("GET", "/api/system/optimize/nope/logs")
         assert missing["ok"] is False
+
+    async def test_run_logs_after_seq_is_gap_safe(self, fake_db):
+        """after_seq=1 over seqs 0,1,3,4 returns 3,4 — never skips.
+
+        Event seq advances even when an insert fails (see
+        ``_emit_run_event``), so a positional offset overshoots after a
+        gap: offset=2 lands on row *position* 2 = seq 3, silently
+        dropping seq 3 from the client's view. ``seq > after_seq``
+        filtering cannot skip.
+        """
+        run_id = "gap-run"
+        fake_db.insert(sim_optimizer.RUNS_TABLE,
+                       {"id": run_id, "status": "complete"})
+        for seq in (0, 1, 3, 4):
+            fake_db.insert(sim_optimizer.EVENTS_TABLE, {
+                "run_id": run_id, "seq": seq, "level": "info",
+                "stage": "searching", "iteration": None,
+                "event": f"ev{seq}", "message": "", "data": {},
+                "created_at": None,
+            })
+        gap_safe = sim_optimizer.optimization_logs(
+            fake_db, run_id, after_seq=1)
+        assert gap_safe["ok"] is True
+        assert [r["seq"] for r in gap_safe["rows"]] == [3, 4]
+        # Legacy positional paging is retained unchanged.
+        legacy = sim_optimizer.optimization_logs(
+            fake_db, run_id, offset=2, limit=2)
+        assert [r["seq"] for r in legacy["rows"]] == [3, 4]
+        # Route passthrough: after_seq reaches the service.
+        via_route = await call(
+            "GET", f"/api/system/optimize/{run_id}/logs",
+            params={"after_seq": 1, "limit": 100})
+        assert via_route["ok"] is True
+        assert [r["seq"] for r in via_route["rows"]] == [3, 4]
 
 
 # ---------------------------------------------------------------------------

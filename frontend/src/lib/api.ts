@@ -368,12 +368,15 @@ export const api = {
     get<OptEquityResponse>(
       `/api/system/optimize/${encodeURIComponent(id)}/equity` +
       (iteration === undefined ? "" : `?iteration=${iteration}`)),
-  // GET paged per-run event log, seq ascending — offset is the next
-  // unseen seq (last seen seq + 1). Clearing the local view never
-  // deletes server rows; the next poll simply re-pages from offset 0.
-  optLogs: (id: string, offset = 0, limit = 200) =>
+  // GET paged per-run event log, seq ascending — gap-safe `seq >
+  // after_seq` filtering (event seq advances even on failed inserts, so
+  // positional offsets overshoot after a gap). Null = first page.
+  // Clearing the local view never deletes server rows; the next poll
+  // simply re-pages from the start.
+  optLogs: (id: string, afterSeq: number | null = null, limit = 200) =>
     get<OptLogsResponse>(
-      `/api/system/optimize/${encodeURIComponent(id)}/logs?offset=${offset}&limit=${limit}`),
+      `/api/system/optimize/${encodeURIComponent(id)}/logs?limit=${limit}` +
+      (afterSeq === null || afterSeq === undefined ? "" : `&after_seq=${afterSeq}`)),
   // POST cooperative stop — completed iterations are preserved.
   optCancel: (id: string) =>
     post<OptStatusResponse>(

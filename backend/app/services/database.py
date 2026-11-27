@@ -119,13 +119,19 @@ class Database:
 
     def select(self, table: str, filters: Optional[dict] = None,
                order: str = "created_at", desc: bool = True, limit: int = 50,
-               offset: int = 0, columns: str = "*") -> list[dict]:
+               offset: int = 0, columns: str = "*",
+               after: Optional[dict[str, Any]] = None) -> list[dict]:
         if not self._client:
             return []
         try:
             q = self._client.table(table).select(columns)
             for col, val in (filters or {}).items():
                 q = q.eq(col, val)
+            # Gap-safe keyset filter (e.g. {"seq": last_seen}) — strict
+            # greater-than, applied before ordering/paging. Independent of
+            # `offset` so callers can page by value instead of position.
+            for col, val in (after or {}).items():
+                q = q.gt(col, val)
             q = q.order(order, desc=desc).limit(limit).offset(offset)
             return list(q.execute().data or [])
         except Exception as exc:

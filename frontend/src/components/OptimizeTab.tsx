@@ -118,10 +118,10 @@ export default function OptimizeTab() {
   const [applying, setApplying] = useState(false);
 
   // ---- run log (per-run events; diagnostic only) ----
-  // Appended by last_seq inside pull() under the same no-overlap guard;
+  // Appended by last-seq inside pull() under the same no-overlap guard;
   // pause only stops appending (nothing is lost — resume polls from the
   // same seq), clear only empties this view (server rows stay, next poll
-  // re-pages from offset 0).
+  // re-pages from the start).
   const [logs, setLogs] = useState<OptRunLogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(true);
   const [logPaused, setLogPaused] = useState(false);
@@ -373,17 +373,19 @@ export default function OptimizeTab() {
         setRows(page.rows || []);
         setItTotal(page.total ?? (page.rows || []).length);
       }
-      // Run-log streams under this same no-overlap guard. Offset is the
-      // last seen seq + 1; late/duplicate rows (seq already present) are
-      // dropped, the view is capped at LOG_MAX, and a `more` page drains
-      // inline so a terminal run shows the full log after one pull.
+      // Run-log streams under this same no-overlap guard. Gap-safe
+      // `seq > after_seq` filtering (not positional offset — event seq
+      // advances even on failed inserts, so positions overshoot after a
+      // gap). Late/duplicate rows (seq already present) are dropped, the
+      // view is capped at LOG_MAX, and a `more` page drains inline so a
+      // terminal run shows the full log after one pull.
       // Paused = skip the fetch; resume continues from the same seq.
       if (!logPausedRef.current) {
         let seen = logsRef.current;
         // At the LOG_MAX cap the window still slides: append + slice drops
         // the oldest. An empty batch returns `seen` unchanged → break.
         for (let p = 0; p < 3; p++) {
-          const lg = await api.optLogs(id, nextOptLogOffset(seen), 200);
+          const lg = await api.optLogs(id, nextOptLogAfterSeq(seen), 200);
           if (runIdRef.current !== id) return;
           if (!lg.ok) break;
           const merged = appendOptLogRows(seen, lg.rows || []);
@@ -1096,10 +1098,10 @@ export default function OptimizeTab() {
 /* pieces                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Next log offset = last seen seq + 1 (0 when the view is empty).
+/** Last seen seq for the next gap-safe poll (null = first page).
  *  Exported for the mocked render trace — pull() uses this verbatim. */
-export function nextOptLogOffset(rows: OptRunLogEntry[]): number {
-  return rows.length ? rows[rows.length - 1].seq + 1 : 0;
+export function nextOptLogAfterSeq(rows: OptRunLogEntry[]): number | null {
+  return rows.length ? rows[rows.length - 1].seq : null;
 }
 
 /** Append one fetched page: drop late/duplicate rows (seq already

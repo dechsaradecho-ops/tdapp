@@ -1652,15 +1652,22 @@ async def optimization_equity(request: Request, run_id: str,
 
 @router.get("/optimize/{run_id}/logs")
 async def optimization_logs(request: Request, run_id: str,
-                            offset: int = 0, limit: int = 200) -> dict:
-    """Paged run events for one optimization run, seq ascending."""
+                            offset: int = 0, limit: int = 200,
+                            after_seq: Optional[int] = None) -> dict:
+    """Paged run events for one optimization run, seq ascending.
+
+    Gap-safe ``after_seq`` (``seq > after_seq``) replaces positional
+    ``offset`` when provided — event seq advances even on failed
+    inserts, so positions overshoot after a gap. Legacy ``offset``
+    paging is retained when ``after_seq`` is absent.
+    """
     from app.services import sim_optimizer
 
     db: Database = request.app.state.db
     if not db or not db.available:
         return {"ok": False, "error": "DB unavailable"}
     return sim_optimizer.optimization_logs(db, run_id, offset=offset,
-                                           limit=limit)
+                                           limit=limit, after_seq=after_seq)
 
 
 @router.post("/optimize/{run_id}/cancel")

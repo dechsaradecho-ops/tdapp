@@ -2002,12 +2002,18 @@ def _event_dict(row: dict) -> dict:
 
 
 def optimization_logs(db, run_id: str, offset: int = 0,
-                      limit: int = 200) -> dict:
+                      limit: int = 200,
+                      after_seq: int | None = None) -> dict:
     """Paged per-run event log, ordered by seq ascending. Never raises.
 
-    Validates the run exists, then pages ``(run_id, seq)`` with ``limit``
-    capped at 500. Returns ``{ok, run_id, rows, last_seq, more}`` where
-    ``more`` is ``len(rows) == limit``. No ``Database.count`` — the events
+    Gap-safe paging via ``after_seq`` (``seq > after_seq``): event seq
+    advances even when an insert fails, so positional ``offset`` can
+    overshoot and silently skip rows after a gap — ``after_seq`` (the
+    client's last seen seq) cannot. When ``after_seq`` is provided it
+    replaces ``offset`` (forced to 0); otherwise legacy positional
+    paging applies unchanged. ``limit`` capped at 500. Returns
+    ``{ok, run_id, rows, last_seq, more}`` where ``more`` is
+    ``len(rows) == limit``. No ``Database.count`` — the events
     table has no ``id`` column for it.
     """
     if not db or not getattr(db, "available", False):
@@ -2023,8 +2029,14 @@ def optimization_logs(db, run_id: str, offset: int = 0,
     except (TypeError, ValueError):
         start = 0
     try:
+        aft = None if after_seq is None else int(after_seq)
+    except (TypeError, ValueError):
+        aft = None
+    try:
         rows = db.select(EVENTS_TABLE, filters={"run_id": str(run_id)},
-                         order="seq", desc=False, limit=page, offset=start)
+                         order="seq", desc=False, limit=page,
+                         offset=0 if aft is not None else start,
+                         after=({"seq": aft} if aft is not None else None))
     except Exception as exc:
         return {"ok": False, "error": f"{exc}"[:200]}
     rows = rows or []
