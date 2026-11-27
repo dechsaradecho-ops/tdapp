@@ -16,11 +16,12 @@ import random
 import threading
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from app.engine.portfolio_replay import (
+    CostConfig,
     ReplayMetrics,
     ReplayResult,
     default_cost_config,
@@ -323,6 +324,8 @@ class SearchConfig:
     workers: int = 1
     explore_fraction: float = 0.5
     restart_prob: float = 0.15
+    commission_per_lot_per_side: float = 3.5
+    exit_spread_mult: float = 0.5
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_iterations <= MAX_ITERATIONS_HARD_MAX:
@@ -353,6 +356,23 @@ class SearchConfig:
         restart = float(self.restart_prob)
         if not math.isfinite(restart) or not 0.0 <= restart <= 1.0:
             raise ValueError("restart_prob must be in [0, 1]")
+        if (isinstance(self.commission_per_lot_per_side, bool)
+                or not isinstance(self.commission_per_lot_per_side,
+                                  (int, float))):
+            raise ValueError(
+                "commission_per_lot_per_side must be a finite number >= 0")
+        commission = float(self.commission_per_lot_per_side)
+        if not math.isfinite(commission) or commission < 0:
+            raise ValueError(
+                "commission_per_lot_per_side must be a finite number >= 0")
+        if (isinstance(self.exit_spread_mult, bool)
+                or not isinstance(self.exit_spread_mult, (int, float))):
+            raise ValueError(
+                "exit_spread_mult must be a finite number >= 0")
+        exit_mult = float(self.exit_spread_mult)
+        if not math.isfinite(exit_mult) or exit_mult < 0:
+            raise ValueError(
+                "exit_spread_mult must be a finite number >= 0")
 
 
 @dataclass
@@ -395,8 +415,27 @@ def _train_replay_job(payload: tuple) -> ReplayResult:
     )
 
 
+def _search_cost_config(candidate: AppSettings,
+                         cfg: SearchConfig) -> CostConfig:
+    """Run-level replay costs for one candidate.
+
+    Spreads stay candidate-specific (``default_cost_config`` resolves them
+    from the candidate's overrides/table), but commission and the exit
+    spread multiplier always come from the run-level ``SearchConfig`` —
+    so a zero-cost live setting can never leak a commission-free replay
+    into the search.
+    """
+    base = default_cost_config(candidate)
+    return replace(
+        base,
+        commission_per_lot_per_side=float(cfg.commission_per_lot_per_side),
+        exit_spread_mult=float(cfg.exit_spread_mult),
+    )
+
+
 def _replay_train_batch(executor, batch: list, train_series: dict,
-                        capital: float) -> list:
+                        capital: float,
+                        search_cfg: SearchConfig | None = None) -> list:
     """Run one batch of train replays; results return in batch order.
 
     Futures are awaited STRICTLY in batch (iteration) order, never
@@ -406,7 +445,10 @@ def _replay_train_batch(executor, batch: list, train_series: dict,
     """
     replay_fn = replay_portfolio  # parent-side global: honors test doubles
     payloads = [
-        (replay_fn, train_series, default_cost_config(candidate),
+        (replay_fn, train_series,
+         _search_cost_config(candidate, search_cfg)
+         if search_cfg is not None
+         else default_cost_config(candidate),
          candidate, capital)
         for candidate in batch
     ]
@@ -792,7 +834,7 @@ def optimize_settings(
     # Iteration 0: the baseline itself. Sets the initial best by train net.
     baseline_train = replay_portfolio(
         train_series, baseline, starting_capital=capital,
-        cost_config=default_cost_config(baseline),
+        cost_config=_search_cost_config(baseline, cfg),
     )
     seen.add(canonical_config_hash(baseline))
     best_train_net = float(baseline_train.metrics.net_pnl)
@@ -853,7 +895,7 @@ def optimize_settings(
             seen.add(digest)
             train_result = replay_portfolio(
                 train_series, candidate, starting_capital=capital,
-                cost_config=default_cost_config(candidate),
+                cost_config=_search_cost_config(candidate, cfg),
             )
             if not _fold(candidate, train_result):
                 break
@@ -910,7 +952,7 @@ def optimize_settings(
                             f"(workers={cfg.workers}): {exc}"
                         ) from exc
                 results = _replay_train_batch(
-                    executor, batch, train_series, capital)
+                    executor, batch, train_series, capital, search_cfg=cfg)
                 for candidate, train_result in zip(batch, results):
                     if _cancelled():
                         stop = True
@@ -938,7 +980,7 @@ def optimize_settings(
                 seen.add(digest)
                 train_result = replay_portfolio(
                     train_series, candidate, starting_capital=capital,
-                    cost_config=default_cost_config(candidate),
+                    cost_config=_search_cost_config(candidate, cfg),
                 )
                 if not _fold(candidate, train_result):
                     break
@@ -951,7 +993,7 @@ def optimize_settings(
             break
         full = replay_portfolio(
             series, source.config, starting_capital=capital,
-            cost_config=default_cost_config(source.config),
+            cost_config=_search_cost_config(source.config, cfg),
         )
         _train_slice, val_slice = slice_replay_result(full, cutoff)
         board.append(
@@ -1099,7 +1141,8 @@ def _coerce_search_config(value: Any) -> tuple[SearchConfig | None, str | None]:
     if isinstance(value, dict):
         known = {"max_iterations", "seed", "train_ratio", "top_n",
                  "min_trades", "min_validation_trades", "workers",
-                 "explore_fraction", "restart_prob"}
+                 "explore_fraction", "restart_prob",
+                 "commission_per_lot_per_side", "exit_spread_mult"}
         try:
             cfg = SearchConfig(**{k: v for k, v in value.items()
                                   if k in known})
@@ -1120,6 +1163,8 @@ def _search_config_json(cfg: SearchConfig) -> dict[str, Any]:
             "workers": cfg.workers,
             "explore_fraction": cfg.explore_fraction,
             "restart_prob": cfg.restart_prob,
+            "commission_per_lot_per_side": cfg.commission_per_lot_per_side,
+            "exit_spread_mult": cfg.exit_spread_mult,
             "code_version": CODE_VERSION}
 
 

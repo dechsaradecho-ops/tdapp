@@ -1269,3 +1269,53 @@ class TestWarmStart:
         assert touched == []
         assert real_select("sim_opt_runs", {"id": "old-run"})[0] \
             == before_old
+
+
+# ---------------------------------------------------------------------------
+# Max-search plan Task 1 (RED): realistic run-level costs over the API.
+# ---------------------------------------------------------------------------
+class TestRunLevelCosts:
+    async def test_start_persists_custom_run_costs(
+            self, fake_db, inline_worker, monkeypatch):
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["search_config"] = kwargs.get("search_config")
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+            "search_config": {"max_iterations": 3,
+                              "commission_per_lot_per_side": 9.0,
+                              "exit_spread_mult": 0.75},
+        })
+        assert res["ok"] is True
+        row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["search_config"]["commission_per_lot_per_side"] == 9.0
+        assert row["search_config"]["exit_spread_mult"] == 0.75
+        assert captured["search_config"].commission_per_lot_per_side == 9.0
+        assert captured["search_config"].exit_spread_mult == 0.75
+
+    async def test_start_defaults_run_costs_to_realistic(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1",
+                          "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["search_config"]["commission_per_lot_per_side"] == 3.5
+        assert row["search_config"]["exit_spread_mult"] == 0.5
+
+    async def test_start_rejects_bad_run_costs(self, fake_db):
+        before = len(fake_db.select("sim_opt_runs", limit=100))
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+            "search_config": {"commission_per_lot_per_side": -1.0},
+        })
+        assert res["ok"] is False
+        assert len(fake_db.select("sim_opt_runs", limit=100)) == before

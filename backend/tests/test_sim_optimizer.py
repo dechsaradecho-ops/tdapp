@@ -565,3 +565,128 @@ def test_search_config_json_round_trips_guided_fields():
     payload = _search_config_json(cfg)
     assert payload["explore_fraction"] == 0.4
     assert payload["restart_prob"] == 0.2
+
+
+# ---------------------------------------------------------------------------
+# Max-search plan Task 1 (RED): realistic run-level costs.
+# ---------------------------------------------------------------------------
+
+def test_search_config_cost_defaults_are_realistic():
+    cfg = SearchConfig()
+    assert cfg.commission_per_lot_per_side == 3.5
+    assert cfg.exit_spread_mult == 0.5
+
+
+@pytest.mark.parametrize("field", ["commission_per_lot_per_side",
+                                   "exit_spread_mult"])
+@pytest.mark.parametrize("bad", [True, False, "3.5", None, -1.0, -0.01,
+                                 float("nan"), float("inf"),
+                                 float("-inf")])
+def test_search_config_rejects_bad_costs(field, bad):
+    with pytest.raises(ValueError):
+        SearchConfig(**{field: bad})
+
+
+def test_search_config_accepts_zero_and_custom_costs():
+    cfg = SearchConfig(commission_per_lot_per_side=0.0,
+                       exit_spread_mult=0.0)
+    assert cfg.commission_per_lot_per_side == 0.0
+    assert cfg.exit_spread_mult == 0.0
+    cfg = SearchConfig(commission_per_lot_per_side=10,
+                       exit_spread_mult=0.75)
+    assert cfg.commission_per_lot_per_side == 10
+    assert cfg.exit_spread_mult == 0.75
+
+
+def test_search_config_json_round_trips_cost_fields():
+    _coerce_search_config = sim_optimizer._coerce_search_config
+    _search_config_json = sim_optimizer._search_config_json
+    cfg, error = _coerce_search_config(
+        {"max_iterations": 10, "commission_per_lot_per_side": 10.0,
+         "exit_spread_mult": 0.75})
+    assert error is None
+    payload = _search_config_json(cfg)
+    assert payload["commission_per_lot_per_side"] == 10.0
+    assert payload["exit_spread_mult"] == 0.75
+    default_payload = _search_config_json(_coerce_search_config(None)[0])
+    assert default_payload["commission_per_lot_per_side"] == 3.5
+    assert default_payload["exit_spread_mult"] == 0.5
+
+
+def test_search_cost_config_ignores_zero_live_costs():
+    candidate = AppSettings(paper_commission_per_lot=0.0,
+                            paper_exit_spread_mult=0.0)
+    costs = sim_optimizer._search_cost_config(candidate, SearchConfig())
+    assert costs.commission_per_lot_per_side == 3.5
+    assert costs.exit_spread_mult == 0.5
+
+
+def test_search_cost_config_applies_custom_values_and_keeps_spreads():
+    candidate = AppSettings(paper_commission_per_lot=0.0,
+                            paper_exit_spread_mult=0.0,
+                            spread_overrides={"EURUSD": 0.0002})
+    cfg = SearchConfig(commission_per_lot_per_side=10.0,
+                       exit_spread_mult=0.75)
+    costs = sim_optimizer._search_cost_config(candidate, cfg)
+    assert costs.commission_per_lot_per_side == 10.0
+    assert costs.exit_spread_mult == 0.75
+    assert costs.spreads == sim_optimizer.default_cost_config(
+        candidate).spreads
+    assert costs.default_spread == sim_optimizer.default_cost_config(
+        candidate).default_spread
+
+
+def test_optimize_replays_use_run_level_costs(monkeypatch):
+    series = _series()
+    seen: list = []
+
+    def recording(inner_series, settings, *, starting_capital=1000.0,
+                  cost_config=None, warnings=None):
+        seen.append(cost_config)
+        return fake_replay(inner_series, settings,
+                           starting_capital=starting_capital,
+                           cost_config=cost_config, warnings=warnings)
+
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", recording)
+    baseline = AppSettings(paper_commission_per_lot=0.0,
+                           paper_exit_spread_mult=0.0)
+    optimize_settings(series, baseline, starting_capital=1000,
+                      search_config=SearchConfig(max_iterations=3))
+    assert seen
+    assert all(c.commission_per_lot_per_side == 3.5 for c in seen)
+    assert all(c.exit_spread_mult == 0.5 for c in seen)
+
+    seen.clear()
+    optimize_settings(
+        series, baseline, starting_capital=1000,
+        search_config=SearchConfig(max_iterations=3,
+                                   commission_per_lot_per_side=9.0,
+                                   exit_spread_mult=0.75))
+    assert seen
+    assert all(c.commission_per_lot_per_side == 9.0 for c in seen)
+    assert all(c.exit_spread_mult == 0.75 for c in seen)
+
+
+def test_replay_train_batch_payloads_carry_search_costs(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    seen: list = []
+
+    def recording(inner_series, settings, *, starting_capital=1000.0,
+                  cost_config=None, warnings=None):
+        seen.append(cost_config)
+        return "ok"
+
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", recording)
+    batch = [AppSettings(paper_commission_per_lot=0.0,
+                         paper_exit_spread_mult=0.0)
+             for _ in range(3)]
+    cfg = SearchConfig(commission_per_lot_per_side=9.0,
+                       exit_spread_mult=0.75)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = sim_optimizer._replay_train_batch(
+            executor, batch, _series(), 1000.0, search_cfg=cfg)
+    assert results == ["ok", "ok", "ok"]
+    assert len(seen) == 3
+    assert all(c.commission_per_lot_per_side == 9.0 for c in seen)
+    assert all(c.exit_spread_mult == 0.75 for c in seen)
