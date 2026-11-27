@@ -248,6 +248,9 @@ export const api = {
   applyRiskPreset: (profile: string) =>
     post<SettingsSaveResult>(`/api/settings/preset/${profile}`, {}),
 
+  applySeed8Preset: () =>
+    post<SettingsSaveResult>("/api/settings/optimizer-preset/seed8", {}),
+
   // ---------- AI chat (Settings page) ----------
   // POST /api/ai/test — ยิงคำถามสั้น ๆ ไปยัง model/base URL ที่ตั้งไว้ เพื่อ
   // เช็คว่าใช้งานได้จริงก่อนบันทึก (ส่งค่าที่กำลังพิมพ์ในฟอร์มไปด้วยได้ →

@@ -494,6 +494,29 @@ export default function SettingsPage() {
     }
   };
 
+  const [seed8Busy, setSeed8Busy] = useState(false);
+  const [seed8Msg, setSeed8Msg] = useState("");
+
+  const applySeed8Preset = async () => {
+    if (!cfg || seed8Busy) return;
+    if (!window.confirm(
+      "ใช้ Seed 8 preset?\nจะเปลี่ยน 7 ฟิลด์ของ optimizer และคง capital, ค่าใช้จ่าย และการตั้งค่าอื่นไว้",
+    )) return;
+    setSeed8Busy(true);
+    setSeed8Msg("");
+    try {
+      const res = await api.applySeed8Preset();
+      if (!res.ok) throw new Error(res.message || "ใช้ Seed 8 preset ไม่สำเร็จ");
+      setCfg(res.settings);
+      setSaveMsg("");
+      setSeed8Msg("ใช้และบันทึก Seed 8 preset แล้ว — capital/costs และฟิลด์อื่นคงไว้");
+    } catch (e) {
+      setSeed8Msg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSeed8Busy(false);
+    }
+  };
+
   const recommend = async (allowedOverride?: string[]) => {
     if (!Number.isFinite(capital) || capital <= 0) return;
     const scope = allowedOverride
@@ -935,6 +958,30 @@ export default function SettingsPage() {
                   {presetMsg && <span className="text-accent"> · {presetMsg}</span>}
                 </span>
               </label>
+              <div className="rounded-lg border border-slate-700 bg-surface/60 p-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-slate-100">
+                      Seed 8 — Top-4 optimizer preset
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      AUDCAD, AUDCHF, AUDNZD, CHFJPY · เปลี่ยน 7 ฟิลด์
+                      และคง capital, ค่าใช้จ่าย และการตั้งค่าอื่นไว้
+                    </p>
+                  </div>
+                  <button type="button" onClick={applySeed8Preset}
+                    disabled={seed8Busy} aria-busy={seed8Busy}
+                    className="shrink-0 bg-accent text-white text-xs font-semibold rounded px-3 min-h-[40px] disabled:opacity-50 active:brightness-90">
+                    <span className="inline-flex items-center gap-1.5">
+                      {seed8Busy && <Icon n="spinner" size={13} className="animate-spin" />}
+                      {seed8Busy ? "กำลังใช้..." : "ใช้ Seed 8"}
+                    </span>
+                  </button>
+                </div>
+                {seed8Msg && (
+                  <p className="text-xs text-accent mt-2" role="status">{seed8Msg}</p>
+                )}
+              </div>
               <NumField label="Min Confidence (%)" value={cfg.min_confidence}
                 onChange={(v) => set("min_confidence", v)} step={1}
                 hint="คะแนนมั่นใจขั้นต่ำ — ต่ำกว่านี้ scanner ไม่สร้างสัญญาณ (ยิ่งสูงยิ่งน้อยแต่แม่น)" />

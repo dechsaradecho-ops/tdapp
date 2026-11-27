@@ -184,6 +184,46 @@ async def test_preset_apply_writes_change_log():
 
 
 @pytest.mark.asyncio
+async def test_seed8_preset_applies_only_patch_and_preserves_identity():
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+    row = AppSettings(
+        capital=50_000, min_lot=0.05,
+        paper_commission_per_lot=9.0, paper_exit_spread_mult=0.9,
+        notify_trade_opened=False,
+        allowed_assets=["EURUSD"], gold_max_atr_pct=3.5,
+        max_hold_days=5, max_open_positions=12, max_trades_daily=15,
+        sl_distance_min_pct=0.8, sl_distance_max_pct=1.2,
+    ).model_dump(mode="json")
+    db = SettingsDatabase(row)
+    set_state(db)
+    res = await call("POST", "/api/settings/optimizer-preset/seed8", {})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    settings = body["settings"]
+    assert settings["allowed_assets"] == ["AUDCAD", "AUDCHF", "AUDNZD", "CHFJPY"]
+    assert settings["gold_max_atr_pct"] == 6.25
+    assert settings["max_hold_days"] == 20
+    assert settings["max_open_positions"] == 6
+    assert settings["max_trades_daily"] == 3
+    assert settings["sl_distance_min_pct"] == 2.5
+    assert settings["sl_distance_max_pct"] == 4.0
+    assert settings["capital"] == 50_000
+    assert settings["min_lot"] == 0.05
+    assert settings["paper_commission_per_lot"] == 9.0
+    assert settings["paper_exit_spread_mult"] == 0.9
+    assert settings["notify_trade_opened"] is False
+    rows = db.rows.get(SETTINGS_CHANGE_TABLE) or []
+    assert len(rows) == 1
+    assert rows[0]["source"] == "preset:seed8"
+    assert {c["field"] for c in rows[0]["changes"]} == {
+        "allowed_assets", "gold_max_atr_pct", "max_hold_days",
+        "max_open_positions", "max_trades_daily",
+        "sl_distance_min_pct", "sl_distance_max_pct",
+    }
+
+
+@pytest.mark.asyncio
 async def test_reset_writes_change_log():
     from app.api.routes.settings import SETTINGS_CHANGE_TABLE
     db = SettingsDatabase(AppSettings(max_drawdown_pct=25.0).model_dump(mode="json"))

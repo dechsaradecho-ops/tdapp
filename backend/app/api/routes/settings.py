@@ -31,6 +31,18 @@ _FIELDS = set(AppSettings.model_fields.keys())
 # Audit trail for Settings changes (migration 054, Logs menu → settings tab).
 SETTINGS_CHANGE_TABLE = "settings_change_logs"
 
+# Seed 8 is a patch-only optimizer preset: applying it must not overwrite
+# capital, costs, risk sizing, identity, notifications, or other live choices.
+SEED8_PRESET: dict[str, Any] = {
+    "allowed_assets": ["AUDCAD", "AUDCHF", "AUDNZD", "CHFJPY"],
+    "gold_max_atr_pct": 6.25,
+    "max_hold_days": 20,
+    "max_open_positions": 6,
+    "max_trades_daily": 3,
+    "sl_distance_min_pct": 2.5,
+    "sl_distance_max_pct": 4.0,
+}
+
 
 def diff_settings(old: AppSettings, new: AppSettings) -> list[dict[str, Any]]:
     """Per-field old→new diff (only fields whose value actually changed).
@@ -448,6 +460,18 @@ def get_risk_presets() -> dict[str, dict[str, object]]:
     the user applies it. Values mirror RISK_PRESETS in schemas.py."""
     return {profile.value: dict(values)
             for profile, values in RISK_PRESETS.items()}
+
+
+@router.post("/optimizer-preset/seed8", response_model=SettingsSaveResult)
+def apply_seed8_preset(request: Request) -> SettingsSaveResult:
+    """Apply only the seven Seed 8 optimizer fields.
+
+    Capital, costs, risk sizing, identity, notifications, and every other
+    live setting survive unchanged. The shared patch path keeps partial-write
+    safety and writes an audit row with ``source="preset:seed8"``.
+    """
+    return apply_settings_patch(
+        request.app.state.db, dict(SEED8_PRESET), source="preset:seed8")
 
 
 @router.get("/effective")
