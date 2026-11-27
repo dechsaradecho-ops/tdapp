@@ -523,10 +523,14 @@ def test_candidate_for_iteration_phase_boundary(monkeypatch):
                         lambda *args: calls.append("explore") or AppSettings(min_confidence=5))
     monkeypatch.setattr(sim_optimizer, "refine_from_parent",
                         lambda *args: calls.append("refine") or AppSettings(min_confidence=45))
-    _candidate_for_iteration(baseline, best, random.Random(0), 1, 2, 0.0)
-    _candidate_for_iteration(baseline, best, random.Random(0), 2, 2, 0.0)
-    _candidate_for_iteration(baseline, best, random.Random(0), 3, 2, 0.0)
+    first = _candidate_for_iteration(baseline, best, random.Random(0), 1, 2, 0.0)
+    second = _candidate_for_iteration(baseline, best, random.Random(0), 2, 2, 0.0)
+    third = _candidate_for_iteration(baseline, best, random.Random(0), 3, 2, 0.0)
     assert calls == ["explore", "explore", "refine"]
+    # Single-value contract: returns only the candidate settings.
+    assert first.min_confidence == 5
+    assert second.min_confidence == 5
+    assert third.min_confidence == 45
 
 
 def test_guided_search_same_seed_workers_1_and_4_match(monkeypatch):

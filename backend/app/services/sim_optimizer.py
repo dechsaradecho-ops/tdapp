@@ -271,20 +271,20 @@ def _candidate_for_iteration(
     iteration: int,
     explore_iterations: int,
     restart_prob: float,
-) -> tuple[AppSettings, bool]:
-    """One candidate for a 1-based candidate iteration plus its kind.
+) -> AppSettings:
+    """One candidate for a 1-based candidate iteration.
 
     Exploration iterations (``iteration <= explore_iterations``) clone from
-    the original ``baseline`` via ``candidate_from_baseline`` and return
-    ``False``. Refinement iterations take the restart draw: with probability
-    ``restart_prob`` they restart from the baseline (``False``), otherwise
-    they refine ``best_config`` via ``refine_from_parent`` (``True``).
+    the original ``baseline`` via ``candidate_from_baseline``. Refinement
+    iterations take the restart draw: with probability ``restart_prob``
+    they restart from the baseline, otherwise they refine ``best_config``
+    via ``refine_from_parent``.
     """
     if iteration <= explore_iterations:
-        return candidate_from_baseline(baseline, rng, iteration), False
+        return candidate_from_baseline(baseline, rng, iteration)
     if rng.random() < restart_prob:
-        return candidate_from_baseline(baseline, rng, iteration), False
-    return refine_from_parent(best_config, rng), True
+        return candidate_from_baseline(baseline, rng, iteration)
+    return refine_from_parent(best_config, rng)
 
 
 def config_diff(before: AppSettings, after: AppSettings) -> dict:
@@ -692,6 +692,30 @@ def summarize_meta_filter(series: dict, config: AppSettings,
     }
 
 
+def _unavailable_meta_report(reason: str) -> dict:
+    """Shape-stable unavailable meta-filter payload (diagnostic only).
+
+    Success carries ``evaluated/take/skip/unavailable/skip_rate_pct``; the
+    no-recommendation and summary-failure paths must carry the same zero
+    counts so clients can rely on one shape. Never affects ranking.
+    """
+    return {
+        "evaluated": 0,
+        "take": 0,
+        "skip": 0,
+        "unavailable": 0,
+        "skip_rate_pct": 0.0,
+        "threshold": None,
+        "artifact_run_id": None,
+        "trained_at": None,
+        "status": "unavailable",
+        "reason": str(reason),
+        "note": ("post-run diagnostic unavailable — verdicts did not "
+                 "affect ranking, eligibility, or replay"),
+        "ranking_effect": "none",
+    }
+
+
 def _train_net_pnl(iteration: IterationResult) -> float:
     try:
         return float(iteration.train_result.metrics.net_pnl)
@@ -816,7 +840,7 @@ def optimize_settings(
         while len(iterations) < cfg.max_iterations:
             if _cancelled():
                 break
-            candidate, _ = _candidate_for_iteration(
+            candidate = _candidate_for_iteration(
                 baseline, best_config, rng, len(iterations), explore_n,
                 cfg.restart_prob)
             digest = canonical_config_hash(candidate)
@@ -860,7 +884,7 @@ def optimize_settings(
                        and len(iterations) + len(batch) <= explore_n):
                     if _cancelled():
                         break
-                    candidate, _ = _candidate_for_iteration(
+                    candidate = _candidate_for_iteration(
                         baseline, best_config, rng,
                         len(iterations) + len(batch), explore_n,
                         cfg.restart_prob)
@@ -901,7 +925,7 @@ def optimize_settings(
             while len(iterations) < cfg.max_iterations:
                 if _cancelled():
                     break
-                candidate, _ = _candidate_for_iteration(
+                candidate = _candidate_for_iteration(
                     baseline, best_config, rng, len(iterations), explore_n,
                     cfg.restart_prob)
                 digest = canonical_config_hash(candidate)
@@ -1663,7 +1687,7 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
                     detailed.discard(best_detail_iter)
                 if _store_details(db, run_id, iteration, train):
                     detailed.add(iteration)
-                best_detail_iter = iteration
+                    best_detail_iter = iteration
 
         outcome = optimize_settings(
             series, baseline, starting_capital=capital,
@@ -1753,9 +1777,7 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
             except Exception as exc:  # noqa: BLE001 - report never fails run
                 log.warning("opt %s: meta-filter summary failed: %s",
                             run_id, exc)
-                meta_report = {"status": "unavailable",
-                               "reason": "summary failed",
-                               "ranking_effect": "none"}
+                meta_report = _unavailable_meta_report("summary failed")
             recommendation["meta_filter"] = meta_report
             final = {"stage": "done", "best_train_pnl": best_train,
                      "best": best, "recommendation": recommendation,
@@ -1776,8 +1798,8 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
         else:
             final = {"stage": "done", "best_train_pnl": best_train,
                      "best": best, "recommendation": recommendation,
-                     "meta_filter": {"status": "unavailable",
-                                     "reason": "no recommendation"},
+                     "meta_filter": _unavailable_meta_report(
+                         "no recommendation"),
                      "warnings": list(getattr(outcome, "warnings", None)
                                       or [])}
             _log("info", "validating", "meta_filter_reported",

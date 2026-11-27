@@ -8,7 +8,7 @@
 -- stream. One row per event, ordered by a per-run monotonic ``seq`` the
 -- worker assigns (never a wall-clock timestamp, which workers and clocks
 -- cannot keep monotonic). The Logs page polls
--- ``GET /api/system/optimize/{id}/logs`` with ``offset=last_seq+1``.
+-- ``GET /api/system/optimize/{id}/logs`` with ``after_seq=last_seq``.
 --
 -- Event logging is best-effort: the worker never fails a run because an
 -- event row did not land. ``data`` carries small summaries only (PnL,

@@ -1001,3 +1001,146 @@ class TestMetaFilterReport:
         assert logs["ok"] is True
         assert any(r["event"] == "meta_filter_reported"
                    for r in logs["rows"])
+
+    async def test_failed_best_store_leaves_no_orphan_details(
+            self, fake_db, inline_worker, monkeypatch):
+        """A failed `_store_details` for a new best must not advance the
+        best-detail pointer: the next improvement deletes the last
+        *successful* best's rows, leaving no orphan rows behind."""
+        from tests.test_sim_optimizer import fake_replay
+
+        series = self._series()
+
+        def scripted_optimizer(s, baseline, *, starting_capital=1000.0,
+                               search_config=None, progress_callback=None,
+                               cancel_event=None):
+            from types import SimpleNamespace
+
+            template = fake_replay(series, baseline,
+                                   starting_capital=starting_capital)
+            script = [(0, 100.0, False), (1, 200.0, True),
+                      (2, 300.0, True), (3, 400.0, True)]
+            iters = []
+            for it, net, improved in script:
+                metrics = SimpleNamespace(
+                    net_pnl=net, gross_pnl=net, costs=0.0,
+                    trades=len(template.trades), wins=len(template.trades),
+                    win_rate_pct=100.0, profit_factor=None, average_r=1.0,
+                    max_drawdown_pct=0.0, ambiguous_pct=0.0)
+                train = SimpleNamespace(trades=list(template.trades),
+                                        equity_curve=list(
+                                            template.equity_curve),
+                                        metrics=metrics, warnings=[])
+                entry = sim_optimizer.IterationResult(
+                    iteration=it, config=baseline, config_diff={},
+                    train_result=train, validation_result=None,
+                    improved=improved)
+                iters.append(entry)
+                if progress_callback is not None:
+                    progress_callback(entry)
+            base_board = sim_optimizer.IterationResult(
+                iteration=0, config=baseline, config_diff={},
+                train_result=iters[0].train_result,
+                validation_result=template, improved=False)
+            return sim_optimizer.OptimizationResult(
+                best=None, baseline=iters[0], iterations=iters,
+                validation_leaderboard=[base_board], warnings=[])
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            scripted_optimizer)
+        real_store = sim_optimizer._store_details
+
+        def flaky_store(db, run_id, iteration, replay):
+            if iteration == 2:
+                # Persist junk-free failure: land rows, then report False.
+                return False
+            return real_store(db, run_id, iteration, replay)
+
+        monkeypatch.setattr(sim_optimizer, "_store_details", flaky_store)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        run_id = res["run_id"]
+        by_iter: dict = {}
+        for row in fake_db.select(sim_optimizer.TRADES_TABLE,
+                                  {"run_id": run_id}, limit=100000):
+            by_iter.setdefault(row.get("iteration"), 0)
+            by_iter[row.get("iteration")] += 1
+        # Iteration 1 (last successful best before the failure) must have
+        # been deleted when iteration 3 improved; iteration 2 never
+        # landed. Only pinned baseline 0 and final best 3 remain.
+        assert 2 not in by_iter, f"orphan rows for failed iter 2: {by_iter}"
+        assert 1 not in by_iter, f"stale best rows leaked: {by_iter}"
+        assert 0 in by_iter and 3 in by_iter
+        eq_iters = {r.get("iteration") for r in fake_db.select(
+            sim_optimizer.EQUITY_TABLE, {"run_id": run_id}, limit=100000)}
+        assert 2 not in eq_iters and 1 not in eq_iters
+        assert {0, 3} <= eq_iters
+
+    async def test_no_recommendation_meta_filter_has_zero_counts(
+            self, fake_db, inline_worker, monkeypatch):
+        """No-recommendation payload keeps the success shape: zero counts
+        plus status/reason/ranking_effect."""
+        def no_best_optimizer(series, baseline, *, starting_capital=1000.0,
+                              search_config=None, progress_callback=None,
+                              cancel_event=None):
+            from tests.test_sim_optimizer import fake_replay
+            train = fake_replay(series, baseline,
+                                starting_capital=starting_capital)
+            entry = sim_optimizer.IterationResult(
+                iteration=0, config=baseline, config_diff={},
+                train_result=train, validation_result=None, improved=False)
+            if progress_callback is not None:
+                progress_callback(entry)
+            return sim_optimizer.OptimizationResult(
+                best=None, baseline=entry, iterations=[entry],
+                validation_leaderboard=[], warnings=[])
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            no_best_optimizer)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        st = await call("GET", f"/api/system/optimize/{res['run_id']}")
+        assert st["ok"] is True
+        report = st.get("meta_filter") or {}
+        assert report["status"] == "unavailable"
+        assert report["reason"] == "no recommendation"
+        assert report["ranking_effect"] == "none"
+        assert report["evaluated"] == 0
+        assert report["take"] == 0
+        assert report["skip"] == 0
+        assert report["unavailable"] == 0
+        assert report["skip_rate_pct"] == 0.0
+
+    async def test_summary_failure_meta_filter_has_zero_counts(
+            self, fake_db, inline_worker, monkeypatch):
+        """A raised `summarize_meta_filter` still stores a shape-stable
+        zero-count payload instead of a bare status dict."""
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+
+        def _boom(series, config, trades):
+            raise RuntimeError("meta store down")
+
+        monkeypatch.setattr(sim_optimizer, "summarize_meta_filter", _boom)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        st = await call("GET", f"/api/system/optimize/{res['run_id']}")
+        assert st["ok"] is True
+        assert st["status"] == "complete"
+        report = st.get("meta_filter") or {}
+        assert report["status"] == "unavailable"
+        assert report["reason"] == "summary failed"
+        assert report["ranking_effect"] == "none"
+        assert report["evaluated"] == 0
+        assert report["take"] == 0
+        assert report["skip"] == 0
+        assert report["unavailable"] == 0
+        assert report["skip_rate_pct"] == 0.0
+        reco = st.get("recommendation") or {}
+        assert (reco.get("meta_filter") or {})["evaluated"] == 0
