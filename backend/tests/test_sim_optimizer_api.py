@@ -1224,3 +1224,48 @@ class TestWarmStart:
         })
         assert res["ok"] is False
         assert len(fake_db.select("sim_opt_runs", limit=100)) == before
+
+    async def test_normal_start_without_base_run_id_is_unchanged(
+            self, fake_db, inline_worker, monkeypatch):
+        """No `base_run_id` means a pure live-baseline run: the worker
+        receives the captured live baseline itself, the stored
+        `baseline_settings` equals it, `search_config` carries no warm
+        keys, and a prior completed run is neither read nor mutated."""
+        from app.models.schemas import AppSettings
+
+        live = AppSettings(min_opportunity=0)
+        captured: dict = {}
+
+        def fake_opt(series, baseline, **kwargs):
+            captured["baseline"] = baseline
+            return fast_fake_optimizer(series, baseline, **kwargs)
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings", fake_opt)
+        monkeypatch.setattr(sim_optimizer, "capture_live_baseline",
+                            lambda db: live)
+        _seed_completed_run_with_recommendation(fake_db, "old-run")
+        _seed_dataset(fake_db, "v1")
+        before_old = dict(
+            fake_db.select("sim_opt_runs", {"id": "old-run"})[0])
+        touched: list = []
+        real_select = fake_db.select
+
+        def spy_select(table, filters=None, **kw):
+            if (table == sim_optimizer.RUNS_TABLE
+                    and (filters or {}).get("id") == "old-run"):
+                touched.append((table, dict(filters or {})))
+            return real_select(table, filters=filters, **kw)
+
+        monkeypatch.setattr(fake_db, "select", spy_select)
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD"],
+        })
+        assert res["ok"] is True
+        assert captured["baseline"] is live
+        row = real_select("sim_opt_runs", {"id": res["run_id"]})[0]
+        assert row["baseline_settings"] == live.model_dump(mode="json")
+        assert "warm_start_run_id" not in row["search_config"]
+        assert "warm_start_settings" not in row["search_config"]
+        assert touched == []
+        assert real_select("sim_opt_runs", {"id": "old-run"})[0] \
+            == before_old
