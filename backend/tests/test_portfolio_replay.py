@@ -1673,3 +1673,47 @@ def test_rate_resolution_happens_once_per_snapshot_per_date(monkeypatch):
     assert result.trades, "seeded scenario must open positions"
     assert seen, "expected rate resolution during replay"
     assert max(seen.values()) <= 2
+
+
+def test_signal_cache_key_normalizes_asset_case(monkeypatch):
+    import app.engine.portfolio_replay as replay_mod
+    settings = AppSettings(min_confidence=70, min_opportunity=60)
+    history = _fx_trend()
+    day = _day_of(history, len(history) - 1)
+    calls = {"n": 0}
+    real = replay_mod.snapshot_from_candles
+
+    def _counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(replay_mod, "snapshot_from_candles", _counting)
+    cache: dict = {}
+    upper = signal_at("EURUSD", history, settings, day, snapshot_cache=cache)
+    assert upper is not None
+    lower = signal_at("eurusd", history, settings, day, snapshot_cache=cache)
+    assert lower is not None
+    assert calls["n"] == 1
+    assert list(cache) == [("EURUSD", day)]
+    assert (lower.entry, lower.stop_loss, lower.take_profit, lower.direction,
+            lower.opportunity, lower.confidence, lower.snapshot) == \
+           (upper.entry, upper.stop_loss, upper.take_profit, upper.direction,
+            upper.opportunity, upper.confidence, upper.snapshot)
+
+
+def test_rate_snapshot_handoff_does_not_alias_loop_snapshot(monkeypatch):
+    import app.engine.portfolio_replay as replay_mod
+    series = _taskA_series()
+    settings = AppSettings()
+    aliased: list = []
+    real = replay_mod.size_for_replay
+
+    def _recording(settings_, signal, equity, rates, day, **kwargs):
+        aliased.append(kwargs.get("rates_snapshot") is rates)
+        return real(settings_, signal, equity, rates, day, **kwargs)
+
+    monkeypatch.setattr(replay_mod, "size_for_replay", _recording)
+    result = replay_portfolio(series, settings, starting_capital=1000)
+    assert result.trades, "seeded scenario must open positions"
+    assert aliased, "expected sizing calls during replay"
+    assert not any(aliased)

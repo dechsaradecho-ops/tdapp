@@ -182,10 +182,12 @@ def signal_at(
     ``build_timeline``); dateless candles raise ``ValueError`` like Task 1.
 
     ``snapshot_cache`` is an optional caller-owned per-(asset, date) cache
-    for the ``snapshot_from_candles`` result: on a hit the cached snapshot
-    is reused (identical inputs → identical signal, no recompute); on a
-    miss the computed snapshot is stored. The cached snapshot is treated
-    as read-only. ``None`` (default) preserves the uncached behavior.
+    for the ``snapshot_from_candles`` result (keyed by upper-cased asset +
+    date, matching the replay loop's ``snapshot_for`` keys): on a hit the
+    cached snapshot is reused (identical inputs → identical signal, no
+    recompute); on a miss the computed snapshot is stored. The cached
+    snapshot is treated as read-only. ``None`` (default) preserves the
+    uncached behavior.
     """
     from app.core.gold_policy import gold_entry_block_reason
     from app.engine.strategy_engine import (
@@ -226,7 +228,7 @@ def signal_at(
             return None
 
     snap: dict
-    cache_key = (str(asset), wanted)
+    cache_key = (str(asset).upper(), wanted)
     if snapshot_cache is not None and cache_key in snapshot_cache:
         cached = snapshot_cache[cache_key]
         snap = cached if isinstance(cached, dict) else {}
@@ -1144,7 +1146,7 @@ def _try_enter(
         snapshot=dict(getattr(signal, "snapshot", None) or {}),
     )
     lots = size_for_replay(settings, adjusted, equity, prior_rates, day,
-                             rates_snapshot=prior_rates)
+                             rates_snapshot=dict(prior_rates))
     if not math.isfinite(lots) or lots <= 0:
         return None
 
