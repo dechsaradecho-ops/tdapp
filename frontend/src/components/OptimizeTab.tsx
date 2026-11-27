@@ -31,6 +31,7 @@ import type {
   OptRunLogEntry,
   OptRunStatus,
   SimDataReport,
+  OptTrade,
 } from "@/lib/types";
 
 const POLL_MS = 1000;
@@ -83,6 +84,27 @@ const usdF = (v: unknown): string => {
     maximumFractionDigits: 0,
   })}`;
 };
+
+/** Top assets by net PnL for the recommendation's validation trades. */
+export function topAssetPnl(trades: OptTrade[], limit = 6): Array<{
+  asset: string; pnl: number; trades: number; wins: number;
+}> {
+  const byAsset = new Map<string, { pnl: number; trades: number; wins: number }>();
+  for (const t of trades || []) {
+    const asset = String(t.asset || "").toUpperCase();
+    if (!asset) continue;
+    const row = byAsset.get(asset) || { pnl: 0, trades: 0, wins: 0 };
+    const pnl = Number(t.pnl_usd) || 0;
+    row.pnl += pnl;
+    row.trades += 1;
+    if (pnl > 0) row.wins += 1;
+    byAsset.set(asset, row);
+  }
+  return Array.from(byAsset.entries())
+    .map(([asset, row]) => ({ asset, ...row }))
+    .sort((a, b) => b.pnl - a.pnl || a.asset.localeCompare(b.asset))
+    .slice(0, Math.max(0, limit));
+}
 
 /** Compact from → to for one config-diff entry (arrays shortened). */
 const fmtDiffVal = (v: unknown): string => {
@@ -571,6 +593,10 @@ export default function OptimizeTab() {
   const rec = run?.recommendation ?? null;
   const warnings = run?.warnings ?? [];
   const ambPct = best?.validation_metrics?.ambiguous_pct ?? 0;
+  const topAssets = useMemo(
+    () => topAssetPnl(equityBest && equityBest.ok ? equityBest.trades : [], 6),
+    [equityBest],
+  );
 
   const pct = run ? Math.min(100, Math.max(0, Math.round(run.progress * 100))) : 0;
 
@@ -987,6 +1013,29 @@ export default function OptimizeTab() {
             {" · "}avg R: {numF(rec.validation_metrics?.average_r, 2)}
           </div>
           <MetaFilterBlock mf={run?.meta_filter ?? rec?.meta_filter ?? null} />
+          {topAssets.length > 0 && (
+            <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
+              <div className="text-xs font-bold text-slate-300 mb-2">
+                Top 6 คู่ตามกำไรสุทธิ (validation)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {topAssets.map((a, i) => (
+                  <div key={a.asset} className="rounded bg-white/[0.03] px-2 py-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-semibold text-white">#{i + 1} {a.asset}</span>
+                      <span className={a.pnl >= 0 ? "text-profit" : "text-loss"}>
+                        {usdF(a.pnl)}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      {intF(a.trades)} trades · {a.trades > 0
+                        ? `${(a.wins / a.trades * 100).toFixed(1)}%` : "—"} win
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {rec.note && <p className="text-[11px] text-slate-400 mb-2">{rec.note}</p>}
           {best && Object.keys(best.config_diff || {}).length > 0 && (
             <div className="rounded border border-slate-700/60 bg-surface/40 p-3 mb-3">
