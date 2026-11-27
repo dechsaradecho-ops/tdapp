@@ -43,6 +43,22 @@ SEED8_PRESET: dict[str, Any] = {
     "sl_distance_max_pct": 4.0,
 }
 
+SEED10_PRESET: dict[str, Any] = {
+    "allowed_assets": [
+        "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF",
+        "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP",
+        "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF",
+        "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDJPY", "NZDUSD",
+        "USDCAD", "USDCHF", "USDJPY", "XAUUSD",
+    ],
+    "gold_max_atr_pct": 0.75,
+    "max_open_positions": 3,
+    "max_trades_daily": 10,
+    "no_behind_min_days": 15.0,
+    "profit_protect_r": 1.25,
+    "sl_distance_min_pct": 2.7,
+}
+
 
 def diff_settings(old: AppSettings, new: AppSettings) -> list[dict[str, Any]]:
     """Per-field old→new diff (only fields whose value actually changed).
@@ -472,6 +488,17 @@ def apply_seed8_preset(request: Request) -> SettingsSaveResult:
     """
     return apply_settings_patch(
         request.app.state.db, dict(SEED8_PRESET), source="preset:seed8")
+
+
+@router.post("/optimizer-preset/seed10", response_model=SettingsSaveResult)
+def apply_seed10_preset(request: Request) -> SettingsSaveResult:
+    """Apply only the seven Seed 10 optimizer fields.
+
+    Capital, costs, risk sizing, identity, notifications, and every other
+    live setting survive unchanged. Audit source is ``preset:seed10``.
+    """
+    return apply_settings_patch(
+        request.app.state.db, dict(SEED10_PRESET), source="preset:seed10")
 
 
 @router.get("/effective")

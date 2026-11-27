@@ -224,6 +224,54 @@ async def test_seed8_preset_applies_only_patch_and_preserves_identity():
 
 
 @pytest.mark.asyncio
+async def test_seed10_preset_applies_only_patch_and_preserves_identity():
+    from app.api.routes.settings import SETTINGS_CHANGE_TABLE
+    all_assets = [
+        "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF",
+        "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP",
+        "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF",
+        "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDJPY", "NZDUSD",
+        "USDCAD", "USDCHF", "USDJPY", "XAUUSD",
+    ]
+    row = AppSettings(
+        capital=50_000, min_lot=0.05,
+        paper_commission_per_lot=9.0, paper_exit_spread_mult=0.9,
+        notify_trade_opened=False,
+        allowed_assets=["AUDCAD", "AUDCHF", "AUDNZD", "CHFJPY"],
+        gold_max_atr_pct=6.25, max_open_positions=6, max_trades_daily=3,
+        no_behind_min_days=4.0, profit_protect_r=2.0,
+        sl_distance_min_pct=2.5,
+    ).model_dump(mode="json")
+    db = SettingsDatabase(row)
+    set_state(db)
+    res = await call("POST", "/api/settings/optimizer-preset/seed10", {})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    settings = body["settings"]
+    assert settings["allowed_assets"] == all_assets
+    assert settings["gold_max_atr_pct"] == 0.75
+    assert settings["max_open_positions"] == 3
+    assert settings["max_trades_daily"] == 10
+    assert settings["no_behind_min_days"] == 15.0
+    assert settings["profit_protect_r"] == 1.25
+    assert settings["sl_distance_min_pct"] == 2.7
+    assert settings["capital"] == 50_000
+    assert settings["min_lot"] == 0.05
+    assert settings["paper_commission_per_lot"] == 9.0
+    assert settings["paper_exit_spread_mult"] == 0.9
+    assert settings["notify_trade_opened"] is False
+    rows = db.rows.get(SETTINGS_CHANGE_TABLE) or []
+    assert len(rows) == 1
+    assert rows[0]["source"] == "preset:seed10"
+    assert {c["field"] for c in rows[0]["changes"]} == {
+        "allowed_assets", "gold_max_atr_pct", "max_open_positions",
+        "max_trades_daily", "no_behind_min_days", "profit_protect_r",
+        "sl_distance_min_pct",
+    }
+
+
+@pytest.mark.asyncio
 async def test_reset_writes_change_log():
     from app.api.routes.settings import SETTINGS_CHANGE_TABLE
     db = SettingsDatabase(AppSettings(max_drawdown_pct=25.0).model_dump(mode="json"))

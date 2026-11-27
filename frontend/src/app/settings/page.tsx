@@ -517,6 +517,29 @@ export default function SettingsPage() {
     }
   };
 
+  const [seed10Busy, setSeed10Busy] = useState(false);
+  const [seed10Msg, setSeed10Msg] = useState("");
+
+  const applySeed10Preset = async () => {
+    if (!cfg || seed10Busy) return;
+    if (!window.confirm(
+      "ใช้ Seed 10 preset?\nจะเปิดทั้ง 28 คู่ และเปลี่ยน 7 ฟิลด์ของ optimizer โดยคง capital, ค่าใช้จ่าย และการตั้งค่าอื่นไว้",
+    )) return;
+    setSeed10Busy(true);
+    setSeed10Msg("");
+    try {
+      const res = await api.applySeed10Preset();
+      if (!res.ok) throw new Error(res.message || "ใช้ Seed 10 preset ไม่สำเร็จ");
+      setCfg(res.settings);
+      setSaveMsg("");
+      setSeed10Msg("ใช้และบันทึก Seed 10 preset แล้ว — capital/costs และฟิลด์อื่นคงไว้");
+    } catch (e) {
+      setSeed10Msg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSeed10Busy(false);
+    }
+  };
+
   const recommend = async (allowedOverride?: string[]) => {
     if (!Number.isFinite(capital) || capital <= 0) return;
     const scope = allowedOverride
@@ -980,6 +1003,30 @@ export default function SettingsPage() {
                 </div>
                 {seed8Msg && (
                   <p className="text-xs text-accent mt-2" role="status">{seed8Msg}</p>
+                )}
+              </div>
+              <div className="rounded-lg border border-slate-700 bg-surface/60 p-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-slate-100">
+                      Seed 10 — All-28 optimizer preset
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      เปิดทั้ง 28 คู่ · daily limit 10 · เปลี่ยน 7 ฟิลด์
+                      และคง capital, ค่าใช้จ่าย และการตั้งค่าอื่นไว้
+                    </p>
+                  </div>
+                  <button type="button" onClick={applySeed10Preset}
+                    disabled={seed10Busy} aria-busy={seed10Busy}
+                    className="shrink-0 bg-accent text-white text-xs font-semibold rounded px-3 min-h-[40px] disabled:opacity-50 active:brightness-90">
+                    <span className="inline-flex items-center gap-1.5">
+                      {seed10Busy && <Icon n="spinner" size={13} className="animate-spin" />}
+                      {seed10Busy ? "กำลังใช้..." : "ใช้ Seed 10"}
+                    </span>
+                  </button>
+                </div>
+                {seed10Msg && (
+                  <p className="text-xs text-accent mt-2" role="status">{seed10Msg}</p>
                 )}
               </div>
               <NumField label="Min Confidence (%)" value={cfg.min_confidence}
