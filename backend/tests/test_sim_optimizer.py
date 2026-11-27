@@ -299,3 +299,169 @@ def test_slice_replay_result_partitions_and_recomputes(monkeypatch):
     assert all(p.date < cutoff for p in train_slice.equity_curve)
     assert train_slice.warnings == full.warnings
     assert val_slice.warnings == full.warnings
+
+
+# ---------------------------------------------------------------------------
+# Task B fixtures: flat/boom replays must be module-level so Windows spawn
+# children can unpickle them by reference.
+# ---------------------------------------------------------------------------
+
+def flat_replay(series, settings, *, starting_capital=1000.0, cost_config=None, warnings=None):
+    """Constant-net stand-in: no candidate ever improves, so stall always wins."""
+    dates = sorted(
+        {datetime.fromtimestamp(b.t, tz=timezone.utc).date() for bars in series.values() for b in bars}
+    )
+    if not dates:
+        dates = [date(2024, 1, 1)]
+    trades: list[ReplayTrade] = []
+    for i in range(120):
+        day = dates[i % len(dates)]
+        trades.append(
+            ReplayTrade(
+                trade_id=f"C-{i:04d}", asset="EURUSD", direction="BUY",
+                entry_date=day, entry_price=100.0, exit_date=day,
+                exit_price=101.0, volume=1.0, pnl_usd=10.0,
+                r_multiple=1.0, exit_reason="tp", mae_r=0.0, mfe_r=1.0,
+                ambiguous=False, gross_pnl_usd=11.0, costs_usd=1.0,
+            )
+        )
+    curve = [
+        EquityPoint(date=d, equity=float(starting_capital) + 100.0,
+                    realized_pnl=0.0, unrealized_pnl=0.0, drawdown_pct=0.0)
+        for d in dates
+    ]
+    metrics = ReplayMetrics(net_pnl=1200.0, gross_pnl=1320.0, costs=120.0,
+                            trades=len(trades), wins=len(trades),
+                            win_rate_pct=100.0, profit_factor=None,
+                            average_r=1.0, max_drawdown_pct=0.0,
+                            ambiguous_pct=0.0)
+    return ReplayResult(trades=trades, equity_curve=curve,
+                        metrics=metrics, warnings=list(warnings or []))
+
+
+def boom_replay(series, settings, *, starting_capital=1000.0, cost_config=None, warnings=None):
+    """Always-raising stand-in: proves worker errors fail the run closed.
+
+    The baseline replay runs in the parent, so it is recognized by object
+    identity and succeeds; every candidate replays in a spawn child (where
+    the module global is a fresh ``None`` and settings arrive as unpickled
+    copies) and raises there.
+    """
+    if settings is not _boom_ok_settings:
+        raise RuntimeError("boom")
+    return flat_replay(series, settings, starting_capital=starting_capital,
+                       cost_config=cost_config, warnings=warnings)
+
+
+_boom_ok_settings = None
+
+
+def _snapshot(result):
+    return {
+        "configs": [canonical_config_hash(i.config) for i in result.iterations],
+        "diffs": [dict(i.config_diff) for i in result.iterations],
+        "trains": [float(i.train_result.metrics.net_pnl) for i in result.iterations],
+        "improved": [bool(i.improved) for i in result.iterations],
+        "best_iter": None if result.best is None else int(result.best.iteration),
+        "best_val": (None if result.best is None
+                     else float(result.best.validation_result.metrics.net_pnl)),
+        "board": [(int(i.iteration), float(i.validation_result.metrics.net_pnl))
+                  for i in result.validation_leaderboard],
+    }
+
+
+def test_search_config_workers_defaults_to_sequential():
+    assert SearchConfig().workers == 1
+
+
+@pytest.mark.parametrize("bad", [0, -1, -8])
+def test_search_config_rejects_bad_workers(bad):
+    with pytest.raises(ValueError):
+        SearchConfig(workers=bad)
+
+
+def test_workers_parallel_matches_sequential_fake(monkeypatch):
+    series = _series()
+    baseline = AppSettings()
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", fake_replay)
+    cfg1 = SearchConfig(max_iterations=12, seed=5)
+    cfg4 = SearchConfig(max_iterations=12, seed=5, workers=4)
+    seq_progress: list[tuple[int, bool]] = []
+    par_progress: list[tuple[int, bool]] = []
+    a = optimize_settings(series, baseline, starting_capital=1000, search_config=cfg1,
+                          progress_callback=lambda e: seq_progress.append((e.iteration, e.improved)))
+    b = optimize_settings(series, baseline, starting_capital=1000, search_config=cfg4,
+                          progress_callback=lambda e: par_progress.append((e.iteration, e.improved)))
+    assert _snapshot(a) == _snapshot(b)
+    assert seq_progress == par_progress
+    assert [i for i, _ in seq_progress] == list(range(len(a.iterations)))
+
+
+def test_workers_parallel_matches_sequential_real():
+    series = _series(30)
+    baseline = AppSettings()
+    a = optimize_settings(series, baseline, starting_capital=1000,
+                          search_config=SearchConfig(max_iterations=8, seed=3))
+    b = optimize_settings(series, baseline, starting_capital=1000,
+                          search_config=SearchConfig(max_iterations=8, seed=3, workers=3))
+    assert _snapshot(a) == _snapshot(b)
+
+
+def test_stall_counting_identical_under_parallel(monkeypatch):
+    series = _series()
+    baseline = AppSettings()
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", flat_replay)
+    a = optimize_settings(series, baseline, starting_capital=1000,
+                          search_config=SearchConfig(max_iterations=50, seed=5))
+    b = optimize_settings(series, baseline, starting_capital=1000,
+                          search_config=SearchConfig(max_iterations=50, seed=5, workers=4))
+    assert len(a.iterations) == 1 + 20
+    assert [i.improved for i in a.iterations] == [i.improved for i in b.iterations]
+    assert [canonical_config_hash(i.config) for i in a.iterations] == [
+        canonical_config_hash(i.config) for i in b.iterations]
+
+
+def test_cancel_between_batches_preserves_completed(monkeypatch):
+    import threading
+
+    series = _series()
+    baseline = AppSettings()
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", fake_replay)
+    cancel = threading.Event()
+
+    def on_progress(entry):
+        if entry.iteration >= 2:
+            cancel.set()
+
+    result = optimize_settings(
+        series, baseline, starting_capital=1000,
+        search_config=SearchConfig(max_iterations=30, seed=9, workers=4),
+        progress_callback=on_progress, cancel_event=cancel)
+    assert 3 <= len(result.iterations) < 30
+    assert all(i.train_result is not None for i in result.iterations)
+    assert [i.iteration for i in result.iterations] == list(range(len(result.iterations)))
+
+
+def test_worker_error_fails_closed(monkeypatch):
+    import sys
+
+    series = _series()
+    baseline = AppSettings()
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", boom_replay)
+    monkeypatch.setattr(sys.modules[__name__], "_boom_ok_settings", baseline)
+    with pytest.raises(RuntimeError, match="parallel train replay failed"):
+        optimize_settings(series, baseline, starting_capital=1000,
+                          search_config=SearchConfig(max_iterations=6, seed=1, workers=4))
+
+
+def test_parallel_payloads_pickle_cleanly(monkeypatch):
+    import pickle
+
+    series = _series(10)
+    candidate = AppSettings()
+    assert pickle.loads(pickle.dumps(fake_replay)) is fake_replay
+    assert pickle.loads(pickle.dumps(series)) == series
+    assert pickle.loads(pickle.dumps(candidate)) == candidate
+    assert pickle.loads(pickle.dumps(
+        sim_optimizer.default_cost_config(candidate))) == sim_optimizer.default_cost_config(candidate)
+    assert pickle.loads(pickle.dumps(fake_replay(series, candidate))) == fake_replay(series, candidate)

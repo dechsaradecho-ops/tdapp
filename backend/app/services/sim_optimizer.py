@@ -15,7 +15,7 @@ import math
 import random
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -182,6 +182,7 @@ class SearchConfig:
     top_n: int = 5
     min_trades: int = 100
     min_validation_trades: int = 30
+    workers: int = 1
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_iterations <= MAX_ITERATIONS_HARD_MAX:
@@ -196,6 +197,10 @@ class SearchConfig:
             raise ValueError("min_trades must be >= 1")
         if self.min_validation_trades < 1:
             raise ValueError("min_validation_trades must be >= 1")
+        if isinstance(self.workers, bool) or not isinstance(self.workers, int):
+            raise ValueError("workers must be an integer >= 1")
+        if self.workers < 1:
+            raise ValueError("workers must be >= 1")
 
 
 @dataclass
@@ -220,6 +225,53 @@ class OptimizationResult:
 # Search-loop tunables (Task 3 controller rulings).
 _STALL_LIMIT = 20
 _MAX_DUP_RETRIES = 100
+
+
+def _train_replay_job(payload: tuple) -> ReplayResult:
+    """Process-pool entry point: exactly one train replay, no search state.
+
+    The replay callable travels IN the payload (resolved from the module
+    global in the parent) so Windows spawn children — which re-import this
+    module fresh — call the same function the parent loop uses. Only
+    module-level importable callables survive the trip; the random search
+    itself never enters workers.
+    """
+    replay_fn, train_series, cost_config, candidate, capital = payload
+    return replay_fn(
+        train_series, candidate, starting_capital=capital,
+        cost_config=cost_config,
+    )
+
+
+def _replay_train_batch(executor, batch: list, train_series: dict,
+                        capital: float) -> list:
+    """Run one batch of train replays; results return in batch order.
+
+    Futures are awaited STRICTLY in batch (iteration) order, never
+    completion order, so the caller folds them exactly as the sequential
+    loop would. The first worker failure cancels the rest of the batch and
+    raises RuntimeError — fail closed, never partial-silent.
+    """
+    replay_fn = replay_portfolio  # parent-side global: honors test doubles
+    payloads = [
+        (replay_fn, train_series, default_cost_config(candidate),
+         candidate, capital)
+        for candidate in batch
+    ]
+    futures = [executor.submit(_train_replay_job, payload)
+               for payload in payloads]
+    results: list = []
+    for offset, future in enumerate(futures):
+        try:
+            results.append(future.result())
+        except Exception as exc:
+            for pending in futures:
+                pending.cancel()
+            raise RuntimeError(
+                "optimizer: parallel train replay failed at batch offset "
+                f"{offset}: {type(exc).__name__}: {exc}"
+            ) from exc
+    return results
 
 
 def _bar_date_utc(bar: Any) -> date:
@@ -368,8 +420,12 @@ def optimize_settings(
     stall (20 candidate iterations without train improvement). Validation
     replays the top-N distinct candidates once over the full timeline,
     slices each full replay at the cutoff, and recommends the highest
-    validation net PnL among trade-eligible configs. Never touches DB,
-    broker, network, notifications, or live settings writes.
+    validation net PnL among trade-eligible configs. ``workers=1`` (default)
+    replays every candidate inline; ``workers>1`` replays each batch of
+    candidates in a process pool but folds them STRICTLY in iteration order,
+    so best-tracking, improved flags, stall counting, cancel checks, and
+    progress callbacks behave exactly as the sequential loop. Never touches
+    DB, broker, network, notifications, or live settings writes.
     """
     cfg = search_config if search_config is not None else SearchConfig()
     rng = random.Random(cfg.seed)
@@ -418,22 +474,16 @@ def optimize_settings(
     # Iterations 1..N: candidates cloned from the original baseline.
     stall = 0
     dup_retries = 0
-    while len(iterations) < cfg.max_iterations:
-        if _cancelled():
-            break
-        candidate = candidate_from_baseline(baseline, rng, len(iterations))
-        digest = canonical_config_hash(candidate)
-        if digest in seen:
-            dup_retries += 1
-            if dup_retries > _MAX_DUP_RETRIES:
-                break
-            continue
-        dup_retries = 0
-        seen.add(digest)
-        train_result = replay_portfolio(
-            train_series, candidate, starting_capital=capital,
-            cost_config=default_cost_config(candidate),
-        )
+
+    def _fold(candidate: AppSettings, train_result) -> bool:
+        """Record one train replay in iteration order.
+
+        Returns False when the stall limit is reached and the search must
+        stop. Shared by the sequential and parallel paths so best-tracking
+        (strict ``>``), ``improved`` flags, stall counting, and progress
+        callbacks are identical under both.
+        """
+        nonlocal best_train_net, stall
         net = float(train_result.metrics.net_pnl)
         improved = net > best_train_net
         if improved:
@@ -449,8 +499,81 @@ def optimize_settings(
         )
         iterations.append(entry)
         _emit(entry)
-        if stall >= _STALL_LIMIT:
-            break
+        return stall < _STALL_LIMIT
+
+    if cfg.workers <= 1:
+        while len(iterations) < cfg.max_iterations:
+            if _cancelled():
+                break
+            candidate = candidate_from_baseline(baseline, rng, len(iterations))
+            digest = canonical_config_hash(candidate)
+            if digest in seen:
+                dup_retries += 1
+                if dup_retries > _MAX_DUP_RETRIES:
+                    break
+                continue
+            dup_retries = 0
+            seen.add(digest)
+            train_result = replay_portfolio(
+                train_series, candidate, starting_capital=capital,
+                cost_config=default_cost_config(candidate),
+            )
+            if not _fold(candidate, train_result):
+                break
+    else:
+        # Parallel train replays with an ordered fold. Candidate generation
+        # stays sequential (cheap, RNG-ordered) so the candidate stream — and
+        # hence `seen`/dup counting — matches the sequential loop exactly;
+        # only the train replay_portfolio calls run in a process pool
+        # (threads do not help CPU-bound pure-Python replays). A stall or
+        # cancel stop discards the rest of the in-flight batch: the
+        # sequential loop would never have generated those iterations.
+        executor: Optional[ProcessPoolExecutor] = None
+        try:
+            stop = False
+            while len(iterations) < cfg.max_iterations and not stop:
+                if _cancelled():
+                    break
+                batch: list[AppSettings] = []
+                while (len(batch) < cfg.workers
+                       and len(iterations) + len(batch) < cfg.max_iterations):
+                    if _cancelled():
+                        break
+                    candidate = candidate_from_baseline(
+                        baseline, rng, len(iterations) + len(batch))
+                    digest = canonical_config_hash(candidate)
+                    if digest in seen:
+                        dup_retries += 1
+                        if dup_retries > _MAX_DUP_RETRIES:
+                            stop = True
+                            break
+                        continue
+                    dup_retries = 0
+                    seen.add(digest)
+                    batch.append(candidate)
+                if stop or not batch:
+                    break
+                if executor is None:
+                    try:
+                        executor = ProcessPoolExecutor(
+                            max_workers=cfg.workers)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "optimizer: could not start parallel pool "
+                            f"(workers={cfg.workers}): {exc}"
+                        ) from exc
+                results = _replay_train_batch(
+                    executor, batch, train_series, capital)
+                for candidate, train_result in zip(batch, results):
+                    if _cancelled():
+                        stop = True
+                        break
+                    if not _fold(candidate, train_result):
+                        stop = True
+                        break
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
     # Validation: top-N distinct configs by train net, one full replay each.
     ranked = sorted(iterations, key=_train_net_pnl, reverse=True)[: max(1, cfg.top_n)]
@@ -606,7 +729,7 @@ def _coerce_search_config(value: Any) -> tuple[SearchConfig | None, str | None]:
         return value, None
     if isinstance(value, dict):
         known = {"max_iterations", "seed", "train_ratio", "top_n",
-                 "min_trades", "min_validation_trades"}
+                 "min_trades", "min_validation_trades", "workers"}
         try:
             cfg = SearchConfig(**{k: v for k, v in value.items()
                                   if k in known})
@@ -624,6 +747,7 @@ def _search_config_json(cfg: SearchConfig) -> dict[str, Any]:
             "train_ratio": cfg.train_ratio, "top_n": cfg.top_n,
             "min_trades": cfg.min_trades,
             "min_validation_trades": cfg.min_validation_trades,
+            "workers": cfg.workers,
             "code_version": CODE_VERSION}
 
 
