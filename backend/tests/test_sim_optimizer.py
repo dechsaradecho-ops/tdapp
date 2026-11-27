@@ -18,6 +18,7 @@ from app.services.sim_optimizer import (
     canonical_config_json,
     config_diff,
     optimize_settings,
+    refine_from_parent,
     slice_replay_result,
     split_series,
 )
@@ -465,3 +466,49 @@ def test_parallel_payloads_pickle_cleanly(monkeypatch):
     assert pickle.loads(pickle.dumps(
         sim_optimizer.default_cost_config(candidate))) == sim_optimizer.default_cost_config(candidate)
     assert pickle.loads(pickle.dumps(fake_replay(series, candidate))) == fake_replay(series, candidate)
+
+
+def test_guided_search_config_defaults_and_validation():
+    cfg = SearchConfig()
+    assert cfg.explore_fraction == 0.5
+    assert cfg.restart_prob == 0.15
+    for kwargs in (
+        {"explore_fraction": 0.0}, {"explore_fraction": 1.0},
+        {"explore_fraction": True}, {"explore_fraction": "0.5"},
+        {"restart_prob": -0.01}, {"restart_prob": 1.01},
+        {"restart_prob": False}, {"restart_prob": "0.15"},
+    ):
+        with pytest.raises(ValueError):
+            SearchConfig(**kwargs)
+
+
+def test_refine_from_parent_is_small_bounded_and_pure():
+    parent = AppSettings(
+        min_confidence=40, min_opportunity=45, risk_per_trade_pct=1.0,
+        rr_target=1.5, sl_distance_min_pct=0.5, sl_distance_max_pct=1.0,
+    )
+    before = parent.model_dump(mode="json")
+    for seed in range(100):
+        child = refine_from_parent(parent, random.Random(seed))
+        diff = config_diff(parent, child)
+        assert 1 <= len(diff) <= 2
+        assert child.sl_distance_max_pct >= child.sl_distance_min_pct
+        for field, change in diff.items():
+            assert field in set(SEARCH_BOUNDS) | set(BOOLEAN_SEARCH_DIMS) | {"sl_distance_mode"}
+            if field in SEARCH_BOUNDS:
+                lo, hi, step = SEARCH_BOUNDS[field]
+                value = change["to"]
+                assert lo - 1e-9 <= value <= hi + 1e-9
+                k = round((value - lo) / step)
+                assert math.isclose(value, lo + k * step, abs_tol=1e-6)
+                old = change["from"]
+                if old is not None:
+                    assert abs(value - old) <= step + 1e-9
+        assert parent.model_dump(mode="json") == before
+
+
+def test_refine_from_parent_same_seed_is_identical():
+    parent = AppSettings(min_confidence=40, risk_per_trade_pct=1.0)
+    a = refine_from_parent(parent, random.Random(7))
+    b = refine_from_parent(parent, random.Random(7))
+    assert a == b

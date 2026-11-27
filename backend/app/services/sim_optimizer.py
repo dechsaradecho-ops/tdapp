@@ -149,6 +149,97 @@ def candidate_from_baseline(
     return candidate
 
 
+def _sl_refine_ok(dim: str, value: float, other: float) -> bool:
+    """True when an SL-side candidate keeps max >= min (rounded compare)."""
+    if dim == "sl_distance_min_pct":
+        return value <= other
+    return value >= other
+
+
+def refine_from_parent(
+    parent: AppSettings, rng: random.Random
+) -> AppSettings:
+    """Small bounded step away from a parent config (guided-search refine).
+
+    Deep-copies ``parent`` then moves 1–2 sampled search dimensions: numeric
+    dimensions move by exactly one grid step (off-grid values snap to the
+    nearest grid value; a ``None`` ``min_confidence_gold`` becomes an
+    explicit grid value); booleans flip; ``sl_distance_mode`` picks a
+    different mode. SL min/max moves choose a direction that preserves
+    ``sl_distance_max_pct >= sl_distance_min_pct`` — no third-field repair.
+    Never mutates ``parent`` and consumes only ``rng``.
+    """
+    child = parent.model_copy(deep=True)
+    dims: list[str] = (
+        list(SEARCH_BOUNDS) + ["sl_distance_mode"] + list(BOOLEAN_SEARCH_DIMS)
+    )
+    n_mutate = rng.randint(1, 2)
+    for dim in rng.sample(dims, n_mutate):
+        if dim in SEARCH_BOUNDS:
+            lo, hi, step = SEARCH_BOUNDS[dim]
+            decimals = _step_decimals(step)
+            n_steps = int(round((hi - lo) / step))
+            current = getattr(child, dim)
+            if current is None:
+                # Only min_confidence_gold is Optional: inherit-base (None)
+                # becomes an explicit grid value.
+                value = lo + rng.randint(0, n_steps) * step
+                setattr(child, dim, round(value, decimals))
+                continue
+            cur = float(current)
+            k_near = int(round((cur - lo) / step))
+            k_near = max(0, min(k_near, n_steps))
+            if math.isclose(cur, lo + k_near * step, abs_tol=1e-6):
+                options = []
+                if k_near > 0:
+                    options.append(k_near - 1)
+                if k_near < n_steps:
+                    options.append(k_near + 1)
+                if dim in ("sl_distance_min_pct", "sl_distance_max_pct"):
+                    other = float(getattr(
+                        child, "sl_distance_max_pct"
+                        if dim == "sl_distance_min_pct"
+                        else "sl_distance_min_pct"))
+                    kept = [k for k in options if _sl_refine_ok(
+                        dim, round(lo + k * step, decimals), other)]
+                    if kept:
+                        options = kept
+                    else:
+                        continue
+                if not options:
+                    continue
+                chosen = rng.choice(options)
+            else:
+                chosen = k_near
+                if dim in ("sl_distance_min_pct", "sl_distance_max_pct"):
+                    other = float(getattr(
+                        child, "sl_distance_max_pct"
+                        if dim == "sl_distance_min_pct"
+                        else "sl_distance_min_pct"))
+                    if not _sl_refine_ok(
+                            dim, round(lo + chosen * step, decimals), other):
+                        allowed = [
+                            k for k in range(n_steps + 1) if _sl_refine_ok(
+                                dim, round(lo + k * step, decimals), other)]
+                        if not allowed:
+                            continue
+                        chosen = min(
+                            allowed,
+                            key=lambda k: (abs(lo + k * step - cur), k))
+            value = round(lo + chosen * step, decimals)
+            if dim in _INT_SEARCH_DIMS:
+                setattr(child, dim, int(value))
+            else:
+                setattr(child, dim, value)
+        elif dim == "sl_distance_mode":
+            current = getattr(child, dim)
+            options = [m for m in SL_DISTANCE_MODES if m != current]
+            setattr(child, dim, rng.choice(options or list(SL_DISTANCE_MODES)))
+        else:
+            setattr(child, dim, not getattr(child, dim))
+    return child
+
+
 def config_diff(before: AppSettings, after: AppSettings) -> dict:
     """Field-level diff of two settings snapshots: {field: {from, to}}."""
     diff: dict[str, dict[str, Any]] = {}
@@ -183,6 +274,8 @@ class SearchConfig:
     min_trades: int = 100
     min_validation_trades: int = 30
     workers: int = 1
+    explore_fraction: float = 0.5
+    restart_prob: float = 0.15
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_iterations <= MAX_ITERATIONS_HARD_MAX:
@@ -201,6 +294,18 @@ class SearchConfig:
             raise ValueError("workers must be an integer >= 1")
         if self.workers < 1:
             raise ValueError("workers must be >= 1")
+        if (isinstance(self.explore_fraction, bool)
+                or not isinstance(self.explore_fraction, (int, float))):
+            raise ValueError("explore_fraction must be a number in (0, 1)")
+        explore = float(self.explore_fraction)
+        if not math.isfinite(explore) or not 0.0 < explore < 1.0:
+            raise ValueError("explore_fraction must be in (0, 1)")
+        if (isinstance(self.restart_prob, bool)
+                or not isinstance(self.restart_prob, (int, float))):
+            raise ValueError("restart_prob must be a number in [0, 1]")
+        restart = float(self.restart_prob)
+        if not math.isfinite(restart) or not 0.0 <= restart <= 1.0:
+            raise ValueError("restart_prob must be in [0, 1]")
 
 
 @dataclass
