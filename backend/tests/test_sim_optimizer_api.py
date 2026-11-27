@@ -47,17 +47,35 @@ class OptFakeDatabase(FakeDatabase):
         super().__init__(rows=rows, fail_tables=fail_tables)
         self.saved_settings: dict[str, dict] = {}
 
-    def insert(self, table: str, row: dict):
+    def insert(self, table: str, row: dict | list[dict]):
         if table == "trading_settings":
-            self.saved_settings[str(row.get("id", "1"))] = dict(row)
+            if isinstance(row, list):
+                for single in row:
+                    self.saved_settings[str(single.get("id", "1"))] = dict(
+                        single)
+            else:
+                self.saved_settings[str(row.get("id", "1"))] = dict(row)
         if table in (self.fail_tables or set()):
             return None
-        stored = dict(row)
-        if "id" not in stored:
-            stored["id"] = f"fake-{len(self.inserted)}"
-        self.inserted.append((table, dict(stored)))
-        self.rows.setdefault(table, []).insert(0, stored)
-        return stored
+        if isinstance(row, list):
+            # Bulk path mirrors production Database.insert(list): one call,
+            # one list back. Ids supplied by the caller are preserved (this
+            # fake's sim_opt_runs shim); otherwise a fake id is minted.
+            stored: list[dict] = []
+            for single in row:
+                self.inserted.append((table, dict(single)))
+                rec = dict(single)
+                if "id" not in rec:
+                    rec["id"] = f"fake-{len(self.inserted)}"
+                self.rows.setdefault(table, []).insert(0, rec)
+                stored.append(rec)
+            return stored
+        stored_row = dict(row)
+        if "id" not in stored_row:
+            stored_row["id"] = f"fake-{len(self.inserted)}"
+        self.inserted.append((table, dict(stored_row)))
+        self.rows.setdefault(table, []).insert(0, stored_row)
+        return stored_row
 
     def update(self, table: str, row_id: str, changes: dict) -> bool:
         if table == "trading_settings":
@@ -67,6 +85,25 @@ class OptFakeDatabase(FakeDatabase):
                 r.update(changes)
                 return True
         return False
+
+    def select(self, table: str, filters: dict | None = None,
+               order: str = "created_at", desc: bool = True, limit: int = 50,
+               offset: int = 0, columns: str = "*") -> list[dict]:
+        # Production Database.select orders server-side before slicing, so
+        # seq/iteration pages are chronological. The stock fake ignores
+        # `order` (returning newest-first storage order), which would slice
+        # the wrong window for offset > 0 — honor `order`/`desc` here.
+        rows = list(self.rows.get(table, []))
+        for col, val in (filters or {}).items():
+            rows = [r for r in rows if r.get(col) == val]
+        try:
+            rows = sorted(rows,
+                          key=lambda r: (r.get(order) is None,
+                                         r.get(order)),
+                          reverse=bool(desc))
+        except TypeError:
+            pass
+        return rows[offset:offset + limit]
 
     def delete(self, table: str, filters: dict) -> bool:
         if table == "trading_settings":
@@ -207,9 +244,65 @@ def fast_fake_optimizer(series, baseline, *, starting_capital=1000.0,
         validation_leaderboard=board, warnings=[])
 
 
+def load_migration(name: str) -> str:
+    path = Path(__file__).resolve().parents[2] / "database" / name
+    return path.read_text(encoding="utf-8").lower()
+
+
 # ---------------------------------------------------------------------------
-# Brief Step 1 tests (must FAIL before the implementation exists)
+# Task 3: per-run event log + bulk detail persistence (RED first)
 # ---------------------------------------------------------------------------
+class TestRunEventLog:
+    def test_run_event_log_schema_is_service_role_only(self):
+        schema = load_migration("064_sim_opt_run_events.sql")
+        assert "create table if not exists sim_opt_run_events" in schema
+        assert "revoke all on sim_opt_run_events from anon, authenticated" \
+            in schema
+
+    async def test_run_logs_are_ordered_and_paged(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        logs = await call(
+            "GET", f"/api/system/optimize/{res['run_id']}/logs?limit=100")
+        assert logs["ok"] is True
+        seqs = [r["seq"] for r in logs["rows"]]
+        assert seqs == sorted(seqs)
+        assert any(r["event"] == "iteration_completed"
+                   for r in logs["rows"])
+        assert any(r["event"] == "run_completed" for r in logs["rows"])
+
+    async def test_run_logs_page_shape_and_unknown_run(
+            self, fake_db, inline_worker, monkeypatch):
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        run_id = res["run_id"]
+        first = await call(
+            "GET", f"/api/system/optimize/{run_id}/logs",
+            params={"offset": 0, "limit": 2})
+        assert first["ok"] is True
+        assert first["run_id"] == run_id
+        assert len(first["rows"]) == 2
+        assert first["more"] is True
+        assert first["last_seq"] == first["rows"][-1]["seq"]
+        second = await call(
+            "GET", f"/api/system/optimize/{run_id}/logs",
+            params={"offset": 2, "limit": 2})
+        assert second["ok"] is True
+        assert second["rows"]
+        assert second["rows"][0]["seq"] > first["rows"][-1]["seq"]
+        missing = await call("GET", "/api/system/optimize/nope/logs")
+        assert missing["ok"] is False
+
+
 class TestBriefStep1:
     async def test_start_uses_user_capital_and_never_writes_live_settings(
             self, fake_db, inline_worker, monkeypatch):

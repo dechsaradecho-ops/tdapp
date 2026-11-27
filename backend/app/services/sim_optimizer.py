@@ -838,6 +838,7 @@ RUNS_TABLE = "sim_opt_runs"
 ITER_TABLE = "sim_opt_iterations"
 TRADES_TABLE = "sim_opt_trades"
 EQUITY_TABLE = "sim_opt_equity"
+EVENTS_TABLE = "sim_opt_run_events"
 
 CODE_VERSION = "sim-opt-v1"
 
@@ -1262,27 +1263,77 @@ def start_optimization(db, *, dataset_version: str,
 
 
 def _store_details(db, run_id: str, iteration: int,
-                   replay: Any | None) -> None:
-    """Persist full trades/equity for one iteration (best-effort, logged)."""
+                   replay: Any | None) -> bool:
+    """Persist full trades/equity for one iteration via bulk inserts.
+
+    At most two ``db.insert(table, rows)`` calls (one trade array, one
+    equity array) instead of one call per row. Returns True when every
+    row landed (or there was nothing to persist); a failed bulk write is
+    logged and returns False so the caller never marks details complete.
+    Best-effort: never raises.
+    """
     if replay is None:
-        return
+        return True
     try:
-        for row in _trade_rows(run_id, iteration,
-                               list(getattr(replay, "trades", None) or [])):
-            if db.insert(TRADES_TABLE, row) is None:
-                log.warning("opt %s iter %s: trade insert failed",
-                            run_id, iteration)
-                break
-        for row in _equity_rows(
-                run_id, iteration,
-                list(getattr(replay, "equity_curve", None) or [])):
-            if db.insert(EQUITY_TABLE, row) is None:
-                log.warning("opt %s iter %s: equity insert failed",
-                            run_id, iteration)
-                break
+        trade_rows = _trade_rows(run_id, iteration,
+                                 list(getattr(replay, "trades", None) or []))
+        if trade_rows:
+            inserted = db.insert(TRADES_TABLE, trade_rows)
+            if not isinstance(inserted, list) or \
+                    len(inserted) != len(trade_rows):
+                log.warning("opt %s iter %s: trade bulk insert failed "
+                            "(%d rows)", run_id, iteration, len(trade_rows))
+                return False
+        equity_rows = _equity_rows(
+            run_id, iteration,
+            list(getattr(replay, "equity_curve", None) or []))
+        if equity_rows:
+            inserted = db.insert(EQUITY_TABLE, equity_rows)
+            if not isinstance(inserted, list) or \
+                    len(inserted) != len(equity_rows):
+                log.warning("opt %s iter %s: equity bulk insert failed "
+                            "(%d rows)", run_id, iteration, len(equity_rows))
+                return False
     except Exception as exc:
         log.warning("opt %s iter %s: detail persist failed: %s",
                     run_id, iteration, exc)
+        return False
+    return True
+
+
+def _emit_run_event(db, run_id: str, *, seq: int, level: str, stage: str,
+                    event: str, message: str = "",
+                    iteration: int | None = None,
+                    data: dict | None = None) -> int:
+    """Append one row to the per-run event log. Best-effort, never raises.
+
+    Returns the next sequence number (``seq + 1``) so the caller keeps a
+    per-run monotonic ``seq`` even when a row fails to land — advancing on
+    failure keeps later rows unique under the ``(run_id, seq)`` primary
+    key instead of retrying a taken sequence. ``data`` must stay a small
+    summary (never secrets, raw exception dumps, or full configs).
+    """
+    nxt = seq + 1
+    try:
+        clean_level = str(level or "info")
+        if clean_level not in ("info", "warning", "error"):
+            clean_level = "info"
+        row = {
+            "run_id": str(run_id),
+            "seq": int(seq),
+            "level": clean_level,
+            "stage": (None if stage is None else str(stage)),
+            "iteration": (None if iteration is None
+                          else int(iteration)),
+            "event": str(event),
+            "message": str(message or ""),
+            "data": _json_safe(dict(data or {})),
+        }
+        if db is not None and getattr(db, "available", True):
+            db.insert(EVENTS_TABLE, row)
+    except Exception as exc:  # noqa: BLE001 - events must never fail a run
+        log.debug("opt %s: run event %s failed: %s", run_id, event, exc)
+    return nxt
 
 
 def _delete_details(db, run_id: str, iteration: int) -> None:
@@ -1315,6 +1366,16 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
     live_result: dict[str, Any] = {"stage": "loading",
                                    "best_train_pnl": None, "best": None,
                                    "recommendation": None, "warnings": []}
+    seq = 0
+
+    def _log(level: str, stage: str, event: str, message: str = "",
+             iteration: int | None = None,
+             data: dict | None = None) -> None:
+        """Append one run-log event; best-effort, advances the seq."""
+        nonlocal seq
+        seq = _emit_run_event(db, run_id, seq=seq, level=level,
+                              stage=stage, event=event, message=message,
+                              iteration=iteration, data=data)
 
     def _progress_patch(stage: str) -> None:
         live_result["stage"] = stage
@@ -1328,6 +1389,10 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
     try:
         _patch_run(db, run_id, {"stage": "loading",
                                 "result": dict(live_result)})
+        _log("info", "loading", "run_started",
+             f"optimization run started on dataset {version}",
+             data={"dataset_version": version, "assets": list(assets),
+                   "starting_capital": capital})
         data_hash = _read_data_hash(db, version)
         if data_hash:
             _patch_run(db, run_id, {"data_hash": data_hash})
@@ -1338,24 +1403,50 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
             _finish_run(db, run_id, "failed",
                         result={**live_result, "stage": "failed"},
                         error=f"dataset load failed: {exc}"[:300])
+            _log("error", "failed", "run_failed",
+                 "dataset load failed", data={"error": "dataset load failed"})
             return
         if not series:
             _finish_run(db, run_id, "failed",
                         result={**live_result, "stage": "failed"},
                         error="dataset unavailable or incomplete "
                               "(never partial replay)")
+            _log("error", "failed", "run_failed",
+                 "dataset unavailable or incomplete (never partial replay)")
             return
+        try:
+            bars = sum(len(v or []) for v in series.values())
+        except Exception:
+            bars = 0
+        _log("info", "loading", "dataset_loaded",
+             f"dataset {version} loaded: "
+             f"{len(series)} assets, {bars} bars",
+             data={"assets": sorted(series), "bars": bars,
+                   "data_hash": data_hash})
         if cancel.is_set():
             _finish_run(db, run_id, "cancelled",
                         result={**live_result, "stage": "cancelled",
                                 "warnings": ["cancelled before search"]})
+            _log("info", "cancelled", "cancel_requested",
+                 "cancelled before search")
+            _log("info", "cancelled", "run_cancelled",
+                 "cancelled before search")
             return
         _progress_patch("searching")
+        _log("info", "searching", "search_started",
+             f"search started: up to {cfg.max_iterations} iterations",
+             data={"max_iterations": cfg.max_iterations, "seed": cfg.seed,
+                   "train_ratio": cfg.train_ratio, "top_n": cfg.top_n,
+                   "workers": cfg.workers,
+                   "explore_fraction": cfg.explore_fraction,
+                   "restart_prob": cfg.restart_prob})
 
         def on_progress(entry: Any) -> None:
-            nonlocal iters_done, best_train, best_detail_iter
+            nonlocal iters_done, best_train, best_detail_iter, seq
             if cancel.is_set():
                 return
+            train: Any | None = None
+            train_metrics: dict[str, Any] | None = None
             try:
                 train = getattr(entry, "train_result", None)
                 train_metrics = _metrics_dict(train)
@@ -1389,20 +1480,37 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
                     if train_metrics else None
             except (TypeError, ValueError):
                 net = None
-            if net is not None and (best_train is None or net > best_train):
+            new_best = (net is not None
+                        and (best_train is None or net > best_train))
+            if new_best:
                 best_train = net
             iteration = int(getattr(entry, "iteration", 0) or 0)
             improved = bool(getattr(entry, "improved", False))
+            _log("info", "searching", "iteration_completed",
+                 f"iteration {iteration} completed: "
+                 f"train net {net if net is not None else 'n/a'}",
+                 iteration=iteration,
+                 data={"net_pnl": net, "improved": improved})
+            if new_best:
+                _log("info", "searching", "best_improved",
+                     f"new best train net "
+                     f"{best_train if best_train is not None else 'n/a'} "
+                     f"at iteration {iteration}",
+                     iteration=iteration, data={"net_pnl": best_train})
+            # Fresh status FIRST: the live run row (stage/best_train_pnl)
+            # must stay current even when the detail write below is slow
+            # or fails — the old order hid a new best until persistence
+            # finished.
+            _progress_patch("searching")
             if iteration == 0 or improved:
                 if (best_detail_iter is not None
                         and best_detail_iter != iteration
                         and best_detail_iter != 0):
                     _delete_details(db, run_id, best_detail_iter)
                     detailed.discard(best_detail_iter)
-                _store_details(db, run_id, iteration, train)
-                detailed.add(iteration)
+                if _store_details(db, run_id, iteration, train):
+                    detailed.add(iteration)
                 best_detail_iter = iteration
-            _progress_patch("searching")
 
         outcome = optimize_settings(
             series, baseline, starting_capital=capital,
@@ -1413,24 +1521,38 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
                         result={**live_result, "stage": "cancelled",
                                 "warnings": ["cancelled — completed "
                                              "iterations preserved"]})
+            _log("info", "cancelled", "cancel_requested",
+                 "cancelled after search — completed iterations preserved")
+            _log("info", "cancelled", "run_cancelled",
+                 "cancelled after search — completed iterations preserved")
             return
         board = list(getattr(outcome, "validation_leaderboard", None) or [])
-        for entry in board[:max(1, cfg.top_n)]:
+        top_board = board[:max(1, cfg.top_n)]
+        _log("info", "validating", "validation_started",
+             f"validating top {len(top_board)} candidates",
+             data={"candidates": len(top_board)})
+        for entry in top_board:
             if cancel.is_set():
                 _finish_run(
                     db, run_id, "cancelled",
                     result={**live_result, "stage": "cancelled",
                             "warnings": ["cancelled during validation — "
                                          "completed iterations preserved"]})
+                _log("info", "cancelled", "cancel_requested",
+                     "cancelled during validation — "
+                     "completed iterations preserved")
+                _log("info", "cancelled", "run_cancelled",
+                     "cancelled during validation — "
+                     "completed iterations preserved")
                 return
             iteration = int(getattr(entry, "iteration", 0) or 0)
             if iteration == 0:
                 continue  # pinned: baseline evidence stays train-phase
             _delete_details(db, run_id, iteration)
             detailed.discard(iteration)
-            _store_details(db, run_id, iteration,
-                           getattr(entry, "validation_result", None))
-            detailed.add(iteration)
+            if _store_details(db, run_id, iteration,
+                              getattr(entry, "validation_result", None)):
+                detailed.add(iteration)
         best_entry = getattr(outcome, "best", None)
         best = _best_summary(best_entry)
         recommendation = None
@@ -1455,23 +1577,48 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
         final = {"stage": "done", "best_train_pnl": best_train,
                  "best": best, "recommendation": recommendation,
                  "warnings": list(getattr(outcome, "warnings", None) or [])}
+        if best_entry is not None:
+            _log("info", "validating", "recommendation_ready",
+                 f"recommendation ready at iteration "
+                 f"{recommendation['iteration']}",
+                 iteration=int(recommendation.get("iteration", 0) or 0),
+                 data={"iteration": recommendation.get("iteration")})
+        else:
+            _log("info", "validating", "no_recommendation",
+                 "no trade-eligible candidate — no recommendation",
+                 data={"reason": "no trade-eligible candidate"})
         if _cancel_requested(db, run_id, cancel):
             _finish_run(db, run_id, "cancelled",
                         result={**live_result, "stage": "cancelled",
                                 "warnings": ["cancelled before completion — "
                                              "completed iterations "
                                              "preserved"]})
+            _log("info", "cancelled", "cancel_requested",
+                 "cancelled before completion — "
+                 "completed iterations preserved")
+            _log("info", "cancelled", "run_cancelled",
+                 "cancelled before completion — "
+                 "completed iterations preserved")
             return
         _patch_run(db, run_id, {"progress": 1.0})
         _finish_run(db, run_id, "complete", result=final)
+        best_iter = (recommendation or {}).get("iteration")
+        _log("info", "done", "run_completed",
+             f"run completed: best train net "
+             f"{best_train if best_train is not None else 'n/a'}",
+             data={"best_train_pnl": best_train,
+                   "best_iteration": best_iter})
     except Exception as exc:                       # noqa: BLE001 - verdict, not a crash
         log.exception("opt run %s failed", run_id)
+        short = f"{type(exc).__name__}: {exc}"[:300]
         try:
             _finish_run(db, run_id, "failed",
                         result={**live_result, "stage": "failed"},
-                        error=f"{type(exc).__name__}: {exc}"[:300])
+                        error=short)
         except Exception:
             pass
+        _log("error", "failed", "run_failed", "run failed",
+             data={"error": short})
     finally:
         _release_active(run_id)
         _CANCEL.pop(run_id, None)
@@ -1642,6 +1789,56 @@ def optimization_equity(db, run_id: str,
     } for r in (trade_rows or [])]
     return {"ok": True, "run_id": str(run_id), "iteration": iteration,
             "rows": equity, "trades": trades, "total": len(equity)}
+
+
+def _event_dict(row: dict) -> dict:
+    return {
+        "seq": row.get("seq"),
+        "level": row.get("level"),
+        "stage": row.get("stage"),
+        "iteration": row.get("iteration"),
+        "event": row.get("event"),
+        "message": row.get("message"),
+        "data": row.get("data") or {},
+        "created_at": row.get("created_at"),
+    }
+
+
+def optimization_logs(db, run_id: str, offset: int = 0,
+                      limit: int = 200) -> dict:
+    """Paged per-run event log, ordered by seq ascending. Never raises.
+
+    Validates the run exists, then pages ``(run_id, seq)`` with ``limit``
+    capped at 500. Returns ``{ok, run_id, rows, last_seq, more}`` where
+    ``more`` is ``len(rows) == limit``. No ``Database.count`` — the events
+    table has no ``id`` column for it.
+    """
+    if not db or not getattr(db, "available", False):
+        return {"ok": False, "error": "DB unavailable"}
+    if _run_row(db, run_id) is None:
+        return {"ok": False, "error": "unknown optimization run"}
+    try:
+        page = max(1, min(int(limit or 200), 500))
+    except (TypeError, ValueError):
+        page = 200
+    try:
+        start = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        start = 0
+    try:
+        rows = db.select(EVENTS_TABLE, filters={"run_id": str(run_id)},
+                         order="seq", desc=False, limit=page, offset=start)
+    except Exception as exc:
+        return {"ok": False, "error": f"{exc}"[:200]}
+    rows = rows or []
+    try:
+        rows = sorted(rows, key=lambda r: r.get("seq", 0))
+    except Exception:
+        pass
+    out = [_event_dict(r) for r in rows]
+    return {"ok": True, "run_id": str(run_id), "rows": out,
+            "last_seq": out[-1]["seq"] if out else None,
+            "more": len(out) == page}
 
 
 def cancel_optimization(db, run_id: str) -> dict:

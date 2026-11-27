@@ -1567,6 +1567,7 @@ async def sim_data_status(request: Request, version: str) -> dict:
 # GET  /api/system/optimize/{id}/iterations -> paged per-iteration summaries
 # GET  /api/system/optimize/{id}/equity -> trades + equity (?iteration=N,
 #                                          default best else baseline)
+# GET  /api/system/optimize/{id}/logs -> paged run events (?offset=&limit=)
 # POST /api/system/optimize/{id}/cancel -> cooperative stop
 # POST /api/system/optimize/{id}/apply -> guarded diff-only recommendation apply
 #
@@ -1647,6 +1648,19 @@ async def optimization_equity(request: Request, run_id: str,
     if not db or not db.available:
         return {"ok": False, "error": "DB unavailable"}
     return sim_optimizer.optimization_equity(db, run_id, iteration=iteration)
+
+
+@router.get("/optimize/{run_id}/logs")
+async def optimization_logs(request: Request, run_id: str,
+                            offset: int = 0, limit: int = 200) -> dict:
+    """Paged run events for one optimization run, seq ascending."""
+    from app.services import sim_optimizer
+
+    db: Database = request.app.state.db
+    if not db or not db.available:
+        return {"ok": False, "error": "DB unavailable"}
+    return sim_optimizer.optimization_logs(db, run_id, offset=offset,
+                                           limit=limit)
 
 
 @router.post("/optimize/{run_id}/cancel")
