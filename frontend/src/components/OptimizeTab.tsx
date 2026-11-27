@@ -79,7 +79,7 @@ const usdF = (v: unknown): string => {
   if (v === null || v === undefined) return "—";
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
-  return `${n >= 0 ? "+" : ""}$${Math.abs(n).toLocaleString("en-US", {
+  return `${n < 0 ? "-" : "+"}$${Math.abs(n).toLocaleString("en-US", {
     maximumFractionDigits: 0,
   })}`;
 };
