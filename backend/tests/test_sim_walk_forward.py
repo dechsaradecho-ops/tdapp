@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -103,3 +104,70 @@ def test_replay_test_fold_uses_warmup_but_excludes_pre_test_exits(monkeypatch):
     )
     assert seen["capital"] == 1000
     assert [t.trade_id for t in result.trades] == ["carry", "inside"]
+
+
+def make_series(start: date, end: date) -> dict:
+    days = []
+    day = start
+    while day <= end:
+        days.append(bar(day))
+        day += timedelta(days=1)
+    return {"EURUSD": days}
+
+
+def test_run_walk_forward_refits_only_on_training_windows(monkeypatch):
+    series = make_series(date(2020, 1, 1), date(2026, 11, 25))
+    configs = [AppSettings(max_hold_days=5), AppSettings(max_hold_days=6),
+               AppSettings(max_hold_days=7), AppSettings(max_hold_days=8),
+               AppSettings(max_hold_days=9)]
+    seen = []
+
+    def fake_optimize(train_series, baseline, *, starting_capital,
+                      search_config, **kwargs):
+        idx = len(seen)
+        seen.append((baseline, search_config.seed,
+                     sim_walk_forward.series_date_bounds(train_series)))
+        best = configs[idx + 1]
+        return SimpleNamespace(best=SimpleNamespace(
+            config=best, iteration=9,
+            train_result=SimpleNamespace(metrics=ReplayMetrics(net_pnl=1)),
+        ))
+
+    def fake_test(full_series, fold, config, **kwargs):
+        return ReplayResult(
+            trades=[], equity_curve=[],
+            metrics=ReplayMetrics(net_pnl=10, trades=1), warnings=[],
+        )
+
+    monkeypatch.setattr(sim_walk_forward, "load_dataset", lambda *a: series)
+    monkeypatch.setattr(sim_walk_forward, "optimize_settings", fake_optimize)
+    monkeypatch.setattr(sim_walk_forward, "replay_test_fold", fake_test)
+
+    result = sim_walk_forward.run_walk_forward(
+        object(), "v20261126-120951-1d5254", ["EURUSD"], configs[0],
+        fold_count=4, train_days=365, test_days=90,
+    )
+    assert [s[1] for s in seen] == [100, 101, 102, 103]
+    assert all(seen[i][0] is configs[i] for i in range(4)), [
+        (i, seen[i][0] is configs[i], seen[i][0].max_hold_days,
+         configs[i].max_hold_days)
+        for i in range(4)
+    ]
+    assert result["total_net_pnl"] == 40
+    assert result["pass_overall_profit"] is True
+
+
+def test_run_walk_forward_stops_when_refit_has_no_recommendation(monkeypatch):
+    monkeypatch.setattr(
+        sim_walk_forward, "load_dataset",
+        lambda *a: make_series(date(2020, 1, 1), date(2026, 11, 25)),
+    )
+    monkeypatch.setattr(
+        sim_walk_forward, "optimize_settings",
+        lambda *a, **k: SimpleNamespace(best=None),
+    )
+    result = sim_walk_forward.run_walk_forward(
+        object(), "v20261126-120951-1d5254", ["EURUSD"], AppSettings(),
+    )
+    assert result["status"] == "stopped_no_recommendation"
+    assert result["pass_overall_profit"] is False
