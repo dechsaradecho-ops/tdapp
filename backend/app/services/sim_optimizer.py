@@ -441,14 +441,16 @@ def _replay_train_batch(executor, batch: list, train_series: dict,
     Futures are awaited STRICTLY in batch (iteration) order, never
     completion order, so the caller folds them exactly as the sequential
     loop would. The first worker failure cancels the rest of the batch and
-    raises RuntimeError — fail closed, never partial-silent.
+    raises RuntimeError — fail closed, never partial-silent. An omitted
+    ``search_cfg`` defaults to ``SearchConfig()`` so every payload still
+    carries realistic run-level costs (a zero-cost candidate can never
+    replay commission-free through this path).
     """
     replay_fn = replay_portfolio  # parent-side global: honors test doubles
+    cfg = search_cfg if search_cfg is not None else SearchConfig()
     payloads = [
         (replay_fn, train_series,
-         _search_cost_config(candidate, search_cfg)
-         if search_cfg is not None
-         else default_cost_config(candidate),
+         _search_cost_config(candidate, cfg),
          candidate, capital)
         for candidate in batch
     ]
@@ -1494,8 +1496,9 @@ def start_optimization(db, *, dataset_version: str,
     ``assets`` still controls which dataset series are loaded. The override
     is persisted as ``search_config["tradable_assets_override"]`` for audit;
     the stored ``baseline_settings`` stays the captured live snapshot and
-    the prior warm-start run is never mutated. Invalid overrides are refused
-    with ``ok: False`` and zero new run rows.
+    the prior warm-start run is never mutated. Invalid overrides — or an
+    override naming symbols outside the resolved dataset ``assets`` — are
+    refused with ``ok: False`` and zero new run rows.
     """
     if not db or not getattr(db, "available", False):
         return {"ok": False, "error": "DB unavailable"}
@@ -1542,6 +1545,12 @@ def start_optimization(db, *, dataset_version: str,
             return {"ok": False, "error": "assets required"}
     if len(clean) > 40:
         return {"ok": False, "error": "assets required (1-40)"}
+    if tradable is not None:
+        outside = [a for a in tradable if a not in clean]
+        if outside:
+            return {"ok": False,
+                    "error": "tradable_assets must be a subset of assets: "
+                    + ", ".join(outside)}
     run_id = _new_run_id()
     if not _try_start_active(run_id):
         live = active_optimization()

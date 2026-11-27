@@ -1428,3 +1428,19 @@ class TestTradableUniverse:
         row = fake_db.select("sim_opt_runs", {"id": res["run_id"]})[0]
         assert row["baseline_settings"] == live.model_dump(mode="json")
         assert "tradable_assets_override" not in row["search_config"]
+
+    async def test_non_subset_tradable_refused_before_row_insert(
+            self, fake_db, inline_worker, monkeypatch):
+        """A valid symbol outside the resolved dataset assets is refused
+        with zero new rows — the whitelist cannot name what was not loaded."""
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        _seed_dataset(fake_db, "v1", assets=("EURUSD", "GBPUSD"))
+        before = len(fake_db.select("sim_opt_runs", limit=100))
+        res = await call("POST", "/api/system/optimize", {
+            "dataset_version": "v1", "assets": ["EURUSD", "GBPUSD"],
+            "tradable_assets": ["XAUUSD"],
+        })
+        assert res["ok"] is False
+        assert "subset" in str(res.get("error", "")).lower()
+        assert len(fake_db.select("sim_opt_runs", limit=100)) == before

@@ -690,3 +690,33 @@ def test_replay_train_batch_payloads_carry_search_costs(monkeypatch):
     assert len(seen) == 3
     assert all(c.commission_per_lot_per_side == 9.0 for c in seen)
     assert all(c.exit_spread_mult == 0.75 for c in seen)
+
+
+def test_replay_train_batch_defaults_to_realistic_costs(monkeypatch):
+    """Omitted search_cfg must still replay at realistic run-level costs.
+
+    A direct call without ``search_cfg`` used to fall back to
+    ``default_cost_config(candidate)``, letting a zero-cost candidate run a
+    commission-free replay. The default is the realistic ``SearchConfig()``
+    (commission 3.5 / exit spread 0.5).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    seen: list = []
+
+    def recording(inner_series, settings, *, starting_capital=1000.0,
+                  cost_config=None, warnings=None):
+        seen.append(cost_config)
+        return "ok"
+
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", recording)
+    batch = [AppSettings(paper_commission_per_lot=0.0,
+                         paper_exit_spread_mult=0.0)
+             for _ in range(2)]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = sim_optimizer._replay_train_batch(
+            executor, batch, _series(), 1000.0)
+    assert results == ["ok", "ok"]
+    assert len(seen) == 2
+    assert all(c.commission_per_lot_per_side == 3.5 for c in seen)
+    assert all(c.exit_spread_mult == 0.5 for c in seen)
