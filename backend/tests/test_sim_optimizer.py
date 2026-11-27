@@ -512,3 +512,52 @@ def test_refine_from_parent_same_seed_is_identical():
     a = refine_from_parent(parent, random.Random(7))
     b = refine_from_parent(parent, random.Random(7))
     assert a == b
+
+
+def test_candidate_for_iteration_phase_boundary(monkeypatch):
+    _candidate_for_iteration = sim_optimizer._candidate_for_iteration
+    baseline = AppSettings()
+    best = AppSettings(min_confidence=40)
+    calls = []
+    monkeypatch.setattr(sim_optimizer, "candidate_from_baseline",
+                        lambda *args: calls.append("explore") or AppSettings(min_confidence=5))
+    monkeypatch.setattr(sim_optimizer, "refine_from_parent",
+                        lambda *args: calls.append("refine") or AppSettings(min_confidence=45))
+    _candidate_for_iteration(baseline, best, random.Random(0), 1, 2, 0.0)
+    _candidate_for_iteration(baseline, best, random.Random(0), 2, 2, 0.0)
+    _candidate_for_iteration(baseline, best, random.Random(0), 3, 2, 0.0)
+    assert calls == ["explore", "explore", "refine"]
+
+
+def test_guided_search_same_seed_workers_1_and_4_match(monkeypatch):
+    series = _series()
+    baseline = AppSettings()
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", fake_replay)
+    cfg1 = SearchConfig(max_iterations=8, seed=11, workers=1)
+    cfg4 = SearchConfig(max_iterations=8, seed=11, workers=4)
+    a = optimize_settings(series, baseline, starting_capital=1000, search_config=cfg1)
+    b = optimize_settings(series, baseline, starting_capital=1000, search_config=cfg4)
+    assert [i.config for i in a.iterations] == [i.config for i in b.iterations]
+    assert [i.config_diff for i in a.iterations] == [i.config_diff for i in b.iterations]
+    assert a.best == b.best
+    assert a.validation_leaderboard == b.validation_leaderboard
+
+
+def test_guided_search_restart_probability_one_skips_refinement(monkeypatch):
+    series = _series()
+    baseline = AppSettings()
+    monkeypatch.setattr(sim_optimizer, "replay_portfolio", fake_replay)
+    monkeypatch.setattr(sim_optimizer, "refine_from_parent",
+                        lambda *args: (_ for _ in ()).throw(AssertionError("must not refine")))
+    cfg = SearchConfig(max_iterations=6, seed=3, restart_prob=1.0)
+    optimize_settings(series, baseline, starting_capital=1000, search_config=cfg)
+
+
+def test_search_config_json_round_trips_guided_fields():
+    _coerce_search_config = sim_optimizer._coerce_search_config
+    _search_config_json = sim_optimizer._search_config_json
+    cfg = _coerce_search_config({"max_iterations": 10, "explore_fraction": 0.4,
+                                 "restart_prob": 0.2})[0]
+    payload = _search_config_json(cfg)
+    assert payload["explore_fraction"] == 0.4
+    assert payload["restart_prob"] == 0.2

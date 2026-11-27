@@ -240,6 +240,51 @@ def refine_from_parent(
     return child
 
 
+def _explore_iterations(max_iterations: int, explore_fraction: float) -> int:
+    """Count of leading candidate iterations drawn from the baseline.
+
+    Zero when ``max_iterations == 1`` (baseline only); otherwise
+    ``min(max_iterations - 1, max(1, floor((max_iterations - 1) *
+    explore_fraction)))``.
+    """
+    try:
+        total = int(max_iterations)
+    except (TypeError, ValueError):
+        return 0
+    if total <= 1:
+        return 0
+    try:
+        fraction = float(explore_fraction)
+    except (TypeError, ValueError):
+        fraction = 0.5
+    if not math.isfinite(fraction):
+        fraction = 0.5
+    return min(total - 1, max(1, math.floor((total - 1) * fraction)))
+
+
+def _candidate_for_iteration(
+    baseline: AppSettings,
+    best_config: AppSettings,
+    rng: random.Random,
+    iteration: int,
+    explore_iterations: int,
+    restart_prob: float,
+) -> tuple[AppSettings, bool]:
+    """One candidate for a 1-based candidate iteration plus its kind.
+
+    Exploration iterations (``iteration <= explore_iterations``) clone from
+    the original ``baseline`` via ``candidate_from_baseline`` and return
+    ``False``. Refinement iterations take the restart draw: with probability
+    ``restart_prob`` they restart from the baseline (``False``), otherwise
+    they refine ``best_config`` via ``refine_from_parent`` (``True``).
+    """
+    if iteration <= explore_iterations:
+        return candidate_from_baseline(baseline, rng, iteration), False
+    if rng.random() < restart_prob:
+        return candidate_from_baseline(baseline, rng, iteration), False
+    return refine_from_parent(best_config, rng), True
+
+
 def config_diff(before: AppSettings, after: AppSettings) -> dict:
     """Field-level diff of two settings snapshots: {field: {from, to}}."""
     diff: dict[str, dict[str, Any]] = {}
@@ -519,21 +564,26 @@ def optimize_settings(
 ) -> OptimizationResult:
     """Profit-max search with chronological validation (synchronous).
 
-    Evaluates the baseline on the train split, then iterates candidates from
-    the original baseline on train only — tracking best by train net PnL,
-    deduplicating by config hash, stopping on max iterations / cancel /
-    stall (20 candidate iterations without train improvement). Validation
-    replays the top-N distinct candidates once over the full timeline,
-    slices each full replay at the cutoff, and recommends the highest
-    validation net PnL among trade-eligible configs. ``workers=1`` (default)
-    replays every candidate inline; ``workers>1`` replays each batch of
-    candidates in a process pool but folds them STRICTLY in iteration order,
-    so best-tracking, improved flags, stall counting, cancel checks, and
-    progress callbacks behave exactly as the sequential loop. Never touches
+    Evaluates the baseline on the train split, then iterates candidates on
+    train only: the first ``explore_fraction`` of candidate iterations draw
+    from the original baseline, then refinement mutates the moving best
+    (highest train net PnL) with ``restart_prob`` full-random restarts for
+    diversity — tracking best by train net PnL, deduplicating by config
+    hash, stopping on max iterations / cancel / stall (20 candidate
+    iterations without train improvement). Validation replays the top-N
+    distinct candidates once over the full timeline, slices each full replay
+    at the cutoff, and recommends the highest validation net PnL among
+    trade-eligible configs. ``workers=1`` (default) replays every candidate
+    inline; ``workers>1`` replays each exploration batch in a process pool
+    but folds them STRICTLY in iteration order, then shuts the pool down
+    and runs refinement candidates inline one at a time, so best-tracking,
+    improved flags, stall counting, cancel checks, and progress callbacks
+    behave exactly as the sequential loop at any worker count. Never touches
     DB, broker, network, notifications, or live settings writes.
     """
     cfg = search_config if search_config is not None else SearchConfig()
     rng = random.Random(cfg.seed)
+    explore_n = _explore_iterations(cfg.max_iterations, cfg.explore_fraction)
     try:
         capital = float(starting_capital)
     except (TypeError, ValueError):
@@ -575,8 +625,10 @@ def optimize_settings(
     )
     iterations.append(baseline_entry)
     _emit(baseline_entry)
+    best_config = baseline
 
-    # Iterations 1..N: candidates cloned from the original baseline.
+    # Iterations 1..N: exploration clones the original baseline, then
+    # refinement mutates the moving best (restart draws excepted).
     stall = 0
     dup_retries = 0
 
@@ -585,14 +637,15 @@ def optimize_settings(
 
         Returns False when the stall limit is reached and the search must
         stop. Shared by the sequential and parallel paths so best-tracking
-        (strict ``>``), ``improved`` flags, stall counting, and progress
-        callbacks are identical under both.
+        (strict ``>``), ``best_config`` parent timing, ``improved`` flags,
+        stall counting, and progress callbacks are identical under both.
         """
-        nonlocal best_train_net, stall
+        nonlocal best_train_net, stall, best_config
         net = float(train_result.metrics.net_pnl)
         improved = net > best_train_net
         if improved:
             best_train_net = net
+            best_config = candidate
             stall = 0
         else:
             stall += 1
@@ -610,7 +663,9 @@ def optimize_settings(
         while len(iterations) < cfg.max_iterations:
             if _cancelled():
                 break
-            candidate = candidate_from_baseline(baseline, rng, len(iterations))
+            candidate, _ = _candidate_for_iteration(
+                baseline, best_config, rng, len(iterations), explore_n,
+                cfg.restart_prob)
             digest = canonical_config_hash(candidate)
             if digest in seen:
                 dup_retries += 1
@@ -630,22 +685,32 @@ def optimize_settings(
         # stays sequential (cheap, RNG-ordered) so the candidate stream — and
         # hence `seen`/dup counting — matches the sequential loop exactly;
         # only the train replay_portfolio calls run in a process pool
-        # (threads do not help CPU-bound pure-Python replays). A stall or
-        # cancel stop discards the rest of the in-flight batch: the
-        # sequential loop would never have generated those iterations.
+        # (threads do not help CPU-bound pure-Python replays). Exploration
+        # candidates never touch best_config, so whole batches replay in the
+        # pool. Refinement candidates depend on the moving best (fold
+        # order), so once refinement begins the pool shuts down and the
+        # remaining iterations run inline one at a time — the exact
+        # sequential candidate stream and best-parent timing at any worker
+        # count. A stall or cancel stop discards the rest of the in-flight
+        # batch: the sequential loop would never have generated those
+        # iterations.
         executor: Optional[ProcessPoolExecutor] = None
         try:
             stop = False
-            while len(iterations) < cfg.max_iterations and not stop:
+            while (len(iterations) < cfg.max_iterations and not stop
+                   and len(iterations) <= explore_n):
                 if _cancelled():
                     break
                 batch: list[AppSettings] = []
                 while (len(batch) < cfg.workers
-                       and len(iterations) + len(batch) < cfg.max_iterations):
+                       and len(iterations) + len(batch) < cfg.max_iterations
+                       and len(iterations) + len(batch) <= explore_n):
                     if _cancelled():
                         break
-                    candidate = candidate_from_baseline(
-                        baseline, rng, len(iterations) + len(batch))
+                    candidate, _ = _candidate_for_iteration(
+                        baseline, best_config, rng,
+                        len(iterations) + len(batch), explore_n,
+                        cfg.restart_prob)
                     digest = canonical_config_hash(candidate)
                     if digest in seen:
                         dup_retries += 1
@@ -679,6 +744,27 @@ def optimize_settings(
         finally:
             if executor is not None:
                 executor.shutdown(wait=True)
+        if not stop:
+            while len(iterations) < cfg.max_iterations:
+                if _cancelled():
+                    break
+                candidate, _ = _candidate_for_iteration(
+                    baseline, best_config, rng, len(iterations), explore_n,
+                    cfg.restart_prob)
+                digest = canonical_config_hash(candidate)
+                if digest in seen:
+                    dup_retries += 1
+                    if dup_retries > _MAX_DUP_RETRIES:
+                        break
+                    continue
+                dup_retries = 0
+                seen.add(digest)
+                train_result = replay_portfolio(
+                    train_series, candidate, starting_capital=capital,
+                    cost_config=default_cost_config(candidate),
+                )
+                if not _fold(candidate, train_result):
+                    break
 
     # Validation: top-N distinct configs by train net, one full replay each.
     ranked = sorted(iterations, key=_train_net_pnl, reverse=True)[: max(1, cfg.top_n)]
@@ -834,7 +920,8 @@ def _coerce_search_config(value: Any) -> tuple[SearchConfig | None, str | None]:
         return value, None
     if isinstance(value, dict):
         known = {"max_iterations", "seed", "train_ratio", "top_n",
-                 "min_trades", "min_validation_trades", "workers"}
+                 "min_trades", "min_validation_trades", "workers",
+                 "explore_fraction", "restart_prob"}
         try:
             cfg = SearchConfig(**{k: v for k, v in value.items()
                                   if k in known})
@@ -853,6 +940,8 @@ def _search_config_json(cfg: SearchConfig) -> dict[str, Any]:
             "min_trades": cfg.min_trades,
             "min_validation_trades": cfg.min_validation_trades,
             "workers": cfg.workers,
+            "explore_fraction": cfg.explore_fraction,
+            "restart_prob": cfg.restart_prob,
             "code_version": CODE_VERSION}
 
 
