@@ -1150,6 +1150,151 @@ META_FILTER_GLOB = "meta-filter-*.json"
 META_FILTER_STALE_DAYS = 90
 
 
+@dataclass(frozen=True)
+class MetaFilterVerdict:
+    """Structured take/skip verdict from the offline-trained meta-filter.
+
+    Post-run diagnostic carrier: ``meta_filter_block`` maps this to ``""``
+    (take / unavailable) or the block reason (skip), and the sandbox
+    optimizer tallies one verdict per best-entry validation trade after the
+    run. Never affects ranking, eligibility, or live trading.
+    """
+
+    status: str  # "take" | "skip" | "unavailable"
+    probability: Optional[float]
+    threshold: Optional[float]
+    reason: str  # "" unless status == "skip"
+    artifact_run_id: Optional[str]
+    trained_at: Optional[str]
+
+
+def evaluate_meta_filter(settings, asset: str, direction: str,
+                         snapshot_dict: Optional[dict]) -> MetaFilterVerdict:
+    """Take/skip/unavailable verdict from the offline-trained meta-filter.
+
+    This holds the production math ``meta_filter_block`` used to inline:
+    artifact loading/validation, feature derivation, train-stat
+    standardization, and the sigmoid-vs-threshold comparison. Missing,
+    stale, collapsed, or underivable inputs yield ``unavailable`` (fail
+    open) — a model that cannot prove edge must never halt trading.
+    Never raises.
+    """
+    try:
+        asset_u = str(asset or "").upper()
+        artifact = _load_meta_filter_artifact()
+        if not artifact:
+            return MetaFilterVerdict("unavailable", None, None, "", None,
+                                     None)
+        run_id = str(artifact.get("run_id") or "") or None
+        trained_raw = str(artifact.get("trained_at") or "") or None
+        evaluation = artifact.get("evaluation") or {}
+        if evaluation.get("holds_out") is not True:
+            log.info("meta_filter pass-open %s: newest artifact holds_out=%r",
+                     asset_u, evaluation.get("holds_out"))
+            return MetaFilterVerdict("unavailable", None, None, "", run_id,
+                                     trained_raw)
+        picked = evaluation.get("picked") or {}
+        try:
+            artifact_threshold = float(picked.get("threshold"))
+        except (TypeError, ValueError):
+            log.info("meta_filter pass-open %s: artifact has no threshold",
+                     asset_u)
+            return MetaFilterVerdict("unavailable", None, None, "", run_id,
+                                     trained_raw)
+        try:
+            thr_setting = float(G(settings, "meta_filter_threshold",
+                                   zero_as_missing=False) or 0)
+        except (TypeError, ValueError):
+            thr_setting = 0.0
+        threshold = thr_setting if thr_setting > 0 else artifact_threshold
+        if thr_setting > 0:
+            log.info("meta_filter threshold override %.2f (artifact %.2f)",
+                     threshold, artifact_threshold)
+        trained_at = _parse_dt_for_meta(artifact.get("trained_at"))
+        if trained_at is None:
+            log.info("meta_filter pass-open %s: unparseable trained_at",
+                     asset_u)
+            return MetaFilterVerdict("unavailable", None, threshold, "",
+                                     run_id, trained_raw)
+        age_days = (datetime.now(timezone.utc) - trained_at).total_seconds() \
+            / 86400.0
+        if age_days > META_FILTER_STALE_DAYS:
+            log.info("meta_filter pass-open %s: artifact %.0f days old "
+                     "(> %d)", asset_u, age_days, META_FILTER_STALE_DAYS)
+            return MetaFilterVerdict("unavailable", None, threshold, "",
+                                     run_id, trained_raw)
+        features = artifact.get("features") or []
+        stats = artifact.get("stats") or {}
+        model = artifact.get("model") or {}
+        weights = model.get("weights")
+        if not features or not isinstance(weights, list) \
+                or len(weights) != len(features):
+            log.info("meta_filter pass-open %s: feature/weight mismatch",
+                     asset_u)
+            return MetaFilterVerdict("unavailable", None, threshold, "",
+                                     run_id, trained_raw)
+        try:
+            bias = float(model.get("bias") or 0.0)
+        except (TypeError, ValueError):
+            bias = 0.0
+        derived = _meta_filter_features(snapshot_dict or {}, direction)
+        if derived is None:
+            log.info("meta_filter pass-open %s: snapshot lacks model inputs",
+                     asset_u)
+            return MetaFilterVerdict("unavailable", None, threshold, "",
+                                     run_id, trained_raw)
+        xs: list[float] = []
+        for name in features:
+            if name not in derived:
+                log.info("meta_filter pass-open %s: feature %s not derivable",
+                         asset_u, name)
+                return MetaFilterVerdict("unavailable", None, threshold, "",
+                                         run_id, trained_raw)
+            entry = stats.get(name) or {}
+            try:
+                mean = float(entry["mean"])
+                std = float(entry["std"])
+            except (TypeError, ValueError, KeyError):
+                log.info("meta_filter pass-open %s: no train stats for %s",
+                         asset_u, name)
+                return MetaFilterVerdict("unavailable", None, threshold, "",
+                                         run_id, trained_raw)
+            if not std > 0:
+                log.info("meta_filter pass-open %s: non-positive train std "
+                         "for %s", asset_u, name)
+                return MetaFilterVerdict("unavailable", None, threshold, "",
+                                         run_id, trained_raw)
+            value = derived[name]
+            if not isinstance(value, (int, float)) or value != value \
+                    or value in (float("inf"), float("-inf")):
+                log.info("meta_filter pass-open %s: non-finite live value "
+                         "for %s", asset_u, name)
+                return MetaFilterVerdict("unavailable", None, threshold, "",
+                                         run_id, trained_raw)
+            # Standardize with TRAIN stats — never refit on live data.
+            xs.append((float(value) - mean) / std)
+        proba = _meta_sigmoid(
+            sum(w * x for w, x in zip(weights, xs)) + bias)
+        if proba < threshold:
+            run = str(artifact.get("run_id") or "")[:8]
+            try:
+                test_r_s = (f"{float((evaluation.get('picked') or {}).get('test_mean_r')):+.2f}R")
+            except (TypeError, ValueError):
+                test_r_s = "n/a"
+            return MetaFilterVerdict(
+                "skip", proba, threshold,
+                (f"meta_filter skip: P(profitable) {proba:.2f} < take "
+                 f"{threshold:.2f} for {asset_u} {direction} "
+                 f"(artifact {run}, test {test_r_s}) — "
+                 f"setup นี้มีแนวโน้มไปไม่ถึงเป้า ไม่เปิดออเดอร์"),
+                run_id, trained_raw)
+        return MetaFilterVerdict("take", proba, threshold, "", run_id,
+                                 trained_raw)
+    except Exception as exc:
+        log.warning("meta_filter pass-open on error: %s", exc)
+        return MetaFilterVerdict("unavailable", None, None, "", None, None)
+
+
 def _load_meta_filter_artifact() -> Optional[dict]:
     """Newest parseable meta-filter artifact by trained_at, else None.
 
@@ -1249,114 +1394,18 @@ def meta_filter_block(db, settings, asset: str, direction: str,
                       snapshot_dict: Optional[dict]) -> str:
     """Take/skip verdict from the offline-trained meta-filter.
 
-    Returns "" (take / fail-open) or a block reason containing "meta_filter".
-    Engages ONLY when the newest artifact holds out (picked threshold beats
-    buy-and-hold out-of-sample), was trained within META_FILTER_STALE_DAYS,
-    and every artifact feature derives from `snapshot_dict` (an indicator
-    snapshot in the quotes.fetch_all_snapshots shape). Anything else —
-    missing/stale/collapsed artifact, partial snapshot, ANY error — returns
-    "" plus a log line, never a block. `db`/`settings` are accepted for seam
-    symmetry with the other gates (future audit logging); the verdict itself
-    needs neither. Never raises.
+    Thin wrapper over :func:`evaluate_meta_filter`: "" for take or
+    fail-open, or a block reason containing "meta_filter" for skip. `db` /
+    `settings` are accepted for seam symmetry with the other gates (future
+    audit logging); the verdict itself needs neither. Never raises.
     """
     try:
-        asset_u = str(asset or "").upper()
-        artifact = _load_meta_filter_artifact()
-        if not artifact:
-            return ""
-        evaluation = artifact.get("evaluation") or {}
-        if evaluation.get("holds_out") is not True:
-            log.info("meta_filter pass-open %s: newest artifact holds_out=%r",
-                     asset_u, evaluation.get("holds_out"))
-            return ""
-        picked = evaluation.get("picked") or {}
-        try:
-            artifact_threshold = float(picked.get("threshold"))
-        except (TypeError, ValueError):
-            log.info("meta_filter pass-open %s: artifact has no threshold",
-                     asset_u)
-            return ""
-        try:
-            thr_setting = float(G(settings, "meta_filter_threshold",
-                                   zero_as_missing=False) or 0)
-        except (TypeError, ValueError):
-            thr_setting = 0.0
-        threshold = thr_setting if thr_setting > 0 else artifact_threshold
-        if thr_setting > 0:
-            log.info("meta_filter threshold override %.2f (artifact %.2f)",
-                     threshold, artifact_threshold)
-        trained_at = _parse_dt_for_meta(artifact.get("trained_at"))
-        if trained_at is None:
-            log.info("meta_filter pass-open %s: unparseable trained_at",
-                     asset_u)
-            return ""
-        age_days = (datetime.now(timezone.utc) - trained_at).total_seconds() \
-            / 86400.0
-        if age_days > META_FILTER_STALE_DAYS:
-            log.info("meta_filter pass-open %s: artifact %.0f days old "
-                     "(> %d)", asset_u, age_days, META_FILTER_STALE_DAYS)
-            return ""
-        features = artifact.get("features") or []
-        stats = artifact.get("stats") or {}
-        model = artifact.get("model") or {}
-        weights = model.get("weights")
-        if not features or not isinstance(weights, list) \
-                or len(weights) != len(features):
-            log.info("meta_filter pass-open %s: feature/weight mismatch",
-                     asset_u)
-            return ""
-        try:
-            bias = float(model.get("bias") or 0.0)
-        except (TypeError, ValueError):
-            bias = 0.0
-        derived = _meta_filter_features(snapshot_dict or {}, direction)
-        if derived is None:
-            log.info("meta_filter pass-open %s: snapshot lacks model inputs",
-                     asset_u)
-            return ""
-        xs: list[float] = []
-        for name in features:
-            if name not in derived:
-                log.info("meta_filter pass-open %s: feature %s not derivable",
-                         asset_u, name)
-                return ""
-            entry = stats.get(name) or {}
-            try:
-                mean = float(entry["mean"])
-                std = float(entry["std"])
-            except (TypeError, ValueError, KeyError):
-                log.info("meta_filter pass-open %s: no train stats for %s",
-                         asset_u, name)
-                return ""
-            if not std > 0:
-                log.info("meta_filter pass-open %s: non-positive train std "
-                         "for %s", asset_u, name)
-                return ""
-            value = derived[name]
-            if not isinstance(value, (int, float)) or value != value \
-                    or value in (float("inf"), float("-inf")):
-                log.info("meta_filter pass-open %s: non-finite live value "
-                         "for %s", asset_u, name)
-                return ""
-            # Standardize with TRAIN stats — never refit on live data.
-            xs.append((float(value) - mean) / std)
-        proba = _meta_sigmoid(
-            sum(w * x for w, x in zip(weights, xs)) + bias)
-        if proba < threshold:
-            run = str(artifact.get("run_id") or "")[:8]
-            try:
-                test_r_s = (f"{float((evaluation.get('picked') or {}).get('test_mean_r')):+.2f}R")
-            except (TypeError, ValueError):
-                test_r_s = "n/a"
-            return (
-                f"meta_filter skip: P(profitable) {proba:.2f} < take "
-                f"{threshold:.2f} for {asset_u} {direction} "
-                f"(artifact {run}, test {test_r_s}) — "
-                f"setup นี้มีแนวโน้มไปไม่ถึงเป้า ไม่เปิดออเดอร์")
-        return ""
+        verdict = evaluate_meta_filter(settings, asset, direction,
+                                       snapshot_dict)
     except Exception as exc:
         log.warning("meta_filter pass-open on error: %s", exc)
         return ""
+    return verdict.reason if verdict.status == "skip" else ""
 
 
 def _parse_dt_for_meta(raw: Any) -> Optional[datetime]:

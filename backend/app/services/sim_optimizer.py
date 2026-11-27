@@ -26,7 +26,9 @@ from app.engine.portfolio_replay import (
     default_cost_config,
     replay_portfolio,
 )
+from app.integrations.quotes import snapshot_from_candles
 from app.models.schemas import AppSettings
+from app.services.execution import evaluate_meta_filter
 
 log = logging.getLogger(__name__)
 
@@ -537,6 +539,157 @@ def slice_replay_result(
         metrics=_slice_metrics(val_trades, val_curve), warnings=warnings,
     )
     return train_slice, val_slice
+
+
+# ---------------------------------------------------------------------------
+# Post-run meta-filter report (Task 4, guided-search plan).
+#
+# Diagnostic ONLY: after the recommendation is selected, one verdict per
+# best-entry validation trade answers "would the production meta-filter
+# have taken this setup?". It never runs during the search and never
+# changes ranking, eligibility, or replay — `ranking_effect` is always
+# "none". Snapshots are rebuilt from the signal picture (bars strictly
+# before the entry date); missing snapshots/artifacts are `unavailable`,
+# never fabricated takes.
+# ---------------------------------------------------------------------------
+
+#: Prior-close window for the per-trade snapshot (mirrors REPLAY_WARMUP).
+_META_SNAPSHOT_WINDOW = 200
+
+
+def _trade_field(trade: Any, name: str) -> Any:
+    """One trade attribute from a ReplayTrade, SimpleNamespace, or dict."""
+    if isinstance(trade, dict):
+        return trade.get(name)
+    return getattr(trade, name, None)
+
+
+def _trade_entry_day(trade: Any) -> Optional[date]:
+    """UTC date of a trade's entry (date/datetime/ISO string, else None)."""
+    raw = _trade_field(trade, "entry_date")
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if raw:
+        try:
+            return date.fromisoformat(str(raw)[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _meta_direction(raw: Any) -> str:
+    """Replay/DB direction → production BUY/SELL (unknown passes through)."""
+    text = str(raw or "").strip().upper()
+    if text in ("LONG", "BUY", "B", "L"):
+        return "BUY"
+    if text in ("SHORT", "SELL", "S"):
+        return "SELL"
+    return text
+
+
+def _snapshot_before(series: dict, asset: str,
+                     entry_day: Optional[date]) -> dict | None:
+    """Production snapshot from the last bars strictly before `entry_day`.
+
+    The last ``_META_SNAPSHOT_WINDOW`` bars of `asset` with a UTC date
+    ``< entry_day`` (the prior-close/signal picture — the entry-date bar
+    itself is excluded), run through the production
+    ``snapshot_from_candles``. None when there is no usable history;
+    never raises, never invents bars.
+    """
+    if entry_day is None:
+        return None
+    try:
+        lookup = {str(key or "").upper(): bars
+                  for key, bars in (series or {}).items()}
+        bars = lookup.get(str(asset or "").upper())
+        if not bars:
+            return None
+        window = []
+        for bar in bars:
+            try:
+                stamp = (bar.get("t") if isinstance(bar, dict)
+                         else getattr(bar, "t", None))
+                moment = float(stamp)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(moment) or moment <= 0:
+                continue
+            if datetime.fromtimestamp(
+                    moment, tz=timezone.utc).date() < entry_day:
+                window.append(bar)
+        window = window[-_META_SNAPSHOT_WINDOW:]
+        if not window:
+            return None
+        return snapshot_from_candles(str(asset or "").upper(), window)
+    except Exception:
+        return None
+
+
+def summarize_meta_filter(series: dict, config: AppSettings,
+                          trades: list) -> dict:
+    """Post-run meta-filter tally over one trade list (diagnostic only).
+
+    For each trade, rebuilds the production snapshot from that asset's
+    history strictly before its entry date and calls
+    ``evaluate_meta_filter``. Returns ``evaluated`` / ``take`` / ``skip`` /
+    ``unavailable`` counts, ``skip_rate_pct``, the artifact ``threshold`` /
+    ``artifact_run_id`` / ``trained_at`` (first verdict carrying each),
+    a ``note``, and ``ranking_effect="none"``. Pure: never touches the DB,
+    broker, network, or live settings, and never mutates its inputs.
+    """
+    take = skip = unavailable = 0
+    threshold: Any = None
+    artifact_run_id: Any = None
+    trained_at: Any = None
+    rows = list(trades or [])
+    for trade in rows:
+        verdict = None
+        try:
+            asset = str(_trade_field(trade, "asset") or "")
+            snapshot = _snapshot_before(
+                series, asset, _trade_entry_day(trade))
+            verdict = evaluate_meta_filter(
+                config, asset, _meta_direction(
+                    _trade_field(trade, "direction")), snapshot)
+            status = getattr(verdict, "status", "unavailable")
+        except Exception as exc:  # noqa: BLE001 - one bad trade, keep tally
+            log.debug("meta-filter summary: skipping one trade: %s", exc)
+            status = "unavailable"
+        if status == "take":
+            take += 1
+        elif status == "skip":
+            skip += 1
+        else:
+            unavailable += 1
+        if verdict is not None:
+            if threshold is None \
+                    and getattr(verdict, "threshold", None) is not None:
+                threshold = getattr(verdict, "threshold")
+            if artifact_run_id is None \
+                    and getattr(verdict, "artifact_run_id", None) is not None:
+                artifact_run_id = getattr(verdict, "artifact_run_id")
+            if trained_at is None \
+                    and getattr(verdict, "trained_at", None) is not None:
+                trained_at = getattr(verdict, "trained_at")
+    evaluated = len(rows)
+    return {
+        "evaluated": evaluated,
+        "take": take,
+        "skip": skip,
+        "unavailable": unavailable,
+        "skip_rate_pct": (round(skip / evaluated * 100.0, 1)
+                          if evaluated else 0.0),
+        "threshold": threshold,
+        "artifact_run_id": artifact_run_id,
+        "trained_at": trained_at,
+        "note": ("post-run diagnostic over the recommended validation "
+                 "trades — verdicts did not affect ranking, eligibility, "
+                 "or replay"),
+        "ranking_effect": "none",
+    }
 
 
 def _train_net_pnl(iteration: IterationResult) -> float:
@@ -1574,9 +1727,6 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
                          "candidates — apply manually via Settings; the "
                          "optimizer never writes live settings"),
             }
-        final = {"stage": "done", "best_train_pnl": best_train,
-                 "best": best, "recommendation": recommendation,
-                 "warnings": list(getattr(outcome, "warnings", None) or [])}
         if best_entry is not None:
             _log("info", "validating", "recommendation_ready",
                  f"recommendation ready at iteration "
@@ -1587,6 +1737,52 @@ def _run_optimization(db, run_id: str, job: dict) -> None:
             _log("info", "validating", "no_recommendation",
                  "no trade-eligible candidate — no recommendation",
                  data={"reason": "no trade-eligible candidate"})
+        final: dict[str, Any]
+        if best_entry is not None:
+            try:
+                validation_trades = list(
+                    getattr(getattr(best_entry, "validation_result", None),
+                            "trades", None) or [])
+            except Exception:
+                validation_trades = []
+            try:
+                meta_report: dict[str, Any] = summarize_meta_filter(
+                    series,
+                    getattr(best_entry, "config", None) or baseline,
+                    validation_trades)
+            except Exception as exc:  # noqa: BLE001 - report never fails run
+                log.warning("opt %s: meta-filter summary failed: %s",
+                            run_id, exc)
+                meta_report = {"status": "unavailable",
+                               "reason": "summary failed",
+                               "ranking_effect": "none"}
+            recommendation["meta_filter"] = meta_report
+            final = {"stage": "done", "best_train_pnl": best_train,
+                     "best": best, "recommendation": recommendation,
+                     "meta_filter": meta_report,
+                     "warnings": list(getattr(outcome, "warnings", None)
+                                      or [])}
+            _log("info", "validating", "meta_filter_reported",
+                 f"meta-filter report: {meta_report.get('take', 0)} take / "
+                 f"{meta_report.get('skip', 0)} skip / "
+                 f"{meta_report.get('unavailable', 0)} unavailable over "
+                 f"{meta_report.get('evaluated', 0)} validation trades "
+                 f"(ranking unchanged)",
+                 data={"evaluated": meta_report.get("evaluated"),
+                       "take": meta_report.get("take"),
+                       "skip": meta_report.get("skip"),
+                       "unavailable": meta_report.get("unavailable"),
+                       "ranking_effect": "none"})
+        else:
+            final = {"stage": "done", "best_train_pnl": best_train,
+                     "best": best, "recommendation": recommendation,
+                     "meta_filter": {"status": "unavailable",
+                                     "reason": "no recommendation"},
+                     "warnings": list(getattr(outcome, "warnings", None)
+                                      or [])}
+            _log("info", "validating", "meta_filter_reported",
+                 "meta-filter report unavailable: no recommendation",
+                 data={"reason": "no recommendation"})
         if _cancel_requested(db, run_id, cancel):
             _finish_run(db, run_id, "cancelled",
                         result={**live_result, "stage": "cancelled",
@@ -1638,6 +1834,7 @@ def _status_dict(row: dict) -> dict:
         "best_train_pnl": result.get("best_train_pnl"),
         "best": result.get("best"),
         "recommendation": result.get("recommendation"),
+        "meta_filter": result.get("meta_filter"),
         "warnings": list(result.get("warnings") or []),
         "error": row.get("error"),
     }

@@ -23,6 +23,7 @@ Run from backend/: py -3 -m pytest tests/test_meta_filter_gate.py -q
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ import pytest
 
 from app.models.schemas import AppSettings
 from app.services import execution
+from app.services.execution import evaluate_meta_filter
 from tests.test_workers import FakeDatabase
 
 
@@ -166,6 +168,40 @@ def test_meta_threshold_zero_uses_artifact(monkeypatch, tmp_path):
         "EURUSD", "BUY", _snapshot())
     assert "meta_filter" in reason
     assert "take 0.65" in reason
+
+
+def test_meta_filter_evaluator_reports_take_skip_and_unavailable(
+        monkeypatch, tmp_path):
+    """Structured evaluator: unavailable without an artifact, and a real take
+    plus a real skip (probability/threshold pinned) from artifact fixtures."""
+    real_load = execution._load_meta_filter_artifact
+    monkeypatch.setattr(execution, "_load_meta_filter_artifact", lambda: None)
+    missing = evaluate_meta_filter(AppSettings(), "EURUSD", "BUY", {})
+    assert missing.status == "unavailable"
+    assert missing.probability is None
+    assert missing.reason == ""
+    monkeypatch.setattr(execution, "_load_meta_filter_artifact", real_load)
+    _point_at(monkeypatch, tmp_path)
+    _write_artifact(tmp_path, holds_out=True, threshold=0.65, bias=+2.0)
+    # Explicit 0 = "use artifact picked threshold" (no 0.5 default override).
+    take = evaluate_meta_filter(
+        _settings(meta_filter_threshold=0), "EURUSD", "BUY", _snapshot())
+    assert take.status == "take"
+    assert take.probability == pytest.approx(1.0 / (1.0 + math.exp(-2.0)))
+    assert take.threshold == 0.65
+    assert take.reason == ""
+    assert take.artifact_run_id == "test0000test0000test0000test0000"
+    _write_artifact(tmp_path, holds_out=True, threshold=0.65, bias=-2.0)
+    skip = evaluate_meta_filter(
+        _settings(meta_filter_threshold=0), "EURUSD", "BUY", _snapshot())
+    assert skip.status == "skip"
+    assert skip.probability == pytest.approx(1.0 / (1.0 + math.exp(2.0)))
+    assert skip.threshold == 0.65
+    assert "meta_filter" in skip.reason
+    # The string gate stays a thin wrapper: take/unavailable pass, skip blocks.
+    assert execution.meta_filter_block(
+        FakeDatabase(), _settings(meta_filter_threshold=0),
+        "EURUSD", "BUY", _snapshot()) == skip.reason
 
 
 def test_gate_blocked_reports_meta_reject(monkeypatch, tmp_path):

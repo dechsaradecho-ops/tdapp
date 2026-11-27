@@ -863,3 +863,102 @@ class TestOptimizerShapes:
         iters = fake_db.select("sim_opt_iterations",
                                {"run_id": res["run_id"]}, limit=100000)
         assert len(iters) == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 4: post-run meta-filter report (RED first).
+# ---------------------------------------------------------------------------
+class TestMetaFilterReport:
+    @staticmethod
+    def _series():
+        from app.integrations.quotes import Candle
+        base = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        bars = []
+        for i in range(10):
+            t = int((base + timedelta(days=i)).timestamp())
+            px = 1.1000 + i * 0.001
+            bars.append(Candle(o=px, h=px + 0.0003, l=px - 0.0004,
+                               c=px + 0.0001, t=t))
+        return {"EURUSD": bars}
+
+    def test_meta_filter_summary_is_post_run_and_does_not_change_best(
+            self, monkeypatch):
+        """Summary tallies every trade, never fabricates, never ranks."""
+        from types import SimpleNamespace
+        from app.models.schemas import AppSettings
+
+        series = self._series()
+        trades = [
+            SimpleNamespace(asset="EURUSD", direction="BUY",
+                            entry_date=date(2024, 1, 5)),
+            SimpleNamespace(asset="EURUSD", direction="SELL",
+                            entry_date=date(2024, 1, 5)),
+            SimpleNamespace(asset="MISSING", direction="BUY",
+                            entry_date=date(2024, 1, 5)),
+        ]
+        before = [(t.asset, t.direction, t.entry_date) for t in trades]
+        seen: list = []
+
+        def fake_verdict(settings, asset, direction, snapshot):
+            seen.append((asset, direction, snapshot))
+            if asset == "MISSING":
+                return SimpleNamespace(
+                    status="unavailable", probability=None,
+                    threshold=None, reason="",
+                    artifact_run_id=None, trained_at=None)
+            ok = direction == "BUY"
+            return SimpleNamespace(
+                status="take" if ok else "skip",
+                probability=0.9 if ok else 0.1, threshold=0.65,
+                reason="" if ok else "meta_filter skip",
+                artifact_run_id="abc123", trained_at="2024-01-01")
+
+        monkeypatch.setattr(sim_optimizer, "evaluate_meta_filter",
+                            fake_verdict)
+        summary = sim_optimizer.summarize_meta_filter(
+            series, AppSettings(), trades)
+        assert summary["evaluated"] == len(trades)
+        assert (summary["take"] + summary["skip"]
+                + summary["unavailable"]) == len(trades)
+        assert summary["ranking_effect"] == "none"
+        # Prior-close picture only: the entry-date bar itself is excluded.
+        eur_snaps = [s for a, _, s in seen if a == "EURUSD"]
+        assert eur_snaps and all(s is not None for s in eur_snaps)
+        assert {s["bar_count"] for s in eur_snaps} == {3}
+        assert {s["price"] for s in eur_snaps} == {round(1.1000 + 2 * 0.001
+                                                         + 0.0001, 5)}
+        assert [s for a, _, s in seen if a == "MISSING"] == [None]
+        # Post-run purity: inputs untouched, summary carries the artifact.
+        assert [(t.asset, t.direction, t.entry_date)
+                for t in trades] == before
+        assert summary["threshold"] == 0.65
+        assert summary["artifact_run_id"] == "abc123"
+
+    async def test_completed_run_reports_meta_filter(
+            self, fake_db, inline_worker, monkeypatch):
+        """A finished run stores the report on result + recommendation and
+        emits meta_filter_reported — without changing the recommendation."""
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        run_id = res["run_id"]
+        st = await call("GET", f"/api/system/optimize/{run_id}")
+        assert st["ok"] is True
+        assert st["status"] == "complete"
+        report = st.get("meta_filter") or {}
+        assert report.get("ranking_effect") == "none"
+        assert report.get("evaluated", 0) > 0
+        assert (report.get("take", 0) + report.get("skip", 0)
+                + report.get("unavailable", 0)) == report["evaluated"]
+        reco = st.get("recommendation") or {}
+        assert (reco.get("meta_filter") or {}).get("ranking_effect") \
+            == "none"
+        logs = await call(
+            "GET", f"/api/system/optimize/{run_id}/logs",
+            params={"offset": 0, "limit": 500})
+        assert logs["ok"] is True
+        assert any(r["event"] == "meta_filter_reported"
+                   for r in logs["rows"])
