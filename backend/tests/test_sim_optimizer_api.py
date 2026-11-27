@@ -303,6 +303,200 @@ class TestRunEventLog:
         assert missing["ok"] is False
 
 
+# ---------------------------------------------------------------------------
+# Task 3 review round 1: regression pins for bulk details + early status.
+# Source behavior is approved as-is; these tests pin it.
+# ---------------------------------------------------------------------------
+class TestTask3RegressionPins:
+    @staticmethod
+    def _series():
+        from types import SimpleNamespace
+        base = datetime(2024, 1, 2, tzinfo=timezone.utc).timestamp()
+        return {"EURUSD": [SimpleNamespace(t=base + 86400 * i)
+                           for i in range(10)]}
+
+    def test_store_details_uses_bulk_arrays(self, fake_db, monkeypatch):
+        """Details persist via at most two bulk inserts (trade array +
+        equity array), never one insert per row."""
+        from tests.test_sim_optimizer import fake_replay
+        from app.models.schemas import AppSettings
+        replay = fake_replay(self._series(), AppSettings())
+        assert replay.trades and replay.equity_curve
+        calls: list = []
+        real = fake_db.insert
+
+        def spy(table, row):
+            calls.append((table, row))
+            return real(table, row)
+
+        monkeypatch.setattr(fake_db, "insert", spy)
+        assert sim_optimizer._store_details(
+            fake_db, "run-x", 1, replay) is True
+        detail = [c for c in calls if c[0] in (
+            sim_optimizer.TRADES_TABLE, sim_optimizer.EQUITY_TABLE)]
+        assert len(detail) <= 2
+        assert {t for t, _ in detail} == {
+            sim_optimizer.TRADES_TABLE, sim_optimizer.EQUITY_TABLE}
+        assert all(isinstance(rows, list) and rows for _, rows in detail)
+        assert fake_db.select(
+            sim_optimizer.TRADES_TABLE, {"run_id": "run-x"}) != []
+        assert fake_db.select(
+            sim_optimizer.EQUITY_TABLE, {"run_id": "run-x"}) != []
+
+    def test_store_details_skips_empty_arrays(self, fake_db, monkeypatch):
+        """Empty trade/equity arrays are skipped, not inserted as junk;
+        an empty replay (or None) still reports success with zero calls."""
+        from types import SimpleNamespace
+        point = SimpleNamespace(date="2024-01-03", equity=1100.0,
+                                realized_pnl=100.0, unrealized_pnl=0.0,
+                                drawdown_pct=0.0)
+        calls: list = []
+        real = fake_db.insert
+
+        def spy(table, row):
+            calls.append((table, row))
+            return real(table, row)
+
+        monkeypatch.setattr(fake_db, "insert", spy)
+        replay = SimpleNamespace(trades=[], equity_curve=[point])
+        assert sim_optimizer._store_details(
+            fake_db, "run-y", 1, replay) is True
+        tables = [t for t, _ in calls]
+        assert sim_optimizer.TRADES_TABLE not in tables
+        assert tables.count(sim_optimizer.EQUITY_TABLE) == 1
+        before = len(calls)
+        assert sim_optimizer._store_details(
+            fake_db, "run-y", 2,
+            SimpleNamespace(trades=[], equity_curve=[])) is True
+        assert sim_optimizer._store_details(
+            fake_db, "run-y", 3, None) is True
+        assert len(calls) == before
+
+    def test_store_details_false_on_short_bulk_response(self):
+        """A short/mismatched bulk response (or None) is a logged failure,
+        never silently accepted."""
+        from types import SimpleNamespace
+
+        class _ShortBulkDb:
+            available = True
+
+            def __init__(self):
+                self.calls: list = []
+
+            def insert(self, table, rows):
+                self.calls.append((table, rows))
+                return [{"partial": True}]
+
+        replay = SimpleNamespace(
+            trades=[SimpleNamespace(), SimpleNamespace()],
+            equity_curve=[])
+        short_db = _ShortBulkDb()
+        assert sim_optimizer._store_details(
+            short_db, "run-x", 1, replay) is False
+        assert len(short_db.calls) == 1
+        assert isinstance(short_db.calls[0][1], list)
+        failed_db = OptFakeDatabase(
+            fail_tables={sim_optimizer.TRADES_TABLE})
+        assert sim_optimizer._store_details(
+            failed_db, "run-x", 1, replay) is False
+
+    async def test_failed_detail_write_marks_nothing_detailed(
+            self, fake_db, inline_worker, monkeypatch):
+        """When `_store_details` returns False the run still completes and
+        no iteration is left marked detailed (no trade/equity rows land)."""
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            fast_fake_optimizer)
+        seen: list = []
+
+        def failing_store(db, run_id, iteration, replay):
+            seen.append(iteration)
+            return False
+
+        monkeypatch.setattr(sim_optimizer, "_store_details", failing_store)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        run_id = res["run_id"]
+        st = await call("GET", f"/api/system/optimize/{run_id}")
+        assert st["ok"] is True
+        assert st["status"] == "complete"
+        assert seen, "detail persistence must have been attempted"
+        assert fake_db.select("sim_opt_trades", {"run_id": run_id},
+                              limit=100000) == []
+        assert fake_db.select("sim_opt_equity", {"run_id": run_id},
+                              limit=100000) == []
+        assert len(fake_db.select("sim_opt_iterations", {"run_id": run_id},
+                                  limit=100000)) == 3
+
+    async def test_status_patch_precedes_detail_persistence(
+            self, fake_db, inline_worker, monkeypatch):
+        """The live run row must already show the improved best BEFORE
+        detail persistence begins — fails if `_progress_patch` is moved
+        after `_store_details`."""
+        from types import SimpleNamespace
+
+        def _res(net):
+            metrics = SimpleNamespace(
+                net_pnl=net, gross_pnl=net, costs=0.0, trades=10, wins=10,
+                win_rate_pct=100.0, profit_factor=None, average_r=1.0,
+                max_drawdown_pct=0.0, ambiguous_pct=0.0)
+            return SimpleNamespace(trades=[], equity_curve=[],
+                                   metrics=metrics, warnings=[])
+
+        def scripted_optimizer(series, baseline, *, starting_capital=1000.0,
+                               search_config=None, progress_callback=None,
+                               cancel_event=None):
+            script = [(0, 100.0, False), (1, 50.0, False),
+                      (2, 200.0, True)]
+            iters = []
+            for it, net, improved in script:
+                entry = sim_optimizer.IterationResult(
+                    iteration=it, config=baseline, config_diff={},
+                    train_result=_res(net), validation_result=None,
+                    improved=improved)
+                iters.append(entry)
+                if progress_callback is not None:
+                    progress_callback(entry)
+            base_board = sim_optimizer.IterationResult(
+                iteration=0, config=baseline, config_diff={},
+                train_result=_res(100.0),
+                validation_result=_res(150.0), improved=False)
+            return sim_optimizer.OptimizationResult(
+                best=None, baseline=iters[0], iterations=iters,
+                validation_leaderboard=[base_board], warnings=[])
+
+        monkeypatch.setattr(sim_optimizer, "optimize_settings",
+                            scripted_optimizer)
+        real_store = sim_optimizer._store_details
+        probes: list = []
+
+        def spy_store(db, run_id, iteration, replay):
+            rows = db.select(sim_optimizer.RUNS_TABLE,
+                             filters={"id": run_id}, limit=1)
+            assert rows, "run row must be readable while details persist"
+            probes.append({
+                "iteration": iteration,
+                "best_train_pnl": (rows[0].get("result") or {}).get(
+                    "best_train_pnl"),
+            })
+            return real_store(db, run_id, iteration, replay)
+
+        monkeypatch.setattr(sim_optimizer, "_store_details", spy_store)
+        _seed_dataset(fake_db, "v1")
+        res = await call("POST", "/api/system/optimize",
+                         {"dataset_version": "v1", "assets": ["EURUSD"]})
+        assert res["ok"] is True
+        st = await call("GET",
+                        f"/api/system/optimize/{res['run_id']}")
+        assert st["ok"] is True
+        assert st["status"] == "complete"
+        by_iter = {p["iteration"]: p["best_train_pnl"] for p in probes}
+        # Iteration 1 is worse (no store); 0 and 2 store details, each
+        # AFTER the live row already shows that iteration's best.
+        assert by_iter == {0: 100.0, 2: 200.0}
+
+
 class TestBriefStep1:
     async def test_start_uses_user_capital_and_never_writes_live_settings(
             self, fake_db, inline_worker, monkeypatch):
