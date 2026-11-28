@@ -474,6 +474,11 @@ async def health() -> dict:
             job_running = dict(getattr(executor, "_instances", {}) or {})
         except Exception:                    # diagnostics must never 500
             log.debug("health scheduler probe failed", exc_info=True)
+    try:
+        from app.integrations.quotes import price_fetch_mode
+        quote_mode = price_fetch_mode()
+    except Exception:
+        quote_mode = "unknown"
     return {
         "status": "ok",
         "platform": "AI Wealth & Trading Advisor",
@@ -484,6 +489,7 @@ async def health() -> dict:
         "commit": (os.environ.get("RENDER_GIT_COMMIT") or "local")[:7],
         "workers": ("running" if scheduler is not None
                     else ("enabled" if get_settings().enable_workers else "disabled")),
+        "quote_fetch_mode": quote_mode,
         "jobs": [j.id for j in scheduler.get_jobs()] if scheduler is not None else [],
         "job_next": job_next,
         "job_running": job_running,

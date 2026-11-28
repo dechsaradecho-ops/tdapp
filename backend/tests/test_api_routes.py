@@ -211,6 +211,7 @@ class TestHealth:
         assert r.status_code == 200
         assert body["status"] == "ok"
         assert body["workers"] in ("disabled", "enabled", "running")
+        assert body["quote_fetch_mode"] == "live"
         assert "db" in body and "ai" in body
 
     @pytest.mark.asyncio
