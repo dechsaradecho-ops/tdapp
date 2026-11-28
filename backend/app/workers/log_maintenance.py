@@ -28,6 +28,7 @@ from typing import Any
 from app.services import quote_log, scheduler_log, signal_log
 from app.services import notification_service
 from app.services import simulation
+from app.models.schemas import is_market_closed
 from app.workers import market_scanner, news_analysis
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,8 @@ async def _alert_quote_errors(db: Any, notifier: Any) -> str:
     """Raise one risk_warning when the hourly quote error rate is high."""
     global _last_alert
     if notifier is None:
+        return ""
+    if is_market_closed():
         return ""
     if time.monotonic() - _last_alert < ALERT_COOLDOWN_S:
         return ""

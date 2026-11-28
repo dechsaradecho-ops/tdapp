@@ -143,6 +143,10 @@ class TestQuoteErrorRate:
 
 
 class TestAlerting:
+    @pytest.fixture(autouse=True)
+    def _market_open(self, monkeypatch):
+        monkeypatch.setattr(log_maintenance, "is_market_closed", lambda: False)
+
     @pytest.mark.asyncio
     async def test_alerts_when_error_rate_is_high(self):
         db = FakeDatabase(rows={"quote_api_logs": [
@@ -154,6 +158,19 @@ class TestAlerting:
         assert notifier.sent and notifier.sent[0][1] == "risk_warning"
         assert "40/100" in notifier.sent[0][2]
         assert "alert" in out
+
+    @pytest.mark.asyncio
+    async def test_silent_when_market_closed(self, monkeypatch):
+        monkeypatch.setattr(
+            log_maintenance, "is_market_closed", lambda: True, raising=False)
+        db = FakeDatabase(rows={"quote_api_logs": [
+            {"id": f"r{i}", "created_at": _stamp_minutes_ago(5),
+             "status": "success" if i < 60 else "error", "category": "forex",
+             "provider": "biquote", "asset": "EURUSD"} for i in range(100)]})
+        notifier = RecordingNotifier()
+        out = await log_maintenance.run_once(db, notifier)
+        assert notifier.sent == []
+        assert "alert" not in out
 
     @pytest.mark.asyncio
     async def test_silent_below_the_threshold(self):
