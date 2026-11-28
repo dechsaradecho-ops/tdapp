@@ -161,6 +161,26 @@ def _yahoo_inverse_symbol(asset: str) -> str | None:
 SPOT_TTL = 30.0  # seconds — monitor polls every 10s; 30s cache keeps feeds tiny
 _spot_cache: dict[str, tuple[float, float]] = {}  # asset → (monotonic_ts, price)
 
+PRICE_PREOPEN_REFRESH_MINUTES = 15
+
+
+def price_fetch_mode(now: datetime | None = None) -> str:
+    """Return ``live``, ``preopen`` or ``closed`` for external price polling.
+
+    Closed markets serve last-good in-process cache only. A short pre-open
+    window is allowed so the first open-market cycle does not start cold.
+    The import is local to avoid the schemas ↔ quotes module cycle.
+    """
+    from app.models.schemas import is_market_closed, next_market_open
+
+    now = now or datetime.now(timezone.utc)
+    if not is_market_closed(now):
+        return "live"
+    seconds_to_open = (next_market_open(now) - now).total_seconds()
+    if 0 <= seconds_to_open <= PRICE_PREOPEN_REFRESH_MINUTES * 60:
+        return "preopen"
+    return "closed"
+
 # asset → (monotonic_ts, price) of the last REAL intraday print (Yahoo chart
 # meta). Kept separately from _spot_cache (30s) because the question here is
 # "how stale is the last tick we actually saw", which needs a longer memory.
@@ -1129,6 +1149,14 @@ async def fetch_spot_prices(assets: list[str]) -> tuple[dict[str, float], dict[s
             out[a] = hit[1]
         else:
             todo.append(a)
+    if todo and price_fetch_mode() == "closed":
+        for asset in todo:
+            hit = _spot_cache.get(asset) or _spot_live.get(asset)
+            if hit is not None:
+                out[asset] = hit[1]
+            else:
+                failures[asset] = "market closed — no cached quote"
+        return out, failures
     if todo:
         headers = {"User-Agent": YAHOO_UA}
 
@@ -1585,6 +1613,22 @@ async def fetch_display_prices(
             todo.append(a)
     if not todo:
         return out, meta, failures
+    if price_fetch_mode() == "closed":
+        for asset in todo:
+            hit = _display_cache.get(asset)
+            if hit is None:
+                failures[asset] = "market closed — no cached quote"
+                continue
+            cached = hit[2]
+            out[asset] = cached.price
+            meta[asset] = DisplayQuote(
+                price=cached.price,
+                source=cached.source,
+                age_seconds=cached.age_seconds,
+                market_state="closed",
+                stale=True,
+            )
+        return out, meta, failures
 
     fx = [a for a in todo if str(a or "").upper() != "XAUUSD"]
     gold = [a for a in todo if str(a or "").upper() == "XAUUSD"]
@@ -1724,6 +1768,12 @@ async def fetch_all_snapshots(assets: list[str], concurrency: int = 5,
         else:
             missing.append(a)
     if not missing:
+        return out
+    if price_fetch_mode() == "closed":
+        for asset in missing:
+            hit = _quote_cache.get(asset)
+            if hit is not None:
+                out[asset] = hit[1]
         return out
 
     sem = asyncio.Semaphore(concurrency)

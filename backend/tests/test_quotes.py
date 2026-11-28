@@ -1017,6 +1017,74 @@ class TestBatchTimeouts:
         assert "HANGUSD" not in result
         assert elapsed < 2.0  # bounded by the total budget, not the hang
 
+
+class TestMarketClosedPricePolicy:
+    def test_mode_switches_between_live_preopen_and_closed(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        from app.models import schemas
+
+        now = datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(schemas, "is_market_closed", lambda value=None: False)
+        assert quotes.price_fetch_mode(now) == "live"
+
+        monkeypatch.setattr(schemas, "is_market_closed", lambda value=None: True)
+        monkeypatch.setattr(
+            schemas, "next_market_open",
+            lambda value=None: value + timedelta(minutes=10),
+        )
+        assert quotes.price_fetch_mode(now) == "preopen"
+
+        monkeypatch.setattr(
+            schemas, "next_market_open",
+            lambda value=None: value + timedelta(minutes=30),
+        )
+        assert quotes.price_fetch_mode(now) == "closed"
+
+    @pytest.mark.asyncio
+    async def test_spot_closed_uses_cache_without_network(self, monkeypatch):
+        monkeypatch.setattr(quotes, "price_fetch_mode", lambda now=None: "closed")
+        quotes._spot_cache["EURUSD"] = (time.monotonic() - 3600, 1.2345)
+
+        def no_client(*args, **kwargs):
+            raise AssertionError("network client must not be constructed")
+
+        monkeypatch.setattr(quotes.httpx, "AsyncClient", no_client)
+        prices, failures = await quotes.fetch_spot_prices(["EURUSD", "GBPUSD"])
+        assert prices == {"EURUSD": 1.2345}
+        assert "GBPUSD" in failures
+
+    @pytest.mark.asyncio
+    async def test_display_closed_uses_cache_and_marks_stale(self, monkeypatch):
+        monkeypatch.setattr(quotes, "price_fetch_mode", lambda now=None: "closed")
+        cached = quotes.DisplayQuote(
+            price=1.2345, source="biquote", age_seconds=2.0,
+            market_state="open", stale=False,
+        )
+        quotes._display_cache["EURUSD"] = (time.monotonic() - 3600, 1.2345, cached)
+
+        async def no_fetch(*args, **kwargs):
+            raise AssertionError("display fetch must not run")
+
+        monkeypatch.setattr(quotes, "_fetch_display_uncached", no_fetch)
+        prices, meta, failures = await quotes.fetch_display_prices(["EURUSD", "GBPUSD"])
+        assert prices == {"EURUSD": 1.2345}
+        assert meta["EURUSD"].market_state == "closed"
+        assert meta["EURUSD"].stale is True
+        assert "GBPUSD" in failures
+
+    @pytest.mark.asyncio
+    async def test_snapshots_closed_use_cache_without_network(self, monkeypatch):
+        monkeypatch.setattr(quotes, "price_fetch_mode", lambda now=None: "closed")
+        quotes._quote_cache["EURUSD"] = (
+            time.monotonic() - 3600, {"asset": "EURUSD", "price": 1.2345})
+
+        async def no_fetch(*args, **kwargs):
+            raise AssertionError("snapshot fetch must not run")
+
+        monkeypatch.setattr(quotes, "fetch_snapshot", no_fetch)
+        result = await quotes.fetch_all_snapshots(["EURUSD", "GBPUSD"], ttl=0)
+        assert result == {"EURUSD": {"asset": "EURUSD", "price": 1.2345}}
+
     @pytest.mark.asyncio
     async def test_spot_hung_asset_times_out(self, monkeypatch):
         """One hung spot resolves to a failure row; others still price."""
