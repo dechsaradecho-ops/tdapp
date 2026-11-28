@@ -1086,6 +1086,17 @@ class TestMarketClosedPricePolicy:
         assert result == {"EURUSD": {"asset": "EURUSD", "price": 1.2345}}
 
     @pytest.mark.asyncio
+    async def test_candles_closed_do_not_hit_network(self, monkeypatch):
+        monkeypatch.setattr(quotes, "price_fetch_mode", lambda now=None: "closed")
+
+        class NoNetworkClient:
+            async def get(self, *args, **kwargs):
+                raise AssertionError("candle fetch must not run")
+
+        with pytest.raises(quotes.QuotesUnavailable, match="market closed"):
+            await quotes.fetch_candles_with_source("EURUSD", NoNetworkClient())
+
+    @pytest.mark.asyncio
     async def test_spot_hung_asset_times_out(self, monkeypatch):
         """One hung spot resolves to a failure row; others still price."""
         import asyncio

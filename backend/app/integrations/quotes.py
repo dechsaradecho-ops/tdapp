@@ -788,6 +788,8 @@ async def fetch_candles_with_source(asset: str, client: httpx.AsyncClient,
     then the Yahoo-primary → mapped-fallback chain. Raises QuotesUnavailable when
     every feed fails or fewer than 30 bars come back.
     """
+    if price_fetch_mode() == "closed":
+        raise QuotesUnavailable("market closed — candle fetch paused")
     if asset not in SUPPORTED_ASSETS and asset not in ASSET_FEEDS:
         raise QuotesUnavailable(f"no feed mapping for {asset}")
 
